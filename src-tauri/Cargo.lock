@@ -2114,6 +2114,7 @@ dependencies = [
  "async-walkdir",
  "chksum-md5",
  "futures",
+ "lazy_static",
  "nt_version",
  "reqwest",
  "rfd",

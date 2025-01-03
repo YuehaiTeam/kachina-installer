@@ -4,6 +4,7 @@
 pub mod fs;
 pub mod dfs;
 pub mod installer;
+pub mod static_obj;
 
 use tauri::Manager;
 fn main() {

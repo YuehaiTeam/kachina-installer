@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::static_obj::REQUEST_CLIENT;
+
 #[derive(Deserialize, Serialize, Debug)]
 pub struct DownloadResp {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -15,17 +17,10 @@ pub struct DownloadResp {
 
 #[tauri::command]
 pub async fn get_dfs(path: String) -> Result<DownloadResp, String> {
-    let user_agent = format!("KachinaInstaller/{}", env!("CARGO_PKG_VERSION"));
     let dfs_api_base = "https://77.cocogoat.cn/v2/dfs/";
     let path_without_first_slash = path.strip_prefix("/").unwrap_or(&path);
     let url = format!("{}{}", dfs_api_base, path_without_first_slash);
-    let client = reqwest::Client::new();
-    let res: Result<reqwest::Response, reqwest::Error> = client
-        .post(&url)
-        .timeout(std::time::Duration::from_secs(3))
-        .header("User-Agent", user_agent.clone())
-        .send()
-        .await;
+    let res: Result<reqwest::Response, reqwest::Error> = REQUEST_CLIENT.post(&url).send().await;
     if res.is_err() {
         return Err(format!("Failed to send http request: {:?}", res.err()));
     }
@@ -67,12 +62,7 @@ pub async fn get_dfs(path: String) -> Result<DownloadResp, String> {
         return Err("Failed to solve challenge".to_string());
     }
     let url = format!("{}?sid={}", url, solve);
-    let res: Result<reqwest::Response, reqwest::Error> = client
-        .post(&url)
-        .timeout(std::time::Duration::from_secs(3))
-        .header("User-Agent", user_agent)
-        .send()
-        .await;
+    let res: Result<reqwest::Response, reqwest::Error> = REQUEST_CLIENT.post(&url).send().await;
     if res.is_err() {
         return Err(format!("Failed to send http request: {:?}", res.err()));
     }
@@ -95,15 +85,8 @@ pub async fn get_dfs(path: String) -> Result<DownloadResp, String> {
 
 #[tauri::command]
 pub async fn get_dfs_metadata(prefix: String) -> Result<Value, String> {
-    let user_agent = format!("KachinaInstaller/{}", env!("CARGO_PKG_VERSION"));
     let url = format!("https://77.cocogoat.cn/v2/dfs/{}/.metadata.json", prefix);
-    let client = reqwest::Client::new();
-    let res: Result<reqwest::Response, reqwest::Error> = client
-        .get(&url)
-        .timeout(std::time::Duration::from_secs(3))
-        .header("User-Agent", user_agent.clone())
-        .send()
-        .await;
+    let res: Result<reqwest::Response, reqwest::Error> = REQUEST_CLIENT.get(&url).send().await;
     if res.is_err() {
         return Err(format!("Failed to send http request: {:?}", res.err()));
     }

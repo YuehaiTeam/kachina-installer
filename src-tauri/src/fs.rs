@@ -5,6 +5,8 @@ use std::path::Path;
 use tauri::{AppHandle, Emitter};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+use crate::static_obj::REQUEST_CLIENT;
+
 #[tauri::command]
 pub async fn decompress(source: String, target: String) -> String {
     let source = Path::new(&source);
@@ -81,7 +83,7 @@ pub async fn download_and_decompress(
     // download and decompress with progress using reqwest, pass progress with emit("id", downloaded)
     let target_file = target_file.unwrap();
     let mut target_file = tokio::io::BufWriter::new(target_file);
-    let res = reqwest::get(&url).await;
+    let res = REQUEST_CLIENT.get(&url).send().await;
     if res.is_err() {
         return Err(format!("Failed to send http request: {:?}", res.err()));
     }

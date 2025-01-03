@@ -282,6 +282,7 @@ const substeps = ['获取最新版本信息', '检查更新内容', '下载并�
 const current = ref('');
 const percent = ref(0);
 const source = ref('');
+const progressInterval = ref(0);
 
 const PROJECT_CONFIG = {
   exeName: 'BetterGI.exe',
@@ -365,7 +366,7 @@ const runinstall = async () => {
     speed: 0,
     runningTasks: {} as Record<string, string>,
   };
-  const progressInterval = setInterval(() => {
+  progressInterval.value = setInterval(() => {
     const now = performance.now();
     const time_diff = now - stat.last_time;
     stat.speed =
@@ -379,7 +380,8 @@ const runinstall = async () => {
       `${downloaded} / ${total} (${speed}/s)<div class="d-single-list"><div class="d-single">` +
       Object.values(stat.runningTasks).join('</div><div class="d-single">') +
       '</div></div>';
-  }, 500);
+    percent.value = 20 + (stat.downloaded_total_size / total_size) * 80;
+  }, 400);
   await mapLimit(diff_files, 5, async (item: (typeof diff_files)[0]) => {
     stat.runningTasks[item.file_name] =
       `<span class="d-single-filename">${basename(item.file_name)}</span><span class="d-single-progress">0%</span>`;
@@ -427,17 +429,40 @@ const runinstall = async () => {
     if (!url && dfs_result.source) {
       url = dfs_result.source;
     }
-    await invoke('download_and_decompress', {
-      id,
-      url: url,
-      target: source.value + filename_with_first_slash,
-    });
-    unlisten();
-    const size_diff = item.size - last_downloaded_size;
-    stat.downloaded_total_size += size_diff;
-    delete stat.runningTasks[item.file_name];
+    if (!url) {
+      throw new Error('没有可用的下载节点：' + JSON.stringify(dfs_result));
+    }
+    const run_dl = async () => {
+      try {
+        await invoke('download_and_decompress', {
+          id,
+          url: url,
+          target: source.value + filename_with_first_slash,
+        });
+      } catch (e) {
+        console.error(e);
+        stat.downloaded_total_size -= last_downloaded_size;
+        throw e;
+      } finally {
+        unlisten();
+        delete stat.runningTasks[item.file_name];
+      }
+      const size_diff = item.size - last_downloaded_size;
+      stat.downloaded_total_size += size_diff;
+    };
+    for (let i = 0; i < 3; i++) {
+      try {
+        await run_dl();
+        break;
+      } catch (e) {
+        console.error(e);
+        if (i === 2) {
+          throw e;
+        }
+      }
+    }
   });
-  clearInterval(progressInterval);
+  clearInterval(progressInterval.value);
   current.value = '安装完成';
   step.value = 3;
   percent.value = 100;
@@ -454,6 +479,8 @@ const install = async () => {
     substep.value = 0;
     percent.value = 0;
     current.value = '';
+    clearInterval(progressInterval.value);
+    progressInterval.value = 0;
   }
 };
 onMounted(async () => {
@@ -481,7 +508,7 @@ const basename = (path: string) => {
 const fetchWithTimeout = (
   url: string,
   options: RequestInit,
-  timeout = 500,
+  timeout = 2000,
 ): Promise<Response> => {
   return Promise.race([
     fetch(url, options),
