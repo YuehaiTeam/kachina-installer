@@ -151,7 +151,7 @@
     margin-top: 1px;
   }
   a {
-    color: #6dbef9;
+    color: var(--colorBrandForegroundLink);
     cursor: pointer;
   }
 }
@@ -168,7 +168,7 @@
     opacity: 0.8;
   }
   a {
-    color: #6dbef9;
+    color: var(--colorBrandForegroundLink);
     cursor: pointer;
     font-family:
       Consolas,
@@ -238,7 +238,35 @@
     Microsoft Yahei;
 }
 </style>
+<style>
+.d-single-list {
+  display: flex;
+  flex-direction: column;
+  height: 55px;
+  overflow: hidden;
+  padding-top: 4px;
+  font-size: 11px;
+  gap: 2px;
+  width: 230px;
+}
 
+.d-single {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.d-single-filename {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.d-single-progress {
+  width: 36px;
+  min-width: 36px;
+}
+</style>
 <script lang="ts" setup>
 import { ref, onMounted } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
@@ -246,6 +274,7 @@ import { listen } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { message, open } from '@tauri-apps/plugin-dialog';
 import { v4 as uuid } from 'uuid';
+import { mapLimit } from 'async';
 const isUpdate = ref(false);
 const step = ref(1);
 const substep = ref(0);
@@ -334,29 +363,38 @@ const runinstall = async () => {
     speed_last_size: 0,
     last_time: performance.now(),
     speed: 0,
+    runningTasks: {} as Record<string, string>,
   };
-  for (const item of diff_files) {
+  const progressInterval = setInterval(() => {
+    const now = performance.now();
+    const time_diff = now - stat.last_time;
+    stat.speed =
+      (stat.downloaded_total_size - stat.speed_last_size) / time_diff;
+    stat.speed_last_size = stat.downloaded_total_size;
+    stat.last_time = now;
+    const speed = formatSize(stat.speed * 1000);
+    const downloaded = formatSize(stat.downloaded_total_size);
+    const total = formatSize(total_size);
+    current.value =
+      `${downloaded} / ${total} (${speed}/s)<div class="d-single-list"><div class="d-single">` +
+      Object.values(stat.runningTasks).join('</div><div class="d-single">') +
+      '</div></div>';
+  }, 500);
+  await mapLimit(diff_files, 5, async (item: (typeof diff_files)[0]) => {
+    stat.runningTasks[item.file_name] =
+      `<span class="d-single-filename">${basename(item.file_name)}</span><span class="d-single-progress">0%</span>`;
     const dfs_result = (await invoke('get_dfs', {
       path: `bgi/hashed/${item.md5}`,
     })) as { url?: string; tests?: [string, string][]; source: string };
     const id = uuid();
+    let last_downloaded_size = 0;
     let unlisten = await listen(id, ({ payload }) => {
       let current_size = payload as number;
-      let current_time = performance.now();
-      const current_total_size = current_size + stat.downloaded_total_size;
-      if (current_time - stat.last_time >= 500) {
-        stat.speed =
-          ((current_total_size - stat.speed_last_size) /
-            (current_time - stat.last_time)) *
-          1000;
-        console.log('speed update', JSON.stringify(stat));
-        stat.last_time = current_time;
-        stat.speed_last_size = current_total_size;
-      }
-      percent.value = 20 + (current_total_size / total_size) * 80;
-      current.value = `${basename(item.file_name)}<br/>${formatSize(current_size)} / ${formatSize(
-        item.size,
-      )} ${formatSize(stat.speed)}/s`;
+      const size_diff = current_size - last_downloaded_size;
+      last_downloaded_size = current_size;
+      stat.downloaded_total_size += size_diff;
+      stat.runningTasks[item.file_name] =
+        `<span class="d-single-filename">${basename(item.file_name)}</span><span class="d-single-progress">${Math.round(current_size / item.size)}%</span>`;
     });
     let filename_with_first_slash = item.file_name.startsWith('/')
       ? item.file_name
@@ -391,12 +429,16 @@ const runinstall = async () => {
     }
     await invoke('download_and_decompress', {
       id,
-      url: dfs_result.url as string,
+      url: url,
       target: source.value + filename_with_first_slash,
     });
     unlisten();
-    stat.downloaded_total_size += item.size;
-  }
+    const size_diff = item.size - last_downloaded_size;
+    stat.downloaded_total_size += size_diff;
+    delete stat.runningTasks[item.file_name];
+  });
+  clearInterval(progressInterval);
+  current.value = '安装完成';
   step.value = 3;
   percent.value = 100;
 };
