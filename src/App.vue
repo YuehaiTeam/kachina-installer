@@ -285,6 +285,7 @@ const current = ref('');
 const percent = ref(0);
 const source = ref('');
 const progressInterval = ref(0);
+const connectableOrigins = new Set();
 
 const PROJECT_CONFIG = {
   exeName: 'BetterGI.exe',
@@ -403,7 +404,6 @@ const runinstall = async () => {
     let filename_with_first_slash = item.file_name.startsWith('/')
       ? item.file_name
       : `/${item.file_name}`;
-    console.log('dfs result is', dfs_result);
     let url = dfs_result.url;
     if (!url && (dfs_result.tests?.length || 0) > 0) {
       const tests = dfs_result.tests as [string, string][];
@@ -411,9 +411,14 @@ const runinstall = async () => {
         const now = performance.now();
         const result = await Promise.race(
           tests.map((test) => {
+            const origin = new URL(test[0]).origin;
+            if (connectableOrigins.has(origin)) {
+              return { url: test[1], time: 10 };
+            }
             return fetchWithTimeout(test[0], { method: 'HEAD' })
               .then((response) => {
                 if (response.ok) {
+                  connectableOrigins.add(origin);
                   return { url: test[1], time: performance.now() - now };
                 }
                 throw new Error('not ok');
@@ -434,6 +439,7 @@ const runinstall = async () => {
     if (!url) {
       throw new Error('没有可用的下载节点：' + JSON.stringify(dfs_result));
     }
+    console.log('dfs-url', url);
     const run_dl = async () => {
       try {
         await invoke('download_and_decompress', {
@@ -505,7 +511,7 @@ const formatSize = (size: number) => {
   return `${(size / 1024 / 1024).toFixed(2)} MB`;
 };
 const basename = (path: string) => {
-  return path.split('/').pop() as string;
+  return path.replace(/\\/g, '/').split('/').pop() as string;
 };
 const fetchWithTimeout = (
   url: string,
@@ -521,7 +527,7 @@ const fetchWithTimeout = (
 };
 const launch = async () => {
   const mainExe = `BetterGI.exe`;
-  const fullPath = `${source.value}/${mainExe}`;
+  const fullPath = `${source.value}${sep()}${mainExe}`;
   await invoke('launch_and_exit', { path: fullPath });
 };
 const changeSource = async () => {
@@ -531,11 +537,11 @@ const changeSource = async () => {
     canCreateDirectories: true,
     multiple: false,
   });
-  if(result === null) return;
+  if (result === null) return;
   const dirInfo = await readDir(result);
-  if(dirInfo.length!==0) {
-    await mkdir(`${result}${sep()}BetterGI`);
-    source.value = `${result}${sep()}BetterGI`;
+  if (dirInfo.length !== 0) {
+    await mkdir(`${result}${sep()}${PROJECT_CONFIG.regName}`);
+    source.value = `${result}${sep()}${PROJECT_CONFIG.regName}`;
   } else {
     source.value = result;
   }

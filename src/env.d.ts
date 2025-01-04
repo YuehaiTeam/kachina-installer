@@ -7,3 +7,10 @@ declare module '*.vue' {
   const component: DefineComponent<{}, {}, any>;
   export default component;
 }
+
+// process.env.NODE_ENV is defined by the environment
+declare const process: {
+  env: {
+    NODE_ENV: 'development' | 'production';
+  };
+};

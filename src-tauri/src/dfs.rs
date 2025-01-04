@@ -85,6 +85,20 @@ pub async fn get_dfs(path: String) -> Result<DownloadResp, String> {
 
 #[tauri::command]
 pub async fn get_dfs_metadata(prefix: String) -> Result<Value, String> {
+    // retry for 3 times
+    let mut res: Result<Value, String> = run_get_dfs_metadata(prefix.clone()).await;
+    if res.is_err() {
+        for _ in 0..2 {
+            res = run_get_dfs_metadata(prefix.clone()).await;
+            if res.is_ok() {
+                break;
+            }
+        }
+    }
+    res
+}
+
+pub async fn run_get_dfs_metadata(prefix: String) -> Result<Value, String> {
     let url = format!("https://77.cocogoat.cn/v2/dfs/{}/.metadata.json", prefix);
     let res: Result<reqwest::Response, reqwest::Error> = REQUEST_CLIENT.get(&url).send().await;
     if res.is_err() {

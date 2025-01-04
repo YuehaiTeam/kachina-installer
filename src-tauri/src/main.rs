@@ -1,12 +1,13 @@
 // Prevents additional console window on Windows in release, DO NOT REMOVE!!
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-pub mod fs;
 pub mod dfs;
+pub mod fs;
 pub mod installer;
 pub mod static_obj;
 
 use tauri::Manager;
+use tracing_subscriber::EnvFilter;
 fn main() {
     let wv2ver = tauri::webview_version();
     if wv2ver.is_err() || std::env::args_os().any(|a| &a == "--install-webview2") {
@@ -25,6 +26,9 @@ fn main() {
             .block_on(cli_main());
         return;
     }
+    tracing_subscriber::fmt()
+        .with_env_filter(EnvFilter::from_default_env())
+        .init();
     let (major, minor, build) = nt_version::get();
     let is_lower_than_win10 = major < 10;
     if is_lower_than_win10 {
