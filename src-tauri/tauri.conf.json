@@ -4,9 +4,9 @@
   "version": "0.1.0",
   "identifier": "click.kachina",
   "build": {
-    "beforeDevCommand": "pnpm dev",
+    "beforeDevCommand": "rsbuild dev",
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "pnpm build",
+    "beforeBuildCommand": "rsbuild build",
     "frontendDist": "../dist"
   },
   "app": {

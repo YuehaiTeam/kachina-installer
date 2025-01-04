@@ -4,14 +4,15 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "dev": "rsbuild dev",
-    "build": "rsbuild build",
+    "dev": "tauri dev --exit-on-panic",
+    "build": "tauri build",
     "preview": "rsbuild preview",
     "tauri": "tauri"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",
     "@tauri-apps/plugin-dialog": "~2",
+    "@tauri-apps/plugin-fs": "^2.2.0",
     "@tauri-apps/plugin-opener": "^2",
     "async": "^3.2.6",
     "uuid": "^11.0.3",

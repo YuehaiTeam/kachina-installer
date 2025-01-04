@@ -8,6 +8,9 @@
     "opener:default",
     "dialog:default",
     "core:window:allow-set-title",
-    "core:window:allow-show"
+    "core:window:allow-show",
+    "fs:default",
+    {"identifier": "fs:allow-read-dir", "allow": [{"path": "**"}]},
+    {"identifier": "fs:allow-mkdir", "allow": [{"path": "**"}]}
   ]
 }
