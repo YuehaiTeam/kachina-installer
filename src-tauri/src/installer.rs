@@ -111,15 +111,14 @@ pub async fn get_dirs() -> Option<(String, String)> {
 }
 
 #[tauri::command]
-pub async fn create_uninstaller(path: String) -> Result<(), String> {
-    // if 'updater.exe' is in path, and updater is self, copy updater to path
-    let uninstaller_path = Path::new(&path);
-    let parent_path = uninstaller_path.parent();
-    if parent_path.is_none() {
-        return Err("Failed to get parent path".to_string());
-    }
-    let parent_path = parent_path.unwrap();
-    let updater_path = parent_path.join("update.exe");
+pub async fn create_uninstaller(
+    source: String,
+    uninstaller_name: String,
+    updater_name: String,
+) -> Result<(), String> {
+    let source = Path::new(&source);
+    let uninstaller_path = source.join(uninstaller_name);
+    let updater_path = source.join(updater_name);
     let current_exe_path = std::env::current_exe();
     if current_exe_path.is_err() {
         return Err(format!(

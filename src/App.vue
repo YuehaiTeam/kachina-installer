@@ -265,11 +265,13 @@ const progressInterval = ref(0);
 const connectableOrigins = new Set();
 
 const PROJECT_CONFIG = {
-  dfs_path: 'bgi',
+  dfsPath: 'bgi',
   appName: 'BetterGI',
   publisher: 'babalae',
   regName: 'BetterGI',
   exeName: 'BetterGI.exe',
+  uninstallName: 'BetterGI.uninst.exe',
+  updaterName: 'BetterGI.update.exe',
   programFilesPath: 'BetterGI\\BetterGI',
   title: 'BetterGI',
   description: '更好的原神，免费且开源',
@@ -286,7 +288,7 @@ const getSource = async () => {
 const runinstall = async () => {
   step.value = 2;
   const latest_meta = (await invoke('get_dfs_metadata', {
-    prefix: `${PROJECT_CONFIG.dfs_path}`,
+    prefix: `${PROJECT_CONFIG.dfsPath}`,
   })) as {
     tag_name: string;
     hashed: { file_name: string; md5: string; size: number }[];
@@ -416,6 +418,9 @@ const runinstall = async () => {
     if (!url && dfs_result.source) {
       url = dfs_result.source;
     }
+    if (!url && dfs_result.tests?.length) {
+      url = dfs_result.tests[0][1];
+    }
     if (!url) {
       throw new Error('没有可用的下载节点：' + JSON.stringify(dfs_result));
     }
@@ -479,7 +484,9 @@ const finishInstall = async (latest_meta: {
       console.error(e);
     });
     await invoke('create_uninstaller', {
-      path: `${source.value}${sep()}uninst.exe`,
+      source: source.value,
+      uninstallerName: PROJECT_CONFIG.uninstallName,
+      updaterName: PROJECT_CONFIG.updaterName,
     }).catch((e) => {
       console.error(e);
     });
@@ -489,7 +496,7 @@ const finishInstall = async (latest_meta: {
       version: latest_meta.tag_name,
       exe: `${source.value}${sep()}${PROJECT_CONFIG.exeName}`,
       source: source.value,
-      uninstaller: `${source.value}${sep()}uninst.exe`,
+      uninstaller: `${source.value}${sep()}${PROJECT_CONFIG.uninstallName}`,
       metadata: JSON.stringify(latest_meta),
       size: latest_meta.hashed.reduce((acc, cur) => acc + cur.size, 0),
       publisher: PROJECT_CONFIG.publisher,
@@ -497,7 +504,7 @@ const finishInstall = async (latest_meta: {
       console.error(e);
     });
     await invokeCreateLnk(
-      `${source.value}${sep()}uninst.exe`,
+      `${source.value}${sep()}${PROJECT_CONFIG.uninstallName}`,
       `${program}${sep()}${PROJECT_CONFIG.appName}${sep()}卸载${PROJECT_CONFIG.appName}.lnk`,
     ).catch((e) => {
       console.error(e);

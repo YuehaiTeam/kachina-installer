@@ -2,7 +2,7 @@ use async_compression::tokio::bufread::ZstdDecoder as TokioZstdDecoder;
 use futures::StreamExt;
 use serde::Serialize;
 use std::path::Path;
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, WebviewWindow};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::static_obj::REQUEST_CLIENT;
@@ -229,10 +229,11 @@ pub async fn select_dir(path: String) -> Option<String> {
 }
 
 #[tauri::command]
-pub async fn error_dialog(title: String, message: String) {
+pub async fn error_dialog(title: String, message: String, window: WebviewWindow) {
     rfd::MessageDialog::new()
         .set_title(&title)
         .set_description(&message)
         .set_level(rfd::MessageLevel::Error)
+        .set_parent(&window)
         .show();
 }
