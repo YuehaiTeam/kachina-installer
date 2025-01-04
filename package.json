@@ -4,8 +4,8 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "dev": "rsbuild dev",
-    "build": "rsbuild build",
+    "dev": "tauri dev --exit-on-panic",
+    "build": "tauri build",
     "preview": "rsbuild preview",
     "tauri": "tauri"
   },
