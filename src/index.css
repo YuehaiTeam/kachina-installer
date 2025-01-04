@@ -722,3 +722,6 @@ a {
 a:hover {
   color: var(--colorBrandForegroundLinkHover);
 }
+.progress-bar {
+  background: var(--colorBrandForeground1);
+}
