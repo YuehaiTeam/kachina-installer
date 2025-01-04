@@ -273,8 +273,10 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { message, open } from '@tauri-apps/plugin-dialog';
+import { mkdir, readDir } from '@tauri-apps/plugin-fs';
 import { v4 as uuid } from 'uuid';
 import { mapLimit } from 'async';
+import { sep } from '@tauri-apps/api/path';
 const isUpdate = ref(false);
 const step = ref(1);
 const substep = ref(0);
@@ -527,8 +529,14 @@ const changeSource = async () => {
     defaultPath: source.value,
     directory: true,
     canCreateDirectories: true,
+    multiple: false,
   });
-  if (result) {
+  if(result === null) return;
+  const dirInfo = await readDir(result);
+  if(dirInfo.length!==0) {
+    await mkdir(`${result}${sep()}BetterGI`);
+    source.value = `${result}${sep()}BetterGI`;
+  } else {
     source.value = result;
   }
 };
