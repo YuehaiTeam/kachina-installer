@@ -51,6 +51,14 @@ fn main() {
         ])
         .setup(move |app| {
             let main_window = app.get_window("main").unwrap();
+            #[cfg(debug_assertions)]
+            {
+                let _window = app.get_webview_window("main");
+                if _window.is_some() {
+                    _window.unwrap().open_devtools();
+                }
+            }
+
             if !is_win11 {
                 let _ = main_window.set_effects(Some(tauri::utils::config::WindowEffectsConfig {
                     effects: vec![tauri::window::Effect::Acrylic],
