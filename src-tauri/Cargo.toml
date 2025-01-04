@@ -43,6 +43,7 @@ nt_version = "0.1"
 lazy_static = "1.5"
 open = { version = "5.3.1", features = ["shellexecute-on-windows"] }
 mslnk = "=0.1"
+twox-hash = "2.1.0"
 
 [profile.release]
 codegen-units = 1 # Allows LLVM to perform better optimization.

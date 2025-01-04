@@ -1,7 +1,7 @@
 use async_compression::tokio::bufread::ZstdDecoder as TokioZstdDecoder;
 use futures::StreamExt;
 use serde::Serialize;
-use std::path::Path;
+use std::{io::Read as _, path::Path};
 use tauri::{AppHandle, Emitter, WebviewWindow};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -52,7 +52,7 @@ pub async fn download_and_decompress(
 ) -> Result<usize, String> {
     let target = Path::new(&target);
     let exe_path = std::env::current_exe();
-    if let Some(exe_path) = exe_path.ok() {
+    if let Ok(exe_path) = exe_path {
         // check if target is the same as exe path
         if exe_path == target {
             // if same, rename the exe to exe.old
@@ -127,7 +127,7 @@ pub async fn download_and_decompress(
 #[derive(Serialize, Debug)]
 pub struct Metadata {
     pub file_name: String,
-    pub md5: String,
+    pub hash: String,
     pub size: u64,
 }
 
@@ -136,6 +136,7 @@ pub async fn deep_readdir_with_metadata(
     id: String,
     source: String,
     app: AppHandle,
+    hash_algorithm: String,
 ) -> Result<Vec<Metadata>, String> {
     let path = Path::new(&source);
     if !path.exists() {
@@ -161,7 +162,7 @@ pub async fn deep_readdir_with_metadata(
                     let size = entry.metadata().await.unwrap().len();
                     files.push(Metadata {
                         file_name: path.to_string(),
-                        md5: "".to_string(),
+                        hash: "".to_string(),
                         size,
                     });
                 }
@@ -176,12 +177,45 @@ pub async fn deep_readdir_with_metadata(
     let _ = app.emit(&id, (0, files.len()));
     let len = files.len();
     for (i, file) in files.iter_mut().enumerate() {
-        let md5 = chksum_md5::async_chksum(Path::new(&file.file_name)).await;
-        if md5.is_err() {
-            return Err(format!("Failed to calculate md5: {:?}", md5.err()));
+        if hash_algorithm == "md5" {
+            let md5 = chksum_md5::async_chksum(Path::new(&file.file_name)).await;
+            if md5.is_err() {
+                return Err(format!("Failed to calculate md5: {:?}", md5.err()));
+            }
+            let md5 = md5.unwrap();
+            file.hash = md5.to_hex_lowercase();
+        } else if hash_algorithm == "xxh" {
+            let name = file.file_name.clone();
+            let res = tokio::task::spawn_blocking(move || {
+                use twox_hash::XxHash3_128;
+                let mut hasher = XxHash3_128::new();
+                let mut file = std::fs::File::open(&name).unwrap();
+                let mut buffer = [0u8; 1024];
+                loop {
+                    let read = file.read(&mut buffer);
+                    if read.is_err() {
+                        return Err(format!("Failed to read file: {:?}", read.err()));
+                    }
+                    let read = read.unwrap();
+                    if read == 0 {
+                        break;
+                    }
+                    hasher.write(&buffer[..read]);
+                }
+                let hash = hasher.finish_128();
+                Ok(format!("{:x}", hash))
+            })
+            .await;
+            if res.is_err() {
+                return Err(format!("Failed to calculate xxhash: {:?}", res.err()));
+            }
+            let res = res.unwrap();
+            if res.is_err() {
+                return Err(format!("Failed to calculate xxhash: {:?}", res.err()));
+            }
+            let res = res.unwrap();
+            file.hash = res;
         }
-        let md5 = md5.unwrap();
-        file.md5 = md5.to_hex_lowercase();
         // send progress
         let _ = app.emit(&id, (i as u64 + 1, len));
     }
@@ -199,7 +233,7 @@ pub async fn is_dir_empty(path: String) -> bool {
         return true;
     }
     let mut entries = entries.unwrap();
-    while let Ok(Some(_entry)) = entries.next_entry().await {
+    if let Ok(Some(_entry)) = entries.next_entry().await {
         return false;
     }
     true
@@ -208,10 +242,10 @@ pub async fn is_dir_empty(path: String) -> bool {
 #[tauri::command]
 pub async fn ensure_dir(path: String) -> Result<(), String> {
     let path = Path::new(&path);
-    let res = tokio::fs::create_dir_all(path)
+    tokio::fs::create_dir_all(path)
         .await
         .map_err(|e| format!("Failed to create dir: {:?}", e))?;
-    Ok(res)
+    Ok(())
 }
 
 #[tauri::command]
@@ -221,11 +255,9 @@ pub async fn select_dir(path: String) -> Option<String> {
         .set_can_create_directories(true)
         .pick_folder()
         .await;
-    if res.is_none() {
-        return None;
-    }
+    res.as_ref()?;
     let res = res.unwrap();
-    return res.path().to_str().map(|s| s.to_string());
+    res.path().to_str().map(|s| s.to_string())
 }
 
 #[tauri::command]

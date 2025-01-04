@@ -60,9 +60,9 @@ fn main() {
             let main_window = app.get_webview_window("main").unwrap();
             #[cfg(debug_assertions)]
             {
-                let _window = app.get_webview_window("main");
-                if _window.is_some() {
-                    _window.unwrap().open_devtools();
+                let window = app.get_webview_window("main");
+                if let Some(window) = window {
+                    window.open_devtools();
                 }
             }
 

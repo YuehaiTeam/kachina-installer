@@ -166,7 +166,9 @@ pub async fn write_registry(
         ),
         winreg::enums::KEY_READ | winreg::enums::KEY_WRITE | winreg::enums::KEY_QUERY_VALUE,
     );
-    let key = if key.is_err() {
+    let key = if let Ok(key) = key {
+        key
+    } else {
         let create = winreg::RegKey::predef(winreg::enums::HKEY_LOCAL_MACHINE)
             .create_subkey(format!(
                 "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\{}",
@@ -174,8 +176,6 @@ pub async fn write_registry(
             ))
             .map_err(|e| format!("Failed to create subkey: {:?}", e))?;
         create.0
-    } else {
-        key.unwrap()
     };
 
     key.set_value("DisplayName", &name)

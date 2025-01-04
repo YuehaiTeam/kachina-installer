@@ -291,8 +291,16 @@ const runinstall = async () => {
     prefix: `${PROJECT_CONFIG.dfsPath}`,
   })) as {
     tag_name: string;
-    hashed: { file_name: string; md5: string; size: number }[];
+    hashed: { file_name: string; md5?: string; xxh?: string; size: number }[];
   };
+  let hashKey = '';
+  if (latest_meta.hashed.every((e) => e.md5)) {
+    hashKey = 'md5';
+  } else if (latest_meta.hashed.every((e) => e.xxh)) {
+    hashKey = 'xxh';
+  } else {
+    throw new Error('更新服务端配置有误，不支持的哈希算法');
+  }
   substep.value = 1;
   percent.value = 5;
   let id = uuid();
@@ -305,7 +313,8 @@ const runinstall = async () => {
     (await invoke('deep_readdir_with_metadata', {
       id,
       source: source.value,
-    })) as { file_name: string; md5: string; size: number }[]
+      hashAlgorithm: hashKey,
+    })) as { file_name: string; hash: string; size: number }[]
   ).map((e) => {
     return {
       ...e,
@@ -316,8 +325,9 @@ const runinstall = async () => {
   current.value = '校验本地文件……';
   const diff_files = [] as {
     file_name: string;
-    md5: string;
     size: number;
+    md5?: string;
+    xxh?: string;
   }[];
   const strip_first_slash = (s: string) => {
     let ss = s.replace(/\\/g, '/');
@@ -331,7 +341,7 @@ const runinstall = async () => {
       (e) =>
         strip_first_slash(e.file_name) === strip_first_slash(item.file_name),
     );
-    if (!local || local.md5 !== item.md5) {
+    if (!local || local.hash !== item[hashKey as 'xxh' | 'md5']) {
       diff_files.push(item);
     }
   }
@@ -371,7 +381,7 @@ const runinstall = async () => {
     stat.runningTasks[item.file_name] =
       `<span class="d-single-filename">${basename(item.file_name)}</span><span class="d-single-progress">0%</span>`;
     const dfs_result = (await invoke('get_dfs', {
-      path: `bgi/hashed/${item.md5}`,
+      path: `bgi/hashed/${item[hashKey as 'xxh' | 'md5']}`,
     })) as { url?: string; tests?: [string, string][]; source: string };
     const id = uuid();
     let last_downloaded_size = 0;
@@ -465,7 +475,6 @@ const finishInstall = async (latest_meta: {
   tag_name: string;
   hashed: {
     file_name: string;
-    md5: string;
     size: number;
   }[];
 }) => {
