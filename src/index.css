@@ -266,7 +266,8 @@
   body {
     margin: 0;
     color: #0f0f0f;
-    background: transparent;    --borderRadiusNone: 0;
+    background: transparent;
+    --borderRadiusNone: 0;
     --borderRadiusSmall: 2px;
     --borderRadiusMedium: 4px;
     --borderRadiusLarge: 6px;
@@ -292,9 +293,12 @@
     --lineHeightHero800: 40px;
     --lineHeightHero900: 52px;
     --lineHeightHero1000: 92px;
-    --fontFamilyBase: 'Segoe UI', 'Segoe UI Web (West European)', -apple-system, BlinkMacSystemFont, Roboto, 'Helvetica Neue', sans-serif;
+    --fontFamilyBase: 'Segoe UI', 'Segoe UI Web (West European)', -apple-system,
+      BlinkMacSystemFont, Roboto, 'Helvetica Neue', sans-serif;
     --fontFamilyMonospace: Consolas, 'Courier New', Courier, monospace;
-    --fontFamilyNumeric: Bahnschrift, 'Segoe UI', 'Segoe UI Web (West European)', -apple-system, BlinkMacSystemFont, Roboto, 'Helvetica Neue', sans-serif;
+    --fontFamilyNumeric: Bahnschrift, 'Segoe UI',
+      'Segoe UI Web (West European)', -apple-system, BlinkMacSystemFont, Roboto,
+      'Helvetica Neue', sans-serif;
     --fontWeightRegular: 400;
     --fontWeightMedium: 500;
     --fontWeightSemibold: 600;
@@ -333,15 +337,15 @@
     --durationSlow: 300ms;
     --durationSlower: 400ms;
     --durationUltraSlow: 500ms;
-    --curveAccelerateMax: cubic-bezier(0.9,0.1,1,0.2);
-    --curveAccelerateMid: cubic-bezier(1,0,1,1);
-    --curveAccelerateMin: cubic-bezier(0.8,0,0.78,1);
-    --curveDecelerateMax: cubic-bezier(0.1,0.9,0.2,1);
-    --curveDecelerateMid: cubic-bezier(0,0,0,1);
-    --curveDecelerateMin: cubic-bezier(0.33,0,0.1,1);
-    --curveEasyEaseMax: cubic-bezier(0.8,0,0.2,1);
-    --curveEasyEase: cubic-bezier(0.33,0,0.67,1);
-    --curveLinear: cubic-bezier(0,0,1,1);
+    --curveAccelerateMax: cubic-bezier(0.9, 0.1, 1, 0.2);
+    --curveAccelerateMid: cubic-bezier(1, 0, 1, 1);
+    --curveAccelerateMin: cubic-bezier(0.8, 0, 0.78, 1);
+    --curveDecelerateMax: cubic-bezier(0.1, 0.9, 0.2, 1);
+    --curveDecelerateMid: cubic-bezier(0, 0, 0, 1);
+    --curveDecelerateMin: cubic-bezier(0.33, 0, 0.1, 1);
+    --curveEasyEaseMax: cubic-bezier(0.8, 0, 0.2, 1);
+    --curveEasyEase: cubic-bezier(0.33, 0, 0.67, 1);
+    --curveLinear: cubic-bezier(0, 0, 1, 1);
     --colorNeutralForeground1: #242424;
     --colorNeutralForeground1Hover: #242424;
     --colorNeutralForeground1Pressed: #242424;
@@ -504,9 +508,9 @@
     --colorNeutralShadowKey: rgba(0, 0, 0, 0.14);
     --colorNeutralShadowAmbientLighter: rgba(0, 0, 0, 0.06);
     --colorNeutralShadowKeyLighter: rgba(0, 0, 0, 0.07);
-    --colorNeutralShadowAmbientDarker: rgba(0, 0, 0, 0.20);
+    --colorNeutralShadowAmbientDarker: rgba(0, 0, 0, 0.2);
     --colorNeutralShadowKeyDarker: rgba(0, 0, 0, 0.24);
-    --colorBrandShadowAmbient: rgba(0, 0, 0, 0.30);
+    --colorBrandShadowAmbient: rgba(0, 0, 0, 0.3);
     --colorBrandShadowKey: rgba(0, 0, 0, 0.25);
     --shadow2: 0 0 2px rgba(0, 0, 0, 0.12), 0 1px 2px rgba(0, 0, 0, 0.14);
     --shadow4: 0 0 2px rgba(0, 0, 0, 0.12), 0 2px 4px rgba(0, 0, 0, 0.14);
@@ -514,12 +518,12 @@
     --shadow16: 0 0 2px rgba(0, 0, 0, 0.12), 0 8px 16px rgba(0, 0, 0, 0.14);
     --shadow28: 0 0 8px rgba(0, 0, 0, 0.12), 0 14px 28px rgba(0, 0, 0, 0.14);
     --shadow64: 0 0 8px rgba(0, 0, 0, 0.12), 0 32px 64px rgba(0, 0, 0, 0.14);
-    --shadow2Brand: 0 0 2px rgba(0, 0, 0, 0.30), 0 1px 2px rgba(0, 0, 0, 0.25);
-    --shadow4Brand: 0 0 2px rgba(0, 0, 0, 0.30), 0 2px 4px rgba(0, 0, 0, 0.25);
-    --shadow8Brand: 0 0 2px rgba(0, 0, 0, 0.30), 0 4px 8px rgba(0, 0, 0, 0.25);
-    --shadow16Brand: 0 0 2px rgba(0, 0, 0, 0.30), 0 8px 16px rgba(0, 0, 0, 0.25);
-    --shadow28Brand: 0 0 8px rgba(0, 0, 0, 0.30), 0 14px 28px rgba(0, 0, 0, 0.25);
-    --shadow64Brand: 0 0 8px rgba(0, 0, 0, 0.30), 0 32px 64px rgba(0, 0, 0, 0.25);
+    --shadow2Brand: 0 0 2px rgba(0, 0, 0, 0.3), 0 1px 2px rgba(0, 0, 0, 0.25);
+    --shadow4Brand: 0 0 2px rgba(0, 0, 0, 0.3), 0 2px 4px rgba(0, 0, 0, 0.25);
+    --shadow8Brand: 0 0 2px rgba(0, 0, 0, 0.3), 0 4px 8px rgba(0, 0, 0, 0.25);
+    --shadow16Brand: 0 0 2px rgba(0, 0, 0, 0.3), 0 8px 16px rgba(0, 0, 0, 0.25);
+    --shadow28Brand: 0 0 8px rgba(0, 0, 0, 0.3), 0 14px 28px rgba(0, 0, 0, 0.25);
+    --shadow64Brand: 0 0 8px rgba(0, 0, 0, 0.3), 0 32px 64px rgba(0, 0, 0, 0.25);
   }
 }
 
@@ -527,30 +531,11 @@
   align-items: center;
   appearance: auto;
   background-color: var(--colorBrandBackground);
-  border-bottom-color: rgba(0, 0, 0, 0);
-  border-bottom-left-radius: 4px;
-  border-bottom-right-radius: 4px;
-  border-bottom-style: solid;
-  border-bottom-width: 1px;
-  border-image-outset: 0;
-  border-image-repeat: stretch;
-  border-image-slice: 100%;
-  border-image-source: none;
-  border-image-width: 1;
-  border-left-color: rgba(0, 0, 0, 0);
-  border-left-style: solid;
-  border-left-width: 1px;
-  border-right-color: rgba(0, 0, 0, 0);
-  border-right-style: solid;
-  border-right-width: 1px;
-  border-top-color: rgba(0, 0, 0, 0);
-  border-top-left-radius: 4px;
-  border-top-right-radius: 4px;
-  border-top-style: solid;
-  border-top-width: 1px;
+  border: 1px solid rgba(0, 0, 0, 0);
+  border-radius: 4px;
   box-sizing: border-box;
   color: rgb(255, 255, 255);
-  cursor: default;
+  cursor: pointer;
   display: flex;
   font-family:
     'Segoe UI',
@@ -560,53 +545,22 @@
     Roboto,
     'Helvetica Neue',
     sans-serif;
-  font-feature-settings: normal;
-  font-kerning: auto;
-  font-optical-sizing: auto;
   font-size: 14px;
-  font-size-adjust: none;
-  font-stretch: 100%;
-  font-style: normal;
-  font-variant-alternates: normal;
-  font-variant-caps: normal;
-  font-variant-east-asian: normal;
-  font-variant-emoji: normal;
-  font-variant-ligatures: normal;
-  font-variant-numeric: normal;
-  font-variant-position: normal;
-  font-variation-settings: normal;
   font-weight: 600;
   justify-content: center;
-  letter-spacing: normal;
-  cursor: pointer;
-  margin-bottom: 0px;
-  margin-left: 0px;
-  margin-right: 0px;
-  margin-top: 0px;
+  margin: 0;
   min-width: 96px;
-  outline-style: none;
-  overflow-x: hidden;
-  overflow-y: hidden;
-  padding-block-end: 5px;
-  padding-block-start: 5px;
-  padding-bottom: 5px;
-  padding-inline-end: 12px;
-  padding-inline-start: 12px;
-  padding-left: 12px;
-  padding-right: 12px;
-  padding-top: 5px;
+  outline: none;
+  overflow: hidden;
+  padding: 5px 12px;
   text-align: center;
-  text-decoration-line: none;
-  text-indent: 0px;
+  text-decoration: none;
   text-rendering: auto;
-  text-shadow: none;
-  text-transform: none;
-  transition-duration: 0.1s;
-  transition-property: background, border, color;
-  transition-timing-function: cubic-bezier(0.33, 0, 0.67, 1);
+  transition:
+    background 0.1s cubic-bezier(0.33, 0, 0.67, 1),
+    border 0.1s cubic-bezier(0.33, 0, 0.67, 1),
+    color 0.1s cubic-bezier(0.33, 0, 0.67, 1);
   vertical-align: middle;
-  word-spacing: 0px;
-  border-image: none;
 }
 .btn:hover {
   border-color: transparent;
@@ -615,8 +569,14 @@
 .btn:focus {
   background-color: var(--colorBrandBackgroundPressed);
 }
+.btn[disabled] {
+  opacity: 0.5;
+  cursor: not-allowed;
+  background-color: var(--colorBrandBackground) !important;
+}
 .checkbox {
   position: relative;
+  cursor: pointer;
   .checkbox-ind {
     align-self: flex-start;
     box-sizing: border-box;
@@ -627,10 +587,7 @@
     overflow: hidden;
     color: var(--fui-Checkbox__indicator--color);
     background-color: var(--fui-Checkbox__indicator--backgroundColor);
-    border-color: var(
-      --fui-Checkbox__indicator--borderColor,
-      var(--colorNeutralStrokeAccessible)
-    );
+    border-color: var(--colorNeutralStrokeAccessible);
     border-style: solid;
     border-width: var(--strokeWidthThin);
     border-radius: var(--borderRadiusSmall);
@@ -640,6 +597,9 @@
     font-size: 12px;
     height: 16px;
     width: 16px;
+    svg {
+      display: none;
+    }
   }
   .checkbox-inn {
     box-sizing: border-box;
@@ -650,6 +610,16 @@
     position: absolute;
     top: 0px;
     width: calc(16px + 2 * var(--spacingHorizontalS));
+  }
+  .checkbox-inn:checked + .checkbox-ind {
+    --fui-Checkbox__indicator--color: var(--colorNeutralForegroundInverted);
+    --fui-Checkbox__indicator--backgroundColor: var(
+      --colorCompoundBrandBackgroundHover
+    );
+    border-color: var(--colorCompoundBrandBackgroundHover);
+    svg {
+      display: block;
+    }
   }
 }
 
@@ -744,4 +714,11 @@
   100% {
     transform: rotate(360deg);
   }
+}
+
+a {
+  color: var(--colorBrandForegroundLink);
+}
+a:hover {
+  color: var(--colorBrandForegroundLinkHover);
 }

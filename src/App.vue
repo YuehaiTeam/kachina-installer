@@ -1,24 +1,18 @@
 <template>
   <div class="content">
     <div class="image">
-      <img src="./left.png" alt="BetterGI" />
+      <img src="./left.webp" alt="BetterGI" />
     </div>
     <div class="right">
-      <div class="title">BetterGI</div>
-      <div class="desc">更好的原神，免费且开源</div>
+      <div class="title">{{ PROJECT_CONFIG.title }}</div>
+      <div class="desc">{{ PROJECT_CONFIG.description }}</div>
       <div v-if="step === 1" class="actions">
         <div v-if="!isUpdate" class="lnk">
-          <div class="checkbox">
-            <input type="checkbox" class="checkbox-inn" />
-            <div class="checkbox-ind"></div>
-          </div>
+          <Checkbox v-model="createLnk" />
           创建桌面快捷方式
         </div>
         <div v-if="!isUpdate" class="read">
-          <div class="checkbox">
-            <input type="checkbox" class="checkbox-inn" />
-            <div class="checkbox-ind"></div>
-          </div>
+          <Checkbox v-model="acceptEula" />
           我已阅读并同意
           <a> 用户协议 </a>
         </div>
@@ -27,7 +21,11 @@
           <span v-if="isUpdate">更新到</span>
           <a @click="changeSource">{{ source }}</a>
         </div>
-        <button class="btn btn-install" @click="install">
+        <button
+          class="btn btn-install"
+          @click="install"
+          :disabled="!isUpdate && !acceptEula"
+        >
           {{ isUpdate ? '更新' : '安装' }}
         </button>
       </div>
@@ -44,16 +42,7 @@
               <span class="fui-Spinner__spinnerTail"></span>
             </span>
             <span v-else class="substep-done">
-              <svg
-                fill="currentColor"
-                viewBox="0 0 20 20"
-                xmlns="http://www.w3.org/2000/svg"
-              >
-                <path
-                  d="M10 2a8 8 0 1 1 0 16 8 8 0 0 1 0-16Zm0 1a7 7 0 1 0 0 14 7 7 0 0 0 0-14Zm3.36 4.65c.17.17.2.44.06.63l-.06.07-4 4a.5.5 0 0 1-.64.07l-.07-.06-2-2a.5.5 0 0 1 .63-.77l.07.06L9 11.3l3.65-3.65c.2-.2.51-.2.7 0Z"
-                  fill="currentColor"
-                ></path>
-              </svg>
+              <CircleSuccess />
             </span>
             <div>{{ i }}</div>
           </div>
@@ -63,16 +52,7 @@
       </div>
       <div class="finish" v-if="step === 3">
         <div class="finish-text">
-          <svg
-            fill="currentColor"
-            viewBox="0 0 20 20"
-            xmlns="http://www.w3.org/2000/svg"
-          >
-            <path
-              d="M10 2a8 8 0 1 1 0 16 8 8 0 0 1 0-16Zm0 1a7 7 0 1 0 0 14 7 7 0 0 0 0-14Zm3.36 4.65c.17.17.2.44.06.63l-.06.07-4 4a.5.5 0 0 1-.64.07l-.07-.06-2-2a.5.5 0 0 1 .63-.77l.07.06L9 11.3l3.65-3.65c.2-.2.51-.2.7 0Z"
-              fill="currentColor"
-            ></path>
-          </svg>
+          <CircleSuccess />
           {{ isUpdate ? '更新' : '安装' }}完成
         </div>
         <button class="btn btn-install" @click="launch">启动</button>
@@ -151,7 +131,6 @@
     margin-top: 1px;
   }
   a {
-    color: var(--colorBrandForegroundLink);
     cursor: pointer;
   }
 }
@@ -168,7 +147,6 @@
     opacity: 0.8;
   }
   a {
-    color: var(--colorBrandForegroundLink);
     cursor: pointer;
     font-family:
       Consolas,
@@ -269,15 +247,14 @@
 </style>
 <script lang="ts" setup>
 import { ref, onMounted } from 'vue';
-import { invoke } from '@tauri-apps/api/core';
-import { listen } from '@tauri-apps/api/event';
-import { getCurrentWindow } from '@tauri-apps/api/window';
-import { message, open } from '@tauri-apps/plugin-dialog';
-import { mkdir, readDir } from '@tauri-apps/plugin-fs';
 import { v4 as uuid } from 'uuid';
 import { mapLimit } from 'async';
-import { sep } from '@tauri-apps/api/path';
+import Checkbox from './Checkbox.vue';
+import CircleSuccess from './CircleSuccess.vue';
+import { listen, invoke, sep, getCurrentWindow } from './tauri';
 const isUpdate = ref(false);
+const acceptEula = ref(true);
+const createLnk = ref(true);
 const step = ref(1);
 const substep = ref(0);
 const substeps = ['获取最新版本信息', '检查更新内容', '下载并安装'];
@@ -288,10 +265,12 @@ const progressInterval = ref(0);
 const connectableOrigins = new Set();
 
 const PROJECT_CONFIG = {
-  exeName: 'BetterGI.exe',
-  regName: 'BetterGI',
-  programFilesPath: 'BetterGI\\BetterGI',
   dfs_path: 'bgi',
+  appName: 'BetterGI',
+  publisher: 'babalae',
+  regName: 'BetterGI',
+  exeName: 'BetterGI.exe',
+  programFilesPath: 'BetterGI\\BetterGI',
   title: 'BetterGI',
   description: '更好的原神，免费且开源',
   windowTitle: 'BetterGI 安装程序',
@@ -357,6 +336,7 @@ const runinstall = async () => {
   if (diff_files.length === 0) {
     percent.value = 100;
     step.value = 3;
+    finishInstall(latest_meta);
     return;
   }
   substep.value = 2;
@@ -471,18 +451,64 @@ const runinstall = async () => {
     }
   });
   clearInterval(progressInterval.value);
+  finishInstall(latest_meta);
   current.value = '安装完成';
   step.value = 3;
   percent.value = 100;
+};
+const finishInstall = async (latest_meta: {
+  tag_name: string;
+  hashed: {
+    file_name: string;
+    md5: string;
+    size: number;
+  }[];
+}) => {
+  const [program, desktop] = (await invoke('get_dirs')) as [string, string];
+  if (createLnk.value && !isUpdate.value) {
+    await invokeCreateLnk(
+      `${source.value}${sep()}${PROJECT_CONFIG.exeName}`,
+      `${desktop}${sep()}${PROJECT_CONFIG.appName}.lnk`,
+    );
+  }
+  if (!isUpdate.value) {
+    await invokeCreateLnk(
+      `${source.value}${sep()}${PROJECT_CONFIG.exeName}`,
+      `${program}${sep()}${PROJECT_CONFIG.appName}${sep()}${PROJECT_CONFIG.appName}.lnk`,
+    ).catch((e) => {
+      console.error(e);
+    });
+    await invoke('create_uninstaller', {
+      path: `${source.value}${sep()}uninst.exe`,
+    }).catch((e) => {
+      console.error(e);
+    });
+    await invoke('write_registry', {
+      regName: PROJECT_CONFIG.regName,
+      name: PROJECT_CONFIG.appName,
+      version: latest_meta.tag_name,
+      exe: `${source.value}${sep()}${PROJECT_CONFIG.exeName}`,
+      source: source.value,
+      uninstaller: `${source.value}${sep()}uninst.exe`,
+      metadata: JSON.stringify(latest_meta),
+      size: latest_meta.hashed.reduce((acc, cur) => acc + cur.size, 0),
+      publisher: PROJECT_CONFIG.publisher,
+    }).catch((e) => {
+      console.error(e);
+    });
+    await invokeCreateLnk(
+      `${source.value}${sep()}uninst.exe`,
+      `${program}${sep()}${PROJECT_CONFIG.appName}${sep()}卸载${PROJECT_CONFIG.appName}.lnk`,
+    ).catch((e) => {
+      console.error(e);
+    });
+  }
 };
 const install = async () => {
   try {
     await runinstall();
   } catch (e) {
-    message((e as Error).toString(), {
-      title: '出错了',
-      kind: 'error',
-    });
+    error((e as Error).toString());
     step.value = 1;
     substep.value = 0;
     percent.value = 0;
@@ -531,19 +557,31 @@ const launch = async () => {
   await invoke('launch_and_exit', { path: fullPath });
 };
 const changeSource = async () => {
-  const result = await open({
-    defaultPath: source.value,
-    directory: true,
-    canCreateDirectories: true,
-    multiple: false,
-  });
-  if (result === null) return;
-  const dirInfo = await readDir(result);
-  if (dirInfo.length !== 0) {
-    await mkdir(`${result}${sep()}${PROJECT_CONFIG.regName}`);
-    source.value = `${result}${sep()}${PROJECT_CONFIG.regName}`;
-  } else {
-    source.value = result;
+  try {
+    const result = (await invoke('select_dir', {
+      path: source.value,
+    })) as string | null;
+    if (result === null) return;
+    const isEmpty = await invoke('is_dir_empty', {
+      path: result,
+    });
+    if (!isEmpty) {
+      await invoke('ensure_dir', {
+        path: `${result}${sep()}${PROJECT_CONFIG.regName}`,
+      });
+      source.value = `${result}${sep()}${PROJECT_CONFIG.regName}`;
+    } else {
+      source.value = result;
+    }
+  } catch (e) {
+    error((e as Error).toString());
+    throw e;
   }
+};
+const invokeCreateLnk = (target: string, lnk: string) => {
+  return invoke('create_lnk', { target, lnk });
+};
+const error = (message: string, title = '出错了') => {
+  invoke('error_dialog', { message, title });
 };
 </script>

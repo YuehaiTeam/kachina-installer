@@ -187,3 +187,52 @@ pub async fn deep_readdir_with_metadata(
     }
     Ok(files)
 }
+
+#[tauri::command]
+pub async fn is_dir_empty(path: String) -> bool {
+    let path = Path::new(&path);
+    if !path.exists() {
+        return true;
+    }
+    let entries = tokio::fs::read_dir(path).await;
+    if entries.is_err() {
+        return true;
+    }
+    let mut entries = entries.unwrap();
+    while let Ok(Some(_entry)) = entries.next_entry().await {
+        return false;
+    }
+    true
+}
+
+#[tauri::command]
+pub async fn ensure_dir(path: String) -> Result<(), String> {
+    let path = Path::new(&path);
+    let res = tokio::fs::create_dir_all(path)
+        .await
+        .map_err(|e| format!("Failed to create dir: {:?}", e))?;
+    Ok(res)
+}
+
+#[tauri::command]
+pub async fn select_dir(path: String) -> Option<String> {
+    let res = rfd::AsyncFileDialog::new()
+        .set_directory(path)
+        .set_can_create_directories(true)
+        .pick_folder()
+        .await;
+    if res.is_none() {
+        return None;
+    }
+    let res = res.unwrap();
+    return res.path().to_str().map(|s| s.to_string());
+}
+
+#[tauri::command]
+pub async fn error_dialog(title: String, message: String) {
+    rfd::MessageDialog::new()
+        .set_title(&title)
+        .set_description(&message)
+        .set_level(rfd::MessageLevel::Error)
+        .show();
+}

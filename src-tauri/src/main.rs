@@ -6,8 +6,8 @@ pub mod fs;
 pub mod installer;
 pub mod static_obj;
 
+use static_obj::REQUEST_CLIENT;
 use tauri::Manager;
-use tracing_subscriber::EnvFilter;
 fn main() {
     let wv2ver = tauri::webview_version();
     if wv2ver.is_err() || std::env::args_os().any(|a| &a == "--install-webview2") {
@@ -26,9 +26,6 @@ fn main() {
             .block_on(cli_main());
         return;
     }
-    tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::from_default_env())
-        .init();
     let (major, minor, build) = nt_version::get();
     let is_lower_than_win10 = major < 10;
     if is_lower_than_win10 {
@@ -41,21 +38,26 @@ fn main() {
     // use 22000 as the build number of Windows 11
     let is_win11 = major == 10 && minor == 0 && build >= 22000;
     tauri::Builder::default()
-        .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_opener::init())
-        .plugin(tauri_plugin_fs::init())
         .invoke_handler(tauri::generate_handler![
             fs::decompress,
             fs::md5_file,
             fs::download_and_decompress,
             fs::deep_readdir_with_metadata,
+            fs::is_dir_empty,
+            fs::ensure_dir,
+            fs::select_dir,
+            fs::error_dialog,
             dfs::get_dfs,
             dfs::get_dfs_metadata,
             installer::launch_and_exit,
             installer::get_install_source,
+            installer::create_lnk,
+            installer::get_dirs,
+            installer::create_uninstaller,
+            installer::write_registry
         ])
         .setup(move |app| {
-            let main_window = app.get_window("main").unwrap();
+            let main_window = app.get_webview_window("main").unwrap();
             #[cfg(debug_assertions)]
             {
                 let _window = app.get_webview_window("main");
@@ -78,9 +80,17 @@ fn main() {
 
 async fn cli_main() {
     println!("安装程序缺少必要的运行环境");
-    println!("当前系统未安装 WebView2 运行时，正在安装...");
-    let wv2_installer_blob = include_bytes!("../../utils/MicrosoftEdgeWebview2Setup.exe");
-    // extract the installer to a temp file
+    println!("当前系统未安装 WebView2 运行时，正在下载并安装...");
+    // use reqwest to download the installer
+    let res = REQUEST_CLIENT
+        .get("https://go.microsoft.com/fwlink/p/?LinkId=2124703")
+        .send()
+        .await
+        .expect("failed to download WebView2 installer");
+    let wv2_installer_blob = res
+        .bytes()
+        .await
+        .expect("failed to download WebView2 installer");
     let temp_dir = std::env::temp_dir();
     let installer_path = temp_dir
         .as_path()
