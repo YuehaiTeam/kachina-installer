@@ -81,10 +81,10 @@
 }
 
 .image {
+  min-width: 180px;
   width: 180px;
-  padding: 12px;
   box-sizing: border-box;
-  padding-right: 0;
+  padding: 12px 0 12px 12px;
 
   img {
     width: 100%;
@@ -94,22 +94,19 @@
 }
 
 .right {
-  flex: 1;
+  position: relative;
+  width: calc(100% - 188px);
   text-align: left;
   display: flex;
   flex-direction: column;
   padding: 16px;
+  box-sizing: border-box;
+  overflow: hidden;
 }
 
 .title {
   font-size: 25px;
-  padding: 6px 10px;
-  padding-top: 2px;
-}
-
-.checkbox {
-  height: 16px;
-  overflow: hidden;
+  padding: 2px 10px 6px;
 }
 
 .btn-install {
@@ -134,11 +131,6 @@
   padding-left: 12px;
   font-size: 13px;
   display: flex;
-
-  .checkbox {
-    margin-right: 6px;
-    margin-top: 1px;
-  }
 
   a {
     cursor: pointer;
@@ -227,9 +219,11 @@
 }
 
 .current-status {
+  position: relative;
+  max-width: 100%;
   font-size: 12px;
   opacity: 0.7;
-  padding-left: 34px;
+  padding-left: 14px;
   margin-top: -6px;
   font-family:
     Consolas,
@@ -238,6 +232,12 @@
 }
 </style>
 <style>
+.d-single-stat {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .d-single-list {
   display: flex;
   flex-direction: column;
@@ -247,6 +247,26 @@
   font-size: 11px;
   gap: 2px;
   width: 230px;
+  max-height: 250px;
+  overflow-y: auto;
+  padding-left: 20px;
+
+  &::-webkit-scrollbar {
+    width: 4px;
+  }
+
+  &::-webkit-scrollbar-thumb {
+    background: var(--colorBrandForeground1);
+    border-radius: 4px;
+  }
+
+  &::-webkit-scrollbar-track {
+    background: var(--colorBrandBackground);
+  }
+
+  &::-webkit-scrollbar-thumb:hover {
+    background: var(--colorBrandForeground2);
+  }
 }
 
 .d-single {
@@ -388,10 +408,14 @@ async function runInstall(): Promise<void> {
     const speed = formatSize(stat.speed * 1000);
     const downloaded = formatSize(stat.downloadedTotalSize);
     const total = formatSize(total_size);
-    current.value =
-      `${downloaded} / ${total} (${speed}/s)<div class="d-single-list"><div class="d-single">` +
-      Object.values(stat.runningTasks).join('</div><div class="d-single">') +
-      '</div></div>';
+    current.value = `
+      <span class="d-single-stat">${downloaded} / ${total} (${speed}/s)</span>
+      <div class="d-single-list">
+        <div class="d-single">
+          ${Object.values(stat.runningTasks).join('</div><div class="d-single">')}
+        </div>
+      </div>
+    `;
     percent.value = 20 + (stat.downloadedTotalSize / total_size) * 80;
   }, 400);
   await mapLimit(diff_files, 5, async (item: (typeof diff_files)[0]) => {
@@ -414,7 +438,7 @@ async function runInstall(): Promise<void> {
       ? item.file_name
       : `/${item.file_name}`;
     let url = dfs_result.url;
-    if (!url && (dfs_result.tests?.length || 0) > 0) {
+    if (!url && dfs_result.tests && dfs_result.tests.length > 0) {
       const tests = dfs_result.tests;
       if (tests.length > 0) {
         const now = performance.now();
@@ -554,7 +578,7 @@ function formatSize(size: number): string {
 }
 
 function basename(path: string): string {
-  return path.replace(/\\/g, '/').split('/').pop();
+  return path.replace(/\\/g, '/').split('/').pop() as string;
 }
 
 function fetchWithTimeout(
@@ -567,7 +591,7 @@ function fetchWithTimeout(
     new Promise((_, reject) =>
       setTimeout(() => reject(new Error('timeout')), timeout),
     ),
-  ]);
+  ]) as Promise<Response>;
 }
 
 async function launch() {
