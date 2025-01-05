@@ -359,7 +359,7 @@ async function runInstall(): Promise<void> {
       (e) =>
         strip_first_slash(e.file_name) === strip_first_slash(item.file_name),
     );
-    if (!local || local.hash !== item[hashKey as 'xxh' | 'md5']) {
+    if (!local || local.hash !== item[hashKey as DfsMetadataHashType]) {
       diff_files.push(item);
     }
   }
@@ -402,8 +402,8 @@ async function runInstall(): Promise<void> {
     });
     const id = uuid();
     let last_downloaded_size = 0;
-    let idUnListen = await listen(id, ({ payload }) => {
-      let current_size = payload as number;
+    let idUnListen = await listen<number>(id, ({ payload }) => {
+      let current_size = payload;
       const size_diff = current_size - last_downloaded_size;
       last_downloaded_size = current_size;
       stat.downloadedTotalSize += size_diff;
@@ -415,7 +415,7 @@ async function runInstall(): Promise<void> {
       : `/${item.file_name}`;
     let url = dfs_result.url;
     if (!url && (dfs_result.tests?.length || 0) > 0) {
-      const tests = dfs_result.tests as [string, string][];
+      const tests = dfs_result.tests;
       if (tests.length > 0) {
         const now = performance.now();
         const result = await Promise.race(
