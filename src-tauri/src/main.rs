@@ -8,6 +8,7 @@ pub mod static_obj;
 
 use static_obj::REQUEST_CLIENT;
 use tauri::Manager;
+use tauri_utils::config::WindowEffectsConfig;
 fn main() {
     let wv2ver = tauri::webview_version();
     if wv2ver.is_err() || std::env::args_os().any(|a| &a == "--install-webview2") {
@@ -67,7 +68,7 @@ fn main() {
             }
 
             if !is_win11 {
-                let _ = main_window.set_effects(Some(tauri::utils::config::WindowEffectsConfig {
+                let _ = main_window.set_effects(Some(WindowEffectsConfig {
                     effects: vec![tauri::window::Effect::Acrylic],
                     ..Default::default()
                 }));
