@@ -5,7 +5,9 @@
   "type": "module",
   "scripts": {
     "dev": "tauri dev --exit-on-panic",
+    "dev:uac": "powershell -Command \"Start-Process -Verb RunAs '.\\src-tauri\\target\\debug\\kachina-installer.exe'\"",
     "build": "tauri build",
+    "debug": "tauri build --debug && pnpm dev:uac",
     "preview": "rsbuild preview",
     "tauri": "tauri"
   },

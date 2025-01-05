@@ -3,8 +3,8 @@
     <input
       type="checkbox"
       class="checkbox-inn"
-      :checked="props.modelValue"
-      @change="() => emit('update:modelValue', !props.modelValue)"
+      :checked="model"
+      @change="model = !model"
     />
     <div class="checkbox-ind">
       <svg
@@ -24,8 +24,5 @@
 </template>
 
 <script setup lang="ts">
-const props = defineProps<{
-  modelValue: boolean;
-}>();
-const emit = defineEmits(['update:modelValue']);
+const model = defineModel<boolean>();
 </script>
