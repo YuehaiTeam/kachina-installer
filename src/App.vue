@@ -368,7 +368,7 @@ async function runInstall(): Promise<void> {
   });
   idUnListen();
   current.value = '校验本地文件……';
-  const diff_files: Array<DfsMetadataHashInfo> = [];
+  const diff_files: Array<DfsUpdateTask> = [];
   const strip_first_slash = (s: string) => {
     let ss = s.replace(/\\/g, '/');
     if (ss.startsWith('/')) return ss.slice(1);
@@ -380,7 +380,12 @@ async function runInstall(): Promise<void> {
         strip_first_slash(e.file_name) === strip_first_slash(item.file_name),
     );
     if (!local || local.hash !== item[hashKey as DfsMetadataHashType]) {
-      diff_files.push(item);
+      let patch = latest_meta.patches?.find(
+        (e) =>
+          e.from[hashKey as DfsMetadataHashType] ===
+          item[hashKey as DfsMetadataHashType],
+      );
+      diff_files.push({ ...item, patch });
     }
   }
   if (diff_files.length === 0) {
@@ -391,7 +396,10 @@ async function runInstall(): Promise<void> {
   }
   subStep.value = 2;
   current.value = '准备下载……';
-  const total_size = diff_files.reduce((acc, cur) => acc + cur.size, 0);
+  const total_size = diff_files.reduce(
+    (acc, cur) => acc + (cur?.patch?.size || cur.size),
+    0,
+  );
   let stat: InstallStat = {
     downloadedTotalSize: 0,
     speedLastSize: 0,
@@ -421,8 +429,11 @@ async function runInstall(): Promise<void> {
   await mapLimit(diff_files, 5, async (item: (typeof diff_files)[0]) => {
     stat.runningTasks[item.file_name] =
       `<span class="d-single-filename">${basename(item.file_name)}</span><span class="d-single-progress">0%</span>`;
+    const hash = item.patch
+      ? `${item.patch.from[hashKey as DfsMetadataHashType]}_${item.patch.to[hashKey as DfsMetadataHashType]}`
+      : item[hashKey as DfsMetadataHashType];
     const dfs_result = await invoke<InvokeGetDfsRes>('get_dfs', {
-      path: `bgi/hashed/${item[hashKey as DfsMetadataHashType]}`,
+      path: `bgi/hashed/${hash}`,
     });
     const id = uuid();
     let last_downloaded_size = 0;
@@ -469,21 +480,33 @@ async function runInstall(): Promise<void> {
     }
     console.log('dfs-url', url);
     const run_dl = async () => {
+      let itemSize = item.size;
       try {
-        await invoke('download_and_decompress', {
-          id,
-          url: url,
-          target: source.value + filename_with_first_slash,
-        });
+        if (item.patch) {
+          itemSize = item.patch.size;
+          await invoke('download_and_decompress_and_hpatch', {
+            id,
+            url: url,
+            target: source.value + filename_with_first_slash,
+            diffSize: item.patch.size,
+          });
+        } else {
+          await invoke('download_and_decompress', {
+            id,
+            url: url,
+            target: source.value + filename_with_first_slash,
+          });
+        }
       } catch (e) {
         console.error(e);
         stat.downloadedTotalSize -= last_downloaded_size;
+        stat.downloadedTotalSize = Math.max(0, stat.downloadedTotalSize);
         throw e;
       } finally {
         idUnListen();
         delete stat.runningTasks[item.file_name];
       }
-      const size_diff = item.size - last_downloaded_size;
+      const size_diff = itemSize - last_downloaded_size;
       stat.downloadedTotalSize += size_diff;
     };
     for (let i = 0; i < 3; i++) {
@@ -547,7 +570,8 @@ async function install(): Promise<void> {
   try {
     await runInstall();
   } catch (e) {
-    if (e instanceof Error) await error(e.toString());
+    console.error(e);
+    if (e instanceof Error) await error(e.stack || e.toString());
     else await error(JSON.stringify(e));
     step.value = 1;
     subStep.value = 0;
@@ -609,6 +633,7 @@ async function changeSource() {
     if (result === null) return;
     const isEmpty = await invoke<boolean>('is_dir_empty', {
       path: result,
+      ...PROJECT_CONFIG,
     });
     if (!isEmpty) {
       await invoke('ensure_dir', {
@@ -617,7 +642,7 @@ async function changeSource() {
       source.value = `${result}${sep()}${PROJECT_CONFIG.regName}`;
     } else source.value = result;
   } catch (e) {
-    if (e instanceof Error) await error(e.toString());
+    if (e instanceof Error) await error(e.stack || e.toString());
     else await error(JSON.stringify(e));
     throw e;
   }

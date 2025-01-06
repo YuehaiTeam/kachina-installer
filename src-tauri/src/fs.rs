@@ -1,11 +1,11 @@
 use async_compression::tokio::bufread::ZstdDecoder as TokioZstdDecoder;
 use futures::StreamExt;
 use serde::Serialize;
-use std::{io::Read as _, path::Path};
+use std::{io::Read as _, os::windows::fs::MetadataExt, path::Path};
 use tauri::{AppHandle, Emitter, WebviewWindow};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-use crate::static_obj::REQUEST_CLIENT;
+use crate::{progressed_read::ReadWithCallback, static_obj::REQUEST_CLIENT};
 
 #[tauri::command]
 pub async fn decompress(source: String, target: String) -> String {
@@ -80,7 +80,6 @@ pub async fn download_and_decompress(
             target_file.err()
         ));
     }
-    // download and decompress with progress using reqwest, pass progress with emit("id", downloaded)
     let target_file = target_file.unwrap();
     let mut target_file = tokio::io::BufWriter::new(target_file);
     let res = REQUEST_CLIENT.get(&url).send().await;
@@ -92,10 +91,11 @@ pub async fn download_and_decompress(
     let mut reader = tokio_util::io::StreamReader::new(stream);
     let mut decoder = TokioZstdDecoder::new(&mut reader);
     let mut downloaded = 0;
-    let buffer = &mut [0u8; 1024];
+    let mut boxed = Box::new([0u8; 256 * 1024]);
+    let buffer = &mut *boxed;
     let mut now = std::time::Instant::now();
     loop {
-        let read = decoder.read(buffer).await;
+        let read: Result<usize, std::io::Error> = decoder.read(buffer).await;
         if read.is_err() {
             return Err(format!("Failed to read from decoder: {:?}", read.err()));
         }
@@ -105,7 +105,7 @@ pub async fn download_and_decompress(
         }
         downloaded += read;
         // emit only every 16 ms
-        if now.elapsed().as_millis() >= 16 {
+        if now.elapsed().as_millis() >= 100 {
             now = std::time::Instant::now();
             let _ = app.emit(&id, downloaded);
         }
@@ -121,6 +121,146 @@ pub async fn download_and_decompress(
     }
     // emit the final progress
     let _ = app.emit(&id, downloaded);
+    Ok(downloaded)
+}
+
+#[tauri::command]
+pub async fn run_hpatch(target: String, diff: String) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || {
+        let target = Path::new(&target);
+        let new_target = target.with_extension("patching");
+        let target_size = target
+            .metadata()
+            .map_err(|e| format!("Failed to get target size: {:?}", e))?;
+        let target_file = std::fs::File::create(new_target.clone())
+            .map_err(|e| format!("Failed to create new target: {:?}", e))?;
+        let old_target_file =
+            std::fs::File::open(target).map_err(|e| format!("Failed to open target: {:?}", e))?;
+        let diff_size = std::fs::metadata(&diff)
+            .map_err(|e| format!("Failed to get diff size: {:?}", e))?
+            .file_size();
+        let diff_file =
+            std::fs::File::open(diff).map_err(|e| format!("Failed to open diff: {:?}", e))?;
+        let res = hpatch_sys::safe_patch_single_stream(
+            target_file,
+            diff_file,
+            diff_size as usize,
+            old_target_file,
+            target_size.file_size() as usize,
+        );
+        if res {
+            // move target to target.old
+            let old_target = target.with_extension("old");
+            std::fs::rename(target, &old_target)
+                .map_err(|e| format!("Failed to rename target: {:?}", e))?;
+            std::fs::rename(new_target, target)
+                .map_err(|e| format!("Failed to rename new target: {:?}", e))?;
+            Ok(())
+        } else {
+            // delete new target
+            std::fs::remove_file(new_target)
+                .map_err(|e| format!("Failed to remove new target: {:?}", e))?;
+            Err("Failed to run hpatch".to_string())
+        }
+    })
+    .await
+    .map_err(|e| format!("Failed to run hpatch: {:?}", e))?
+}
+
+#[tauri::command]
+pub async fn download_and_decompress_and_hpatch(
+    id: String,
+    url: String,
+    diff_size: usize,
+    target: String,
+    app: AppHandle,
+) -> Result<usize, String> {
+    let target_cl = target.clone();
+    let target = Path::new(&target);
+    let exe_path = std::env::current_exe();
+    if let Ok(exe_path) = exe_path {
+        // check if target is the same as exe path
+        if exe_path == target {
+            // if same, rename the exe to exe.old
+            let old_exe = exe_path.with_extension("old");
+            let res = tokio::fs::rename(&exe_path, &old_exe).await;
+            if res.is_err() {
+                return Err(format!("Failed to rename current exe: {:?}", res.err()));
+            }
+        }
+    }
+    // ensure dir
+    let parent = target.parent();
+    if parent.is_none() {
+        return Err("Failed to get parent dir".to_string());
+    }
+    let parent = parent.unwrap();
+    let res = tokio::fs::create_dir_all(parent).await;
+    if res.is_err() {
+        return Err(format!("Failed to create parent dir: {:?}", res.err()));
+    }
+    let res = REQUEST_CLIENT.get(&url).send().await;
+    if res.is_err() {
+        return Err(format!("Failed to send http request: {:?}", res.err()));
+    }
+    let res = res.unwrap();
+    let stream = futures::TryStreamExt::map_err(res.bytes_stream(), std::io::Error::other);
+    let reader = tokio_util::io::StreamReader::new(stream);
+    let decoder = TokioZstdDecoder::new(reader);
+    let app_cl = app.clone();
+    let id_cl = id.clone();
+    let mut downloaded = 0;
+    let decoder = ReadWithCallback {
+        reader: decoder,
+        callback: move |chunk| {
+            downloaded += chunk;
+            let _ = app_cl.emit(&id_cl, downloaded);
+        },
+    };
+    tokio::task::spawn_blocking(move || {
+        let target_cl = Path::new(&target_cl);
+        let new_target = target_cl.with_extension("patching");
+        let target_size = target_cl
+            .metadata()
+            .map_err(|e| format!("Failed to get target size: {:?}", e))?;
+        let target_file = std::fs::File::create(new_target.clone());
+        let old_target_file = std::fs::File::open(target_cl)
+            .map_err(|e| format!("Failed to open target: {:?}", e))?;
+        let diff_file = tokio_util::io::SyncIoBridge::new(decoder);
+        let res = hpatch_sys::safe_patch_single_stream(
+            target_file.map_err(|e| format!("Failed to create new target: {:?}", e))?,
+            diff_file,
+            diff_size,
+            old_target_file,
+            target_size.file_size() as usize,
+        );
+        if res {
+            // move target to target.old
+            let old_target = target_cl.with_extension("old");
+            let exe_path = std::env::current_exe();
+            let exe_path = exe_path.map_err(|e| format!("Failed to get exe path: {:?}", e))?;
+            // rename to .old if the target is the same as exe
+            if exe_path == target_cl {
+                let old_target = target_cl.with_extension("old");
+                std::fs::rename(target_cl, old_target)
+                    .map_err(|e| format!("Failed to rename target: {:?}", e))?;
+            } else {
+                // delete old file
+                std::fs::remove_file(old_target)
+                    .map_err(|e| format!("Failed to remove old target: {:?}", e))?;
+            }
+            std::fs::rename(new_target, target_cl)
+                .map_err(|e| format!("Failed to rename new target: {:?}", e))?;
+            Ok(())
+        } else {
+            // delete new target
+            std::fs::remove_file(new_target)
+                .map_err(|e| format!("Failed to remove new target: {:?}", e))?;
+            Err("Failed to run hpatch".to_string())
+        }
+    })
+    .await
+    .map_err(|e| format!("Failed to exec hpatch: {:?}", e))??;
     Ok(downloaded)
 }
 
@@ -223,13 +363,18 @@ pub async fn deep_readdir_with_metadata(
 }
 
 #[tauri::command]
-pub async fn is_dir_empty(path: String) -> bool {
+pub async fn is_dir_empty(path: String, exe_name: String) -> bool {
     let path = Path::new(&path);
     if !path.exists() {
         return true;
     }
     let entries = tokio::fs::read_dir(path).await;
     if entries.is_err() {
+        return true;
+    }
+    // check if exe exists
+    let exe_path = path.join(exe_name);
+    if exe_path.exists() {
         return true;
     }
     let mut entries = entries.unwrap();

@@ -32,7 +32,7 @@ reqwest = { version = "0.12", default-features = false, features = [
     "zstd",
 ] }
 futures = "0.3"
-tokio-util = "0.7"
+tokio-util = { version = "0.7", features = ["io-util"] }
 async-walkdir = "2.0"
 winreg = "0.52"
 windows = { version = "0.58", features = ["Win32_System_Console"] }
@@ -45,6 +45,8 @@ lazy_static = "1.5"
 open = { version = "5.3.1", features = ["shellexecute-on-windows"] }
 mslnk = "=0.1"
 twox-hash = "2.1.0"
+hpatch-sys = { path = "./libs/hpatch-sys" }
+pin-project = "1.1.7"
 
 [profile.release]
 codegen-units = 1 # Allows LLVM to perform better optimization.

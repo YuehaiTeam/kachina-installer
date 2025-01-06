@@ -10,6 +10,7 @@ type ProjectConfig = {
   title: string;
   description: string;
   windowTitle: string;
+  foldedInstallDir: bool;
 };
 
 type InstallStat = {
@@ -31,9 +32,21 @@ type DfsMetadataHashInfo = {
   xxh?: string;
 };
 
+type DfsMetadataPatchInfo = {
+  file_name: string;
+  size: number;
+  from: Omit<DfsMetadataHashInfo, 'file_name'>;
+  to: Omit<DfsMetadataHashInfo, 'file_name'>;
+};
+
+interface DfsUpdateTask extends DfsMetadataHashInfo {
+  patch?: DfsMetadataPatchInfo;
+}
+
 type InvokeGetDfsMetadataRes = {
   tag_name: string;
   hashed: Array<DfsMetadataHashInfo>;
+  patches?: Array<DfsMetadataPatchInfo>;
 };
 
 type InvokeDeepReaddirWithMetadataRes = Array<{

@@ -5,6 +5,7 @@ pub mod dfs;
 pub mod fs;
 pub mod installer;
 pub mod static_obj;
+pub mod progressed_read;
 
 use static_obj::REQUEST_CLIENT;
 use tauri::Manager;
@@ -42,7 +43,9 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             fs::decompress,
             fs::md5_file,
+            fs::run_hpatch,
             fs::download_and_decompress,
+            fs::download_and_decompress_and_hpatch,
             fs::deep_readdir_with_metadata,
             fs::is_dir_empty,
             fs::ensure_dir,
