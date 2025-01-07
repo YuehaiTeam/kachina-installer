@@ -4,8 +4,9 @@
 pub mod dfs;
 pub mod fs;
 pub mod installer;
-pub mod static_obj;
+pub mod local;
 pub mod progressed_read;
+pub mod static_obj;
 
 use static_obj::REQUEST_CLIENT;
 use tauri::Manager;
@@ -41,24 +42,26 @@ fn main() {
     let is_win11 = major == 10 && minor == 0 && build >= 22000;
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
-            fs::decompress,
-            fs::md5_file,
             fs::run_hpatch,
+            fs::local_decompress,
             fs::download_and_decompress,
             fs::download_and_decompress_and_hpatch,
             fs::deep_readdir_with_metadata,
             fs::is_dir_empty,
             fs::ensure_dir,
-            fs::select_dir,
-            fs::error_dialog,
+            fs::rm_list,
+            fs::clear_empty_dirs,
             dfs::get_dfs,
             dfs::get_dfs_metadata,
             installer::launch_and_exit,
-            installer::get_install_source,
+            installer::get_installer_config,
             installer::create_lnk,
             installer::get_dirs,
             installer::create_uninstaller,
-            installer::write_registry
+            installer::write_registry,
+            installer::read_uninstall_metadata,
+            installer::select_dir,
+            installer::error_dialog,
         ])
         .setup(move |app| {
             let main_window = app.get_webview_window("main").unwrap();

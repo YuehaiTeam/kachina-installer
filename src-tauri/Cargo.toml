@@ -47,6 +47,7 @@ mslnk = "=0.1"
 twox-hash = "2.1.0"
 hpatch-sys = { path = "./libs/hpatch-sys" }
 pin-project = "1.1.7"
+fmmap = { version = "0.3", features = ["tokio-async"] }
 
 [profile.release]
 codegen-units = 1 # Allows LLVM to perform better optimization.

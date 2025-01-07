@@ -1,67 +1,91 @@
 <template>
-  <div class="content">
-    <div class="image">
-      <img src="./left.webp" alt="BetterGI" />
+  <div class="main">
+    <div v-show="!init" class="init-loading">
+      <span class="fui-Spinner__spinner">
+        <span class="fui-Spinner__spinnerTail"></span>
+      </span>
     </div>
-    <div class="right">
-      <div class="title">{{ PROJECT_CONFIG.title }}</div>
-      <div class="desc">{{ PROJECT_CONFIG.description }}</div>
-      <div v-if="step === 1" class="actions">
-        <div v-if="!isUpdate" class="lnk">
-          <Checkbox v-model="createLnk" />
-          创建桌面快捷方式
-        </div>
-        <div v-if="!isUpdate" class="read">
-          <Checkbox v-model="acceptEula" />
-          我已阅读并同意
-          <a> 用户协议 </a>
-        </div>
-        <div class="more">
-          <span v-if="!isUpdate">安装到</span>
-          <span v-if="isUpdate">更新到</span>
-          <a @click="changeSource">{{ source }}</a>
-        </div>
-        <button
-          class="btn btn-install"
-          @click="install"
-          :disabled="!isUpdate && !acceptEula"
-        >
-          {{ isUpdate ? '更新' : '安装' }}
-        </button>
+    <div v-show="init" class="content">
+      <div class="image">
+        <img src="./left.webp" alt="BetterGI" />
       </div>
-      <div class="progress" v-if="step === 2">
-        <div class="step-desc">
-          <div
-            v-for="(i, a) in subStepList"
-            class="substep"
-            :class="{ done: a < subStep }"
-            v-show="a <= subStep"
-            :key="i"
-          >
-            <span v-if="a === subStep" class="fui-Spinner__spinner">
-              <span class="fui-Spinner__spinnerTail"></span>
-            </span>
-            <span v-else class="substep-done">
-              <CircleSuccess />
-            </span>
-            <div>{{ i }}</div>
+      <div class="right">
+        <div class="title">{{ PROJECT_CONFIG.title }}</div>
+        <div class="desc">{{ PROJECT_CONFIG.description }}</div>
+        <div v-if="step === 1" class="actions">
+          <div v-if="!isUpdate" class="lnk">
+            <Checkbox v-model="createLnk" />
+            创建桌面快捷方式
           </div>
+          <div v-if="!isUpdate" class="read">
+            <Checkbox v-model="acceptEula" />
+            我已阅读并同意
+            <a> 用户协议 </a>
+          </div>
+          <div class="more">
+            <span v-if="!isUpdate">安装到</span>
+            <span v-if="isUpdate">更新到</span>
+            <a @click="changeSource">{{ source }}</a>
+          </div>
+          <button
+            class="btn btn-install"
+            @click="install"
+            :disabled="!isUpdate && !acceptEula"
+          >
+            {{ isUpdate ? '更新' : '安装' }}
+          </button>
         </div>
-        <div class="current-status" v-html="current"></div>
-        <div class="progress-bar" :style="{ width: `${percent}%` }"></div>
-      </div>
-      <div class="finish" v-if="step === 3">
-        <div class="finish-text">
-          <CircleSuccess />
-          {{ isUpdate ? '更新' : '安装' }}完成
+        <div class="progress" v-if="step === 2">
+          <div class="step-desc">
+            <div
+              v-for="(i, a) in subStepList"
+              class="substep"
+              :class="{ done: a < subStep }"
+              v-show="a <= subStep"
+              :key="i"
+            >
+              <span v-if="a === subStep" class="fui-Spinner__spinner">
+                <span class="fui-Spinner__spinnerTail"></span>
+              </span>
+              <span v-else class="substep-done">
+                <CircleSuccess />
+              </span>
+              <div>{{ i }}</div>
+            </div>
+          </div>
+          <div class="current-status" v-html="current"></div>
+          <div class="progress-bar" :style="{ width: `${percent}%` }"></div>
         </div>
-        <button class="btn btn-install" @click="launch">启动</button>
+        <div class="finish" v-if="step === 3">
+          <div class="finish-text">
+            <CircleSuccess />
+            {{ isUpdate ? '更新' : '安装' }}完成
+          </div>
+          <button class="btn btn-install" @click="launch">启动</button>
+        </div>
       </div>
     </div>
   </div>
 </template>
 
 <style scoped>
+.main {
+  min-height: 100vh;
+}
+.init-loading {
+  height: 100vh;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  padding-bottom: 24px;
+  box-sizing: border-box;
+}
+
+.init-loading .fui-Spinner__spinner {
+  width: 40px;
+  height: 40px;
+  --fui-Spinner--strokeWidth: 4px;
+}
 .content {
   display: flex;
   min-height: 100vh;
@@ -293,6 +317,9 @@ import { mapLimit } from 'async';
 import Checkbox from './Checkbox.vue';
 import CircleSuccess from './CircleSuccess.vue';
 import { getCurrentWindow, invoke, listen, sep } from './tauri';
+import { runDfsDownload } from './dfs';
+
+const init = ref(false);
 
 const subStepList: ReadonlyArray<string> = [
   '获取最新版本信息',
@@ -310,7 +337,6 @@ const current = ref<string>('');
 const percent = ref<number>(0);
 const source = ref<string>('');
 const progressInterval = ref<number>(0);
-const connectableOrigins = new Set();
 
 const PROJECT_CONFIG: ProjectConfig = {
   dfsPath: 'bgi',
@@ -326,19 +352,36 @@ const PROJECT_CONFIG: ProjectConfig = {
   windowTitle: 'BetterGI 安装程序',
 };
 
-async function getSource(): Promise<InvokeGetInstallSourceRes> {
-  return await invoke<InvokeGetInstallSourceRes>(
-    'get_install_source',
-    PROJECT_CONFIG,
-  );
+const INSTALLER_CONFIG: InstallerConfig = {
+  install_path: '',
+  install_path_exists: false,
+  is_uninstall: false,
+  embedded_config: null,
+  enbedded_metadata: null,
+  embedded_files: [],
+  exe_path: '',
+};
+
+async function getSource(): Promise<InstallerConfig> {
+  return await invoke<InstallerConfig>('get_installer_config', PROJECT_CONFIG);
 }
 
 async function runInstall(): Promise<void> {
   step.value = 2;
-  const latest_meta = await invoke<InvokeGetDfsMetadataRes>(
+  let latest_meta = INSTALLER_CONFIG.enbedded_metadata;
+  const online_meta = await invoke<InvokeGetDfsMetadataRes>(
     'get_dfs_metadata',
     { prefix: `${PROJECT_CONFIG.dfsPath}` },
   );
+  if (!latest_meta) {
+    latest_meta = online_meta;
+    console.log('Local meta not found, use online meta');
+  } else if (online_meta.tag_name !== latest_meta.tag_name) {
+    console.log('Version update detected, use online meta');
+    latest_meta = online_meta;
+  } else {
+    console.log('Local meta found, use local meta');
+  }
   let hashKey = '';
   if (latest_meta.hashed.every((e) => e.md5)) {
     hashKey = 'md5';
@@ -385,7 +428,18 @@ async function runInstall(): Promise<void> {
           e.from[hashKey as DfsMetadataHashType] ===
           item[hashKey as DfsMetadataHashType],
       );
-      diff_files.push({ ...item, patch });
+      let lpatch = latest_meta.patches?.find((e) =>
+        INSTALLER_CONFIG.embedded_files?.some(
+          (em) => em.name === e.from[hashKey as DfsMetadataHashType],
+        ),
+      );
+      diff_files.push({
+        ...item,
+        patch,
+        lpatch,
+        downloaded: 0,
+        running: false,
+      });
     }
   }
   if (diff_files.length === 0) {
@@ -401,117 +455,48 @@ async function runInstall(): Promise<void> {
     0,
   );
   let stat: InstallStat = {
-    downloadedTotalSize: 0,
     speedLastSize: 0,
     lastTime: performance.now(),
     speed: 0,
-    runningTasks: {},
   };
   progressInterval.value = setInterval(() => {
     const now = performance.now();
     const time_diff = now - stat.lastTime;
-    stat.speed = (stat.downloadedTotalSize - stat.speedLastSize) / time_diff;
-    stat.speedLastSize = stat.downloadedTotalSize;
+    const downloadedTotalSize = diff_files.reduce(
+      (acc, cur) => acc + cur.downloaded,
+      0,
+    );
+    stat.speed = (downloadedTotalSize - stat.speedLastSize) / time_diff;
+    stat.speedLastSize = downloadedTotalSize;
     stat.lastTime = now;
     const speed = formatSize(stat.speed * 1000);
-    const downloaded = formatSize(stat.downloadedTotalSize);
+    const downloaded = formatSize(downloadedTotalSize);
     const total = formatSize(total_size);
+    const runningTasks = diff_files
+      .filter((e) => e.running)
+      .map((e) => `${basename(e.file_name)} ${formatSize(e.downloaded)}`);
     current.value = `
       <span class="d-single-stat">${downloaded} / ${total} (${speed}/s)</span>
       <div class="d-single-list">
         <div class="d-single">
-          ${Object.values(stat.runningTasks).join('</div><div class="d-single">')}
+          ${Object.values(runningTasks).join('</div><div class="d-single">')}
         </div>
       </div>
     `;
-    percent.value = 20 + (stat.downloadedTotalSize / total_size) * 80;
+    percent.value = 20 + (downloadedTotalSize / total_size) * 80;
   }, 400);
   await mapLimit(diff_files, 5, async (item: (typeof diff_files)[0]) => {
-    stat.runningTasks[item.file_name] =
-      `<span class="d-single-filename">${basename(item.file_name)}</span><span class="d-single-progress">0%</span>`;
-    const hash = item.patch
-      ? `${item.patch.from[hashKey as DfsMetadataHashType]}_${item.patch.to[hashKey as DfsMetadataHashType]}`
-      : item[hashKey as DfsMetadataHashType];
-    const dfs_result = await invoke<InvokeGetDfsRes>('get_dfs', {
-      path: `bgi/hashed/${hash}`,
-    });
-    const id = uuid();
-    let last_downloaded_size = 0;
-    let idUnListen = await listen<number>(id, ({ payload }) => {
-      let current_size = payload;
-      const size_diff = current_size - last_downloaded_size;
-      last_downloaded_size = current_size;
-      stat.downloadedTotalSize += size_diff;
-      stat.runningTasks[item.file_name] =
-        `<span class="d-single-filename">${basename(item.file_name)}</span><span class="d-single-progress">${Math.round(current_size / item.size)}%</span>`;
-    });
-    let filename_with_first_slash = item.file_name.startsWith('/')
-      ? item.file_name
-      : `/${item.file_name}`;
-    let url = dfs_result.url;
-    if (!url && dfs_result.tests && dfs_result.tests.length > 0) {
-      const tests = dfs_result.tests;
-      if (tests.length > 0) {
-        const now = performance.now();
-        const result = await Promise.race(
-          tests.map((test) => {
-            const origin = new URL(test[0]).origin;
-            if (connectableOrigins.has(origin)) {
-              return { url: test[1], time: 10 };
-            }
-            return fetchWithTimeout(test[0], { method: 'HEAD' })
-              .then((response) => {
-                if (response.ok) {
-                  connectableOrigins.add(origin);
-                  return { url: test[1], time: performance.now() - now };
-                }
-                throw new Error('not ok');
-              })
-              .catch(() => ({ url: test[0], time: -1 }));
-          }),
-        );
-        if (result.time > 0) url = result.url;
-      }
-    }
-    if (!url && dfs_result.source) url = dfs_result.source;
-    if (!url && dfs_result.tests?.length) url = dfs_result.tests[0][1];
-    if (!url) {
-      throw new Error('没有可用的下载节点：' + JSON.stringify(dfs_result));
-    }
-    console.log('dfs-url', url);
-    const run_dl = async () => {
-      let itemSize = item.size;
-      try {
-        if (item.patch) {
-          itemSize = item.patch.size;
-          await invoke('download_and_decompress_and_hpatch', {
-            id,
-            url: url,
-            target: source.value + filename_with_first_slash,
-            diffSize: item.patch.size,
-          });
-        } else {
-          await invoke('download_and_decompress', {
-            id,
-            url: url,
-            target: source.value + filename_with_first_slash,
-          });
-        }
-      } catch (e) {
-        console.error(e);
-        stat.downloadedTotalSize -= last_downloaded_size;
-        stat.downloadedTotalSize = Math.max(0, stat.downloadedTotalSize);
-        throw e;
-      } finally {
-        idUnListen();
-        delete stat.runningTasks[item.file_name];
-      }
-      const size_diff = itemSize - last_downloaded_size;
-      stat.downloadedTotalSize += size_diff;
-    };
+    let hasError = false;
     for (let i = 0; i < 3; i++) {
       try {
-        await run_dl();
+        await runDfsDownload(
+          INSTALLER_CONFIG.embedded_files || [],
+          source.value,
+          hashKey as DfsMetadataHashType,
+          item,
+          hasError,
+          hasError,
+        );
         break;
       } catch (e) {
         console.error(e);
@@ -583,12 +568,18 @@ async function install(): Promise<void> {
 }
 
 onMounted(async () => {
-  const [sourcePath, sourceExists] = await getSource();
-  source.value = sourcePath;
-  if (sourceExists) isUpdate.value = true;
   const win = getCurrentWindow();
-  await win.setTitle(PROJECT_CONFIG.windowTitle);
   await win.show();
+  const rsrc = await getSource();
+  console.log('INSTALLER_CONFIG: ', rsrc);
+  Object.assign(INSTALLER_CONFIG, rsrc);
+  if (INSTALLER_CONFIG.embedded_config) {
+    Object.assign(PROJECT_CONFIG, INSTALLER_CONFIG.embedded_config);
+  }
+  source.value = INSTALLER_CONFIG.install_path;
+  if (INSTALLER_CONFIG.install_path_exists) isUpdate.value = true;
+  await win.setTitle(PROJECT_CONFIG.windowTitle);
+  init.value = true;
 });
 
 function formatSize(size: number): string {
@@ -605,19 +596,6 @@ function basename(path: string): string {
   return path.replace(/\\/g, '/').split('/').pop() as string;
 }
 
-function fetchWithTimeout(
-  url: string,
-  options: RequestInit,
-  timeout = 2000,
-): Promise<Response> {
-  return Promise.race([
-    fetch(url, options),
-    new Promise((_, reject) =>
-      setTimeout(() => reject(new Error('timeout')), timeout),
-    ),
-  ]) as Promise<Response>;
-}
-
 async function launch() {
   // todo 这里是否可以替换成 PROJECT_CONFIG.exeName?
   const mainExe = `BetterGI.exe`;
@@ -631,16 +609,19 @@ async function changeSource() {
       path: source.value,
     });
     if (result === null) return;
-    const isEmpty = await invoke<boolean>('is_dir_empty', {
+    const [isEmpty, hasExePath] = await invoke<boolean[]>('is_dir_empty', {
       path: result,
       ...PROJECT_CONFIG,
     });
-    if (!isEmpty) {
+    isUpdate.value = hasExePath;
+    if (!isEmpty && !hasExePath) {
       await invoke('ensure_dir', {
         path: `${result}${sep()}${PROJECT_CONFIG.regName}`,
       });
       source.value = `${result}${sep()}${PROJECT_CONFIG.regName}`;
-    } else source.value = result;
+    } else {
+      source.value = result;
+    }
   } catch (e) {
     if (e instanceof Error) await error(e.stack || e.toString());
     else await error(JSON.stringify(e));

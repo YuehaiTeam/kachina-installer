@@ -10,18 +10,13 @@ type ProjectConfig = {
   title: string;
   description: string;
   windowTitle: string;
-  foldedInstallDir: bool;
 };
 
 type InstallStat = {
-  downloadedTotalSize: number;
   speedLastSize: number;
   lastTime: DOMHighResTimeStamp;
   speed: number;
-  runningTasks: Record<string, string>;
 };
-
-type InvokeGetInstallSourceRes = [string, boolean];
 
 type DfsMetadataHashType = 'md5' | 'xxh';
 
@@ -41,6 +36,9 @@ type DfsMetadataPatchInfo = {
 
 interface DfsUpdateTask extends DfsMetadataHashInfo {
   patch?: DfsMetadataPatchInfo;
+  lpatch?: DfsMetadataPatchInfo;
+  downloaded: number;
+  running: boolean;
 }
 
 type InvokeGetDfsMetadataRes = {
@@ -64,3 +62,19 @@ type InvokeGetDfsRes = {
 type InvokeGetDirsRes = [string, string];
 
 type InvokeSelectDirRes = string | null;
+
+interface Embedded {
+  name: String;
+  offset: number;
+  size: number;
+}
+
+interface InstallerConfig {
+  install_path: string;
+  install_path_exists: boolean;
+  is_uninstall: boolean;
+  embedded_files: Embedded[] | null;
+  embedded_config: ProjectConfig | null;
+  enbedded_metadata: InvokeGetDfsMetadataRes | null;
+  exe_path: string;
+}

@@ -13,7 +13,7 @@
     "withGlobalTauri": true,
     "windows": [
       {
-        "title": "Kachina Installer",
+        "title": " ",
         "width": 520,
         "height": 250,
         "center": true,
