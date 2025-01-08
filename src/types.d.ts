@@ -7,6 +7,8 @@ type ProjectConfig = {
   uninstallName: string;
   updaterName: string;
   programFilesPath: string;
+  userDataPath: string[];
+  extraUninstallPath: string[];
   title: string;
   description: string;
   windowTitle: string;
@@ -72,6 +74,12 @@ interface Embedded {
 interface InstallerConfig {
   install_path: string;
   install_path_exists: boolean;
+  install_path_source:
+    | 'CURRENT_DIR'
+    | 'PARENT_DIR'
+    | 'REG'
+    | 'REG_FOLDED'
+    | 'DEFAULT';
   is_uninstall: boolean;
   embedded_files: Embedded[] | null;
   embedded_config: ProjectConfig | null;

@@ -7,32 +7,49 @@
     </div>
     <div v-show="init" class="content">
       <div class="image">
-        <img src="./left.webp" alt="BetterGI" />
+        <img src="./left.webp" :alt="PROJECT_CONFIG.title" />
       </div>
       <div class="right">
         <div class="title">{{ PROJECT_CONFIG.title }}</div>
         <div class="desc">{{ PROJECT_CONFIG.description }}</div>
         <div v-if="step === 1" class="actions">
-          <div v-if="!isUpdate" class="lnk">
+          <div v-if="!isUpdate && !INSTALLER_CONFIG.is_uninstall" class="lnk">
             <Checkbox v-model="createLnk" />
             创建桌面快捷方式
           </div>
-          <div v-if="!isUpdate" class="read">
+          <div v-if="!isUpdate && !INSTALLER_CONFIG.is_uninstall" class="read">
             <Checkbox v-model="acceptEula" />
             我已阅读并同意
             <a> 用户协议 </a>
           </div>
+          <div v-if="INSTALLER_CONFIG.is_uninstall" class="read">
+            <Checkbox v-model="deleteUserData" />
+            同时删除用户数据
+          </div>
           <div class="more">
-            <span v-if="!isUpdate">安装到</span>
-            <span v-if="isUpdate">更新到</span>
+            <span v-if="!isUpdate && !INSTALLER_CONFIG.is_uninstall">
+              安装到
+            </span>
+            <span v-if="isUpdate && !INSTALLER_CONFIG.is_uninstall">
+              更新到
+            </span>
+            <span v-if="INSTALLER_CONFIG.is_uninstall"> 卸载自 </span>
             <a @click="changeSource">{{ source }}</a>
           </div>
           <button
+            v-if="!INSTALLER_CONFIG.is_uninstall"
             class="btn btn-install"
             @click="install"
             :disabled="!isUpdate && !acceptEula"
           >
             {{ isUpdate ? '更新' : '安装' }}
+          </button>
+          <button
+            v-if="INSTALLER_CONFIG.is_uninstall"
+            class="btn btn-install"
+            @click="uninstall"
+          >
+            卸载
           </button>
         </div>
         <div class="progress" v-if="step === 2">
@@ -62,6 +79,26 @@
             {{ isUpdate ? '更新' : '安装' }}完成
           </div>
           <button class="btn btn-install" @click="launch">启动</button>
+        </div>
+        <div class="finish" v-if="step === 4">
+          <div class="finish-text">
+            <CircleSuccess />
+            您已安装最新版本
+          </div>
+          <button class="btn btn-install" @click="launch">启动</button>
+        </div>
+        <div class="uninstall" v-if="step === 5">
+          <span class="fui-Spinner__spinner">
+            <span class="fui-Spinner__spinnerTail"></span>
+          </span>
+          <button class="btn btn-install" disabled>卸载中</button>
+        </div>
+        <div class="finish" v-if="step === 6">
+          <div class="finish-text">
+            <CircleSuccess />
+            卸载成功
+          </div>
+          <button class="btn btn-install" @click="exit">关闭</button>
         </div>
       </div>
     </div>
@@ -138,7 +175,7 @@
   width: 140px;
   position: absolute;
   bottom: 20px;
-  right: 24px;
+  right: 8px;
 }
 
 .actions {
@@ -254,6 +291,19 @@
     'Courier New',
     Microsoft Yahei;
 }
+.uninstall {
+  height: 117px;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+}
+
+.uninstall .fui-Spinner__spinner {
+  width: 40px;
+  height: 40px;
+  display: block;
+  --fui-Spinner--strokeWidth: 4px;
+}
 </style>
 <style>
 .d-single-stat {
@@ -311,7 +361,7 @@
 }
 </style>
 <script lang="ts" setup>
-import { onMounted, ref } from 'vue';
+import { onMounted, reactive, ref } from 'vue';
 import { v4 as uuid } from 'uuid';
 import { mapLimit } from 'async';
 import Checkbox from './Checkbox.vue';
@@ -330,6 +380,7 @@ const subStepList: ReadonlyArray<string> = [
 const isUpdate = ref<boolean>(false);
 const acceptEula = ref<boolean>(true);
 const createLnk = ref<boolean>(true);
+const deleteUserData = ref<boolean>(false);
 const step = ref<number>(1);
 const subStep = ref<number>(0);
 
@@ -338,32 +389,35 @@ const percent = ref<number>(0);
 const source = ref<string>('');
 const progressInterval = ref<number>(0);
 
-const PROJECT_CONFIG: ProjectConfig = {
-  dfsPath: 'bgi',
-  appName: 'BetterGI',
-  publisher: 'babalae',
-  regName: 'BetterGI',
-  exeName: 'BetterGI.exe',
-  uninstallName: 'BetterGI.uninst.exe',
-  updaterName: 'BetterGI.update.exe',
-  programFilesPath: 'BetterGI\\BetterGI',
-  title: 'BetterGI',
-  description: '更好的原神，免费且开源',
-  windowTitle: 'BetterGI 安装程序',
-};
+const PROJECT_CONFIG: ProjectConfig = reactive({
+  dfsPath: '',
+  appName: 'Kachina',
+  publisher: 'YuehaiTeam',
+  regName: 'Kachina',
+  exeName: 'inst.exe',
+  uninstallName: 'uninst.exe',
+  updaterName: 'update.exe',
+  programFilesPath: 'Kachina',
+  userDataPath: [],
+  extraUninstallPath: [],
+  title: 'Title',
+  description: 'description',
+  windowTitle: ' ',
+});
 
-const INSTALLER_CONFIG: InstallerConfig = {
+const INSTALLER_CONFIG: InstallerConfig = reactive({
   install_path: '',
   install_path_exists: false,
+  install_path_source: 'DEFAULT',
   is_uninstall: false,
   embedded_config: null,
   enbedded_metadata: null,
   embedded_files: [],
   exe_path: '',
-};
+});
 
 async function getSource(): Promise<InstallerConfig> {
-  return await invoke<InstallerConfig>('get_installer_config', PROJECT_CONFIG);
+  return await invoke<InstallerConfig>('get_installer_config');
 }
 
 async function runInstall(): Promise<void> {
@@ -444,7 +498,7 @@ async function runInstall(): Promise<void> {
   }
   if (diff_files.length === 0) {
     percent.value = 100;
-    step.value = 3;
+    step.value = 4;
     await finishInstall(latest_meta);
     return;
   }
@@ -528,22 +582,32 @@ async function finishInstall(
       `${source.value}${sep()}${PROJECT_CONFIG.exeName}`,
       `${program}${sep()}${PROJECT_CONFIG.appName}${sep()}${PROJECT_CONFIG.appName}.lnk`,
     ).catch(console.error);
+  }
+  if (
+    !isUpdate.value ||
+    INSTALLER_CONFIG.install_path_source.startsWith('REG')
+  ) {
     await invoke('create_uninstaller', {
       source: source.value,
       uninstallerName: PROJECT_CONFIG.uninstallName,
       updaterName: PROJECT_CONFIG.updaterName,
     }).catch(console.error);
-    await invoke('write_registry', {
-      regName: PROJECT_CONFIG.regName,
-      name: PROJECT_CONFIG.appName,
-      version: latest_meta.tag_name,
-      exe: `${source.value}${sep()}${PROJECT_CONFIG.exeName}`,
-      source: source.value,
-      uninstaller: `${source.value}${sep()}${PROJECT_CONFIG.uninstallName}`,
-      metadata: JSON.stringify(latest_meta),
-      size: latest_meta.hashed.reduce((acc, cur) => acc + cur.size, 0),
-      publisher: PROJECT_CONFIG.publisher,
-    }).catch(console.error);
+    try {
+      await invoke('write_registry', {
+        regName: PROJECT_CONFIG.regName,
+        name: PROJECT_CONFIG.appName,
+        version: latest_meta.tag_name || '0.0',
+        exe: `${source.value}${sep()}${PROJECT_CONFIG.exeName}`,
+        source: source.value,
+        uninstaller: `${source.value}${sep()}${PROJECT_CONFIG.uninstallName}`,
+        metadata: JSON.stringify(latest_meta),
+        size: latest_meta.hashed.reduce((acc, cur) => acc + cur.size, 0),
+        publisher: PROJECT_CONFIG.publisher,
+      });
+    } catch (e) {
+      error(`写入注册表失败: ${e}`, '出错了');
+      console.error(e);
+    }
     await invokeCreateLnk(
       `${source.value}${sep()}${PROJECT_CONFIG.uninstallName}`,
       `${program}${sep()}${PROJECT_CONFIG.appName}${sep()}卸载${PROJECT_CONFIG.appName}.lnk`,
@@ -575,10 +639,41 @@ onMounted(async () => {
   Object.assign(INSTALLER_CONFIG, rsrc);
   if (INSTALLER_CONFIG.embedded_config) {
     Object.assign(PROJECT_CONFIG, INSTALLER_CONFIG.embedded_config);
+    if (process.env.NODE_ENV === 'development') {
+      if (
+        INSTALLER_CONFIG.embedded_files &&
+        INSTALLER_CONFIG.embedded_files.length > 0 &&
+        !INSTALLER_CONFIG.embedded_files.find((e) => e.name === '.config.json')
+      ) {
+        error('打包错误，请确保配置文件被正确打包');
+      }
+    }
+  } else if (process.env.NODE_ENV === 'development') {
+    error('未找到配置文件，请将配置文件放在exe同目录下');
+  } else {
+    await error('安装包损坏，请重新下载');
+    const win = getCurrentWindow();
+    win.close();
+    return;
   }
   source.value = INSTALLER_CONFIG.install_path;
   if (INSTALLER_CONFIG.install_path_exists) isUpdate.value = true;
   await win.setTitle(PROJECT_CONFIG.windowTitle);
+  if (INSTALLER_CONFIG.is_uninstall) {
+    const uninstallConfig = await invoke(
+      'read_uninstall_metadata',
+      PROJECT_CONFIG,
+    );
+    console.log('UNINSTALL_METADATA: ', uninstallConfig);
+    if (!uninstallConfig) {
+      await error('未找到卸载配置文件，请重新安装后再卸载');
+      if (process.env.NODE_ENV !== 'development') {
+        const win = getCurrentWindow();
+        win.close();
+      }
+      return;
+    }
+  }
   init.value = true;
 });
 
@@ -597,10 +692,13 @@ function basename(path: string): string {
 }
 
 async function launch() {
-  // todo 这里是否可以替换成 PROJECT_CONFIG.exeName?
-  const mainExe = `BetterGI.exe`;
+  const mainExe = PROJECT_CONFIG.exeName;
   const fullPath = `${source.value}${sep()}${mainExe}`;
   await invoke('launch_and_exit', { path: fullPath });
+}
+async function exit() {
+  const win = getCurrentWindow();
+  win.close();
 }
 
 async function changeSource() {
@@ -635,5 +733,39 @@ async function invokeCreateLnk(target: string, lnk: string): Promise<void> {
 
 async function error(message: string, title = '出错了'): Promise<void> {
   await invoke('error_dialog', { message, title });
+}
+async function uninstall() {
+  step.value = 5;
+  try {
+    const uninstallConfig = (await invoke(
+      'read_uninstall_metadata',
+      PROJECT_CONFIG,
+    )) as InvokeGetDfsMetadataRes;
+    if (!uninstallConfig) {
+      throw new Error('未找到卸载配置文件，请重新安装后再卸载');
+    }
+    const userDataPath = PROJECT_CONFIG.userDataPath.map((e) =>
+      e.replace(/\${INSTALL_PATH}/g, INSTALLER_CONFIG.install_path),
+    );
+    await invoke('run_uninstall', {
+      source: INSTALLER_CONFIG.install_path,
+      files: [
+        ...uninstallConfig.hashed.map((e) => e.file_name),
+        PROJECT_CONFIG.updaterName,
+      ],
+      userDataPath: deleteUserData.value ? userDataPath : [],
+      extraUninstallPath:
+        PROJECT_CONFIG.extraUninstallPath?.map((e) =>
+          e.replace(/\${INSTALL_PATH}/g, INSTALLER_CONFIG.install_path),
+        ) || [],
+      regName: PROJECT_CONFIG.regName,
+    });
+    step.value = 6;
+  } catch (e) {
+    console.error(e);
+    if (e instanceof Error) await error(e.stack || e.toString());
+    else await error(JSON.stringify(e));
+    step.value = 1;
+  }
 }
 </script>

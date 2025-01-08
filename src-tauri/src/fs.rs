@@ -2,7 +2,11 @@ use async_compression::tokio::bufread::ZstdDecoder as TokioZstdDecoder;
 use fmmap::tokio::AsyncMmapFileExt;
 use futures::StreamExt;
 use serde::Serialize;
-use std::{io::Read as _, os::windows::fs::MetadataExt, path::Path};
+use std::{
+    io::Read as _,
+    os::windows::fs::MetadataExt,
+    path::{Path, PathBuf},
+};
 use tauri::{AppHandle, Emitter};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -470,8 +474,7 @@ pub async fn ensure_dir(path: String) -> Result<(), String> {
     Ok(())
 }
 
-#[tauri::command]
-pub async fn rm_list(key: Vec<String>) -> Vec<String> {
+pub async fn rm_list(key: Vec<PathBuf>) -> Vec<String> {
     let mut set = tokio::task::JoinSet::new();
     for path in key {
         set.spawn(tokio::task::spawn_blocking(move || {
@@ -494,36 +497,38 @@ pub async fn rm_list(key: Vec<String>) -> Vec<String> {
     errs
 }
 
-pub async fn run_clear_empty_dirs(path: String) -> Result<(), String> {
-    let path = Path::new(&path);
-    if !path.exists() {
-        return Ok(());
-    }
-    let mut stack = vec![path.to_path_buf()];
-    while let Some(current) = stack.pop() {
-        if current.is_dir() {
-            let mut empty = true;
-            for entry in current.read_dir().map_err(|e| e.to_string())? {
-                let entry = entry.map_err(|e| e.to_string())?;
-                if entry.file_type().map_err(|e| e.to_string())?.is_dir() {
-                    stack.push(entry.path());
-                    empty = false;
-                } else {
-                    empty = false;
-                }
-            }
-            if empty {
-                let res = tokio::fs::remove_dir(&current).await;
-                if res.is_err() {
-                    return Err(format!("Failed to remove dir: {:?}", res.err()));
-                }
+pub fn run_clear_empty_dirs(path: &Path) -> Result<(), std::io::Error> {
+    let entries = std::fs::read_dir(path)?;
+    for entry in entries {
+        let entry = entry?;
+        let path = entry.path();
+        if path.is_dir() {
+            run_clear_empty_dirs(&path)?;
+            let entries = std::fs::read_dir(&path)?;
+            if entries.count() == 0 {
+                std::fs::remove_dir(&path)?;
             }
         }
     }
     Ok(())
 }
 
+pub fn delete_dir_if_empty(path: &Path) -> Result<(), std::io::Error> {
+    let entries = std::fs::read_dir(path)?;
+    if entries.count() == 0 {
+        std::fs::remove_dir(path)?;
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn clear_empty_dirs(key: String) -> Result<(), String> {
-    run_clear_empty_dirs(key).await
+    tokio::task::spawn_blocking(move || {
+        let path = Path::new(&key);
+        run_clear_empty_dirs(path).map_err(|e| format!("Failed to clear empty dirs: {:?}", e))?;
+        delete_dir_if_empty(path).map_err(|e| format!("Failed to clear empty dirs: {:?}", e))?;
+        Ok(())
+    })
+    .await
+    .map_err(|e| format!("Failed to clear empty dirs: {:?}", e))?
 }

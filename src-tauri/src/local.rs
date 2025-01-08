@@ -71,6 +71,7 @@ async fn search_pattern() -> Result<Vec<usize>, String> {
 pub struct Embedded {
     pub name: String,
     pub offset: usize,
+    pub raw_offset: usize,
     pub size: usize,
 }
 pub async fn get_embedded() -> Result<Vec<Embedded>, String> {
@@ -103,6 +104,7 @@ pub async fn get_embedded() -> Result<Vec<Embedded>, String> {
             name,
             offset: mem_pos_content,
             size: content_length,
+            raw_offset: *offset,
         });
         last_offset = mem_pos_content + content_length;
     }

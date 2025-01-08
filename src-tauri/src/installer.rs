@@ -1,8 +1,23 @@
-use crate::local::{get_config_from_embedded, get_embedded, Embedded};
+use crate::{
+    fs::{delete_dir_if_empty, rm_list, run_clear_empty_dirs},
+    local::{get_config_from_embedded, get_embedded, Embedded},
+};
 use serde_json::Value;
-use std::{ffi::OsString, os::windows::ffi::OsStringExt, path::Path};
+use std::{
+    ffi::OsString,
+    os::windows::{ffi::OsStringExt, process::CommandExt},
+    path::Path,
+};
 use tauri::{AppHandle, WebviewWindow};
-use windows::Win32::UI::Shell::{SHGetFolderPathW, CSIDL_COMMON_PROGRAMS, CSIDL_DESKTOPDIRECTORY};
+use tokio::io::AsyncWriteExt;
+use windows::Win32::{
+    System::Threading::CREATE_NO_WINDOW,
+    UI::Shell::{SHGetFolderPathW, CSIDL_COMMON_PROGRAMS, CSIDL_DESKTOPDIRECTORY},
+};
+
+lazy_static::lazy_static!(
+    static ref DELETE_SELF_ON_EXIT_PATH: std::sync::RwLock<Option<String>> = std::sync::RwLock::new(None);
+);
 
 #[tauri::command]
 pub async fn launch_and_exit(path: String, app: AppHandle) {
@@ -14,6 +29,7 @@ pub async fn launch_and_exit(path: String, app: AppHandle) {
 pub struct InstallerConfig {
     pub install_path: String,
     pub install_path_exists: bool,
+    pub install_path_source: &'static str,
     pub is_uninstall: bool,
     pub embedded_files: Option<Vec<Embedded>>,
     pub embedded_config: Option<Value>,
@@ -21,14 +37,8 @@ pub struct InstallerConfig {
     pub exe_path: String,
 }
 
-pub async fn get_config_pre(
-    uninstall_name: String,
-    exe_path: &Path,
-    install_path: &Path,
-    install_path_exists: bool,
-) -> Result<InstallerConfig, String> {
-    let is_uninstall = exe_path.file_name().unwrap().to_string_lossy() == uninstall_name;
-    let exe_path = exe_path.to_string_lossy().to_string();
+pub async fn get_config_pre(exe_path_path: &Path) -> Result<InstallerConfig, String> {
+    let exe_path = exe_path_path.to_string_lossy().to_string();
     let mut embedded_files = None;
     let mut embedded_config = None;
     let mut enbedded_metadata = None;
@@ -40,10 +50,28 @@ pub async fn get_config_pre(
 
         embedded_files = Some(embedded_files_res);
     }
+    #[cfg(debug_assertions)]
+    {
+        if embedded_config.is_none() {
+            let exe_dir = exe_path_path.parent();
+            if exe_dir.is_none() {
+                return Err("Failed to get exe dir".to_string());
+            }
+            let exe_dir = exe_dir.unwrap();
+            let config_json = exe_dir.join(".config.json");
+            if config_json.exists() {
+                let config = tokio::fs::read(&config_json)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                embedded_config = Some(serde_json::from_slice(&config).map_err(|e| e.to_string())?);
+            }
+        }
+    }
     Ok(InstallerConfig {
-        install_path: install_path.to_string_lossy().to_string(),
-        install_path_exists,
-        is_uninstall,
+        install_path: "".to_string(),
+        install_path_exists: false,
+        install_path_source: "",
+        is_uninstall: false,
         embedded_files,
         embedded_config,
         enbedded_metadata,
@@ -51,13 +79,22 @@ pub async fn get_config_pre(
     })
 }
 
+impl InstallerConfig {
+    pub fn fill(
+        mut self,
+        install_path: &Path,
+        install_path_exists: bool,
+        install_path_source: &'static str,
+    ) -> InstallerConfig {
+        self.install_path = install_path.to_string_lossy().to_string();
+        self.install_path_exists = install_path_exists;
+        self.install_path_source = install_path_source;
+        self
+    }
+}
+
 #[tauri::command]
-pub async fn get_installer_config(
-    exe_name: String,
-    reg_name: String,
-    program_files_path: String,
-    uninstall_name: String,
-) -> Result<InstallerConfig, String> {
+pub async fn get_installer_config() -> Result<InstallerConfig, String> {
     // check if current dir has exeName
     let exe_path = std::env::current_exe();
     if exe_path.is_err() {
@@ -67,23 +104,38 @@ pub async fn get_installer_config(
         ));
     }
     let exe_path = exe_path.unwrap();
+    let mut config = get_config_pre(&exe_path).await?;
+    let mut uninstall_name = "uninst.exe";
+    let mut exe_name = "main.exe";
+    let mut program_files_path = "KachinaInstaller";
+    let mut reg_name = "KachinaInstaller";
+    if let Some(config) = config.embedded_config.as_ref() {
+        uninstall_name = config["uninstallName"].as_str().unwrap_or("uninst.exe");
+        exe_name = config["exeName"].as_str().unwrap_or("main.exe");
+        program_files_path = config["programFilesPath"]
+            .as_str()
+            .unwrap_or("KachinaInstaller");
+        reg_name = config["regName"].as_str().unwrap_or("KachinaInstaller");
+    }
+    let is_uninstall = exe_path.file_name().unwrap().to_string_lossy() == uninstall_name;
+    config.is_uninstall = is_uninstall;
     let exe_dir = exe_path.parent();
     if exe_dir.is_none() {
         return Err("Failed to get exe dir".to_string());
     }
     let exe_dir = exe_dir.unwrap();
-    let exe_path = exe_dir.join(exe_name.clone());
+    let exe_path = exe_dir.join(exe_name);
     if exe_path.exists() {
-        return get_config_pre(uninstall_name, &exe_path, exe_dir, true).await;
+        return Ok(config.fill(exe_dir, true, "CURRENT_DIR"));
     }
     let exe_parent_dir = exe_dir.parent();
     if exe_parent_dir.is_none() {
         return Err("Failed to get exe parent dir".to_string());
     }
     let exe_parent_dir = exe_parent_dir.unwrap();
-    let exe_path = exe_parent_dir.join(exe_name.clone());
+    let exe_path = exe_parent_dir.join(exe_name);
     if exe_path.exists() {
-        return get_config_pre(uninstall_name, &exe_path, exe_parent_dir, true).await;
+        return Ok(config.fill(exe_parent_dir, true, "PARENT_DIR"));
     }
     let key = winreg::RegKey::predef(winreg::enums::HKEY_LOCAL_MACHINE).open_subkey(format!(
         "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\{}",
@@ -95,16 +147,14 @@ pub async fn get_installer_config(
             .get_value("InstallLocation")
             .map_err(|e| e.to_string())?;
         let path = Path::new(&path);
-        let exe_path = Path::new(&path).join(exe_name.clone());
+        let exe_path = Path::new(&path).join(exe_name);
         if exe_path.exists() {
-            return get_config_pre(uninstall_name, &exe_path, path, true).await;
+            return Ok(config.fill(path, true, "REG"));
         }
-        let sub_exe_path = Path::new(&path)
-            .join(reg_name.clone())
-            .join(exe_name.clone());
+        let sub_exe_path = Path::new(&path).join(reg_name).join(exe_name);
         if sub_exe_path.exists() {
-            let sub_exe_dir = Path::new(&path).join(reg_name.clone());
-            return get_config_pre(uninstall_name, &exe_path, &sub_exe_dir, true).await;
+            let sub_exe_dir = Path::new(&path).join(reg_name);
+            return Ok(config.fill(&sub_exe_dir, true, "REG_FOLDED"));
         }
     }
     let program_files = std::env::var("ProgramFiles");
@@ -115,15 +165,13 @@ pub async fn get_installer_config(
         ));
     }
     let program_files = program_files.unwrap();
-    let program_files_real_path = Path::new(&program_files).join(program_files_path.clone());
-    let program_files_exe_path = program_files_real_path.join(exe_name.clone());
-    get_config_pre(
-        uninstall_name,
-        &exe_path,
+    let program_files_real_path = Path::new(&program_files).join(program_files_path);
+    let program_files_exe_path = program_files_real_path.join(exe_name);
+    Ok(config.fill(
         &program_files_real_path,
         program_files_exe_path.exists(),
-    )
-    .await
+        "DEFAULT",
+    ))
 }
 
 #[tauri::command]
@@ -192,11 +240,20 @@ pub async fn create_uninstaller(
         }
     } else {
         // else, overwrite uninstaller and updater
-        let res = tokio::fs::copy(&current_exe_path, &uninstaller_path).await;
-        if res.is_err() {
-            return Err(format!("Failed to create uninstaller: {:?}", res.err()));
-        }
-        let res = tokio::fs::copy(&current_exe_path, &updater_path).await;
+        let mut self_configured_mmap = crate::pack::get_base_with_config().await?;
+        let output_file = tokio::fs::File::create(&uninstaller_path)
+            .await
+            .map_err(|e| format!("Failed to create uninstaller: {:?}", e))?;
+        let mut output = tokio::io::BufWriter::new(output_file);
+        tokio::io::copy(&mut self_configured_mmap, &mut output)
+            .await
+            .map_err(|e| format!("Failed to write uninstaller: {:?}", e))?;
+        // flush
+        output
+            .flush()
+            .await
+            .map_err(|e| format!("Failed to flush: {:?}", e))?;
+        let res = tokio::fs::copy(&uninstaller_path, &updater_path).await;
         if res.is_err() {
             return Err(format!("Failed to create updater: {:?}", res.err()));
         }
@@ -293,4 +350,120 @@ pub async fn error_dialog(title: String, message: String, window: WebviewWindow)
         .set_level(rfd::MessageLevel::Error)
         .set_parent(&window)
         .show();
+}
+
+#[tauri::command]
+pub async fn run_uninstall(
+    source: String,
+    files: Vec<String>,
+    user_data_path: Vec<String>,
+    extra_uninstall_path: Vec<String>,
+    reg_name: String,
+) -> Result<Vec<String>, String> {
+    let exe_path = std::env::current_exe();
+    if exe_path.is_err() {
+        return Err(format!(
+            "Failed to get current exe path: {:?}",
+            exe_path.err()
+        ));
+    }
+    let exe_path = exe_path.unwrap();
+    let mut tmp_uninstaller_path = exe_path.clone();
+    // check if exe_path is in source
+    if exe_path.starts_with(&source) {
+        let tmp_dir = std::env::temp_dir();
+        tmp_uninstaller_path = tmp_dir.join(format!(
+            "kachina.uninst.{}.exe",
+            chrono::Utc::now().timestamp()
+        ));
+        // try to move current exe to tmp_uninstaller_path
+        let res = tokio::fs::rename(&exe_path, &tmp_uninstaller_path).await;
+        if res.is_err() {
+            // move fail, maybe exe and tempdir is not in the same partition
+            // try move to parent dir
+            let source_parent = Path::new(&source).parent();
+            if let Some(source_parent) = source_parent {
+                tmp_uninstaller_path = source_parent.join(format!(
+                    "kachina.uninst.{}.exe",
+                    chrono::Utc::now().timestamp()
+                ));
+                let res = tokio::fs::rename(&exe_path, &tmp_uninstaller_path).await;
+                if res.is_err() {
+                    return Err(format!("Failed to move exe to parent dir: {:?}", res.err()));
+                }
+            } else {
+                return Err(format!("Insecure uninstall: installer is in root dir"));
+            }
+        }
+    }
+    // change cwd to %temp%
+    let temp_dir = std::env::temp_dir();
+    std::env::set_current_dir(&temp_dir).map_err(|e| e.to_string())?;
+    let delete_list = files
+        .iter()
+        .map(|f| Path::new(source.as_str()).join(f))
+        .filter(|f| f.exists() && *f != exe_path)
+        .collect::<Vec<_>>();
+    let res = rm_list(delete_list).await;
+
+    // delete lnk
+
+    // delete user data
+    // merge user_data_path and extra_uninstall_path
+    let to_be_delete = [&user_data_path[..], &extra_uninstall_path[..]].concat();
+    for path in to_be_delete.iter() {
+        let path = Path::new(path);
+        if path.exists() {
+            tokio::fs::remove_dir_all(path)
+                .await
+                .map_err(|e| e.to_string())?;
+        }
+    }
+
+    // recursively delete empty folders
+    let source_path = source.clone();
+    tokio::task::spawn_blocking(move || {
+        let path = Path::new(&source_path);
+        run_clear_empty_dirs(path).map_err(|e| format!("Failed to clear empty dirs: {:?}", e))?;
+        delete_dir_if_empty(path).map_err(|e| format!("Failed to clear empty dirs: {:?}", e))?;
+        Ok::<(), String>(())
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+
+    // delete registry
+    let _ = winreg::RegKey::predef(winreg::enums::HKEY_LOCAL_MACHINE).delete_subkey_all(format!(
+        "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\{}",
+        reg_name
+    ));
+
+    // write delete_on_exit value
+    DELETE_SELF_ON_EXIT_PATH
+        .write()
+        .unwrap()
+        .replace(tmp_uninstaller_path.to_string_lossy().to_string());
+    Ok(res)
+}
+
+pub fn delete_self_on_exit() {
+    let path = DELETE_SELF_ON_EXIT_PATH.read().unwrap();
+    if path.is_none() {
+        return;
+    }
+    let path = path.as_ref().unwrap();
+    // run the cmd file with window hidden
+    let _ = std::process::Command::new("cmd")
+        .arg("/C")
+        .arg("ping")
+        .arg("127.0.0.1")
+        .arg("-n")
+        .arg("2")
+        .arg("&")
+        .arg("del")
+        .arg("/f")
+        .arg("/q")
+        .arg(path)
+        .creation_flags(CREATE_NO_WINDOW.0)
+        .spawn()
+        .unwrap();
 }
