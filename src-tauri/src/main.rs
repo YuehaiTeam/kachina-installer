@@ -15,7 +15,6 @@ use cli::{Command, InstallArgs};
 use installer::delete_self_on_exit;
 use static_obj::REQUEST_CLIENT;
 use tauri::{Manager, WindowEvent};
-use tauri_utils::config::WindowEffectsConfig;
 fn main() {
     let mut has_console = false;
     let is_help = std::env::args().any(|arg| arg == "-h" || arg == "--help");
@@ -94,10 +93,7 @@ fn tauri_main(args: InstallArgs) {
             }
 
             if !is_win11 {
-                let _ = main_window.set_effects(Some(WindowEffectsConfig {
-                    effects: vec![tauri::window::Effect::Acrylic],
-                    ..Default::default()
-                }));
+                let _ = window_vibrancy::apply_acrylic(&main_window, None);
             }
             Ok(())
         })

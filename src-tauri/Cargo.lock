@@ -2179,6 +2179,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "twox-hash",
+ "window-vibrancy",
  "windows",
  "winreg",
 ]

@@ -50,6 +50,7 @@ pin-project = "1.1.7"
 fmmap = { version = "0.3", features = ["tokio-async"] }
 clap = { version = "4.5.24", features = ["derive"] }
 chrono = "0.4.39"
+window-vibrancy = "0.5.2"
 
 [profile.release]
 codegen-units = 1 # Allows LLVM to perform better optimization.

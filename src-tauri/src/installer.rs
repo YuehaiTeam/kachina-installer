@@ -178,6 +178,14 @@ pub async fn get_installer_config() -> Result<InstallerConfig, String> {
 pub async fn create_lnk(target: String, lnk: String) -> Result<(), String> {
     let target = Path::new(&target);
     let lnk = Path::new(&lnk);
+    let lnk_dir = lnk.parent();
+    if lnk_dir.is_none() {
+        return Err("Failed to get lnk parent dir".to_string());
+    }
+    let lnk_dir = lnk_dir.unwrap();
+    tokio::fs::create_dir_all(lnk_dir)
+        .await
+        .map_err(|e| format!("Failed to create lnk dir: {:?}", e))?;
     let sl = mslnk::ShellLink::new(target)
         .map_err(|e| format!("Failed to create shell link: {:?}", e))?;
     sl.create_lnk(lnk)
@@ -370,7 +378,7 @@ pub async fn run_uninstall(
     let exe_path = exe_path.unwrap();
     let mut tmp_uninstaller_path = exe_path.clone();
     // check if exe_path is in source
-    if exe_path.starts_with(&source) {
+    if DELETE_SELF_ON_EXIT_PATH.read().unwrap().is_none() && exe_path.starts_with(&source) {
         let tmp_dir = std::env::temp_dir();
         tmp_uninstaller_path = tmp_dir.join(format!(
             "kachina.uninst.{}.exe",
@@ -392,13 +400,19 @@ pub async fn run_uninstall(
                     return Err(format!("Failed to move exe to parent dir: {:?}", res.err()));
                 }
             } else {
-                return Err(format!("Insecure uninstall: installer is in root dir"));
+                return Err("Insecure uninstall: installer is in root dir".to_string());
             }
         }
     }
+    // write delete_on_exit value
+    DELETE_SELF_ON_EXIT_PATH
+        .write()
+        .unwrap()
+        .replace(tmp_uninstaller_path.to_string_lossy().to_string());
+
     // change cwd to %temp%
     let temp_dir = std::env::temp_dir();
-    std::env::set_current_dir(&temp_dir).map_err(|e| e.to_string())?;
+    std::env::set_current_dir(&temp_dir).map_err(|e| format!("Failed to set cwd: {:?}", e))?;
     let delete_list = files
         .iter()
         .map(|f| Path::new(source.as_str()).join(f))
@@ -406,17 +420,22 @@ pub async fn run_uninstall(
         .collect::<Vec<_>>();
     let res = rm_list(delete_list).await;
 
-    // delete lnk
-
     // delete user data
     // merge user_data_path and extra_uninstall_path
     let to_be_delete = [&user_data_path[..], &extra_uninstall_path[..]].concat();
-    for path in to_be_delete.iter() {
-        let path = Path::new(path);
+    for pathstr in to_be_delete.iter() {
+        let path = Path::new(pathstr);
         if path.exists() {
-            tokio::fs::remove_dir_all(path)
-                .await
-                .map_err(|e| e.to_string())?;
+            // check if is file or dir
+            if path.is_file() {
+                tokio::fs::remove_file(path)
+                    .await
+                    .map_err(|e| format!("Failed to remove user data file {}: {:?}", pathstr, e))?;
+            } else {
+                tokio::fs::remove_dir_all(path).await.map_err(|e| {
+                    format!("Failed to remove user data folder {}: {:?}", pathstr, e)
+                })?;
+            }
         }
     }
 
@@ -429,7 +448,7 @@ pub async fn run_uninstall(
         Ok::<(), String>(())
     })
     .await
-    .map_err(|e| e.to_string())??;
+    .map_err(|e| format!("Failed to clear empty dirs: {:?}", e))??;
 
     // delete registry
     let _ = winreg::RegKey::predef(winreg::enums::HKEY_LOCAL_MACHINE).delete_subkey_all(format!(
@@ -437,11 +456,6 @@ pub async fn run_uninstall(
         reg_name
     ));
 
-    // write delete_on_exit value
-    DELETE_SELF_ON_EXIT_PATH
-        .write()
-        .unwrap()
-        .replace(tmp_uninstaller_path.to_string_lossy().to_string());
     Ok(res)
 }
 
@@ -452,6 +466,7 @@ pub fn delete_self_on_exit() {
     }
     let path = path.as_ref().unwrap();
     // run the cmd file with window hidden
+    #[allow(clippy::zombie_processes)]
     let _ = std::process::Command::new("cmd")
         .arg("/C")
         .arg("ping")

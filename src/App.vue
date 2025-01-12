@@ -567,20 +567,30 @@ async function runInstall(): Promise<void> {
   percent.value = 100;
 }
 
+async function getLnkPath() {
+  const [program, desktop] = await invoke<InvokeGetDirsRes>('get_dirs');
+  return {
+    programFolder: `${program}${sep()}${PROJECT_CONFIG.appName}`,
+    program: `${program}${sep()}${PROJECT_CONFIG.appName}${sep()}${PROJECT_CONFIG.appName}.lnk`,
+    desktop: `${desktop}${sep()}${PROJECT_CONFIG.appName}.lnk`,
+    uninstall: `${program}${sep()}${PROJECT_CONFIG.appName}${sep()}卸载${PROJECT_CONFIG.appName}.lnk`,
+  };
+}
+
 async function finishInstall(
   latest_meta: InvokeGetDfsMetadataRes,
 ): Promise<void> {
-  const [program, desktop] = await invoke<InvokeGetDirsRes>('get_dirs');
+  const { program, desktop, uninstall } = await getLnkPath();
   if (createLnk.value && !isUpdate.value) {
     await invokeCreateLnk(
       `${source.value}${sep()}${PROJECT_CONFIG.exeName}`,
-      `${desktop}${sep()}${PROJECT_CONFIG.appName}.lnk`,
+      desktop,
     );
   }
   if (!isUpdate.value) {
     await invokeCreateLnk(
       `${source.value}${sep()}${PROJECT_CONFIG.exeName}`,
-      `${program}${sep()}${PROJECT_CONFIG.appName}${sep()}${PROJECT_CONFIG.appName}.lnk`,
+      program,
     ).catch(console.error);
   }
   if (
@@ -610,7 +620,7 @@ async function finishInstall(
     }
     await invokeCreateLnk(
       `${source.value}${sep()}${PROJECT_CONFIG.uninstallName}`,
-      `${program}${sep()}${PROJECT_CONFIG.appName}${sep()}卸载${PROJECT_CONFIG.appName}.lnk`,
+      uninstall,
     ).catch(console.error);
   }
 }
@@ -744,20 +754,22 @@ async function uninstall() {
     if (!uninstallConfig) {
       throw new Error('未找到卸载配置文件，请重新安装后再卸载');
     }
-    const userDataPath = PROJECT_CONFIG.userDataPath.map((e) =>
-      e.replace(/\${INSTALL_PATH}/g, INSTALLER_CONFIG.install_path),
-    );
+    const { programFolder, desktop } = await getLnkPath();
     await invoke('run_uninstall', {
       source: INSTALLER_CONFIG.install_path,
       files: [
         ...uninstallConfig.hashed.map((e) => e.file_name),
         PROJECT_CONFIG.updaterName,
       ],
-      userDataPath: deleteUserData.value ? userDataPath : [],
-      extraUninstallPath:
-        PROJECT_CONFIG.extraUninstallPath?.map((e) =>
-          e.replace(/\${INSTALL_PATH}/g, INSTALLER_CONFIG.install_path),
-        ) || [],
+      userDataPath: deleteUserData.value
+        ? PROJECT_CONFIG.userDataPath.map(replacePathEnvirables)
+        : [],
+      extraUninstallPath: [
+        ...(PROJECT_CONFIG.extraUninstallPath?.map(replacePathEnvirables) ||
+          []),
+        programFolder,
+        desktop,
+      ],
       regName: PROJECT_CONFIG.regName,
     });
     step.value = 6;
@@ -767,5 +779,18 @@ async function uninstall() {
     else await error(JSON.stringify(e));
     step.value = 1;
   }
+}
+
+function tplReplace(template: string, data: Record<string, string>): string {
+  const regex = /\${(.*?)}/g;
+  return template.replace(regex, (match, key) => {
+    return typeof data[key] !== 'undefined' ? data[key] : '';
+  });
+}
+function replacePathEnvirables(path: string): string {
+  return tplReplace(path, {
+    INSTALL_PATH: INSTALLER_CONFIG.install_path,
+    APP_NAME: PROJECT_CONFIG.appName,
+  });
 }
 </script>
