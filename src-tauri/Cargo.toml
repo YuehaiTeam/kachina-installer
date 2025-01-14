@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "Unified installer and upgrader"
 authors = ["YuehaiTeam"]
 edition = "2021"
+default-run = "kachina-installer"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
@@ -21,6 +22,8 @@ tokio = { version = "1", features = [
     "fs",
     "io-util",
     "process",
+    "macros",
+    "net",
 ] }
 chksum-md5 = { version = "0.1", features = ["async-runtime-tokio"] }
 reqwest = { version = "0.12", default-features = false, features = [
@@ -35,7 +38,12 @@ futures = "0.3"
 tokio-util = { version = "0.7", features = ["io-util"] }
 async-walkdir = "2.0"
 winreg = "0.52"
-windows = { version = "0.58", features = ["Win32_System_Console"] }
+windows = { version = "0.58", features = [
+    "Win32_System_Console",
+    "Win32_Security",
+    "Win32_System_Registry",
+    "Security",
+] }
 rfd = { version = "0.15", default-features = false, features = [
     "tokio",
     "common-controls-v6",
@@ -50,7 +58,16 @@ pin-project = "1.1.7"
 fmmap = { version = "0.3", features = ["tokio-async"] }
 clap = { version = "4.5.24", features = ["derive"] }
 chrono = "0.4.39"
-window-vibrancy = "0.5.2"
+dark-light = "2.0.0"
+uuid = { version = "1.12.0", features = ["v4"] }
+
+[[bin]]
+name = "kachina-installer"
+path = "src/main.rs"
+
+[[bin]]
+name = "kachina-builder"
+path = "src/builder/main.rs"
 
 [profile.release]
 codegen-units = 1 # Allows LLVM to perform better optimization.

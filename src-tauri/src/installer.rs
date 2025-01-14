@@ -1,4 +1,5 @@
 use crate::{
+    cli::InstallArgs,
     fs::{delete_dir_if_empty, rm_list, run_clear_empty_dirs},
     local::{get_config_from_embedded, get_embedded, Embedded},
 };
@@ -8,7 +9,7 @@ use std::{
     os::windows::{ffi::OsStringExt, process::CommandExt},
     path::Path,
 };
-use tauri::{AppHandle, WebviewWindow};
+use tauri::{AppHandle, State, WebviewWindow};
 use tokio::io::AsyncWriteExt;
 use windows::Win32::{
     System::Threading::CREATE_NO_WINDOW,
@@ -35,9 +36,13 @@ pub struct InstallerConfig {
     pub embedded_config: Option<Value>,
     pub enbedded_metadata: Option<Value>,
     pub exe_path: String,
+    pub args: crate::cli::InstallArgs,
 }
 
-pub async fn get_config_pre(exe_path_path: &Path) -> Result<InstallerConfig, String> {
+pub async fn get_config_pre(
+    exe_path_path: &Path,
+    args: InstallArgs,
+) -> Result<InstallerConfig, String> {
     let exe_path = exe_path_path.to_string_lossy().to_string();
     let mut embedded_files = None;
     let mut embedded_config = None;
@@ -76,6 +81,7 @@ pub async fn get_config_pre(exe_path_path: &Path) -> Result<InstallerConfig, Str
         embedded_config,
         enbedded_metadata,
         exe_path,
+        args,
     })
 }
 
@@ -94,7 +100,7 @@ impl InstallerConfig {
 }
 
 #[tauri::command]
-pub async fn get_installer_config() -> Result<InstallerConfig, String> {
+pub async fn get_installer_config(args: State<'_, InstallArgs>) -> Result<InstallerConfig, String> {
     // check if current dir has exeName
     let exe_path = std::env::current_exe();
     if exe_path.is_err() {
@@ -104,7 +110,7 @@ pub async fn get_installer_config() -> Result<InstallerConfig, String> {
         ));
     }
     let exe_path = exe_path.unwrap();
-    let mut config = get_config_pre(&exe_path).await?;
+    let mut config = get_config_pre(&exe_path, args.inner().clone()).await?;
     let mut uninstall_name = "uninst.exe";
     let mut exe_name = "main.exe";
     let mut program_files_path = "KachinaInstaller";
@@ -248,7 +254,7 @@ pub async fn create_uninstaller(
         }
     } else {
         // else, overwrite uninstaller and updater
-        let mut self_configured_mmap = crate::pack::get_base_with_config().await?;
+        let mut self_configured_mmap = crate::local::get_base_with_config().await?;
         let output_file = tokio::fs::File::create(&uninstaller_path)
             .await
             .map_err(|e| format!("Failed to create uninstaller: {:?}", e))?;

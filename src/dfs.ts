@@ -1,5 +1,6 @@
-import { invoke, listen } from './tauri';
-import { v4 as uuid } from 'uuid';
+import { hybridPatch, InstallFile } from './api/installFile';
+import { ipc } from './api/ipc';
+import { invoke } from './tauri';
 
 const connectableOrigins = new Set();
 
@@ -60,61 +61,73 @@ export const runDfsDownload = async (
   item: DfsUpdateTask,
   disable_patch = false,
   disable_local = false,
+  elevate = false,
 ) => {
-  const id = uuid();
   let filename_with_first_slash = item.file_name.startsWith('/')
     ? item.file_name
     : `/${item.file_name}`;
-  let idUnListen = await listen<number>(id, ({ payload }) => {
+  item.downloaded = 0;
+  const onProgress = ({ payload }: { payload: number }) => {
+    console.log('progress', payload);
+    if (isNaN(payload)) return;
     item.downloaded = payload;
-  });
+  };
   item.running = true;
   try {
     const hasLocalFile = local.find((l) => l.name === item[hashKey]);
+    const hasLpatchFile = local.find(
+      (l) => l.name === item.lpatch?.from[hashKey],
+    );
     if (hasLocalFile && !disable_local) {
-      await invoke('local_decompress', {
-        id,
-        ...hasLocalFile,
-        target: source + filename_with_first_slash,
-      });
+      await ipc(
+        InstallFile(hasLocalFile, source + filename_with_first_slash),
+        elevate,
+        onProgress,
+      );
       console.log('>LOCAL', filename_with_first_slash);
-    } else if (item.lpatch && !disable_patch && !disable_local) {
+    } else if (
+      hasLpatchFile &&
+      item.lpatch &&
+      !disable_patch &&
+      !disable_local
+    ) {
       const hash = `${item.lpatch.from[hashKey]}_${item.lpatch.to[hashKey]}`;
       const url = await getDfsUrl(hash);
       console.log('>LPATCH', filename_with_first_slash, item.lpatch, url);
-      await invoke('local_decompress_and_online_hpatch', {
-        id,
-        url,
-        name: item.patch?.from[hashKey] as string,
-        target: source + filename_with_first_slash,
-        diffSize: item.patch?.size as number,
-      });
+      await ipc(
+        hybridPatch(
+          hasLpatchFile,
+          url,
+          item.lpatch?.size as number,
+          source + filename_with_first_slash,
+        ),
+        elevate,
+        onProgress,
+      );
     } else if (item.patch && !disable_patch) {
       const hash = `${item.patch.from[hashKey]}_${item.patch.to[hashKey]}`;
       const url = await getDfsUrl(hash);
       console.log('>PATCH', filename_with_first_slash, item.patch, url);
-      await invoke('download_and_decompress_and_hpatch', {
-        id,
-        url,
-        target: source + filename_with_first_slash,
-        diffSize: item.patch.size,
-      });
+      await ipc(
+        InstallFile(url, source + filename_with_first_slash, item.patch.size),
+        elevate,
+        onProgress,
+      );
     } else {
       const hash = item[hashKey] as string;
       const url = await getDfsUrl(hash);
       console.log('>DOWNLOAD', filename_with_first_slash, url);
-      await invoke('download_and_decompress', {
-        id,
-        url,
-        target: source + filename_with_first_slash,
-      });
+      await ipc(
+        InstallFile(url, source + filename_with_first_slash),
+        elevate,
+        onProgress,
+      );
     }
   } catch (e) {
     console.error(e);
     item.downloaded = 0;
     throw e;
   } finally {
-    idUnListen();
     item.running = false;
   }
   item.downloaded = item.patch ? item.patch.size : item.size;

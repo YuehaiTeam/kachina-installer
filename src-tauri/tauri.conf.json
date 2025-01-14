@@ -22,7 +22,7 @@
         "visible": false,
         "maximizable": false,
         "windowEffects": {
-          "effects": ["mica"]
+          "effects": []
         }
       }
     ],

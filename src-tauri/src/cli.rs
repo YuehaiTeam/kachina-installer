@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 
-#[derive(Debug, Clone, clap::Args)]
+#[derive(Debug, Clone, clap::Args, serde::Serialize)]
 pub struct InstallArgs {
     #[clap(short = 'D', help = "Install directory")]
     pub target: Option<PathBuf>,
@@ -30,14 +30,36 @@ pub struct PackArgs {
     pub data_dir: Option<PathBuf>,
 }
 
+#[derive(Debug, Clone, clap::Args)]
+pub struct GenArgs {
+    #[clap(long, short = 'i')]
+    pub input_dir: PathBuf,
+    #[clap(long, short = 'm')]
+    pub output_metadata: PathBuf,
+    #[clap(long, short = 'o')]
+    pub output_dir: PathBuf,
+    #[clap(long, short = 'r')]
+    pub repo: String,
+    #[clap(long, short = 't')]
+    pub tag: String,
+    #[clap(long, short = 'd')]
+    pub diff_vers: Option<Vec<String>>,
+    #[clap(long, short = 'z')]
+    pub hdiffz: Option<String>,
+}
+#[derive(Debug, Clone, clap::Args)]
+pub struct UacArgs {
+    pub pipe_id: String,
+}
+
 #[derive(Subcommand, Clone, Debug)]
 pub enum Command {
     #[clap(hide = true)]
     Install(InstallArgs),
     #[clap(hide = true)]
-    Pack(PackArgs),
-    #[clap(hide = true)]
     InstallWebview2,
+    #[clap(hide = true)]
+    HeadlessUac(UacArgs),
 }
 
 #[derive(Parser)]
@@ -49,6 +71,7 @@ pub struct Cli {
     pub install: InstallArgs,
 }
 impl Cli {
+    #[allow(dead_code)]
     pub fn command(&self) -> Command {
         self.command
             .clone()

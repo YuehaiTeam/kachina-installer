@@ -1,10 +1,6 @@
-use fmmap::tokio::{AsyncMmapFileExt, AsyncMmapFileReader};
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 
-use crate::{
-    cli::PackArgs,
-    local::{get_embedded, mmap},
-};
+use crate::{cli::PackArgs, local::get_reader_for_bundle};
 
 pub struct PackFile {
     pub name: String,
@@ -20,11 +16,12 @@ pub struct PackConfig {
 }
 
 pub async fn pack_cli(args: PackArgs) {
-    let embedded = get_embedded().await.map_err(|e| e.to_string()).unwrap();
-    if !embedded.is_empty() {
-        eprintln!("Already packed");
+    let reader = get_reader_for_bundle().await;
+    if reader.is_err() {
+        eprintln!("Failed to get reader: {:?}", reader.err());
         return;
     }
+    let reader = reader.unwrap();
     let config = tokio::fs::read(&args.config).await;
     if config.is_err() {
         eprintln!(
@@ -93,6 +90,10 @@ pub async fn pack_cli(args: PackArgs) {
         while let Some(entry) = entries.next_entry().await.unwrap() {
             let path = entry.path();
             let name = path.file_name().unwrap().to_str().unwrap().to_string();
+            // ignore if name includes '_'
+            if name.contains('_') {
+                continue;
+            }
             let size = tokio::fs::metadata(&path).await.unwrap().len() as usize;
             let f = tokio::fs::File::open(path).await;
             if f.is_err() {
@@ -109,12 +110,6 @@ pub async fn pack_cli(args: PackArgs) {
         image,
         files,
     };
-    let input = mmap().await.reader(0);
-    if input.is_err() {
-        eprintln!("Failed to open input: {:?}", input.err());
-        return;
-    }
-    let input = input.unwrap();
     let output = tokio::fs::File::create(args.output).await.unwrap();
     println!(
         "Packing: image: {:?}, metadata: {:?}, files: {}",
@@ -122,7 +117,7 @@ pub async fn pack_cli(args: PackArgs) {
         config.image.is_some(),
         config.files.len()
     );
-    pack(input, output, config).await;
+    pack(reader, output, config).await;
 }
 
 pub async fn pack(
@@ -131,7 +126,7 @@ pub async fn pack(
     mut config: PackConfig,
 ) {
     // copy base to output, not closing output file
-    println!("Packing base...");
+    println!("Writing base...");
     tokio::io::copy(&mut base, &mut output).await.unwrap();
     // write config
     println!("Writing config...");
@@ -219,33 +214,4 @@ pub async fn write_file(
     write_header(output, &file.name, file.size as u32).await?;
     tokio::io::copy(&mut file.data, output).await?;
     Ok(())
-}
-
-pub async fn get_base_with_config() -> Result<AsyncMmapFileReader<'static>, String> {
-    let embedded = get_embedded().await?;
-    let config_index = embedded.iter().position(|x| x.name == ".config.json");
-    let image_index = embedded.iter().position(|x| x.name == ".image");
-    if config_index.is_none() {
-        if embedded.is_empty() {
-            return mmap().await.reader(0).map_err(|e| e.to_string());
-        }
-        return Err("Malformed packed files: missing config".to_string());
-    }
-    let config_index = config_index.unwrap();
-    // config index should be 0
-    if config_index != 0 {
-        return Err("Malformed packed files: config not at index 0".to_string());
-    }
-    let mut end_pos = embedded[config_index].offset + embedded[config_index].size;
-    if let Some(image_index) = image_index {
-        // image index should be 1
-        if image_index != 1 {
-            return Err("Malformed packed files: image not at index 1".to_string());
-        }
-        end_pos = embedded[image_index].offset + embedded[image_index].size;
-    }
-    mmap()
-        .await
-        .range_reader(0, end_pos)
-        .map_err(|e| e.to_string())
 }

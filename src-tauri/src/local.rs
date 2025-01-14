@@ -1,4 +1,4 @@
-use fmmap::tokio::{AsyncMmapFile, AsyncMmapFileExt};
+use fmmap::tokio::{AsyncMmapFile, AsyncMmapFileExt, AsyncMmapFileReader};
 use serde::Serialize;
 use serde_json::Value;
 use tokio::io::AsyncReadExt;
@@ -111,7 +111,9 @@ pub async fn get_embedded() -> Result<Vec<Embedded>, String> {
     Ok(entries)
 }
 
-pub async fn get_config_from_embedded(embedded: &[Embedded]) -> Result<(Option<Value>, Option<Value>), String> {
+pub async fn get_config_from_embedded(
+    embedded: &[Embedded],
+) -> Result<(Option<Value>, Option<Value>), String> {
     let file = mmap().await;
     let mut config = None;
     let mut metadata = None;
@@ -127,4 +129,33 @@ pub async fn get_config_from_embedded(embedded: &[Embedded]) -> Result<(Option<V
         }
     }
     Ok((config, metadata))
+}
+
+pub async fn get_base_with_config() -> Result<AsyncMmapFileReader<'static>, String> {
+    let embedded = get_embedded().await?;
+    let config_index = embedded.iter().position(|x| x.name == ".config.json");
+    let image_index = embedded.iter().position(|x| x.name == ".image");
+    if config_index.is_none() {
+        if embedded.is_empty() {
+            return mmap().await.reader(0).map_err(|e| e.to_string());
+        }
+        return Err("Malformed packed files: missing config".to_string());
+    }
+    let config_index = config_index.unwrap();
+    // config index should be 0
+    if config_index != 0 {
+        return Err("Malformed packed files: config not at index 0".to_string());
+    }
+    let mut end_pos = embedded[config_index].offset + embedded[config_index].size;
+    if let Some(image_index) = image_index {
+        // image index should be 1
+        if image_index != 1 {
+            return Err("Malformed packed files: image not at index 1".to_string());
+        }
+        end_pos = embedded[image_index].offset + embedded[image_index].size;
+    }
+    mmap()
+        .await
+        .range_reader(0, end_pos)
+        .map_err(|e| e.to_string())
 }

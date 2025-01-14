@@ -414,6 +414,13 @@ const INSTALLER_CONFIG: InstallerConfig = reactive({
   enbedded_metadata: null,
   embedded_files: [],
   exe_path: '',
+  args: {
+    target: null,
+    uninstall: false,
+    non_interactive: false,
+    silent: false,
+    online: false,
+  },
 });
 
 async function getSource(): Promise<InstallerConfig> {
@@ -539,7 +546,7 @@ async function runInstall(): Promise<void> {
     `;
     percent.value = 20 + (downloadedTotalSize / total_size) * 80;
   }, 400);
-  await mapLimit(diff_files, 5, async (item: (typeof diff_files)[0]) => {
+  await mapLimit(diff_files, 6, async (item: (typeof diff_files)[0]) => {
     let hasError = false;
     for (let i = 0; i < 3; i++) {
       try {
@@ -549,7 +556,8 @@ async function runInstall(): Promise<void> {
           hashKey as DfsMetadataHashType,
           item,
           hasError,
-          hasError,
+          hasError || INSTALLER_CONFIG.args.online,
+          true,
         );
         break;
       } catch (e) {
@@ -581,17 +589,12 @@ async function finishInstall(
   latest_meta: InvokeGetDfsMetadataRes,
 ): Promise<void> {
   const { program, desktop, uninstall } = await getLnkPath();
+  const exePath = `${source.value}${sep()}${PROJECT_CONFIG.exeName}`;
   if (createLnk.value && !isUpdate.value) {
-    await invokeCreateLnk(
-      `${source.value}${sep()}${PROJECT_CONFIG.exeName}`,
-      desktop,
-    );
+    await invokeCreateLnk(exePath, desktop);
   }
   if (!isUpdate.value) {
-    await invokeCreateLnk(
-      `${source.value}${sep()}${PROJECT_CONFIG.exeName}`,
-      program,
-    ).catch(console.error);
+    await invokeCreateLnk(exePath, program).catch(console.error);
   }
   if (
     !isUpdate.value ||
@@ -643,9 +646,14 @@ async function install(): Promise<void> {
 
 onMounted(async () => {
   const win = getCurrentWindow();
-  await win.show();
+  if (process.env.NODE_ENV === 'development') {
+    await win.show();
+  }
   const rsrc = await getSource();
   console.log('INSTALLER_CONFIG: ', rsrc);
+  if (!rsrc.args.silent) {
+    await win.show();
+  }
   Object.assign(INSTALLER_CONFIG, rsrc);
   if (INSTALLER_CONFIG.embedded_config) {
     Object.assign(PROJECT_CONFIG, INSTALLER_CONFIG.embedded_config);
@@ -666,9 +674,11 @@ onMounted(async () => {
     win.close();
     return;
   }
-  source.value = INSTALLER_CONFIG.install_path;
+  source.value = INSTALLER_CONFIG.args.target || INSTALLER_CONFIG.install_path;
   if (INSTALLER_CONFIG.install_path_exists) isUpdate.value = true;
   await win.setTitle(PROJECT_CONFIG.windowTitle);
+  INSTALLER_CONFIG.is_uninstall =
+    INSTALLER_CONFIG.is_uninstall || INSTALLER_CONFIG.args.uninstall;
   if (INSTALLER_CONFIG.is_uninstall) {
     const uninstallConfig = await invoke(
       'read_uninstall_metadata',
@@ -685,6 +695,9 @@ onMounted(async () => {
     }
   }
   init.value = true;
+  if (INSTALLER_CONFIG.args.silent || INSTALLER_CONFIG.args.non_interactive) {
+    install();
+  }
 });
 
 function formatSize(size: number): string {
@@ -783,7 +796,7 @@ async function uninstall() {
 
 function tplReplace(template: string, data: Record<string, string>): string {
   const regex = /\${(.*?)}/g;
-  return template.replace(regex, (match, key) => {
+  return template.replace(regex, (_match, key) => {
     return typeof data[key] !== 'undefined' ? data[key] : '';
   });
 }

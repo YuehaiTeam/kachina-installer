@@ -85,4 +85,11 @@ interface InstallerConfig {
   embedded_config: ProjectConfig | null;
   enbedded_metadata: InvokeGetDfsMetadataRes | null;
   exe_path: string;
+  args: {
+    target: string | null;
+    non_interactive: boolean;
+    silent: boolean;
+    online: boolean;
+    uninstall: boolean;
+  };
 }
