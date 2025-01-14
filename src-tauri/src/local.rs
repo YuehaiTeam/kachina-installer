@@ -1,5 +1,5 @@
 use fmmap::tokio::{AsyncMmapFile, AsyncMmapFileExt, AsyncMmapFileReader};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::io::AsyncReadExt;
 use tokio::sync::OnceCell;
@@ -67,7 +67,7 @@ async fn search_pattern() -> Result<Vec<usize>, String> {
 
     Ok(founds)
 }
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Embedded {
     pub name: String,
     pub offset: usize,

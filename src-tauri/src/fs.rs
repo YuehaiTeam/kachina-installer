@@ -10,7 +10,7 @@ use tauri::{AppHandle, Emitter};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use crate::{
-    local::mmap, progressed_read::ReadWithCallback, static_obj::REQUEST_CLIENT, utils::run_hash,
+    local::mmap, utils::hash::run_hash, utils::progressed_read::ReadWithCallback, REQUEST_CLIENT,
 };
 
 #[tauri::command]

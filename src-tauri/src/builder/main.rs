@@ -1,15 +1,11 @@
 use clap::Parser;
-use pcli::Command;
+use cli::Command;
 
+mod cli;
 mod gen;
+mod local;
 mod metadata;
 mod pack;
-mod pcli;
-mod local;
-
-#[path = "../cli.rs"]
-mod cli;
-#[path = "../utils.rs"]
 mod utils;
 
 pub fn main() {
@@ -21,7 +17,7 @@ pub fn main() {
 }
 
 async fn async_main() {
-    let cli = pcli::Cli::parse();
+    let cli = cli::Cli::parse();
     let mut command = cli.command;
     if command.is_none() {
         panic!("No command provided");

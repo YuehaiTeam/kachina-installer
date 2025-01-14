@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use clap::{Parser, Subcommand};
+use clap::Subcommand;
 
 #[derive(Debug, Clone, clap::Args, serde::Serialize)]
 pub struct InstallArgs {
@@ -60,21 +60,4 @@ pub enum Command {
     InstallWebview2,
     #[clap(hide = true)]
     HeadlessUac(UacArgs),
-}
-
-#[derive(Parser)]
-#[command(args_conflicts_with_subcommands = true)]
-pub struct Cli {
-    #[command(subcommand)]
-    command: Option<Command>,
-    #[clap(flatten)]
-    pub install: InstallArgs,
-}
-impl Cli {
-    #[allow(dead_code)]
-    pub fn command(&self) -> Command {
-        self.command
-            .clone()
-            .unwrap_or(Command::Install(self.install.clone()))
-    }
 }

@@ -252,7 +252,7 @@ pub async fn managed_operation(
     }
 }
 
-pub async fn uac_ipc_main(args: crate::cli::UacArgs) {
+pub async fn uac_ipc_main(args: crate::cli::arg::UacArgs) {
     let pipe_name = format!(r"\\.\pipe\{}", args.pipe_id);
     let mut try_times = 0;
     let client = loop {

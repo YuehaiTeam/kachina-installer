@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::static_obj::REQUEST_CLIENT;
+use crate::REQUEST_CLIENT;
 
 #[derive(Deserialize, Serialize, Debug)]
 pub struct DownloadResp {

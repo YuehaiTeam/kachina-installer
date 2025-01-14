@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 
-use crate::utils::run_hash;
+use crate::utils::hash::run_hash;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Metadata {

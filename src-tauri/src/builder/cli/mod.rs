@@ -1,6 +1,9 @@
+#[path = "../../cli/arg.rs"]
+pub mod arg;
+
 use clap::{Parser, Subcommand};
 
-use crate::cli::{GenArgs, PackArgs};
+use crate::cli::arg::{GenArgs, PackArgs};
 
 #[derive(Subcommand, Clone, Debug)]
 pub enum Command {

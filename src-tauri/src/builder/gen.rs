@@ -3,9 +3,9 @@ use std::path::Path;
 use async_compression::tokio::bufread::ZstdEncoder;
 
 use crate::{
-    cli::GenArgs,
+    cli::arg::GenArgs,
     metadata::{deep_generate_metadata, PatchInfo, PatchItem, RepoMetadata},
-    utils::run_hash,
+    utils::hash::run_hash,
 };
 
 pub async fn gen_cli(args: GenArgs) {
