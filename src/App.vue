@@ -383,7 +383,6 @@ import IconSheild from './IconSheild.vue';
 const init = ref(false);
 
 const subStepList: ReadonlyArray<string> = [
-  '检查系统信息',
   '获取最新版本',
   '校验更新内容',
   '下载和解压文件',
@@ -442,8 +441,6 @@ async function getSource(): Promise<InstallerConfig> {
 
 async function runInstall(): Promise<void> {
   step.value = 2;
-  await ipc_prepare(needElevate.value);
-  subStep.value = 1;
   let latest_meta = INSTALLER_CONFIG.enbedded_metadata;
   const online_meta = await invoke<InvokeGetDfsMetadataRes>(
     'get_dfs_metadata',
@@ -458,6 +455,7 @@ async function runInstall(): Promise<void> {
   } else {
     console.log('Local meta found, use local meta');
   }
+  await ipc_prepare(needElevate.value);
   let hashKey = '';
   if (latest_meta.hashed.every((e) => e.md5)) {
     hashKey = 'md5';
@@ -466,7 +464,7 @@ async function runInstall(): Promise<void> {
   } else {
     throw new Error('更新服务端配置有误，不支持的哈希算法');
   }
-  subStep.value = 2;
+  subStep.value = 1;
   percent.value = 5;
   let id = uuid();
   let idUnListen = await listen<[number, number]>(id, ({ payload }) => {
@@ -524,7 +522,7 @@ async function runInstall(): Promise<void> {
     await finishInstall(latest_meta);
     return;
   }
-  subStep.value = 3;
+  subStep.value = 2;
   current.value = '准备下载……';
   const total_size = diff_files.reduce(
     (acc, cur) => acc + (cur?.patch?.size || cur.size),
@@ -617,11 +615,16 @@ async function finishInstall(
     !isUpdate.value ||
     INSTALLER_CONFIG.install_path_source.startsWith('REG')
   ) {
-    await invoke('create_uninstaller', {
-      source: source.value,
-      uninstallerName: PROJECT_CONFIG.uninstallName,
-      updaterName: PROJECT_CONFIG.updaterName,
-    }).catch(console.error);
+    try {
+      await invoke('create_uninstaller', {
+        source: source.value,
+        uninstallerName: PROJECT_CONFIG.uninstallName,
+        updaterName: PROJECT_CONFIG.updaterName,
+      });
+    } catch (e) {
+      error(`创建卸载程序失败: ${e}`, '出错了');
+      console.error(e);
+    }
     try {
       await invoke('write_registry', {
         regName: PROJECT_CONFIG.regName,
