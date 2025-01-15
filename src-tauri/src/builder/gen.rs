@@ -45,7 +45,8 @@ pub async fn gen_cli(args: GenArgs) {
         println!("Compressing {:?} to {:?}", file_path, output_path);
         let reader = tokio::fs::File::open(file_path).await.unwrap();
         let reader = tokio::io::BufReader::new(reader);
-        let mut encoder = ZstdEncoder::new(reader);
+        let mut encoder: ZstdEncoder<tokio::io::BufReader<tokio::fs::File>> =
+            ZstdEncoder::with_quality(reader, async_compression::Level::Best);
         let mut writer = tokio::fs::File::create(output_path).await.unwrap();
         tokio::io::copy(&mut encoder, &mut writer)
             .await
@@ -128,7 +129,8 @@ pub async fn gen_cli(args: GenArgs) {
                         .await
                         .expect("failed to open diff file");
                     let reader = tokio::io::BufReader::new(reader);
-                    let mut encoder = ZstdEncoder::new(reader);
+                    let mut encoder =
+                        ZstdEncoder::with_quality(reader, async_compression::Level::Best);
                     let mut writer = tokio::fs::File::create(&compressed_path)
                         .await
                         .expect("failed to create compressed diff file");
