@@ -5,10 +5,10 @@ import { v4 as uuid } from 'uuid';
 export async function ipc<T extends { type: string }, E, Z>(
   arg: T,
   elevate: boolean,
-  onProgress: (payload: Event<Z>) => void,
+  onProgress?: (payload: Event<Z>) => void,
 ): Promise<E> {
   let id = uuid();
-  let unlisten = await listen<Z>(id, onProgress);
+  let unlisten = await listen<Z>(id, onProgress || (() => {}));
   let res: E;
   try {
     res = await invoke('managed_operation', {
@@ -22,4 +22,12 @@ export async function ipc<T extends { type: string }, E, Z>(
     throw e;
   }
   return res;
+}
+
+export async function ipc_prepare(elevate = false) {
+  await invoke('managed_operation', {
+    ipc: { type: 'Ping' },
+    id: uuid(),
+    elevate,
+  });
 }

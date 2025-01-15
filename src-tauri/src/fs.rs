@@ -2,118 +2,13 @@ use async_compression::tokio::bufread::ZstdDecoder as TokioZstdDecoder;
 use fmmap::tokio::AsyncMmapFileExt;
 use futures::StreamExt;
 use serde::Serialize;
-use std::{
-    os::windows::fs::MetadataExt,
-    path::{Path, PathBuf},
-};
+use std::{os::windows::fs::MetadataExt, path::Path};
 use tauri::{AppHandle, Emitter};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use crate::{
     local::mmap, utils::hash::run_hash, utils::progressed_read::ReadWithCallback, REQUEST_CLIENT,
 };
-
-#[tauri::command]
-pub async fn download_and_decompress(
-    id: String,
-    url: String,
-    target: String,
-    app: AppHandle,
-) -> Result<usize, String> {
-    prepare_target(&target).await?;
-    progressed_copy(
-        create_http_stream(&url).await?,
-        create_target_file(&target).await?,
-        move |downloaded| {
-            let _ = app.emit(&id, downloaded);
-        },
-    )
-    .await
-}
-
-#[tauri::command]
-pub async fn local_decompress(
-    id: String,
-    offset: usize,
-    size: usize,
-    target: String,
-    app: AppHandle,
-) -> Result<usize, String> {
-    prepare_target(&target).await?;
-    progressed_copy(
-        create_local_stream(offset, size).await?,
-        create_target_file(&target).await?,
-        move |downloaded| {
-            let _ = app.emit(&id, downloaded);
-        },
-    )
-    .await
-}
-
-#[tauri::command]
-pub async fn run_hpatch(target: String, diff: String) -> Result<(), String> {
-    tokio::task::spawn_blocking(move || {
-        let target = Path::new(&target);
-        let new_target = target.with_extension("patching");
-        let target_size = target
-            .metadata()
-            .map_err(|e| format!("Failed to get target size: {:?}", e))?;
-        let target_file = std::fs::File::create(new_target.clone())
-            .map_err(|e| format!("Failed to create new target: {:?}", e))?;
-        let old_target_file =
-            std::fs::File::open(target).map_err(|e| format!("Failed to open target: {:?}", e))?;
-        let diff_size = std::fs::metadata(&diff)
-            .map_err(|e| format!("Failed to get diff size: {:?}", e))?
-            .file_size();
-        let diff_file =
-            std::fs::File::open(diff).map_err(|e| format!("Failed to open diff: {:?}", e))?;
-        let res = hpatch_sys::safe_patch_single_stream(
-            target_file,
-            diff_file,
-            diff_size as usize,
-            old_target_file,
-            target_size.file_size() as usize,
-        );
-        if res {
-            // move target to target.old
-            let old_target = target.with_extension("old");
-            std::fs::rename(target, &old_target)
-                .map_err(|e| format!("Failed to rename target: {:?}", e))?;
-            std::fs::rename(new_target, target)
-                .map_err(|e| format!("Failed to rename new target: {:?}", e))?;
-            Ok(())
-        } else {
-            // delete new target
-            std::fs::remove_file(new_target)
-                .map_err(|e| format!("Failed to remove new target: {:?}", e))?;
-            Err("Failed to run hpatch".to_string())
-        }
-    })
-    .await
-    .map_err(|e| format!("Failed to run hpatch: {:?}", e))?
-}
-
-#[tauri::command]
-pub async fn download_and_decompress_and_hpatch(
-    id: String,
-    url: String,
-    diff_size: usize,
-    target: String,
-    app: AppHandle,
-) -> Result<usize, String> {
-    prepare_target(&target).await?;
-    let app_cl = app.clone();
-    let id_cl = id.clone();
-    progressed_hpatch(
-        create_http_stream(&url).await?,
-        &target,
-        diff_size,
-        move |downloaded| {
-            let _ = app_cl.emit(&id_cl, downloaded);
-        },
-    )
-    .await
-}
 
 #[derive(Serialize, Debug, Clone)]
 pub struct Metadata {
@@ -233,65 +128,6 @@ pub async fn ensure_dir(path: String) -> Result<(), String> {
     Ok(())
 }
 
-pub async fn rm_list(key: Vec<PathBuf>) -> Vec<String> {
-    let mut set = tokio::task::JoinSet::new();
-    for path in key {
-        set.spawn(tokio::task::spawn_blocking(move || {
-            let path = Path::new(&path);
-            if path.exists() {
-                let res = std::fs::remove_file(path);
-                if res.is_err() {
-                    return Err(format!("Failed to remove file: {:?}", res.err()));
-                }
-            }
-            Ok(())
-        }));
-    }
-    let res = set.join_all().await;
-    let errs: Vec<String> = res
-        .into_iter()
-        .filter_map(|r| r.err())
-        .map(|e| e.to_string())
-        .collect();
-    errs
-}
-
-pub fn run_clear_empty_dirs(path: &Path) -> Result<(), std::io::Error> {
-    let entries = std::fs::read_dir(path)?;
-    for entry in entries {
-        let entry = entry?;
-        let path = entry.path();
-        if path.is_dir() {
-            run_clear_empty_dirs(&path)?;
-            let entries = std::fs::read_dir(&path)?;
-            if entries.count() == 0 {
-                std::fs::remove_dir(&path)?;
-            }
-        }
-    }
-    Ok(())
-}
-
-pub fn delete_dir_if_empty(path: &Path) -> Result<(), std::io::Error> {
-    let entries = std::fs::read_dir(path)?;
-    if entries.count() == 0 {
-        std::fs::remove_dir(path)?;
-    }
-    Ok(())
-}
-
-#[tauri::command]
-pub async fn clear_empty_dirs(key: String) -> Result<(), String> {
-    tokio::task::spawn_blocking(move || {
-        let path = Path::new(&key);
-        run_clear_empty_dirs(path).map_err(|e| format!("Failed to clear empty dirs: {:?}", e))?;
-        delete_dir_if_empty(path).map_err(|e| format!("Failed to clear empty dirs: {:?}", e))?;
-        Ok(())
-    })
-    .await
-    .map_err(|e| format!("Failed to clear empty dirs: {:?}", e))?
-}
-
 pub async fn create_http_stream(url: &str) -> Result<impl AsyncRead + std::marker::Send, String> {
     let res = REQUEST_CLIENT.get(url).send().await;
     if res.is_err() {
@@ -376,7 +212,7 @@ pub async fn progressed_copy(
         }
         downloaded += read;
         // emit only every 16 ms
-        if now.elapsed().as_millis() >= 100 {
+        if now.elapsed().as_millis() >= 20 {
             now = std::time::Instant::now();
             on_progress(downloaded);
         }

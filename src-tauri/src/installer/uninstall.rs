@@ -1,11 +1,72 @@
-use crate::fs::{delete_dir_if_empty, rm_list, run_clear_empty_dirs};
-use std::{os::windows::process::CommandExt, path::Path};
+use std::{
+    os::windows::process::CommandExt,
+    path::{Path, PathBuf},
+};
 use tokio::io::AsyncWriteExt;
 use windows::Win32::System::Threading::CREATE_NO_WINDOW;
 
 lazy_static::lazy_static!(
     static ref DELETE_SELF_ON_EXIT_PATH: std::sync::RwLock<Option<String>> = std::sync::RwLock::new(None);
 );
+
+pub fn run_clear_empty_dirs(path: &Path) -> Result<(), std::io::Error> {
+    let entries = std::fs::read_dir(path)?;
+    for entry in entries {
+        let entry = entry?;
+        let path = entry.path();
+        if path.is_dir() {
+            run_clear_empty_dirs(&path)?;
+            let entries = std::fs::read_dir(&path)?;
+            if entries.count() == 0 {
+                std::fs::remove_dir(&path)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+pub fn delete_dir_if_empty(path: &Path) -> Result<(), std::io::Error> {
+    let entries = std::fs::read_dir(path)?;
+    if entries.count() == 0 {
+        std::fs::remove_dir(path)?;
+    }
+    Ok(())
+}
+
+pub async fn rm_list(key: Vec<PathBuf>) -> Vec<String> {
+    let mut set = tokio::task::JoinSet::new();
+    for path in key {
+        set.spawn(tokio::task::spawn_blocking(move || {
+            let path = Path::new(&path);
+            if path.exists() {
+                let res = std::fs::remove_file(path);
+                if res.is_err() {
+                    return Err(format!("Failed to remove file: {:?}", res.err()));
+                }
+            }
+            Ok(())
+        }));
+    }
+    let res = set.join_all().await;
+    let errs: Vec<String> = res
+        .into_iter()
+        .filter_map(|r| r.err())
+        .map(|e| e.to_string())
+        .collect();
+    errs
+}
+
+#[tauri::command]
+pub async fn clear_empty_dirs(key: String) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || {
+        let path = Path::new(&key);
+        run_clear_empty_dirs(path).map_err(|e| format!("Failed to clear empty dirs: {:?}", e))?;
+        delete_dir_if_empty(path).map_err(|e| format!("Failed to clear empty dirs: {:?}", e))?;
+        Ok(())
+    })
+    .await
+    .map_err(|e| format!("Failed to clear empty dirs: {:?}", e))?
+}
 
 #[tauri::command]
 pub async fn run_uninstall(

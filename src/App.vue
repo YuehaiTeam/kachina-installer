@@ -42,6 +42,15 @@
             @click="install"
             :disabled="!isUpdate && !acceptEula"
           >
+            <IconSheild
+              style="
+                width: 20px;
+                margin-right: 6px;
+                margin-left: -6px;
+                padding-top: 2px;
+              "
+              v-if="needElevate"
+            />
             {{ isUpdate ? '更新' : '安装' }}
           </button>
           <button
@@ -368,13 +377,16 @@ import Checkbox from './Checkbox.vue';
 import CircleSuccess from './CircleSuccess.vue';
 import { getCurrentWindow, invoke, listen, sep } from './tauri';
 import { runDfsDownload } from './dfs';
+import { ipc_prepare } from './api/ipc';
+import IconSheild from './IconSheild.vue';
 
 const init = ref(false);
 
 const subStepList: ReadonlyArray<string> = [
-  '获取最新版本信息',
-  '检查更新内容',
-  '下载并安装',
+  '检查系统信息',
+  '获取最新版本',
+  '校验更新内容',
+  '下载和解压文件',
 ];
 
 const isUpdate = ref<boolean>(false);
@@ -383,6 +395,7 @@ const createLnk = ref<boolean>(true);
 const deleteUserData = ref<boolean>(false);
 const step = ref<number>(1);
 const subStep = ref<number>(0);
+const needElevate = ref(true);
 
 const current = ref<string>('');
 const percent = ref<number>(0);
@@ -429,6 +442,8 @@ async function getSource(): Promise<InstallerConfig> {
 
 async function runInstall(): Promise<void> {
   step.value = 2;
+  await ipc_prepare(needElevate.value);
+  subStep.value = 1;
   let latest_meta = INSTALLER_CONFIG.enbedded_metadata;
   const online_meta = await invoke<InvokeGetDfsMetadataRes>(
     'get_dfs_metadata',
@@ -451,7 +466,7 @@ async function runInstall(): Promise<void> {
   } else {
     throw new Error('更新服务端配置有误，不支持的哈希算法');
   }
-  subStep.value = 1;
+  subStep.value = 2;
   percent.value = 5;
   let id = uuid();
   let idUnListen = await listen<[number, number]>(id, ({ payload }) => {
@@ -509,7 +524,7 @@ async function runInstall(): Promise<void> {
     await finishInstall(latest_meta);
     return;
   }
-  subStep.value = 2;
+  subStep.value = 3;
   current.value = '准备下载……';
   const total_size = diff_files.reduce(
     (acc, cur) => acc + (cur?.patch?.size || cur.size),
@@ -527,9 +542,11 @@ async function runInstall(): Promise<void> {
       (acc, cur) => acc + cur.downloaded,
       0,
     );
-    stat.speed = (downloadedTotalSize - stat.speedLastSize) / time_diff;
-    stat.speedLastSize = downloadedTotalSize;
-    stat.lastTime = now;
+    if (time_diff > 100) {
+      stat.speed = (downloadedTotalSize - stat.speedLastSize) / time_diff;
+      stat.speedLastSize = downloadedTotalSize;
+      stat.lastTime = now;
+    }
     const speed = formatSize(stat.speed * 1000);
     const downloaded = formatSize(downloadedTotalSize);
     const total = formatSize(total_size);
@@ -545,7 +562,7 @@ async function runInstall(): Promise<void> {
       </div>
     `;
     percent.value = 20 + (downloadedTotalSize / total_size) * 80;
-  }, 400);
+  }, 30);
   await mapLimit(diff_files, 6, async (item: (typeof diff_files)[0]) => {
     let hasError = false;
     for (let i = 0; i < 3; i++) {
@@ -557,7 +574,7 @@ async function runInstall(): Promise<void> {
           item,
           hasError,
           hasError || INSTALLER_CONFIG.args.online,
-          true,
+          needElevate.value,
         );
         break;
       } catch (e) {
@@ -760,6 +777,7 @@ async function error(message: string, title = '出错了'): Promise<void> {
 async function uninstall() {
   step.value = 5;
   try {
+    await ipc_prepare(needElevate.value);
     const uninstallConfig = (await invoke(
       'read_uninstall_metadata',
       PROJECT_CONFIG,

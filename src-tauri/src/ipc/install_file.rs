@@ -2,28 +2,6 @@ use crate::fs::{
     create_http_stream, create_local_stream, create_target_file, prepare_target, progressed_copy,
     progressed_hpatch,
 };
-
-#[derive(serde::Deserialize, serde::Serialize, Clone, Debug)]
-#[serde(tag = "type")]
-pub enum IpcOperation {
-    InstallFile(InstallFileArgs),
-    CreateLnk,
-    CreateUninstaller,
-    WriteRegistry,
-    RunUninstall,
-    CheckDirInstallable,
-    ReadLocalMetadata,
-}
-
-pub async fn run_opr(
-    op: IpcOperation,
-    notify: impl Fn(serde_json::Value) + std::marker::Send + 'static,
-) -> Result<serde_json::Value, String> {
-    match op {
-        IpcOperation::InstallFile(args) => ipc_install_file(args, notify).await,
-        _ => Err("Not implemented".to_string()),
-    }
-}
 #[derive(serde::Deserialize, serde::Serialize, Clone, Debug)]
 #[serde(untagged)]
 enum InstallFileSource {

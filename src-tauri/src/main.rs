@@ -7,7 +7,6 @@ pub mod fs;
 pub mod installer;
 pub mod ipc;
 pub mod local;
-pub mod uac;
 pub mod utils;
 
 use clap::Parser;
@@ -16,7 +15,6 @@ use installer::uninstall::delete_self_on_exit;
 use std::time::Duration;
 use tauri::{window::Color, Manager, WindowEvent};
 use tauri_utils::{config::WindowEffectsConfig, WindowEffect};
-use uac::ManagedElevate;
 
 lazy_static::lazy_static! {
     pub static ref REQUEST_CLIENT: reqwest::Client = reqwest::Client::builder()
@@ -56,7 +54,7 @@ fn main() {
                 .enable_all()
                 .build()
                 .unwrap()
-                .block_on(uac::uac_ipc_main(args));
+                .block_on(ipc::manager::uac_ipc_main(args));
         }
         cli => {
             if !has_console {
@@ -106,10 +104,10 @@ async fn tauri_main(args: InstallArgs) {
             installer::registry::write_registry,
             installer::uninstall::run_uninstall,
             // new mamaned operation
-            uac::managed_operation,
+            ipc::manager::managed_operation,
         ])
         .manage(args)
-        .manage(ManagedElevate::new())
+        .manage(ipc::manager::ManagedElevate::new())
         .setup(move |app| {
             let main_window = app.get_webview_window("main").unwrap();
             #[cfg(debug_assertions)]
