@@ -9,10 +9,16 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions-rs/toolchain@v1.0.6
+      - run: rustup toolchain install stable --profile minimal
+      - uses: Swatinem/rust-cache@v2
         with:
-          toolchain: stable
+          cache-targets: false
+          workspaces: 'src-tauri'
       - uses: pnpm/action-setup@v4.0.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: 'pnpm'
       - name: Install NPM Dependencies
         run: pnpm i
       - name: Build
