@@ -53,13 +53,15 @@ lazy_static = "1.5"
 open = { version = "5.3.1", features = ["shellexecute-on-windows"] }
 mslnk = "=0.1"
 twox-hash = "2.1.0"
-hpatch-sys = { path = "./libs/hpatch-sys" }
 pin-project = "1.1.7"
 fmmap = { version = "0.3", features = ["tokio-async"] }
 clap = { version = "4.5.24", features = ["derive"] }
 chrono = "0.4.39"
 dark-light = "2.0.0"
 uuid = { version = "1.12.0", features = ["v4"] }
+hpatch-sys = { path = "./libs/hpatch-sys" }
+hdiff-sys = { path = "./libs/hdiff-sys" }
+ignore = "0.4.23"
 
 [[bin]]
 name = "kachina-installer"
