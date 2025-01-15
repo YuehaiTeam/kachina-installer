@@ -1,0 +1,43 @@
+name: Build
+on:
+  push:
+  pull_request:
+env:
+  CARGO_TERM_COLOR: always
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rs/toolchain@v1.0.6
+        with:
+          toolchain: stable
+      - uses: pnpm/action-setup@v4.0.0
+      - name: Install NPM Dependencies
+        run: pnpm i
+      - name: Build
+        run: pnpm build
+      - name: Artifact
+        uses: actions/upload-artifact@v4.6.0
+        with:
+          path: src-tauri/target/release/*.exe
+      - name: Release
+        if: github.event_name == 'push' && github.ref_type == 'tag'
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ github.ref }}
+          release_name: Release ${{ github.ref }}
+          draft: false
+          prerelease: false
+      - name: Upload Release Asset
+        if: github.event_name == 'push' && github.ref_type == 'tag'
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: src-tauri/target/release/kachina-builder-bundle.exe
+          asset_name: kachina-builder.exe
+          asset_content_type: application/octet-stream
