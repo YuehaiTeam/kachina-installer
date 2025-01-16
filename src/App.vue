@@ -49,7 +49,7 @@
                 margin-left: -6px;
                 padding-top: 2px;
               "
-              v-if="needElevate"
+              v-if="needElevate || INSTALLER_CONFIG.elevated"
             />
             {{ isUpdate ? '更新' : '安装' }}
           </button>
@@ -58,6 +58,15 @@
             class="btn btn-install"
             @click="uninstall"
           >
+            <IconSheild
+              style="
+                width: 20px;
+                margin-right: 6px;
+                margin-left: -6px;
+                padding-top: 2px;
+              "
+              v-if="needElevate || INSTALLER_CONFIG.elevated"
+            />
             卸载
           </button>
         </div>
@@ -377,7 +386,13 @@ import Checkbox from './Checkbox.vue';
 import CircleSuccess from './CircleSuccess.vue';
 import { getCurrentWindow, invoke, listen, sep } from './tauri';
 import { runDfsDownload } from './dfs';
-import { ipc_prepare } from './api/ipc';
+import {
+  ipcCreateLnk,
+  ipcCreateUninstaller,
+  ipcRunUninstall,
+  ipcWriteRegistry,
+  ipPrepare,
+} from './api/ipc';
 import IconSheild from './IconSheild.vue';
 
 const init = ref(false);
@@ -433,6 +448,7 @@ const INSTALLER_CONFIG: InstallerConfig = reactive({
     silent: false,
     online: false,
   },
+  elevated: false,
 });
 
 async function getSource(): Promise<InstallerConfig> {
@@ -455,7 +471,7 @@ async function runInstall(): Promise<void> {
   } else {
     console.log('Local meta found, use local meta');
   }
-  await ipc_prepare(needElevate.value);
+  await ipPrepare(needElevate.value);
   let hashKey = '';
   if (latest_meta.hashed.every((e) => e.md5)) {
     hashKey = 'md5';
@@ -606,44 +622,51 @@ async function finishInstall(
   const { program, desktop, uninstall } = await getLnkPath();
   const exePath = `${source.value}${sep()}${PROJECT_CONFIG.exeName}`;
   if (createLnk.value && !isUpdate.value) {
-    await invokeCreateLnk(exePath, desktop);
+    await ipcCreateLnk(exePath, desktop, needElevate.value);
   }
   if (!isUpdate.value) {
-    await invokeCreateLnk(exePath, program).catch(console.error);
+    await ipcCreateLnk(exePath, program, needElevate.value).catch(
+      console.error,
+    );
   }
   if (
     !isUpdate.value ||
     INSTALLER_CONFIG.install_path_source.startsWith('REG')
   ) {
     try {
-      await invoke('create_uninstaller', {
-        source: source.value,
-        uninstallerName: PROJECT_CONFIG.uninstallName,
-        updaterName: PROJECT_CONFIG.updaterName,
-      });
+      await ipcCreateUninstaller(
+        source.value,
+        PROJECT_CONFIG.uninstallName,
+        PROJECT_CONFIG.updaterName,
+        needElevate.value,
+      );
     } catch (e) {
       error(`创建卸载程序失败: ${e}`, '出错了');
       console.error(e);
     }
     try {
-      await invoke('write_registry', {
-        regName: PROJECT_CONFIG.regName,
-        name: PROJECT_CONFIG.appName,
-        version: latest_meta.tag_name || '0.0',
-        exe: `${source.value}${sep()}${PROJECT_CONFIG.exeName}`,
-        source: source.value,
-        uninstaller: `${source.value}${sep()}${PROJECT_CONFIG.uninstallName}`,
-        metadata: JSON.stringify(latest_meta),
-        size: latest_meta.hashed.reduce((acc, cur) => acc + cur.size, 0),
-        publisher: PROJECT_CONFIG.publisher,
-      });
+      await ipcWriteRegistry(
+        {
+          reg_name: PROJECT_CONFIG.regName,
+          name: PROJECT_CONFIG.appName,
+          version: latest_meta.tag_name || '0.0',
+          exe: `${source.value}${sep()}${PROJECT_CONFIG.exeName}`,
+          source: source.value,
+          uninstaller: `${source.value}${sep()}${PROJECT_CONFIG.uninstallName}`,
+          metadata: JSON.stringify(latest_meta),
+          size: latest_meta.hashed.reduce((acc, cur) => acc + cur.size, 0),
+          publisher: PROJECT_CONFIG.publisher,
+        },
+        needElevate.value,
+      );
     } catch (e) {
       error(`写入注册表失败: ${e}`, '出错了');
       console.error(e);
     }
-    await invokeCreateLnk(
+    await ipcCreateLnk(
       `${source.value}${sep()}${PROJECT_CONFIG.uninstallName}`,
       uninstall,
+      needElevate.value,
     ).catch(console.error);
   }
 }
@@ -756,9 +779,6 @@ async function changeSource() {
     });
     isUpdate.value = hasExePath;
     if (!isEmpty && !hasExePath) {
-      await invoke('ensure_dir', {
-        path: `${result}${sep()}${PROJECT_CONFIG.regName}`,
-      });
       source.value = `${result}${sep()}${PROJECT_CONFIG.regName}`;
     } else {
       source.value = result;
@@ -770,17 +790,13 @@ async function changeSource() {
   }
 }
 
-async function invokeCreateLnk(target: string, lnk: string): Promise<void> {
-  return await invoke('create_lnk', { target, lnk });
-}
-
 async function error(message: string, title = '出错了'): Promise<void> {
   await invoke('error_dialog', { message, title });
 }
 async function uninstall() {
   step.value = 5;
   try {
-    await ipc_prepare(needElevate.value);
+    await ipPrepare(needElevate.value);
     const uninstallConfig = (await invoke(
       'read_uninstall_metadata',
       PROJECT_CONFIG,
@@ -789,23 +805,26 @@ async function uninstall() {
       throw new Error('未找到卸载配置文件，请重新安装后再卸载');
     }
     const { programFolder, desktop } = await getLnkPath();
-    await invoke('run_uninstall', {
-      source: INSTALLER_CONFIG.install_path,
-      files: [
-        ...uninstallConfig.hashed.map((e) => e.file_name),
-        PROJECT_CONFIG.updaterName,
-      ],
-      userDataPath: deleteUserData.value
-        ? PROJECT_CONFIG.userDataPath.map(replacePathEnvirables)
-        : [],
-      extraUninstallPath: [
-        ...(PROJECT_CONFIG.extraUninstallPath?.map(replacePathEnvirables) ||
-          []),
-        programFolder,
-        desktop,
-      ],
-      regName: PROJECT_CONFIG.regName,
-    });
+    await ipcRunUninstall(
+      {
+        source: INSTALLER_CONFIG.install_path,
+        files: [
+          ...uninstallConfig.hashed.map((e) => e.file_name),
+          PROJECT_CONFIG.updaterName,
+        ],
+        user_data_path: deleteUserData.value
+          ? PROJECT_CONFIG.userDataPath.map(replacePathEnvirables)
+          : [],
+        extra_uninstall_path: [
+          ...(PROJECT_CONFIG.extraUninstallPath?.map(replacePathEnvirables) ||
+            []),
+          programFolder,
+          desktop,
+        ],
+        reg_name: PROJECT_CONFIG.regName,
+      },
+      needElevate.value,
+    );
     step.value = 6;
   } catch (e) {
     console.error(e);

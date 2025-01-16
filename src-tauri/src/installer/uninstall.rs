@@ -56,7 +56,6 @@ pub async fn rm_list(key: Vec<PathBuf>) -> Vec<String> {
     errs
 }
 
-#[tauri::command]
 pub async fn clear_empty_dirs(key: String) -> Result<(), String> {
     tokio::task::spawn_blocking(move || {
         let path = Path::new(&key);
@@ -66,6 +65,25 @@ pub async fn clear_empty_dirs(key: String) -> Result<(), String> {
     })
     .await
     .map_err(|e| format!("Failed to clear empty dirs: {:?}", e))?
+}
+
+#[derive(serde::Deserialize, serde::Serialize, Clone, Debug)]
+pub struct RunUninstallArgs {
+    source: String,
+    files: Vec<String>,
+    user_data_path: Vec<String>,
+    extra_uninstall_path: Vec<String>,
+    reg_name: String,
+}
+pub async fn run_uninstall_with_args(args: RunUninstallArgs) -> Result<Vec<String>, String> {
+    run_uninstall(
+        args.source,
+        args.files,
+        args.user_data_path,
+        args.extra_uninstall_path,
+        args.reg_name,
+    )
+    .await
 }
 
 #[tauri::command]
@@ -189,6 +207,16 @@ pub fn delete_self_on_exit() {
         .creation_flags(CREATE_NO_WINDOW.0)
         .spawn()
         .unwrap();
+}
+
+#[derive(serde::Deserialize, serde::Serialize, Clone, Debug)]
+pub struct CreateUninstallerArgs {
+    source: String,
+    uninstaller_name: String,
+    updater_name: String,
+}
+pub async fn create_uninstaller_with_args(args: CreateUninstallerArgs) -> Result<(), String> {
+    create_uninstaller(args.source, args.uninstaller_name, args.updater_name).await
 }
 
 #[tauri::command]

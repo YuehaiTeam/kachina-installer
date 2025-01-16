@@ -1,6 +1,7 @@
 use crate::{
     cli::arg::InstallArgs,
     local::{get_config_from_embedded, get_embedded, Embedded},
+    utils::uac::check_elevated,
 };
 use serde::Serialize;
 use serde_json::Value;
@@ -18,6 +19,7 @@ pub struct InstallerConfig {
     pub enbedded_metadata: Option<Value>,
     pub exe_path: String,
     pub args: crate::cli::arg::InstallArgs,
+    pub elevated: bool,
 }
 
 pub async fn get_config_pre(
@@ -63,6 +65,7 @@ pub async fn get_config_pre(
         enbedded_metadata,
         exe_path,
         args,
+        elevated: check_elevated().unwrap_or(false),
     })
 }
 

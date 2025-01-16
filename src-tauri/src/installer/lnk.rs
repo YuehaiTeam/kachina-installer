@@ -1,6 +1,15 @@
 use std::{ffi::OsString, os::windows::ffi::OsStringExt, path::Path};
 use windows::Win32::UI::Shell::{SHGetFolderPathW, CSIDL_COMMON_PROGRAMS, CSIDL_DESKTOPDIRECTORY};
 
+#[derive(serde::Deserialize, serde::Serialize, Debug, Clone)]
+pub struct CreateLnkArgs {
+    pub target: String,
+    pub lnk: String,
+}
+pub async fn create_lnk_with_args(args: CreateLnkArgs) -> Result<(), String> {
+    create_lnk(args.target, args.lnk).await
+}
+
 #[tauri::command]
 pub async fn create_lnk(target: String, lnk: String) -> Result<(), String> {
     let target = Path::new(&target);

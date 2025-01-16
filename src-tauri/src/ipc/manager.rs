@@ -1,5 +1,6 @@
 use super::operation::run_opr;
 use super::operation::IpcOperation;
+use crate::utils::uac::check_elevated;
 use crate::utils::uac::run_elevated;
 use crate::utils::uac::SendableHandle;
 use std::time::Duration;
@@ -25,6 +26,7 @@ pub struct ManagedElevate {
     mpsc_rx: tokio::sync::RwLock<Option<tokio::sync::mpsc::Receiver<IpcInner>>>,
     broadcast_tx: tokio::sync::broadcast::Sender<serde_json::Value>,
     pipe_id: String,
+    already_elevated: bool,
 }
 
 impl ManagedElevate {
@@ -38,6 +40,7 @@ impl ManagedElevate {
             mpsc_tx,
             mpsc_rx: tokio::sync::RwLock::new(Some(mpsc_rx)),
             pipe_id,
+            already_elevated: check_elevated().unwrap_or(false),
         }
     }
     pub async fn start(&self) -> bool {
@@ -137,7 +140,7 @@ pub async fn managed_operation(
     mgr: tauri::State<'_, ManagedElevate>,
     window: tauri::WebviewWindow,
 ) -> Result<serde_json::Value, String> {
-    if !elevate {
+    if !elevate || mgr.already_elevated {
         return run_opr(ipc, move |opr| {
             let _ = window.emit(&id, opr);
         })

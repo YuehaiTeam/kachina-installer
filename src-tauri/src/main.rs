@@ -87,6 +87,8 @@ async fn tauri_main(args: InstallArgs) {
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
             // things which can be run directly
+            fs::deep_readdir_with_metadata,
+            fs::is_dir_empty,
             dfs::get_dfs,
             dfs::get_dfs_metadata,
             installer::launch_and_exit,
@@ -95,14 +97,6 @@ async fn tauri_main(args: InstallArgs) {
             installer::registry::read_uninstall_metadata,
             installer::select_dir,
             installer::error_dialog,
-            // things which may need uac
-            fs::deep_readdir_with_metadata,
-            fs::is_dir_empty,
-            fs::ensure_dir,
-            installer::lnk::create_lnk,
-            installer::uninstall::create_uninstaller,
-            installer::registry::write_registry,
-            installer::uninstall::run_uninstall,
             // new mamaned operation
             ipc::manager::managed_operation,
         ])

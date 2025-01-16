@@ -92,4 +92,5 @@ interface InstallerConfig {
     online: boolean;
     uninstall: boolean;
   };
+  elevated: boolean;
 }
