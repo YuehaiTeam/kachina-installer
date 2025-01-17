@@ -796,7 +796,6 @@ async function error(message: string, title = '出错了'): Promise<void> {
 async function uninstall() {
   step.value = 5;
   try {
-    await ipPrepare(needElevate.value);
     const uninstallConfig = (await invoke(
       'read_uninstall_metadata',
       PROJECT_CONFIG,
@@ -804,6 +803,7 @@ async function uninstall() {
     if (!uninstallConfig) {
       throw new Error('未找到卸载配置文件，请重新安装后再卸载');
     }
+    await ipPrepare(needElevate.value);
     const { programFolder, desktop } = await getLnkPath();
     await ipcRunUninstall(
       {
