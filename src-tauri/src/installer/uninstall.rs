@@ -137,8 +137,6 @@ pub async fn run_uninstall(
         .replace(tmp_uninstaller_path.to_string_lossy().to_string());
 
     // change cwd to %temp%
-    let temp_dir = std::env::temp_dir();
-    std::env::set_current_dir(&temp_dir).map_err(|e| format!("Failed to set cwd: {:?}", e))?;
     let delete_list = files
         .iter()
         .map(|f| Path::new(source.as_str()).join(f))
