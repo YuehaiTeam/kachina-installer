@@ -62,6 +62,7 @@ interface IpcRunUninstall {
   user_data_path: string[];
   extra_uninstall_path: string[];
   reg_name: string;
+  uninstall_name: string;
 }
 
 export async function ipcCreateLnk(

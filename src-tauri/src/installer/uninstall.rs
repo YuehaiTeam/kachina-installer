@@ -74,6 +74,7 @@ pub struct RunUninstallArgs {
     user_data_path: Vec<String>,
     extra_uninstall_path: Vec<String>,
     reg_name: String,
+    uninstall_name: String,
 }
 pub async fn run_uninstall_with_args(args: RunUninstallArgs) -> Result<Vec<String>, String> {
     run_uninstall(
@@ -82,6 +83,7 @@ pub async fn run_uninstall_with_args(args: RunUninstallArgs) -> Result<Vec<Strin
         args.user_data_path,
         args.extra_uninstall_path,
         args.reg_name,
+        args.uninstall_name,
     )
     .await
 }
@@ -93,6 +95,7 @@ pub async fn run_uninstall(
     user_data_path: Vec<String>,
     extra_uninstall_path: Vec<String>,
     reg_name: String,
+    uninstall_name: String,
 ) -> Result<Vec<String>, String> {
     let exe_path = std::env::current_exe();
     if exe_path.is_err() {
@@ -102,11 +105,10 @@ pub async fn run_uninstall(
         ));
     }
     let exe_path = exe_path.unwrap();
-    let mut tmp_uninstaller_path = exe_path.clone();
     // check if exe_path is in source
     if DELETE_SELF_ON_EXIT_PATH.read().unwrap().is_none() && exe_path.starts_with(&source) {
         let tmp_dir = std::env::temp_dir();
-        tmp_uninstaller_path = tmp_dir.join(format!(
+        let mut tmp_uninstaller_path = tmp_dir.join(format!(
             "kachina.uninst.{}.exe",
             chrono::Utc::now().timestamp()
         ));
@@ -129,19 +131,22 @@ pub async fn run_uninstall(
                 return Err("Insecure uninstall: installer is in root dir".to_string());
             }
         }
+        // write delete_on_exit value
+        DELETE_SELF_ON_EXIT_PATH
+            .write()
+            .unwrap()
+            .replace(tmp_uninstaller_path.to_string_lossy().to_string());
     }
-    // write delete_on_exit value
-    DELETE_SELF_ON_EXIT_PATH
-        .write()
-        .unwrap()
-        .replace(tmp_uninstaller_path.to_string_lossy().to_string());
 
-    // change cwd to %temp%
-    let delete_list = files
+    let mut delete_list = files
         .iter()
         .map(|f| Path::new(source.as_str()).join(f))
         .filter(|f| f.exists() && *f != exe_path)
         .collect::<Vec<_>>();
+    if !exe_path.starts_with(&source) {
+        // external uninstaller
+        delete_list.push(Path::new(&uninstall_name).to_path_buf());
+    }
     let res = rm_list(delete_list).await;
 
     // delete user data

@@ -482,9 +482,10 @@ async function runInstall(): Promise<void> {
   ) {
     console.log('Version update detected');
     if (
-      isUpdate.value ||
-      INSTALLER_CONFIG.args.non_interactive ||
-      (await confirm('当前安装包不是最新版本，是否直接安装最新版本？'))
+      !INSTALLER_CONFIG.args.non_interactive &&
+      !INSTALLER_CONFIG.args.silent &&
+      (isUpdate.value ||
+        (await confirm('当前安装包不是最新版本，是否直接安装最新版本？')))
     ) {
       latest_meta = online_meta;
     }
@@ -843,7 +844,14 @@ async function changeSource() {
 }
 
 async function error(message: string, title = '出错了'): Promise<void> {
-  await invoke('error_dialog', { message, title });
+  await invoke('error_dialog', {
+    message: message.replace(new RegExp(location.origin, 'g'), ''),
+    title,
+  });
+  if (INSTALLER_CONFIG.args.silent) {
+    const win = getCurrentWindow();
+    win.close();
+  }
 }
 async function confirm(message: string, title = '提示'): Promise<boolean> {
   return await invoke<boolean>('confirm_dialog', { message, title });
@@ -877,6 +885,7 @@ async function uninstall() {
           desktop,
         ],
         reg_name: PROJECT_CONFIG.regName,
+        uninstall_name: PROJECT_CONFIG.uninstallName,
       },
       needElevate.value,
     );
