@@ -1,4 +1,4 @@
-export function version_compare(v1: string, v2: string): number {
+export function version_compare(v1 = '0', v2 = '0'): number {
   let i: number;
   let x: number;
   let compare: number = 0;
