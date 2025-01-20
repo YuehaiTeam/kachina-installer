@@ -9,7 +9,7 @@ pub struct InstallArgs {
     #[clap(short = 'I', help = "Non-interactive install")]
     pub non_interactive: bool,
     #[clap(short = 'S', help = "Silent install")]
-    pub slient: bool,
+    pub silent: bool,
     #[clap(short = 'O', help = "Force online install")]
     pub online: bool,
     #[clap(short = 'U', help = "Uninstall")]

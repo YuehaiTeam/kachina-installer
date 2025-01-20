@@ -1,5 +1,9 @@
-use std::{ffi::OsString, os::windows::ffi::OsStringExt, path::Path};
-use windows::Win32::UI::Shell::{SHGetFolderPathW, CSIDL_COMMON_PROGRAMS, CSIDL_DESKTOPDIRECTORY};
+use std::path::Path;
+use windows::Win32::UI::Shell::{
+    FOLDERID_CommonPrograms, FOLDERID_Desktop, FOLDERID_Programs, FOLDERID_PublicDesktop,
+};
+
+use crate::utils::dir::get_dir;
 
 #[derive(serde::Deserialize, serde::Serialize, Debug, Clone)]
 pub struct CreateLnkArgs {
@@ -29,32 +33,14 @@ pub async fn create_lnk(target: String, lnk: String) -> Result<(), String> {
     Ok(())
 }
 
-fn get_start_menu_directory() -> String {
-    let mut path: [u16; 260] = [0; 260];
-    unsafe {
-        let _ = SHGetFolderPathW(None, CSIDL_COMMON_PROGRAMS as i32, None, 0, &mut path);
-    }
-    OsString::from_wide(&path)
-        .to_string_lossy()
-        .as_ref()
-        .trim_end_matches('\0')
-        .to_string()
-}
-
-fn get_desktop_directory() -> String {
-    use windows::Win32::UI::Shell::SHGetFolderPathW;
-    let mut path: [u16; 260] = [0; 260];
-    unsafe {
-        let _ = SHGetFolderPathW(None, CSIDL_DESKTOPDIRECTORY as i32, None, 0, &mut path);
-    }
-    OsString::from_wide(&path)
-        .to_string_lossy()
-        .as_ref()
-        .trim_end_matches('\0')
-        .to_string()
-}
-
 #[tauri::command]
-pub async fn get_dirs() -> Option<(String, String)> {
-    Some((get_start_menu_directory(), get_desktop_directory()))
+pub async fn get_dirs(elevated: bool) -> Result<(String, String), String> {
+    if elevated {
+        Ok((
+            get_dir(&FOLDERID_PublicDesktop)?,
+            get_dir(&FOLDERID_CommonPrograms)?,
+        ))
+    } else {
+        Ok((get_dir(&FOLDERID_Desktop)?, get_dir(&FOLDERID_Programs)?))
+    }
 }

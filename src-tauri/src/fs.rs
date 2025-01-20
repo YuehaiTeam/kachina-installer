@@ -137,7 +137,7 @@ pub async fn create_http_stream(url: &str) -> Result<impl AsyncRead + std::marke
     let stream = futures::TryStreamExt::map_err(res.bytes_stream(), std::io::Error::other);
     let reader = tokio_util::io::StreamReader::new(stream);
     let decoder = TokioZstdDecoder::new(reader);
-    return Ok(decoder);
+    Ok(decoder)
 }
 
 pub async fn create_local_stream(

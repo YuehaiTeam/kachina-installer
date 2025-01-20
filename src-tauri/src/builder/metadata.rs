@@ -90,7 +90,7 @@ pub async fn deep_generate_metadata(source: &PathBuf) -> Result<Vec<Metadata>, S
         let source = source.clone();
         let real_path = source.join(&file.file_name);
         println!("Hashing: {:?}", file.file_name);
-        let hash = run_hash("xxh", &real_path.to_str().unwrap()).await?;
+        let hash = run_hash("xxh", real_path.to_str().unwrap()).await?;
         file.xxh = Some(hash);
     }
     Ok(files)

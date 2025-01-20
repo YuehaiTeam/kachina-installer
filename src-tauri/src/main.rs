@@ -108,6 +108,7 @@ async fn tauri_main(args: InstallArgs) {
             installer::registry::read_uninstall_metadata,
             installer::select_dir,
             installer::error_dialog,
+            installer::confirm_dialog,
             // new mamaned operation
             ipc::manager::managed_operation,
         ])
@@ -161,10 +162,7 @@ async fn tauri_main(args: InstallArgs) {
 }
 
 async fn cli_main(cli: Command) {
-    match cli {
-        Command::InstallWebview2 => cli::install_webview2().await,
-        _ => {}
-    }
+    if let Command::InstallWebview2 = cli { cli::install_webview2().await }
 }
 
 pub fn get_console() {

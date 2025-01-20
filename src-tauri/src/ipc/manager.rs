@@ -29,6 +29,12 @@ pub struct ManagedElevate {
     already_elevated: bool,
 }
 
+impl Default for ManagedElevate {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ManagedElevate {
     pub fn new() -> Self {
         let (broadcast_tx, _broadcast_rx) = tokio::sync::broadcast::channel(100);
@@ -77,7 +83,7 @@ impl ManagedElevate {
             }
             handle_pipe(server, tx, rx).await;
         }
-        return true;
+        true
     }
 }
 
@@ -87,7 +93,7 @@ pub async fn wait_conn(server: &mut NamedPipeServer) -> bool {
         return false;
     }
     println!("Client connected to pipe");
-    return true;
+    true
 }
 pub async fn handle_pipe(
     server: NamedPipeServer,
@@ -102,7 +108,7 @@ pub async fn handle_pipe(
             let mut buf = String::new();
             tokio::select! {
                 v = serverrx.read_line(&mut buf) => {
-                    if let Ok(_) = v {
+                    if v.is_ok() {
                         let res = serde_json::from_str::<serde_json::Value>(&buf);
                         if let Ok(res) = res {
                             let _ = tx.send(res);
@@ -141,10 +147,10 @@ pub async fn managed_operation(
     window: tauri::WebviewWindow,
 ) -> Result<serde_json::Value, String> {
     if !elevate || mgr.already_elevated {
-        return run_opr(ipc, move |opr| {
+        run_opr(ipc, move |opr| {
             let _ = window.emit(&id, opr);
         })
-        .await;
+        .await
     } else {
         if mgr.process.read().await.is_none() {
             println!("Elevate process not started, starting...");
@@ -174,7 +180,7 @@ pub async fn managed_operation(
                 }
             }
         }
-        return Err("Failed to receive response from elevate process".to_string());
+        Err("Failed to receive response from elevate process".to_string())
     }
 }
 
@@ -200,7 +206,7 @@ pub async fn uac_ipc_main(args: crate::cli::arg::UacArgs) {
     if let Err(err) = client {
         rfd::MessageDialog::new()
             .set_title("Elevate Fail")
-            .set_description(&format!("Failed to connect to pipe: {:?}", err))
+            .set_description(format!("Failed to connect to pipe: {:?}", err))
             .show();
         return;
     }

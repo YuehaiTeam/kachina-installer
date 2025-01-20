@@ -12,6 +12,11 @@ type ProjectConfig = {
   title: string;
   description: string;
   windowTitle: string;
+  // UAC 策略
+  // prefer-admin: 除非用户安装在%User%、%AppData%、%Documents%、%Desktop%、%Downloads%目录，都请求UAC
+  // prefer-user: 只在用户没有权限写入的目录请求UAC
+  // force: 强制请求UAC
+  uacStrategy: 'prefer-admin' | 'prefer-user' | 'force';
 };
 
 type InstallStat = {
@@ -63,7 +68,12 @@ type InvokeGetDfsRes = {
 
 type InvokeGetDirsRes = [string, string];
 
-type InvokeSelectDirRes = string | null;
+type InvokeSelectDirRes = {
+  path: string;
+  state: 'Unwritable' | 'Writable' | 'Private';
+  empty: boolean;
+  upgrade: boolean;
+} | null;
 
 interface Embedded {
   name: String;

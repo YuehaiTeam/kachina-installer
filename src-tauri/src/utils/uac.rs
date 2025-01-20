@@ -63,6 +63,6 @@ pub fn run_elevated<S: AsRef<OsStr>, T: AsRef<OsStr>>(
         if process.is_invalid() {
             return Err(std::io::Error::last_os_error());
         };
-        return Ok(SendableHandle(process));
-    };
+        Ok(SendableHandle(process))
+    }
 }

@@ -394,6 +394,7 @@ import {
   ipPrepare,
 } from './api/ipc';
 import IconSheild from './IconSheild.vue';
+import { version_compare } from './utils/version';
 
 const init = ref(false);
 
@@ -430,6 +431,7 @@ const PROJECT_CONFIG: ProjectConfig = reactive({
   title: 'Title',
   description: 'description',
   windowTitle: ' ',
+  uacStrategy: 'prefer-admin',
 });
 
 const INSTALLER_CONFIG: InstallerConfig = reactive({
@@ -458,19 +460,38 @@ async function getSource(): Promise<InstallerConfig> {
 async function runInstall(): Promise<void> {
   step.value = 2;
   let latest_meta = INSTALLER_CONFIG.enbedded_metadata;
-  const online_meta = await invoke<InvokeGetDfsMetadataRes>(
-    'get_dfs_metadata',
-    { prefix: `${PROJECT_CONFIG.dfsPath}` },
-  );
-  if (!latest_meta) {
+  let online_meta: InvokeGetDfsMetadataRes | null = null;
+  try {
+    online_meta = await invoke<InvokeGetDfsMetadataRes>('get_dfs_metadata', {
+      prefix: `${PROJECT_CONFIG.dfsPath}`,
+    });
+  } catch (e) {
+    console.error(e);
+  }
+  if (!latest_meta && !online_meta) {
+    await error('获取更新信息失败，请检查网络连接');
+    step.value = 1;
+    return;
+  } else if (!latest_meta) {
     latest_meta = online_meta;
     console.log('Local meta not found, use online meta');
-  } else if (online_meta.tag_name !== latest_meta.tag_name) {
-    console.log('Version update detected, use online meta');
-    latest_meta = online_meta;
+  } else if (
+    online_meta &&
+    online_meta.tag_name !== latest_meta.tag_name &&
+    version_compare(online_meta.tag_name, latest_meta.tag_name) > 0
+  ) {
+    console.log('Version update detected');
+    if (
+      isUpdate.value ||
+      INSTALLER_CONFIG.args.non_interactive ||
+      (await confirm('当前安装包不是最新版本，是否直接安装最新版本？'))
+    ) {
+      latest_meta = online_meta;
+    }
   } else {
     console.log('Local meta found, use local meta');
   }
+  latest_meta = latest_meta as InvokeGetDfsMetadataRes;
   await ipPrepare(needElevate.value);
   let hashKey = '';
   if (latest_meta.hashed.every((e) => e.md5)) {
@@ -607,7 +628,9 @@ async function runInstall(): Promise<void> {
 }
 
 async function getLnkPath() {
-  const [program, desktop] = await invoke<InvokeGetDirsRes>('get_dirs');
+  const [program, desktop] = await invoke<InvokeGetDirsRes>('get_dirs',{
+    elevated: needElevate.value,
+  });
   return {
     programFolder: `${program}${sep()}${PROJECT_CONFIG.appName}`,
     program: `${program}${sep()}${PROJECT_CONFIG.appName}${sep()}${PROJECT_CONFIG.appName}.lnk`,
@@ -694,10 +717,19 @@ onMounted(async () => {
   }
   const rsrc = await getSource();
   console.log('INSTALLER_CONFIG: ', rsrc);
+  Object.assign(INSTALLER_CONFIG, rsrc);
+  source.value = INSTALLER_CONFIG.args.target || INSTALLER_CONFIG.install_path;
+  const seldir = await invoke<InvokeSelectDirRes>('select_dir', {
+    exeName: PROJECT_CONFIG.exeName,
+    silent: true,
+    path: source.value,
+  });
+  if (seldir) {
+    setUacByState(seldir.state, PROJECT_CONFIG.uacStrategy);
+  }
   if (!rsrc.args.silent) {
     await win.show();
   }
-  Object.assign(INSTALLER_CONFIG, rsrc);
   if (INSTALLER_CONFIG.embedded_config) {
     Object.assign(PROJECT_CONFIG, INSTALLER_CONFIG.embedded_config);
     if (process.env.NODE_ENV === 'development') {
@@ -717,7 +749,6 @@ onMounted(async () => {
     win.close();
     return;
   }
-  source.value = INSTALLER_CONFIG.args.target || INSTALLER_CONFIG.install_path;
   if (INSTALLER_CONFIG.install_path_exists) isUpdate.value = true;
   await win.setTitle(PROJECT_CONFIG.windowTitle);
   INSTALLER_CONFIG.is_uninstall =
@@ -769,19 +800,27 @@ async function exit() {
 
 async function changeSource() {
   try {
-    const result = await invoke<InvokeSelectDirRes>('select_dir', {
+    const seldir = await invoke<InvokeSelectDirRes>('select_dir', {
       path: source.value,
+      exeName: PROJECT_CONFIG.exeName,
+      silent: false,
     });
-    if (result === null) return;
-    const [isEmpty, hasExePath] = await invoke<boolean[]>('is_dir_empty', {
-      path: result,
-      ...PROJECT_CONFIG,
-    });
-    isUpdate.value = hasExePath;
-    if (!isEmpty && !hasExePath) {
-      source.value = `${result}${sep()}${PROJECT_CONFIG.regName}`;
+    if (seldir === null) return;
+    console.log('SELECT_DIR: ', seldir);
+    setUacByState(seldir.state, PROJECT_CONFIG.uacStrategy);
+    isUpdate.value = seldir.upgrade;
+    if (!seldir.empty && !seldir.upgrade) {
+      const confirmRes = await confirm(
+        '当前目录不为空，是仍要继续？按【否】将创建一层新目录。',
+        '提示',
+      );
+      if (!confirmRes) {
+        source.value = `${seldir.path}${sep()}${PROJECT_CONFIG.appName}`;
+      } else {
+        source.value = seldir.path;
+      }
     } else {
-      source.value = result;
+      source.value = seldir.path;
     }
   } catch (e) {
     if (e instanceof Error) await error(e.stack || e.toString());
@@ -792,6 +831,9 @@ async function changeSource() {
 
 async function error(message: string, title = '出错了'): Promise<void> {
   await invoke('error_dialog', { message, title });
+}
+async function confirm(message: string, title = '提示'): Promise<boolean> {
+  return await invoke<boolean>('confirm_dialog', { message, title });
 }
 async function uninstall() {
   step.value = 5;
@@ -845,5 +887,22 @@ function replacePathEnvirables(path: string): string {
     INSTALL_PATH: INSTALLER_CONFIG.install_path,
     APP_NAME: PROJECT_CONFIG.appName,
   });
+}
+function setUacByState(
+  state: 'Unwritable' | 'Writable' | 'Private',
+  uacStrategy: ProjectConfig['uacStrategy'],
+) {
+  needElevate.value = false;
+  switch (uacStrategy) {
+    case 'force':
+      needElevate.value = true;
+      break;
+    case 'prefer-admin':
+      needElevate.value = state !== 'Private';
+      break;
+    case 'prefer-user':
+      needElevate.value = state === 'Unwritable';
+      break;
+  }
 }
 </script>

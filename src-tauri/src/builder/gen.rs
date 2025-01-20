@@ -94,7 +94,7 @@ pub async fn gen_cli(args: GenArgs) {
                         continue;
                     }
                     // file found, hash it
-                    let old_hash = run_hash("xxh", &diff_file.to_str().unwrap())
+                    let old_hash = run_hash("xxh", diff_file.to_str().unwrap())
                         .await
                         .expect("failed to hash diff file");
                     if old_hash == *file.xxh.as_ref().unwrap() {
