@@ -52,6 +52,11 @@ type InvokeGetDfsMetadataRes = {
   tag_name: string;
   hashed: Array<DfsMetadataHashInfo>;
   patches?: Array<DfsMetadataPatchInfo>;
+  installer?: {
+    size: number;
+    md5?: string;
+    xxh?: string;
+  };
 };
 
 type InvokeDeepReaddirWithMetadataRes = Array<{

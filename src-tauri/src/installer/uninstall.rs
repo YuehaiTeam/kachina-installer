@@ -234,8 +234,8 @@ pub async fn create_uninstaller(
         ));
     }
     let current_exe_path = current_exe_path.unwrap();
-    let updater_is_self = true; // tbd, so always trust the updater is newer
-    if updater_path.exists() && updater_is_self {
+    let updater_is_self = current_exe_path == updater_path;
+    if updater_path.exists() && !updater_is_self {
         let res = tokio::fs::copy(&current_exe_path, &updater_path).await;
         if res.is_err() {
             return Err(format!("Failed to create updater: {:?}", res.err()));

@@ -492,6 +492,15 @@ async function runInstall(): Promise<void> {
     console.log('Local meta found, use local meta');
   }
   latest_meta = latest_meta as InvokeGetDfsMetadataRes;
+  if (isUpdate && latest_meta.installer) {
+    const installerMeta: DfsMetadataHashInfo = {
+      file_name: PROJECT_CONFIG.updaterName,
+      size: latest_meta.installer.size,
+      md5: latest_meta.installer.md5,
+      xxh: latest_meta.installer.xxh,
+    };
+    latest_meta.hashed.push(installerMeta);
+  }
   await ipPrepare(needElevate.value);
   let hashKey = '';
   if (latest_meta.hashed.every((e) => e.md5)) {
@@ -628,7 +637,7 @@ async function runInstall(): Promise<void> {
 }
 
 async function getLnkPath() {
-  const [program, desktop] = await invoke<InvokeGetDirsRes>('get_dirs',{
+  const [program, desktop] = await invoke<InvokeGetDirsRes>('get_dirs', {
     elevated: needElevate.value,
   });
   return {
