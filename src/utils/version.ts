@@ -1,7 +1,17 @@
-export function version_compare(v1 = '0', v2 = '0'): number {
+export function version_compare(v1 = '', v2 = ''): number {
   let i: number;
   let x: number;
   let compare: number = 0;
+
+  if (!v1 && !v2) {
+    return 0;
+  }
+  if (!v1) {
+    return -1;
+  }
+  if (!v2) {
+    return 1;
+  }
 
   const vm: { [key: string]: number } = {
     dev: -6,
