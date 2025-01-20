@@ -779,7 +779,11 @@ onMounted(async () => {
   }
   init.value = true;
   if (INSTALLER_CONFIG.args.silent || INSTALLER_CONFIG.args.non_interactive) {
-    install();
+    if (INSTALLER_CONFIG.args.uninstall || INSTALLER_CONFIG.is_uninstall) {
+      uninstall();
+    } else {
+      install();
+    }
   }
 });
 

@@ -37,10 +37,10 @@ pub async fn create_lnk(target: String, lnk: String) -> Result<(), String> {
 pub async fn get_dirs(elevated: bool) -> Result<(String, String), String> {
     if elevated {
         Ok((
-            get_dir(&FOLDERID_PublicDesktop)?,
             get_dir(&FOLDERID_CommonPrograms)?,
+            get_dir(&FOLDERID_PublicDesktop)?,
         ))
     } else {
-        Ok((get_dir(&FOLDERID_Desktop)?, get_dir(&FOLDERID_Programs)?))
+        Ok((get_dir(&FOLDERID_Programs)?, get_dir(&FOLDERID_Desktop)?))
     }
 }
