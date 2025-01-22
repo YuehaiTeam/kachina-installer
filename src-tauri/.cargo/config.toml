@@ -1,0 +1,7 @@
+[target.'cfg(all(windows, target_env = "msvc"))']
+rustflags = [
+    "-C",
+    "target-feature=+crt-static",
+    "-C",
+    "link-args=/NODEFAULTLIB:ucrt.lib /NODEFAULTLIB:libucrtd.lib /NODEFAULTLIB:ucrtd.lib /NODEFAULTLIB:libcmtd.lib /NODEFAULTLIB:msvcrt.lib /NODEFAULTLIB:msvcrtd.lib /NODEFAULTLIB:libvcruntimed.lib /NODEFAULTLIB:vcruntime.lib /NODEFAULTLIB:vcruntimed.lib /DEFAULTLIB:libucrt.lib /DEFAULTLIB:libvcruntime.lib /DEFAULTLIB:libcmt.lib  /DEFAULTLIB:msvcrt.lib  /DEFAULTLIB:ucrt.lib /DEFAULTLIB:oldnames.lib /DEFAULTLIB:legacy_stdio_definitions.lib",
+]

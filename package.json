@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "tauri dev --exit-on-panic",
-    "build": "tauri build && cd src-tauri/target/release && copy /b kachina-builder.exe+kachina-installer.exe kachina-builder-bundle.exe",
+    "build": "cross-env STATIC_VCRUNTIME=false tauri build && cd src-tauri/target/release && copy /b kachina-builder.exe+kachina-installer.exe kachina-builder-bundle.exe",
     "debug": "tauri build --debug && pnpm dev:uac",
     "preview": "rsbuild preview",
     "tauri": "tauri"
@@ -25,6 +25,7 @@
     "@types/async": "^3.2.24",
     "@types/uuid": "^10.0.0",
     "compression-webpack-plugin": "^11.1.0",
+    "cross-env": "^7.0.3",
     "eslint": "^9.12.0",
     "globals": "^15.11.0",
     "prettier": "^3.3.3",
