@@ -702,6 +702,10 @@ async function finishInstall(
       needElevate.value,
     ).catch(console.error);
   }
+  if (INSTALLER_CONFIG.args.silent) {
+    const win = getCurrentWindow();
+    win.close();
+  }
 }
 
 async function install(): Promise<void> {
@@ -890,6 +894,10 @@ async function uninstall() {
       needElevate.value,
     );
     step.value = 6;
+    if (INSTALLER_CONFIG.args.silent) {
+      const win = getCurrentWindow();
+      win.close();
+    }
   } catch (e) {
     console.error(e);
     if (e instanceof Error) await error(e.stack || e.toString());

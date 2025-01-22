@@ -145,7 +145,7 @@ pub async fn run_uninstall(
         .collect::<Vec<_>>();
     if !exe_path.starts_with(&source) {
         // external uninstaller
-        delete_list.push(Path::new(&uninstall_name).to_path_buf());
+        delete_list.push(Path::new(source.as_str()).join(uninstall_name));
     }
     let res = rm_list(delete_list).await;
 
