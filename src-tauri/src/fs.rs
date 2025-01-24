@@ -300,3 +300,32 @@ where
     }
     Ok(diff_size)
 }
+
+pub async fn verify_hash(
+    target: &str,
+    md5: Option<String>,
+    xxh: Option<String>,
+) -> Result<(), String> {
+    let alg = if md5.is_some() {
+        "md5"
+    } else if xxh.is_some() {
+        "xxh"
+    } else {
+        return Err("No hash provided".to_string());
+    };
+    let expected = if let Some(md5) = md5 {
+        md5
+    } else if let Some(xxh) = xxh {
+        xxh
+    } else {
+        return Err("No hash provided".to_string());
+    };
+    let hash = run_hash(alg, target).await?;
+    if hash != expected {
+        return Err(format!(
+            "File {} hash mismatch: expected {}, got {}",
+            target, expected, hash
+        ));
+    }
+    Ok(())
+}

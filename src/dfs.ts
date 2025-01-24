@@ -80,7 +80,10 @@ export const runDfsDownload = async (
     );
     if (hasLocalFile && !disable_local) {
       await ipc(
-        InstallFile(hasLocalFile, source + filename_with_first_slash),
+        InstallFile(hasLocalFile, source + filename_with_first_slash, {
+          md5: item.md5,
+          xxh: item.xxh,
+        }),
         elevate,
         onProgress,
       );
@@ -100,6 +103,10 @@ export const runDfsDownload = async (
           url,
           item.lpatch?.size as number,
           source + filename_with_first_slash,
+          {
+            md5: item.md5,
+            xxh: item.xxh,
+          },
         ),
         elevate,
         onProgress,
@@ -109,7 +116,15 @@ export const runDfsDownload = async (
       const url = await getDfsUrl(hash);
       console.log('>PATCH', filename_with_first_slash, item.patch, url);
       await ipc(
-        InstallFile(url, source + filename_with_first_slash, item.patch.size),
+        InstallFile(
+          url,
+          source + filename_with_first_slash,
+          {
+            md5: item.md5,
+            xxh: item.xxh,
+          },
+          item.patch.size,
+        ),
         elevate,
         onProgress,
       );
@@ -118,7 +133,10 @@ export const runDfsDownload = async (
       const url = await getDfsUrl(hash);
       console.log('>DOWNLOAD', filename_with_first_slash, url);
       await ipc(
-        InstallFile(url, source + filename_with_first_slash),
+        InstallFile(url, source + filename_with_first_slash, {
+          md5: item.md5,
+          xxh: item.xxh,
+        }),
         elevate,
         onProgress,
       );

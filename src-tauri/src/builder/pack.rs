@@ -1,6 +1,6 @@
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 
-use crate::{cli::PackArgs, local::get_reader_for_bundle};
+use crate::{cli::PackArgs, local::get_reader_for_bundle, metadata::RepoMetadata};
 
 pub struct PackFile {
     pub name: String,
@@ -10,7 +10,7 @@ pub struct PackFile {
 
 pub struct PackConfig {
     pub config: serde_json::Value,
-    pub metadata: Option<serde_json::Value>,
+    pub metadata: Option<RepoMetadata>,
     pub image: Option<PackFile>,
     pub files: Vec<PackFile>,
 }
@@ -49,7 +49,7 @@ pub async fn pack_cli(args: PackArgs) {
             return;
         }
         let metadataf = metadataf.unwrap();
-        let json = serde_json::from_slice(&metadataf);
+        let json = serde_json::from_slice::<RepoMetadata>(&metadataf);
         if json.is_err() {
             eprintln!("Failed to parse metadata: {:?}", json.err());
             return;
@@ -81,27 +81,48 @@ pub async fn pack_cli(args: PackArgs) {
     let data_dir = args.data_dir;
     let mut files = vec![];
     if let Some(data_dir) = data_dir {
-        let entries = tokio::fs::read_dir(data_dir).await;
-        if entries.is_err() {
-            eprintln!("Failed to read data dir: {:?}", entries.err());
-            return;
-        }
-        let mut entries = entries.unwrap();
-        while let Some(entry) = entries.next_entry().await.unwrap() {
-            let path = entry.path();
-            let name = path.file_name().unwrap().to_str().unwrap().to_string();
-            // ignore if name includes '_'
-            if name.contains('_') {
-                continue;
+        if let Some(metadata) = metadata.as_ref() {
+            if let Some(hashed) = metadata.hashed.as_ref() {
+                for file in hashed.iter() {
+                    let path = data_dir.join(&file.file_name);
+                    let size = tokio::fs::metadata(&path).await.unwrap().len() as usize;
+                    let f = tokio::fs::File::open(path).await;
+                    if f.is_err() {
+                        eprintln!("Failed to open file {}: {:?}", file.file_name, f.err());
+                        return;
+                    }
+                    let data = Box::new(f.unwrap()) as Box<dyn AsyncRead + Unpin + Send>;
+                    files.push(PackFile {
+                        name: file.file_name.clone(),
+                        size,
+                        data,
+                    });
+                }
             }
-            let size = tokio::fs::metadata(&path).await.unwrap().len() as usize;
-            let f = tokio::fs::File::open(path).await;
-            if f.is_err() {
-                eprintln!("Failed to open file {}: {:?}", name, f.err());
+        } else {
+            // if no metadata set, just pack all files without '_'
+            let entries = tokio::fs::read_dir(data_dir).await;
+            if entries.is_err() {
+                eprintln!("Failed to read data dir: {:?}", entries.err());
                 return;
             }
-            let data = Box::new(f.unwrap()) as Box<dyn AsyncRead + Unpin + Send>;
-            files.push(PackFile { name, size, data });
+            let mut entries = entries.unwrap();
+            while let Some(entry) = entries.next_entry().await.unwrap() {
+                let path = entry.path();
+                let name = path.file_name().unwrap().to_str().unwrap().to_string();
+                // ignore if name includes '_'
+                if name.contains('_') {
+                    continue;
+                }
+                let size = tokio::fs::metadata(&path).await.unwrap().len() as usize;
+                let f = tokio::fs::File::open(path).await;
+                if f.is_err() {
+                    eprintln!("Failed to open file {}: {:?}", name, f.err());
+                    return;
+                }
+                let data = Box::new(f.unwrap()) as Box<dyn AsyncRead + Unpin + Send>;
+                files.push(PackFile { name, size, data });
+            }
         }
     }
     let config = PackConfig {
@@ -112,7 +133,7 @@ pub async fn pack_cli(args: PackArgs) {
     };
     let output = tokio::fs::File::create(args.output).await.unwrap();
     println!(
-        "Packing: image: {:?}, metadata: {:?}, files: {}",
+        "Packing: metadata: {:?}, image: {:?}, files: {}",
         config.metadata.is_some(),
         config.image.is_some(),
         config.files.len()
@@ -153,8 +174,9 @@ pub async fn pack(
         }
     }
     // if metadata exists, write metadata
-    if let Some(mut metadata) = config.metadata {
+    if let Some(metadata) = config.metadata {
         println!("Writing metadata...");
+        let mut metadata = serde_json::json!(metadata);
         metadata.sort_all_objects();
         let metadata_bytes = serde_json::to_string(&metadata).unwrap();
         let metadata_bytes = metadata_bytes.as_bytes();

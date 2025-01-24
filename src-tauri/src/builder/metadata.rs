@@ -33,6 +33,13 @@ pub struct PatchInfo {
 }
 
 #[derive(Serialize, Deserialize, Debug)]
+pub struct InstallerInfo {
+    pub size: u64,
+    pub md5: Option<String>,
+    pub xxh: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
 pub struct RepoMetadata {
     pub repo_name: String,
     pub tag_name: String,
@@ -42,6 +49,8 @@ pub struct RepoMetadata {
     pub hashed: Option<Vec<Metadata>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub patches: Option<Vec<PatchInfo>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub installer: Option<InstallerInfo>,
 }
 
 pub async fn deep_generate_metadata(source: &PathBuf) -> Result<Vec<Metadata>, String> {

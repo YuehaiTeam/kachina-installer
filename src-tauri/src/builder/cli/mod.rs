@@ -35,6 +35,8 @@ pub struct GenArgs {
     pub diff_vers: Option<Vec<String>>,
     #[clap(long, short = 'x')]
     pub diff_ignore: Option<Vec<String>>,
+    #[clap(long, short = 'u')]
+    pub updater: Option<PathBuf>,
 }
 
 #[derive(Subcommand, Clone, Debug)]

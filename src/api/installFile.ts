@@ -14,6 +14,8 @@ type InstallFileMode =
 interface InstallFileArgs {
   mode: InstallFileMode;
   target: string;
+  xxh?: string;
+  md5?: string;
   type: 'InstallFile';
 }
 
@@ -25,6 +27,10 @@ interface InstallFileArgs {
 export function InstallFile(
   source: InstallFileSource,
   target: string,
+  hash: {
+    xxh?: string;
+    md5?: string;
+  },
   diff_size?: number,
 ): InstallFileArgs {
   let mode: InstallFileMode;
@@ -33,7 +39,7 @@ export function InstallFile(
   } else {
     mode = { type: 'Patch', source, diff_size };
   }
-  return { mode, target, type: 'InstallFile' };
+  return { mode, target, type: 'InstallFile', ...hash };
 }
 
 /**
@@ -48,6 +54,10 @@ export function hybridPatch(
   diff_url: string,
   diff_size: number,
   target: string,
+  hash: {
+    xxh?: string;
+    md5?: string;
+  },
 ): InstallFileArgs {
   const mode: InstallFileMode = {
     type: 'HybridPatch',
@@ -57,5 +67,5 @@ export function hybridPatch(
     source_size: source.size,
   };
 
-  return { mode, target, type: 'InstallFile' };
+  return { mode, target, type: 'InstallFile', ...hash };
 }

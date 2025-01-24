@@ -1,6 +1,6 @@
 use crate::fs::{
     create_http_stream, create_local_stream, create_target_file, prepare_target, progressed_copy,
-    progressed_hpatch,
+    progressed_hpatch, verify_hash,
 };
 #[derive(serde::Deserialize, serde::Serialize, Clone, Debug)]
 #[serde(untagged)]
@@ -31,6 +31,8 @@ enum InstallFileMode {
 pub struct InstallFileArgs {
     mode: InstallFileMode,
     target: String,
+    md5: Option<String>,
+    xxh: Option<String>,
 }
 async fn create_stream_by_source(
     source: InstallFileSource,
@@ -59,6 +61,7 @@ pub async fn ipc_install_file(
                 progress_noti,
             )
             .await?;
+            verify_hash(&target, args.md5, args.xxh).await?;
             Ok(serde_json::json!(res))
         }
         InstallFileMode::Patch { source, diff_size } => {
@@ -69,6 +72,7 @@ pub async fn ipc_install_file(
                 progress_noti,
             )
             .await?;
+            verify_hash(&target, args.md5, args.xxh).await?;
             Ok(serde_json::json!(res))
         }
         InstallFileMode::HybridPatch {
@@ -89,6 +93,7 @@ pub async fn ipc_install_file(
                 |_| {},
             )
             .await?;
+            verify_hash(&target, args.md5, args.xxh).await?;
             Ok(serde_json::json!(()))
         }
     }

@@ -6,15 +6,39 @@ use tokio::io::AsyncWriteExt;
 
 use crate::{
     cli::GenArgs,
-    metadata::{deep_generate_metadata, PatchInfo, PatchItem, RepoMetadata},
+    metadata::{deep_generate_metadata, InstallerInfo, PatchInfo, PatchItem, RepoMetadata},
     utils::hash::run_hash,
 };
 
 pub async fn gen_cli(args: GenArgs) {
+    // ensure output_dir
+    println!("Creating output directory...");
+    let _ = tokio::fs::create_dir_all(&args.output_dir).await;
+    // hash updater
+    let mut installer = None;
+    if let Some(updater) = args.updater.as_ref() {
+        println!("Hashing updater...");
+        let hash = run_hash("xxh", updater.to_str().unwrap())
+            .await
+            .expect("failed to hash updater");
+        let size = tokio::fs::metadata(updater)
+            .await
+            .expect("failed to get updater size")
+            .len();
+        installer = Some(InstallerInfo {
+            size,
+            md5: None,
+            xxh: Some(hash),
+        });
+    }
     println!("Generating metadata...");
-    let metadata = deep_generate_metadata(&args.input_dir)
+    let mut metadata = deep_generate_metadata(&args.input_dir)
         .await
         .expect("failed to generate metadata");
+    if let Some(installer) = installer.as_ref() {
+        // remove updater from metadata
+        metadata.retain(|x| x.xxh.as_ref().unwrap() != installer.xxh.as_ref().unwrap());
+    }
     println!("Writting metadata to {:?}", args.output_metadata);
     let mut repometa = RepoMetadata {
         repo_name: args.repo,
@@ -22,14 +46,13 @@ pub async fn gen_cli(args: GenArgs) {
         assets: None,
         hashed: Some(metadata.clone()),
         patches: None,
+        installer,
     };
     let metadata_str = serde_json::to_string(&repometa).expect("failed to serialize metadata");
     tokio::fs::write(&args.output_metadata, metadata_str)
         .await
         .expect("failed to write metadata");
     println!("Compressing files...");
-    // ensure output_dir
-    let _ = tokio::fs::create_dir_all(&args.output_dir).await;
     // loop through files in metadata
     for file in metadata.iter() {
         // copy file to output_dir
@@ -54,6 +77,29 @@ pub async fn gen_cli(args: GenArgs) {
                 )],
             );
         let mut writer = tokio::fs::File::create(output_path).await.unwrap();
+        tokio::io::copy(&mut encoder, &mut writer)
+            .await
+            .expect("failed to compress file");
+    }
+    // compress and copy installer
+    if let Some(installer) = repometa.installer.as_ref() {
+        let output_path = args.output_dir.join(installer.xxh.as_ref().unwrap());
+        println!("Compressing installer to {:?}", output_path);
+        let reader = tokio::fs::File::open(args.updater.as_ref().unwrap())
+            .await
+            .expect("failed to open installer");
+        let reader = tokio::io::BufReader::new(reader);
+        let mut encoder: ZstdEncoder<tokio::io::BufReader<tokio::fs::File>> =
+            ZstdEncoder::with_quality_and_params(
+                reader,
+                async_compression::Level::Best,
+                &[async_compression::zstd::CParameter::nb_workers(
+                    num_cpus::get() as u32,
+                )],
+            );
+        let mut writer = tokio::fs::File::create(output_path)
+            .await
+            .expect("failed to create file");
         tokio::io::copy(&mut encoder, &mut writer)
             .await
             .expect("failed to compress file");
