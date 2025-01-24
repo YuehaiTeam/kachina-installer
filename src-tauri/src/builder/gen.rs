@@ -2,15 +2,19 @@ use std::path::Path;
 
 use async_compression::tokio::bufread::ZstdEncoder;
 use hdiff_sys::safe_create_single_patch;
-use tokio::io::AsyncWriteExt;
+use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
+use tokio::{io::AsyncWriteExt, task::JoinSet};
 
 use crate::{
     cli::GenArgs,
     metadata::{deep_generate_metadata, InstallerInfo, PatchInfo, PatchItem, RepoMetadata},
-    utils::hash::run_hash,
+    utils::{hash::run_hash, progressed_read::ReadWithCallback},
 };
 
 pub async fn gen_cli(args: GenArgs) {
+    let pb_style = ProgressStyle::with_template("[{elapsed_precise}] {bar:20.cyan/blue} {msg} ")
+        .unwrap()
+        .progress_chars("##-");
     // ensure output_dir
     println!("Creating output directory...");
     let _ = tokio::fs::create_dir_all(&args.output_dir).await;
@@ -53,34 +57,98 @@ pub async fn gen_cli(args: GenArgs) {
         .await
         .expect("failed to write metadata");
     println!("Compressing files...");
-    // loop through files in metadata
-    for file in metadata.iter() {
-        // copy file to output_dir
-        let file_path = args.input_dir.join(&file.file_name);
-        let hash = if file.xxh.is_some() {
-            file.xxh.as_ref().unwrap()
-        } else if file.md5.is_some() {
-            file.md5.as_ref().unwrap()
-        } else {
-            panic!("file has no hash");
-        };
-        let output_path = args.output_dir.join(hash);
-        println!("Compressing {:?} to {:?}", file_path, output_path);
-        let reader = tokio::fs::File::open(file_path).await.unwrap();
-        let reader = tokio::io::BufReader::new(reader);
-        let mut encoder: ZstdEncoder<tokio::io::BufReader<tokio::fs::File>> =
-            ZstdEncoder::with_quality_and_params(
-                reader,
-                async_compression::Level::Best,
-                &[async_compression::zstd::CParameter::nb_workers(
-                    num_cpus::get() as u32,
-                )],
-            );
-        let mut writer = tokio::fs::File::create(output_path).await.unwrap();
-        tokio::io::copy(&mut encoder, &mut writer)
-            .await
-            .expect("failed to compress file");
+    let multi_pg = MultiProgress::new();
+
+    // create a progress bar to track overall status
+    let pb_main = multi_pg.add(ProgressBar::new(metadata.len() as u64));
+    pb_main.set_style(pb_style.clone());
+    pb_main.set_message("total  ");
+
+    // Make the main progress bar render immediately rather than waiting for the
+    // first task to finish.
+    pb_main.tick();
+
+    // tokio::task::JoinSet
+    // setup the JoinSet to manage the join handles for our futures
+    let mut set = JoinSet::new();
+
+    let mut last_item = false;
+
+    // iterate over our downloads vec and
+    // spawn a background task for each download (do_stuff)
+    // Does not spawn more tasks than MAX_CONCURRENT "allows"
+    for (index, file) in metadata.iter().enumerate() {
+        if index == metadata.len() - 1 {
+            last_item = true;
+        }
+
+        // create a progress bar for each download and set the style
+        // using insert_before() so that pb_main stays below the other progress bars
+        let pb_task = multi_pg.insert_before(&pb_main, ProgressBar::new(file.size));
+        pb_task.set_style(pb_style.clone());
+
+        // spawns a background task immediatly no matter if the future is awaited
+        // https://docs.rs/tokio/latest/tokio/task/struct.JoinSet.html#method.spawn
+        let file = file.clone();
+        let output = args.output_dir.clone();
+        let input: std::path::PathBuf = args.input_dir.clone();
+        set.spawn(tokio::task::spawn_blocking(|| {
+            // create new tokio runtime for each task
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            rt.block_on(async move {
+                let display_name = file.file_name.clone().replace("\\", "/");
+                // copy file to output_dir
+                let file_path = input.join(&file.file_name);
+                let hash = if file.xxh.is_some() {
+                    file.xxh.as_ref().unwrap()
+                } else if file.md5.is_some() {
+                    file.md5.as_ref().unwrap()
+                } else {
+                    panic!("file has no hash");
+                };
+                let output_path = output.join(hash);
+                pb_task.set_message(format!("     {:?}", display_name));
+                let task_ = pb_task.clone();
+                let reader = tokio::fs::File::open(file_path).await.unwrap();
+                let reader = ReadWithCallback {
+                    reader,
+                    callback: move |chunk| {
+                        task_.inc(chunk as u64);
+                    },
+                };
+                let reader = tokio::io::BufReader::new(reader);
+                let mut encoder = ZstdEncoder::with_quality_and_params(
+                    reader,
+                    async_compression::Level::Best,
+                    &[async_compression::zstd::CParameter::nb_workers(
+                        num_cpus::get() as u32,
+                    )],
+                );
+                let mut writer = tokio::fs::File::create(output_path).await.unwrap();
+                tokio::io::copy(&mut encoder, &mut writer)
+                    .await
+                    .expect("failed to compress file");
+                pb_task.finish_with_message(format!("DONE {:?}", display_name));
+            });
+        }));
+
+        // when limit is reached, wait until a running task finishes
+        // await the future (join_next().await) and get the execution result
+        // here result would be a download id(u64), as you can see in signature of do_stuff
+        while set.len() >= 3 || last_item {
+            match set.join_next().await {
+                Some(_res) => {}
+                None => {
+                    break;
+                }
+            };
+            pb_main.inc(1);
+        }
     }
+    pb_main.finish_with_message("Compression finished");
     // compress and copy installer
     if let Some(installer) = repometa.installer.as_ref() {
         let output_path = args.output_dir.join(installer.xxh.as_ref().unwrap());

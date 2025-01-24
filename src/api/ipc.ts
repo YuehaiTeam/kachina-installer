@@ -9,7 +9,7 @@ export async function ipc<T extends { type: string }, E, Z>(
 ): Promise<E> {
   let id = uuid();
   let unlisten = await listen<Z>(id, onProgress || (() => {}));
-  let res: E;
+  let res: { Ok: E } | { Err: string } | E;
   try {
     res = await invoke('managed_operation', {
       ipc: arg,
@@ -21,7 +21,17 @@ export async function ipc<T extends { type: string }, E, Z>(
     unlisten();
     throw e;
   }
-  return res;
+  if (
+    !res ||
+    typeof res !== 'object' ||
+    (!('Ok' in (res as {})) && !('Err' in (res as {})))
+  ) {
+    return res as E;
+  }
+  if (res && typeof res === 'object' && 'Err' in res) {
+    throw new Error(res.Err);
+  }
+  return (res as { Ok: E }).Ok;
 }
 
 export async function ipPrepare(elevate = false) {

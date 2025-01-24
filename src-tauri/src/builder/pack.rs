@@ -84,16 +84,24 @@ pub async fn pack_cli(args: PackArgs) {
         if let Some(metadata) = metadata.as_ref() {
             if let Some(hashed) = metadata.hashed.as_ref() {
                 for file in hashed.iter() {
-                    let path = data_dir.join(&file.file_name);
+                    let hash = if file.md5.is_some() {
+                        file.md5.as_ref().unwrap()
+                    } else if file.xxh.is_some() {
+                        file.xxh.as_ref().unwrap()
+                    } else {
+                        eprintln!("No hash found for file: {:?}", file.file_name);
+                        return;
+                    };
+                    let path = data_dir.join(&hash);
                     let size = tokio::fs::metadata(&path).await.unwrap().len() as usize;
                     let f = tokio::fs::File::open(path).await;
                     if f.is_err() {
-                        eprintln!("Failed to open file {}: {:?}", file.file_name, f.err());
+                        eprintln!("Failed to open file {}: {:?}", hash, f.err());
                         return;
                     }
                     let data = Box::new(f.unwrap()) as Box<dyn AsyncRead + Unpin + Send>;
                     files.push(PackFile {
-                        name: file.file_name.clone(),
+                        name: hash.clone(),
                         size,
                         data,
                     });

@@ -134,6 +134,10 @@ pub async fn create_http_stream(url: &str) -> Result<impl AsyncRead + std::marke
         return Err(format!("Failed to send http request: {:?}", res.err()));
     }
     let res = res.unwrap();
+    let code = res.status();
+    if code != 200 {
+        return Err(format!("Failed to download: URL {} returned {}", url, code));
+    }
     let stream = futures::TryStreamExt::map_err(res.bytes_stream(), std::io::Error::other);
     let reader = tokio_util::io::StreamReader::new(stream);
     let decoder = TokioZstdDecoder::new(reader);

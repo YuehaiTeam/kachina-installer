@@ -493,7 +493,11 @@ async function runInstall(): Promise<void> {
     console.log('Local meta found, use local meta');
   }
   latest_meta = latest_meta as InvokeGetDfsMetadataRes;
-  if (isUpdate && latest_meta.installer) {
+  if (
+    isUpdate &&
+    latest_meta.installer &&
+    !INSTALLER_CONFIG.enbedded_metadata
+  ) {
     const installerMeta: DfsMetadataHashInfo = {
       file_name: PROJECT_CONFIG.updaterName,
       size: latest_meta.installer.size,
@@ -625,6 +629,7 @@ async function runInstall(): Promise<void> {
       } catch (e) {
         console.error(e);
         if (i === 2) {
+          await error(`释放文件${item.file_name}失败: ${e}`, '出错了');
           throw e;
         }
       }
