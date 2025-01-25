@@ -21,6 +21,14 @@ jobs:
           cache: 'pnpm'
       - name: Install NPM Dependencies
         run: pnpm i
+      - name: Update Meta
+        run: |
+          $PKGVER = "r$(git rev-list --count HEAD).$(git rev-parse --short HEAD)"
+          $cstTimeZone = [System.TimeZoneInfo]::FindSystemTimeZoneById("China Standard Time")
+          $utcNow = [System.DateTime]::UtcNow
+          $cstTime = [System.TimeZoneInfo]::ConvertTimeFromUtc($utcNow, $cstTimeZone)
+          $BUILDMETA = $cstTime.ToString("yyyy.MM.dd.HHmmss")
+          (Get-Content ./src-tauri/Cargo.toml -Raw) -replace '(?m)^(version = "\d+\.\d+\.\d+)', "`$1-$PKGVER+$BUILDMETA" | Set-Content ./src-tauri/Cargo.toml -Encoding utf8
       - name: Build
         run: pnpm build
       - name: Copy Binary

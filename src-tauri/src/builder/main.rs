@@ -17,6 +17,8 @@ pub fn main() {
 }
 
 async fn async_main() {
+    println!("Kachina Builder v{}", env!("CARGO_PKG_VERSION"));
+    let now = std::time::Instant::now();
     let cli = cli::Cli::parse();
     let mut command = cli.command;
     if command.is_none() {
@@ -27,4 +29,6 @@ async fn async_main() {
         Command::Pack(args) => pack::pack_cli(args).await,
         Command::Gen(args) => gen::gen_cli(args).await,
     }
+    let duration = now.elapsed();
+    println!("Finished in {:?}", duration);
 }
