@@ -776,7 +776,7 @@ onMounted(async () => {
     const uninstallConfig = await invoke(
       'read_uninstall_metadata',
       PROJECT_CONFIG,
-    );
+    ).catch(console.error);
     console.log('UNINSTALL_METADATA: ', uninstallConfig);
     if (!uninstallConfig) {
       await error('未找到卸载配置文件，请重新安装后再卸载');
