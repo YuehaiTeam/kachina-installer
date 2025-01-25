@@ -65,6 +65,7 @@ hdiff-sys = { path = "./libs/hdiff-sys" }
 ignore = "0.4.23"
 num_cpus = "1.16.0"
 indicatif = { version = "0.17.9", features = ["tokio"] }
+console = "0.15.10"
 
 [[bin]]
 name = "kachina-installer"

@@ -2420,6 +2420,7 @@ dependencies = [
  "chksum-md5",
  "chrono",
  "clap",
+ "console",
  "dark-light",
  "fmmap",
  "futures",

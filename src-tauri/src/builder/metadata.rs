@@ -95,12 +95,35 @@ pub async fn deep_generate_metadata(source: &PathBuf) -> Result<Vec<Metadata>, S
             None => break,
         }
     }
-    for file in files.iter_mut() {
+
+    let mut joinset = tokio::task::JoinSet::new();
+
+    for file in files.iter() {
         let source = source.clone();
-        let real_path = source.join(&file.file_name);
-        println!("Hashing: {:?}", file.file_name);
-        let hash = run_hash("xxh", real_path.to_str().unwrap()).await?;
-        file.xxh = Some(hash);
+        let mut file = file.clone();
+        joinset.spawn(async move {
+            let real_path = source.join(&file.file_name);
+            let hash = run_hash("xxh", real_path.to_str().unwrap()).await;
+            if hash.is_err() {
+                return Err(hash.err().unwrap());
+            }
+            let hash = hash.unwrap();
+            file.xxh = Some(hash);
+            println!("Hashed: {:?}", file.file_name);
+            Ok(file)
+        });
     }
-    Ok(files)
+    let mut finished_hashes = Vec::new();
+    while let Some(res) = joinset.join_next().await {
+        if let Err(e) = res {
+            return Err(format!("Failed to run hashing thread: {:?}", e));
+        }
+        let res = res.unwrap();
+        if let Err(e) = res {
+            return Err(format!("Failed to finish hashing: {:?}", e));
+        }
+        let res = res.unwrap();
+        finished_hashes.push(res);
+    }
+    Ok(finished_hashes)
 }

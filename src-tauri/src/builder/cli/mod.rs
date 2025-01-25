@@ -37,6 +37,8 @@ pub struct GenArgs {
     pub diff_ignore: Option<Vec<String>>,
     #[clap(long, short = 'u')]
     pub updater: Option<PathBuf>,
+    #[clap(long, short = 'j', default_value = "2")]
+    pub zstd_concurrency: usize,
 }
 
 #[derive(Subcommand, Clone, Debug)]

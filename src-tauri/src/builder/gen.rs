@@ -15,6 +15,10 @@ pub async fn gen_cli(args: GenArgs) {
     let pb_style = ProgressStyle::with_template("[{elapsed_precise}] {bar:20.cyan/blue} {msg} ")
         .unwrap()
         .progress_chars("##-");
+    let pb_style_total =
+        ProgressStyle::with_template("[{elapsed_precise}] {bar:20.cyan/blue} {pos}/{len} {msg} ")
+            .unwrap()
+            .progress_chars("##-");
     // ensure output_dir
     println!("Creating output directory...");
     let _ = tokio::fs::create_dir_all(&args.output_dir).await;
@@ -61,8 +65,8 @@ pub async fn gen_cli(args: GenArgs) {
 
     // create a progress bar to track overall status
     let pb_main = multi_pg.add(ProgressBar::new(metadata.len() as u64));
-    pb_main.set_style(pb_style.clone());
-    pb_main.set_message("total  ");
+    pb_main.set_style(pb_style_total);
+    pb_main.set_message("TOTAL");
 
     // Make the main progress bar render immediately rather than waiting for the
     // first task to finish.
@@ -131,6 +135,9 @@ pub async fn gen_cli(args: GenArgs) {
                 tokio::io::copy(&mut encoder, &mut writer)
                     .await
                     .expect("failed to compress file");
+                if !console::Term::stdout().is_term() {
+                    println!("Compressed {:?}", display_name);
+                }
                 pb_task.finish_with_message(format!("DONE {:?}", display_name));
             });
         }));
@@ -138,9 +145,19 @@ pub async fn gen_cli(args: GenArgs) {
         // when limit is reached, wait until a running task finishes
         // await the future (join_next().await) and get the execution result
         // here result would be a download id(u64), as you can see in signature of do_stuff
-        while set.len() >= 3 || last_item {
+        while set.len() >= args.zstd_concurrency || last_item {
             match set.join_next().await {
-                Some(_res) => {}
+                Some(res) => {
+                    if let Err(e) = res {
+                        eprintln!("Zstd Task Error: {:?}", e);
+                        std::process::exit(1);
+                    }
+                    let res = res.unwrap();
+                    if let Err(e) = res {
+                        eprintln!("Zstd Task Error: {:?}", e);
+                        std::process::exit(1);
+                    }
+                }
                 None => {
                     break;
                 }
