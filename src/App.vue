@@ -385,13 +385,14 @@ import { mapLimit } from 'async';
 import Checkbox from './Checkbox.vue';
 import CircleSuccess from './CircleSuccess.vue';
 import { getCurrentWindow, invoke, listen, sep } from './tauri';
-import { runDfsDownload } from './dfs';
+import { getDfsMetadata, runDfsDownload } from './dfs';
 import {
   ipcCreateLnk,
   ipcCreateUninstaller,
   ipcRunUninstall,
   ipcWriteRegistry,
   ipPrepare,
+  log,
 } from './api/ipc';
 import IconSheild from './IconSheild.vue';
 import { version_compare } from './utils/version';
@@ -418,7 +419,7 @@ const source = ref<string>('');
 const progressInterval = ref<number>(0);
 
 const PROJECT_CONFIG: ProjectConfig = reactive({
-  dfsPath: '',
+  source: '',
   appName: 'Kachina',
   publisher: 'YuehaiTeam',
   regName: 'Kachina',
@@ -463,9 +464,7 @@ async function runInstall(): Promise<void> {
   let latest_meta = INSTALLER_CONFIG.enbedded_metadata;
   let online_meta: InvokeGetDfsMetadataRes | null = null;
   try {
-    online_meta = await invoke<InvokeGetDfsMetadataRes>('get_dfs_metadata', {
-      prefix: `${PROJECT_CONFIG.dfsPath}`,
-    });
+    online_meta = await getDfsMetadata(PROJECT_CONFIG.source);
   } catch (e) {
     console.error(e);
   }
@@ -475,13 +474,13 @@ async function runInstall(): Promise<void> {
     return;
   } else if (!latest_meta) {
     latest_meta = online_meta;
-    console.log('Local meta not found, use online meta');
+    log('Local meta not found, use online meta');
   } else if (
     online_meta &&
     online_meta.tag_name !== latest_meta.tag_name &&
     version_compare(online_meta.tag_name, latest_meta.tag_name) > 0
   ) {
-    console.log('Version update detected');
+    log('Version update detected');
     if (
       !INSTALLER_CONFIG.args.non_interactive &&
       !INSTALLER_CONFIG.args.silent &&
@@ -491,11 +490,11 @@ async function runInstall(): Promise<void> {
       latest_meta = online_meta;
     }
   } else {
-    console.log('Local meta found, use local meta');
+    log('Local meta found, use local meta');
   }
   latest_meta = latest_meta as InvokeGetDfsMetadataRes;
   if (
-    isUpdate &&
+    isUpdate.value &&
     latest_meta.installer &&
     !INSTALLER_CONFIG.enbedded_metadata
   ) {
@@ -504,6 +503,7 @@ async function runInstall(): Promise<void> {
       size: latest_meta.installer.size,
       md5: latest_meta.installer.md5,
       xxh: latest_meta.installer.xxh,
+      installer: true,
     };
     latest_meta.hashed.push(installerMeta);
   }
@@ -618,6 +618,7 @@ async function runInstall(): Promise<void> {
     for (let i = 0; i < 3; i++) {
       try {
         await runDfsDownload(
+          PROJECT_CONFIG.source,
           INSTALLER_CONFIG.embedded_files || [],
           source.value,
           hashKey as DfsMetadataHashType,
@@ -736,7 +737,7 @@ onMounted(async () => {
     await win.show();
   }
   const rsrc = await getSource();
-  console.log('INSTALLER_CONFIG: ', rsrc);
+  log('INSTALLER_CONFIG: ', rsrc);
   Object.assign(INSTALLER_CONFIG, rsrc);
   source.value = INSTALLER_CONFIG.args.target || INSTALLER_CONFIG.install_path;
   const seldir = await invoke<InvokeSelectDirRes>('select_dir', {
@@ -805,7 +806,7 @@ onMounted(async () => {
       'read_uninstall_metadata',
       PROJECT_CONFIG,
     ).catch(console.error);
-    console.log('UNINSTALL_METADATA: ', uninstallConfig);
+    log('UNINSTALL_METADATA: ', uninstallConfig);
     if (!uninstallConfig) {
       await error('未找到卸载配置文件，请重新安装后再卸载');
       if (process.env.NODE_ENV !== 'development') {
@@ -857,7 +858,7 @@ async function changeSource() {
       silent: false,
     });
     if (seldir === null) return;
-    console.log('SELECT_DIR: ', seldir);
+    log('SELECT_DIR: ', seldir);
     setUacByState(seldir.state, PROJECT_CONFIG.uacStrategy);
     isUpdate.value = seldir.upgrade;
     if (!seldir.empty && !seldir.upgrade) {

@@ -129,6 +129,11 @@ pub async fn confirm_dialog(title: String, message: String, window: WebviewWindo
         .set_parent(&window)
         .set_buttons(rfd::MessageButtons::YesNo)
         .show();
-    
-        matches!(ret, rfd::MessageDialogResult::Yes)
+
+    matches!(ret, rfd::MessageDialogResult::Yes)
+}
+
+#[tauri::command]
+pub fn log(data: String) {
+    println!("{}", data);
 }

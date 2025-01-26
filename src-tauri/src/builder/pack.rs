@@ -209,19 +209,23 @@ pub async fn pack(
     }
     let index_len = index_to_bin(&index).len() + get_header_size("\0INDEX");
     // add index_len to offset
-    for (_name, _size, offset) in index.iter_mut() {
+    for (name, _size, offset) in index.iter_mut() {
+        // index is after config and image
+        if name == "\0CONFIG" || name == "\0IMAGE" {
+            continue;
+        }
         *offset += index_len as u32;
     }
     // write pre-index to pe header
     let index_pre = gen_index_header(
         base_data.len() as u32,
-        (index_len + get_header_size("\0INDEX")) as u32,
         (config_bytes.len() + get_header_size("\0CONFIG")) as u32,
         if let Some(img) = config.image.as_ref() {
             (img.size + get_header_size(&img.name)) as u32
         } else {
             0
         },
+        index_len as u32,
         if let Some(metadata_bytes) = metadata_bytes.as_ref() {
             (metadata_bytes.len() + get_header_size("\0META")) as u32
         } else {
@@ -241,13 +245,6 @@ pub async fn pack(
     // copy base to output, not closing output file
     println!("Writing base...");
     output.write_all(&base_data).await.unwrap();
-    // write index
-    println!("Writing index...");
-    let index_bytes = index_to_bin(&index);
-    write_header(&mut output, "\0INDEX", index_bytes.len() as u32)
-        .await
-        .unwrap();
-    output.write_all(&index_bytes).await.unwrap();
     // write config
     println!("Writing config...");
     let config_bytes = config_bytes.as_bytes();
@@ -270,6 +267,14 @@ pub async fn pack(
             return;
         }
     }
+    // write index
+    println!("Writing index...");
+    let index_bytes = index_to_bin(&index);
+    write_header(&mut output, "\0INDEX", index_bytes.len() as u32)
+        .await
+        .unwrap();
+
+    output.write_all(&index_bytes).await.unwrap();
     // if metadata exists, write metadata
     if let Some(metadata_bytes) = metadata_bytes {
         let res = write_header(&mut output, "\0META", metadata_bytes.len() as u32).await;
@@ -339,16 +344,16 @@ pub fn index_to_bin(index: &Vec<(String, u32, u32)>) -> Vec<u8> {
 
 pub fn gen_index_header(
     base_end: u32,
-    index_end: u32,
     config_end: u32,
     theme_end: u32,
+    index_end: u32,
     manifest_end: u32,
 ) -> Vec<u8> {
     let mut data = "!KachinaInstaller!".as_bytes().to_vec();
     data.extend_from_slice(&base_end.to_be_bytes());
-    data.extend_from_slice(&index_end.to_be_bytes());
     data.extend_from_slice(&config_end.to_be_bytes());
     data.extend_from_slice(&theme_end.to_be_bytes());
+    data.extend_from_slice(&index_end.to_be_bytes());
     data.extend_from_slice(&manifest_end.to_be_bytes());
     data
 }

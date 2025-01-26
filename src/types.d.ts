@@ -1,5 +1,6 @@
+// ^(?:(dfs)\+)?(?:(hashed|packed|auto)\+)?(http(?:s)?:\/\/(?:.*?))$
 type ProjectConfig = {
-  dfsPath: string;
+  source: string;
   appName: string;
   publisher: string;
   regName: string;
@@ -32,6 +33,7 @@ type DfsMetadataHashInfo = {
   size: number;
   md5?: string;
   xxh?: string;
+  installer?: true;
 };
 
 type DfsMetadataPatchInfo = {

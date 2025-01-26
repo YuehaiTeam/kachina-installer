@@ -1,8 +1,17 @@
 import { hybridPatch, InstallFile } from './api/installFile';
-import { ipc } from './api/ipc';
+import { ipc, log } from './api/ipc';
 import { invoke } from './tauri';
 
 const connectableOrigins = new Set();
+
+export const dfsIndexCache = new Map<
+  string,
+  {
+    index: Map<string, Embedded>;
+    metadata: InvokeGetDfsMetadataRes;
+    installer_end: number;
+  }
+>();
 
 function fetchWithTimeout(
   url: string,
@@ -17,9 +26,250 @@ function fetchWithTimeout(
   ]) as Promise<Response>;
 }
 
-export const getDfsUrl = async (key: string): Promise<string> => {
+export const dfsSourceReg =
+  /^(?:(dfs)\+)?(?:(hashed|packed|auto)\+)?(http(?:s)?:\/\/(?:.*?))$/;
+
+export const getDfsSourceType = (
+  source: string,
+): {
+  remote: 'dfs' | 'direct';
+  storage: 'hashed' | 'packed';
+  url: string;
+} => {
+  const match = source.match(dfsSourceReg);
+  if (!match) throw new Error('Invalid dfs source: ' + source);
+  const remote = ['dfs', 'direct'].includes(match[1]) ? match[1] : 'direct';
+  let storage = ['hashed', 'packed', 'auto'].includes(match[2])
+    ? match[2]
+    : 'auto';
+  if (storage === 'auto') {
+    const url = new URL(match[3]);
+    if (url.pathname.endsWith('.exe')) {
+      storage = 'packed';
+    } else if (url.pathname.endsWith('.json')) {
+      storage = 'hashed';
+    }
+  }
+  if (storage === 'auto') {
+    throw new Error('Invalid dfs source: ' + source);
+  }
+  return {
+    remote: remote as 'dfs' | 'direct',
+    storage: storage as 'hashed' | 'packed',
+    url: match[3],
+  };
+};
+export const getDfsMetadata = async (
+  source: string,
+): Promise<InvokeGetDfsMetadataRes> => {
+  const { remote, storage, url } = getDfsSourceType(source);
+  const full_file_url = remote === 'direct' ? url : await getDfsFileUrl(url);
+  if (storage === 'hashed') {
+  } else {
+    if (dfsIndexCache.has(source)) {
+      return dfsIndexCache.get(source)?.metadata as InvokeGetDfsMetadataRes;
+    } else {
+      await refreshDfsIndex(source, full_file_url);
+      if (dfsIndexCache.has(source)) {
+        return dfsIndexCache.get(source)?.metadata as InvokeGetDfsMetadataRes;
+      }
+    }
+  }
+  throw new Error('Get metadata failed');
+};
+export async function refreshDfsIndex(source: string, binurl: string) {
+  const pre_index: [number, number[]] = await invoke('get_http_with_range', {
+    url: binurl,
+    offset: 0,
+    size: 256,
+  });
+  let bufStr = '';
+  for (let i = 0; i < pre_index[1].length; i++) {
+    bufStr += String.fromCharCode(pre_index[1][i]);
+  }
+  const header_offset = bufStr.indexOf('!KachinaInstaller!');
+  if (header_offset === -1) {
+    throw new Error('Invalid remote index');
+  }
+  const index_offset = header_offset + 18;
+  const dataView = new DataView(new Uint8Array(pre_index[1]).buffer);
+  const index_start = dataView.getUint32(index_offset, false);
+  const config_sz = dataView.getUint32(index_offset + 4, false);
+  const theme_sz = dataView.getUint32(index_offset + 8, false);
+  const index_sz = dataView.getUint32(index_offset + 12, false);
+  const metadata_sz = dataView.getUint32(index_offset + 16, false);
+  const data_end = index_start + index_sz + config_sz + theme_sz + metadata_sz;
+  const index: [number, number][] = await invoke('get_http_with_range', {
+    url: binurl,
+    offset: index_start,
+    size: data_end - index_start,
+  });
+  const index_data = new Uint8Array(index[1]);
+  const index_view = new DataView(index_data.buffer);
+  const segments: {
+    config?: ProjectConfig;
+    metadata?: InvokeGetDfsMetadataRes;
+    theme?: string;
+    index?: Map<string, Embedded>;
+  } = {};
+  let offset = 0;
+  while (offset < index_data.length) {
+    const str =
+      String.fromCharCode(index_data[offset]) +
+      String.fromCharCode(index_data[offset + 1]) +
+      String.fromCharCode(index_data[offset + 2]) +
+      String.fromCharCode(index_data[offset + 3]);
+    if (str !== '!in\0'.toUpperCase()) {
+      offset++;
+      continue;
+    }
+    log('found segment', offset);
+    try {
+      // 4byte magic, 2byte name_len, dyn name, 4byte size, dyn data
+      offset += 4;
+      const name_len = index_view.getUint16(offset, false);
+      log('name_len', name_len);
+      offset += 2;
+      const name = new TextDecoder().decode(
+        index_data.slice(offset, offset + name_len),
+      );
+      log('name', name);
+      offset += name_len;
+      const size = index_view.getUint32(offset, false);
+      offset += 4;
+      const data = index_data.slice(offset, offset + size);
+      offset += size;
+      switch (name) {
+        case '\0CONFIG':
+          segments.config = JSON.parse(new TextDecoder().decode(data));
+          break;
+        case '\0META':
+          segments.metadata = JSON.parse(new TextDecoder().decode(data));
+          break;
+        case '\0THEME':
+          segments.theme = new TextDecoder().decode(data);
+          break;
+        case '\0INDEX':
+          const index_view = new DataView(data.buffer);
+          const index = new Map<string, Embedded>();
+          let idx_offset = 0;
+          while (idx_offset < data.length) {
+            const name_len = data[idx_offset];
+            idx_offset++;
+            const name = new TextDecoder().decode(
+              data.slice(idx_offset, idx_offset + name_len),
+            );
+            idx_offset += name_len;
+            const size = index_view.getUint32(idx_offset, false);
+            idx_offset += 4;
+            const offset = index_view.getUint32(idx_offset, false);
+            idx_offset += 4;
+            index.set(name, {
+              name,
+              offset: index_start + offset,
+              raw_offset: 0,
+              size,
+            });
+          }
+          segments.index = index;
+          break;
+        default:
+          console.warn('Unknown segment', name);
+          break;
+      }
+    } catch (e) {
+      break;
+    }
+  }
+  if (!segments.index) {
+    throw new Error('No index');
+  }
+  if (!segments.metadata) {
+    throw new Error('No metadata');
+  }
+  if (!segments.config) {
+    throw new Error('No config');
+  }
+  log(segments);
+  dfsIndexCache.set(source, {
+    index: segments.index,
+    metadata: segments.metadata,
+    installer_end: index_start + config_sz + theme_sz,
+  });
+}
+export const getDfsIndexCache = async (
+  source: string,
+  binurl: string,
+): Promise<Map<string, Embedded>> => {
+  if (dfsIndexCache.has(source)) {
+    return dfsIndexCache.get(source)?.index as Map<string, Embedded>;
+  } else {
+    await refreshDfsIndex(source, binurl);
+    if (dfsIndexCache.has(source)) {
+      return dfsIndexCache.get(source)?.index as Map<string, Embedded>;
+    }
+  }
+  throw new Error('No cache');
+};
+export const getDfsUrl = async (
+  source: string,
+  hash: string,
+  installer?: boolean,
+): Promise<{
+  url: string;
+  offset: number;
+  size: number;
+  skip_decompress?: boolean;
+  skip_hash?: boolean;
+}> => {
+  const { remote, storage, url } = getDfsSourceType(source);
+
+  if (storage === 'hashed') {
+    const full_file_url =
+      remote === 'direct'
+        ? url
+        : await getDfsFileUrl(dfsJsonUrlToHashed(url, hash));
+    return {
+      url: full_file_url,
+      offset: 0,
+      size: 0,
+    };
+  } else {
+    const full_file_url = remote === 'direct' ? url : await getDfsFileUrl(url);
+    const cache = await getDfsIndexCache(source, full_file_url);
+    const file = cache.get(hash);
+    if (!file) {
+      if (installer) {
+        return {
+          url: full_file_url,
+          offset: 0,
+          size: dfsIndexCache.get(source)?.installer_end || 0,
+          skip_decompress: true,
+          skip_hash: true,
+        };
+      }
+      throw new Error('No file in remote binary');
+    }
+    return {
+      url: full_file_url,
+      offset: file.offset,
+      size: file.size,
+    };
+  }
+};
+
+export const dfsJsonUrlToHashed = (jsonUrl: string, hash: string): string => {
+  // path/to/.metadata.json -> path/to/hashed/${hash}
+  const url = new URL(jsonUrl);
+  const path = url.pathname;
+  const lastSlash = path.lastIndexOf('/');
+  const dir = path.slice(0, lastSlash);
+  return `${url.origin}${dir}/hashed/${hash}`;
+};
+
+export const getDfsFileUrl = async (apiurl: string): Promise<string> => {
   const dfs_result = await invoke<InvokeGetDfsRes>('get_dfs', {
-    path: `bgi/hashed/${key}`,
+    url: apiurl,
   });
   let url = dfs_result.url;
   if (!url && dfs_result.tests && dfs_result.tests.length > 0) {
@@ -55,6 +305,7 @@ export const getDfsUrl = async (key: string): Promise<string> => {
 };
 
 export const runDfsDownload = async (
+  dfsSource: string,
   local: Embedded[],
   source: string,
   hashKey: DfsMetadataHashType,
@@ -68,7 +319,7 @@ export const runDfsDownload = async (
     : `/${item.file_name}`;
   item.downloaded = 0;
   const onProgress = ({ payload }: { payload: number }) => {
-    console.log('progress', payload);
+    log('progress', payload);
     if (isNaN(payload)) return;
     item.downloaded = payload;
   };
@@ -87,7 +338,7 @@ export const runDfsDownload = async (
         elevate,
         onProgress,
       );
-      console.log('>LOCAL', filename_with_first_slash);
+      log('>LOCAL', filename_with_first_slash);
     } else if (
       hasLpatchFile &&
       item.lpatch &&
@@ -95,26 +346,21 @@ export const runDfsDownload = async (
       !disable_local
     ) {
       const hash = `${item.lpatch.from[hashKey]}_${item.lpatch.to[hashKey]}`;
-      const url = await getDfsUrl(hash);
-      console.log('>LPATCH', filename_with_first_slash, item.lpatch, url);
+      const url = await getDfsUrl(dfsSource, hash);
+      url.size = url.size || (item.lpatch?.size as number);
+      log('>LPATCH', filename_with_first_slash, item.lpatch, url);
       await ipc(
-        hybridPatch(
-          hasLpatchFile,
-          url,
-          item.lpatch?.size as number,
-          source + filename_with_first_slash,
-          {
-            md5: item.md5,
-            xxh: item.xxh,
-          },
-        ),
+        hybridPatch(hasLpatchFile, url, source + filename_with_first_slash, {
+          md5: item.md5,
+          xxh: item.xxh,
+        }),
         elevate,
         onProgress,
       );
     } else if (item.patch && !disable_patch) {
       const hash = `${item.patch.from[hashKey]}_${item.patch.to[hashKey]}`;
-      const url = await getDfsUrl(hash);
-      console.log('>PATCH', filename_with_first_slash, item.patch, url);
+      const url = await getDfsUrl(dfsSource, hash);
+      log('>PATCH', filename_with_first_slash, item.patch, url);
       await ipc(
         InstallFile(
           url,
@@ -130,8 +376,8 @@ export const runDfsDownload = async (
       );
     } else {
       const hash = item[hashKey] as string;
-      const url = await getDfsUrl(hash);
-      console.log('>DOWNLOAD', filename_with_first_slash, url);
+      const url = await getDfsUrl(dfsSource, hash, item.installer);
+      log('>DOWNLOAD', filename_with_first_slash, url, item.installer);
       await ipc(
         InstallFile(url, source + filename_with_first_slash, {
           md5: item.md5,

@@ -2,11 +2,27 @@ use crate::fs::{
     create_http_stream, create_local_stream, create_target_file, prepare_target, progressed_copy,
     progressed_hpatch, verify_hash,
 };
+
+fn default_as_false() -> bool {
+    false
+}
+
 #[derive(serde::Deserialize, serde::Serialize, Clone, Debug)]
 #[serde(untagged)]
 enum InstallFileSource {
-    Url(String),
-    Local { offset: usize, size: usize },
+    Url {
+        url: String,
+        offset: usize,
+        size: usize,
+        #[serde(default = "default_as_false")]
+        skip_decompress: bool,
+    },
+    Local {
+        offset: usize,
+        size: usize,
+        #[serde(default = "default_as_false")]
+        skip_decompress: bool,
+    },
 }
 
 #[derive(serde::Deserialize, serde::Serialize, Clone, Debug)]
@@ -20,10 +36,8 @@ enum InstallFileMode {
         diff_size: usize,
     },
     HybridPatch {
-        diff_url: String,
-        diff_size: usize,
-        source_offset: usize,
-        source_size: usize,
+        diff: InstallFileSource,
+        source: InstallFileSource,
     },
 }
 
@@ -38,10 +52,17 @@ async fn create_stream_by_source(
     source: InstallFileSource,
 ) -> Result<Box<dyn tokio::io::AsyncRead + Unpin + std::marker::Send>, String> {
     match source {
-        InstallFileSource::Url(url) => Ok(Box::new(create_http_stream(&url).await?)),
-        InstallFileSource::Local { offset, size } => {
-            Ok(Box::new(create_local_stream(offset, size).await?))
-        }
+        InstallFileSource::Url {
+            url,
+            offset,
+            size,
+            skip_decompress,
+        } => Ok(create_http_stream(&url, offset, size, skip_decompress).await?),
+        InstallFileSource::Local {
+            offset,
+            size,
+            skip_decompress,
+        } => Ok(create_local_stream(offset, size, skip_decompress).await?),
     }
 }
 pub async fn ipc_install_file(
@@ -76,23 +97,19 @@ pub async fn ipc_install_file(
             Ok(serde_json::json!(res))
         }
         InstallFileMode::HybridPatch {
-            diff_url,
-            diff_size,
-            source_offset,
-            source_size,
+            diff,
+            source,
         } => {
             // first extract source
-            let source = create_local_stream(source_offset, source_size).await?;
+            let source = create_stream_by_source(source).await?;
             let target_fs = create_target_file(&target).await?;
             progressed_copy(source, target_fs, progress_noti).await?;
             // then apply patch
-            progressed_hpatch(
-                create_http_stream(&diff_url).await?,
-                &target,
-                diff_size,
-                |_| {},
-            )
-            .await?;
+            let size: usize = match diff {
+                InstallFileSource::Url { size, .. } => size,
+                InstallFileSource::Local { size, .. } => size,
+            };
+            progressed_hpatch(create_stream_by_source(diff).await?, &target, size, |_| {}).await?;
             verify_hash(&target, args.md5, args.xxh).await?;
             Ok(serde_json::json!(()))
         }

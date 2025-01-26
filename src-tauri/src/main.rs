@@ -70,6 +70,8 @@ fn main() {
 }
 
 async fn tauri_main(args: InstallArgs) {
+    use windows::Win32::System::Console::{AttachConsole, ATTACH_PARENT_PROCESS};
+    let _ = unsafe { AttachConsole(ATTACH_PARENT_PROCESS) };
     tauri::async_runtime::set(tokio::runtime::Handle::current());
     let (major, minor, build) = nt_version::get();
     let build = (build & 0xffff) as u16;
@@ -102,6 +104,8 @@ async fn tauri_main(args: InstallArgs) {
             fs::is_dir_empty,
             dfs::get_dfs,
             dfs::get_dfs_metadata,
+            dfs::get_http_with_range,
+            installer::log,
             installer::launch_and_exit,
             installer::config::get_installer_config,
             installer::lnk::get_dirs,
@@ -162,7 +166,9 @@ async fn tauri_main(args: InstallArgs) {
 }
 
 async fn cli_main(cli: Command) {
-    if let Command::InstallWebview2 = cli { cli::install_webview2().await }
+    if let Command::InstallWebview2 = cli {
+        cli::install_webview2().await
+    }
 }
 
 pub fn get_console() {

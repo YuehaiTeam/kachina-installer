@@ -16,10 +16,7 @@ pub struct DownloadResp {
 }
 
 #[tauri::command]
-pub async fn get_dfs(path: String) -> Result<DownloadResp, String> {
-    let dfs_api_base = "https://77.cocogoat.cn/v2/dfs/";
-    let path_without_first_slash = path.strip_prefix("/").unwrap_or(&path);
-    let url = format!("{}{}", dfs_api_base, path_without_first_slash);
+pub async fn get_dfs(url: String) -> Result<DownloadResp, String> {
     let res: Result<reqwest::Response, reqwest::Error> = REQUEST_CLIENT.post(&url).send().await;
     if res.is_err() {
         return Err(format!("Failed to send http request: {:?}", res.err()));
@@ -81,6 +78,29 @@ pub async fn get_dfs(path: String) -> Result<DownloadResp, String> {
         return Err("Challenge not solved".to_string());
     }
     Ok(json)
+}
+
+#[tauri::command]
+pub async fn get_http_with_range(
+    url: String,
+    offset: u64,
+    size: u64,
+) -> Result<(u16, Vec<u8>), String> {
+    let mut res = REQUEST_CLIENT.get(&url);
+    if offset != 0 || size != 0 {
+        res = res.header("Range", format!("bytes={}-{}", offset, offset + size - 1));
+    }
+    let res = res.send().await;
+    if res.is_err() {
+        return Err(format!("Failed to send http request: {:?}", res.err()));
+    }
+    let res = res.unwrap();
+    let status = res.status();
+    let bytes: Result<Vec<u8>, reqwest::Error> = res.bytes().await.map(|b| b.to_vec());
+    if bytes.is_err() {
+        return Err(format!("Failed to get bytes: {:?}", bytes.err()));
+    }
+    Ok((status.as_u16(), bytes.unwrap()))
 }
 
 #[tauri::command]

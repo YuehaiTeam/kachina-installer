@@ -117,3 +117,16 @@ export async function ipcWriteRegistry(
     elevate,
   );
 }
+
+export function log(...args: any[]) {
+  console.log(...args);
+  const logstr = args.reduce((acc, arg) => {
+    if (typeof arg === 'string') {
+      return acc + ' ' + arg;
+    }
+    return acc + ' ' + JSON.stringify(arg);
+  });
+  invoke('log', {
+    data: logstr,
+  });
+}

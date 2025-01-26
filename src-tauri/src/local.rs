@@ -118,6 +118,11 @@ pub async fn get_config_from_embedded(
     let mut config = None;
     let mut metadata = None;
     let mut index: Option<Vec<Embedded>> = None;
+    let start_offset = if embedded.is_empty() {
+        0
+    } else {
+        embedded[0].raw_offset
+    };
     for entry in embedded.iter() {
         if entry.name == "\0CONFIG" {
             let content = file.slice(entry.offset, entry.size);
@@ -129,7 +134,7 @@ pub async fn get_config_from_embedded(
             metadata = Some(serde_json::from_str(&content).map_err(|e| e.to_string())?);
         } else if entry.name == "\0INDEX" {
             // u8: name_len var: name u32: size u32: offset
-            let content = file.slice(entry.offset, entry.size);
+            let content: &[u8] = file.slice(entry.offset, entry.size);
             let mut index_entries = Vec::new();
             let mut offset = 0;
             while offset < content.len() {
@@ -144,9 +149,9 @@ pub async fn get_config_from_embedded(
                     u32::from_be_bytes(content[offset..offset + 4].try_into().unwrap()) as usize;
                 offset += 4;
                 index_entries.push(Embedded {
-                    raw_offset: entry.raw_offset + file_offset - get_header_size(&name),
+                    raw_offset: start_offset + file_offset - get_header_size(&name),
                     name,
-                    offset: entry.raw_offset + file_offset,
+                    offset: start_offset + file_offset,
                     size,
                 });
             }
@@ -164,7 +169,6 @@ pub async fn get_base_with_config() -> Result<AsyncMmapFileReader<'static>, Stri
     let embedded = get_embedded().await?;
     let config_index = embedded.iter().position(|x| x.name == "\0CONFIG");
     let image_index = embedded.iter().position(|x| x.name == "\0IMAGE");
-    let index_index = embedded.iter().position(|x| x.name == "\0INDEX");
     if config_index.is_none() {
         if embedded.is_empty() {
             return mmap().await.reader(0).map_err(|e| e.to_string());
@@ -173,7 +177,7 @@ pub async fn get_base_with_config() -> Result<AsyncMmapFileReader<'static>, Stri
     }
     let config_index = config_index.unwrap();
     // config index should be 0
-    if config_index != 0 || index_index.is_some() && config_index != 1 {
+    if config_index != 0 {
         return Err("Malformed packed files: config not at index 0".to_string());
     }
     let mut end_pos = embedded[config_index].offset + embedded[config_index].size;

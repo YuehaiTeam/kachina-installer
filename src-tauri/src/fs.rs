@@ -128,32 +128,50 @@ pub async fn ensure_dir(path: String) -> Result<(), String> {
     Ok(())
 }
 
-pub async fn create_http_stream(url: &str) -> Result<impl AsyncRead + std::marker::Send, String> {
-    let res = REQUEST_CLIENT.get(url).send().await;
+pub async fn create_http_stream(
+    url: &str,
+    offset: usize,
+    size: usize,
+    skip_decompress: bool,
+) -> Result<Box<dyn tokio::io::AsyncRead + Unpin + std::marker::Send>, String> {
+    let mut res = REQUEST_CLIENT.get(url);
+    let has_range = offset > 0 || size > 0;
+    if has_range {
+        res = res.header("Range", format!("bytes={}-{}", offset, offset + size - 1));
+        println!("Range: bytes={}-{}", offset, offset + size - 1);
+    }
+    let res = res.send().await;
     if res.is_err() {
         return Err(format!("Failed to send http request: {:?}", res.err()));
     }
     let res = res.unwrap();
     let code = res.status();
-    if code != 200 {
+    if (!has_range && code != 200) || (has_range && code != 206) {
         return Err(format!("Failed to download: URL {} returned {}", url, code));
     }
     let stream = futures::TryStreamExt::map_err(res.bytes_stream(), std::io::Error::other);
     let reader = tokio_util::io::StreamReader::new(stream);
+    if skip_decompress {
+        return Ok(Box::new(reader));
+    }
     let decoder = TokioZstdDecoder::new(reader);
-    Ok(decoder)
+    Ok(Box::new(decoder))
 }
 
 pub async fn create_local_stream(
     offset: usize,
     size: usize,
-) -> Result<impl AsyncRead + std::marker::Send, String> {
+    skip_decompress: bool,
+) -> Result<Box<dyn tokio::io::AsyncRead + Unpin + std::marker::Send>, String> {
     let mmap_file = mmap().await;
     let reader = mmap_file
         .range_reader(offset, size)
         .map_err(|e| format!("Failed to mmap: {:?}", e))?;
+    if skip_decompress {
+        return Ok(Box::new(reader));
+    }
     let decoder = TokioZstdDecoder::new(reader);
-    Ok(decoder)
+    Ok(Box::new(decoder))
 }
 
 pub async fn prepare_target(target: &str) -> Result<(), String> {
@@ -315,7 +333,7 @@ pub async fn verify_hash(
     } else if xxh.is_some() {
         "xxh"
     } else {
-        return Err("No hash provided".to_string());
+        return Ok(());
     };
     let expected = if let Some(md5) = md5 {
         md5
