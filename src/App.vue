@@ -466,7 +466,7 @@ async function runInstall(): Promise<void> {
   try {
     online_meta = await getDfsMetadata(PROJECT_CONFIG.source);
   } catch (e) {
-    console.error(e);
+    log(e);
   }
   if (!latest_meta && !online_meta) {
     await error('获取更新信息失败，请检查网络连接');
@@ -629,7 +629,7 @@ async function runInstall(): Promise<void> {
         );
         break;
       } catch (e) {
-        console.error(e);
+        log(e);
         if (i === 2) {
           await error(`释放文件${item.file_name}失败: ${e}`, '出错了');
           throw e;
@@ -666,7 +666,7 @@ async function finishInstall(
   }
   if (!isUpdate.value) {
     await ipcCreateLnk(exePath, program, needElevate.value).catch(
-      console.error,
+      log,
     );
   }
   if (
@@ -682,7 +682,7 @@ async function finishInstall(
       );
     } catch (e) {
       error(`创建卸载程序失败: ${e}`, '出错了');
-      console.error(e);
+      log(e);
     }
     try {
       await ipcWriteRegistry(
@@ -701,13 +701,13 @@ async function finishInstall(
       );
     } catch (e) {
       error(`写入注册表失败: ${e}`, '出错了');
-      console.error(e);
+      log(e);
     }
     await ipcCreateLnk(
       `${source.value}${sep()}${PROJECT_CONFIG.uninstallName}`,
       uninstall,
       needElevate.value,
-    ).catch(console.error);
+    ).catch(log);
   }
   if (INSTALLER_CONFIG.args.silent) {
     const win = getCurrentWindow();
@@ -719,7 +719,7 @@ async function install(): Promise<void> {
   try {
     await runInstall();
   } catch (e) {
-    console.error(e);
+    log(e);
     if (e instanceof Error) await error(e.stack || e.toString());
     else await error(JSON.stringify(e));
     step.value = 1;
@@ -777,12 +777,12 @@ onMounted(async () => {
         (e) => e.name === i.name,
       );
       if (!target) {
-        console.warn('Unfound index', target, i);
+        log('Unfound index', target, i);
         hasWrongIndex = true;
         continue;
       }
       if (target.offset !== i.offset || target.raw_offset !== i.raw_offset) {
-        console.warn('Wrong index: pack=', target, 'index=', i);
+        log('Wrong index: pack=', target, 'index=', i);
         hasWrongIndex = true;
       }
     }
@@ -805,7 +805,7 @@ onMounted(async () => {
     const uninstallConfig = await invoke(
       'read_uninstall_metadata',
       PROJECT_CONFIG,
-    ).catch(console.error);
+    ).catch(log);
     log('UNINSTALL_METADATA: ', uninstallConfig);
     if (!uninstallConfig) {
       await error('未找到卸载配置文件，请重新安装后再卸载');
@@ -933,7 +933,7 @@ async function uninstall() {
       win.close();
     }
   } catch (e) {
-    console.error(e);
+    log(e);
     if (e instanceof Error) await error(e.stack || e.toString());
     else await error(JSON.stringify(e));
     step.value = 1;

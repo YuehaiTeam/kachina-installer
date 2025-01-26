@@ -174,7 +174,7 @@ export async function refreshDfsIndex(source: string, binurl: string) {
           segments.index = index;
           break;
         default:
-          console.warn('Unknown segment', name);
+          log('Unknown segment', name);
           break;
       }
     } catch (e) {
@@ -388,7 +388,7 @@ export const runDfsDownload = async (
       );
     }
   } catch (e) {
-    console.error(e);
+    log(e);
     item.downloaded = 0;
     throw e;
   } finally {

@@ -126,7 +126,8 @@ export function log(...args: any[]) {
     }
     return acc + ' ' + JSON.stringify(arg);
   });
+  const timestr = new Date().toISOString();
   invoke('log', {
-    data: logstr,
+    data: `${timestr}: ${logstr}`,
   });
 }
