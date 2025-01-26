@@ -498,14 +498,20 @@ async function runInstall(): Promise<void> {
     latest_meta.installer &&
     !INSTALLER_CONFIG.enbedded_metadata
   ) {
-    const installerMeta: DfsMetadataHashInfo = {
-      file_name: PROJECT_CONFIG.updaterName,
-      size: latest_meta.installer.size,
-      md5: latest_meta.installer.md5,
-      xxh: latest_meta.installer.xxh,
-      installer: true,
-    };
-    latest_meta.hashed.push(installerMeta);
+    if (
+      !latest_meta.hashed.find(
+        (e) => e.file_name === PROJECT_CONFIG.updaterName,
+      )
+    ) {
+      const installerMeta: DfsMetadataHashInfo = {
+        file_name: PROJECT_CONFIG.updaterName,
+        size: latest_meta.installer.size,
+        md5: latest_meta.installer.md5,
+        xxh: latest_meta.installer.xxh,
+        installer: true,
+      };
+      latest_meta.hashed.push(installerMeta);
+    }
   }
   await ipPrepare(needElevate.value);
   let hashKey = '';
@@ -546,13 +552,15 @@ async function runInstall(): Promise<void> {
   for (const item of latest_meta.hashed) {
     const local = local_meta.find(
       (e) =>
-        strip_first_slash(e.file_name) === strip_first_slash(item.file_name),
+        strip_first_slash(e.file_name.toLowerCase()) ===
+        strip_first_slash(item.file_name.toLowerCase()),
     );
     if (!local || local.hash !== item[hashKey as DfsMetadataHashType]) {
       let patch = latest_meta.patches?.find(
         (e) =>
-          e.from[hashKey as DfsMetadataHashType] ===
-          item[hashKey as DfsMetadataHashType],
+          e.from[hashKey as DfsMetadataHashType] === local?.hash &&
+          e.to[hashKey as DfsMetadataHashType] ===
+            item[hashKey as DfsMetadataHashType],
       );
       let lpatch = latest_meta.patches?.find((e) =>
         INSTALLER_CONFIG.embedded_files?.some(
@@ -565,6 +573,7 @@ async function runInstall(): Promise<void> {
         lpatch,
         downloaded: 0,
         running: false,
+        old_hash: local?.hash,
       });
     }
   }
@@ -574,6 +583,7 @@ async function runInstall(): Promise<void> {
     await finishInstall(latest_meta);
     return;
   }
+  console.log('Files to install:', diff_files);
   subStep.value = 2;
   current.value = '准备下载……';
   const total_size = diff_files.reduce(
@@ -629,6 +639,7 @@ async function runInstall(): Promise<void> {
         );
         break;
       } catch (e) {
+        hasError = true;
         log(e);
         if (i === 2) {
           await error(`释放文件${item.file_name}失败: ${e}`, '出错了');
@@ -665,9 +676,7 @@ async function finishInstall(
     await ipcCreateLnk(exePath, desktop, needElevate.value);
   }
   if (!isUpdate.value) {
-    await ipcCreateLnk(exePath, program, needElevate.value).catch(
-      log,
-    );
+    await ipcCreateLnk(exePath, program, needElevate.value).catch(log);
   }
   if (
     !isUpdate.value ||

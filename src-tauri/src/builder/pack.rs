@@ -95,7 +95,7 @@ pub async fn pack_cli(args: PackArgs) {
                     if files.iter().any(|x: &PackFile| x.name == *hash) {
                         continue;
                     }
-                    let path = data_dir.join(&hash);
+                    let path = data_dir.join(hash);
                     let size = tokio::fs::metadata(&path).await.unwrap().len() as usize;
                     let f = tokio::fs::File::open(path).await;
                     if f.is_err() {
@@ -105,6 +105,43 @@ pub async fn pack_cli(args: PackArgs) {
                     let data = Box::new(f.unwrap()) as Box<dyn AsyncRead + Unpin + Send>;
                     files.push(PackFile {
                         name: hash.clone(),
+                        size,
+                        data,
+                    });
+                }
+            }
+            if let Some(patches) = metadata.patches.as_ref() {
+                for patch in patches.iter() {
+                    let from_hash = if patch.from.md5.is_some() {
+                        patch.from.md5.as_ref().unwrap()
+                    } else if patch.from.xxh.is_some() {
+                        patch.from.xxh.as_ref().unwrap()
+                    } else {
+                        eprintln!("No hash found for patch: {:?}", patch.file_name);
+                        return;
+                    };
+                    let to_hash = if patch.to.md5.is_some() {
+                        patch.to.md5.as_ref().unwrap()
+                    } else if patch.to.xxh.is_some() {
+                        patch.to.xxh.as_ref().unwrap()
+                    } else {
+                        eprintln!("No hash found for patch: {:?}", patch.file_name);
+                        return;
+                    };
+                    let patch_fn = format!("{}_{}", from_hash, to_hash);
+                    if files.iter().any(|x: &PackFile| x.name == *patch_fn) {
+                        continue;
+                    }
+                    let path = data_dir.join(&patch_fn);
+                    let size = tokio::fs::metadata(&path).await.unwrap().len() as usize;
+                    let f = tokio::fs::File::open(path).await;
+                    if f.is_err() {
+                        eprintln!("Failed to open file {}: {:?}", patch_fn, f.err());
+                        return;
+                    }
+                    let data = Box::new(f.unwrap()) as Box<dyn AsyncRead + Unpin + Send>;
+                    files.push(PackFile {
+                        name: patch_fn,
                         size,
                         data,
                     });

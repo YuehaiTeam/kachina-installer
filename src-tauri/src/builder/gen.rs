@@ -320,7 +320,7 @@ pub async fn gen_cli(args: GenArgs) {
                             println!("File {:?} diff too large, skipped", file.file_name);
                             return None;
                         }
-                        return Some(PatchInfo {
+                        Some(PatchInfo {
                             file_name: file.file_name.clone(),
                             size: diff_size,
                             from: PatchItem {
@@ -333,7 +333,7 @@ pub async fn gen_cli(args: GenArgs) {
                                 xxh: Some(file.xxh.clone().unwrap()),
                                 size: file.size,
                             },
-                        });
+                        })
                     });
                     while set.len() >= args.zstd_concurrency || last_item {
                         match set.join_next().await {
@@ -343,11 +343,8 @@ pub async fn gen_cli(args: GenArgs) {
                                     std::process::exit(1);
                                 }
                                 let res = res.unwrap();
-                                match res {
-                                    Some(diff) => {
-                                        diffs.push(diff);
-                                    }
-                                    None => {}
+                                if let Some(diff) = res {
+                                    diffs.push(diff);
                                 }
                             }
                             None => {

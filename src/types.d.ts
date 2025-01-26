@@ -48,6 +48,7 @@ interface DfsUpdateTask extends DfsMetadataHashInfo {
   lpatch?: DfsMetadataPatchInfo;
   downloaded: number;
   running: boolean;
+  old_hash?: string;
 }
 
 type InvokeGetDfsMetadataRes = {
