@@ -273,6 +273,9 @@ where
     };
     let target = target.to_string();
     let target_cl = Path::new(&target);
+    let old_target_old = target_cl.with_extension("old");
+    // try remove old_target_old, do not throw error if failed
+    let _ = tokio::fs::remove_file(old_target_old).await;
     let new_target = target_cl.with_extension("patching");
     let target_size = target_cl
         .metadata()
@@ -298,21 +301,20 @@ where
         let old_target = target_cl.with_extension("old");
         let exe_path = std::env::current_exe();
         let exe_path = exe_path.map_err(|e| format!("Failed to get exe path: {:?}", e))?;
-        // rename to .old if the target is the same as exe
-        if exe_path == target_cl {
-            let old_target = target_cl.with_extension("old");
-            tokio::fs::rename(target_cl, old_target)
-                .await
-                .map_err(|e| format!("Failed to rename target: {:?}", e))?;
-        } else {
-            // delete old file
+        // rename to .old
+        tokio::fs::rename(target_cl, old_target.clone())
+            .await
+            .map_err(|e| format!("Failed to rename target: {:?}", e))?;
+        // rename new file to original
+        tokio::fs::rename(new_target, target_cl)
+            .await
+            .map_err(|e| format!("Failed to rename new target: {:?}", e))?;
+        if exe_path != target_cl {
+            // if old file is not self, delete old file
             tokio::fs::remove_file(old_target)
                 .await
                 .map_err(|e| format!("Failed to remove old target: {:?}", e))?;
         }
-        tokio::fs::rename(new_target, target_cl)
-            .await
-            .map_err(|e| format!("Failed to rename new target: {:?}", e))?;
     } else {
         // delete new target
         tokio::fs::remove_file(new_target)
