@@ -15,6 +15,7 @@ pub struct InstallerConfig {
     pub install_path_source: &'static str,
     pub is_uninstall: bool,
     pub embedded_files: Option<Vec<Embedded>>,
+    pub embedded_index: Option<Vec<Embedded>>,
     pub embedded_config: Option<Value>,
     pub enbedded_metadata: Option<Value>,
     pub exe_path: String,
@@ -30,10 +31,12 @@ pub async fn get_config_pre(
     let mut embedded_files = None;
     let mut embedded_config = None;
     let mut enbedded_metadata = None;
+    let mut embedded_index = None;
     if let Ok(embedded_files_res) = get_embedded().await {
         if let Ok(res) = get_config_from_embedded(&embedded_files_res).await {
             embedded_config = res.0;
             enbedded_metadata = res.1;
+            embedded_index = res.2;
         }
 
         embedded_files = Some(embedded_files_res);
@@ -61,6 +64,7 @@ pub async fn get_config_pre(
         install_path_source: "",
         is_uninstall: false,
         embedded_files,
+        embedded_index,
         embedded_config,
         enbedded_metadata,
         exe_path,

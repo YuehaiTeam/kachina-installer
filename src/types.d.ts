@@ -83,6 +83,7 @@ type InvokeSelectDirRes = {
 interface Embedded {
   name: String;
   offset: number;
+  raw_offset: number;
   size: number;
 }
 
@@ -97,6 +98,7 @@ interface InstallerConfig {
     | 'DEFAULT';
   is_uninstall: boolean;
   embedded_files: Embedded[] | null;
+  embedded_index: Embedded[] | null;
   embedded_config: ProjectConfig | null;
   enbedded_metadata: InvokeGetDfsMetadataRes | null;
   exe_path: string;

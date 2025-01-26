@@ -71,7 +71,7 @@ pub async fn pack_cli(args: PackArgs) {
             return;
         }
         Some(PackFile {
-            name: ".image".to_string(),
+            name: "\0IMAGE".to_string(),
             size: image_size as usize,
             data: Box::new(imagef.unwrap()) as Box<dyn AsyncRead + Unpin + Send>,
         })
@@ -154,15 +154,101 @@ pub async fn pack(
     mut output: impl AsyncWrite + std::marker::Unpin,
     mut config: PackConfig,
 ) {
-    // copy base to output, not closing output file
-    println!("Writing base...");
-    tokio::io::copy(&mut base, &mut output).await.unwrap();
-    // write config
-    println!("Writing config...");
+    println!("Reading base...");
+    let mut base_data = vec![];
+    tokio::io::copy(&mut base, &mut base_data).await.unwrap();
+    let metadata_bytes = if let Some(metadata) = config.metadata {
+        println!("Writing metadata...");
+        let mut metadata = serde_json::json!(metadata);
+        metadata.sort_all_objects();
+        let metadata_bytes = serde_json::to_string(&metadata).unwrap();
+        Some(metadata_bytes.as_bytes().to_vec())
+    } else {
+        None
+    };
+    println!("Generating index...");
     config.config.sort_all_objects();
     let config_bytes = serde_json::to_string(&config.config).unwrap();
+    let mut files = config.files;
+    // name size offset
+    let mut index: Vec<(String, u32, u32)> = vec![];
+    // insert config to index
+    let mut current_offset = 0;
+    index.push((
+        "\0CONFIG".to_string(),
+        config_bytes.len() as u32,
+        get_header_size("\0CONFIG") as u32,
+    ));
+    current_offset += config_bytes.len() + get_header_size("\0CONFIG");
+    // insert image to index
+    if let Some(img) = config.image.as_ref() {
+        let offset = current_offset + get_header_size(&img.name);
+        index.push((img.name.clone(), img.size as u32, offset as u32));
+        current_offset = offset + img.size;
+    }
+    // insert metadata to index
+    if let Some(metadata_bytes) = metadata_bytes.as_ref() {
+        let offset = current_offset + get_header_size("\0META");
+        index.push((
+            "\0META".to_string(),
+            metadata_bytes.len() as u32,
+            offset as u32,
+        ));
+        current_offset = offset + metadata_bytes.len();
+    }
+    files.sort_by_key(|x| x.name.clone());
+    for file in files.iter_mut() {
+        let name = file.name.clone();
+        let size = file.size;
+        let offset: usize = current_offset + get_header_size(&name);
+        index.push((name, size as u32, offset as u32));
+        current_offset = offset + size;
+    }
+    let index_len = index_to_bin(&index).len() + get_header_size("\0INDEX");
+    // add index_len to offset
+    for (_name, _size, offset) in index.iter_mut() {
+        *offset += index_len as u32;
+    }
+    // write pre-index to pe header
+    let index_pre = gen_index_header(
+        base_data.len() as u32,
+        index_len as u32,
+        (config_bytes.len() + get_header_size("\0CONFIG")) as u32,
+        if let Some(img) = config.image.as_ref() {
+            (img.size + get_header_size(&img.name)) as u32
+        } else {
+            0
+        },
+        if let Some(metadata_bytes) = metadata_bytes.as_ref() {
+            (metadata_bytes.len() + get_header_size("\0META")) as u32
+        } else {
+            0
+        },
+    );
+    // replace 'This program cannot be run in DOS mode' in pe header to index_pre
+    let pe_str_offset = base_data.iter().position(|x| *x == 0x54).unwrap();
+    let pe_str = &mut base_data[pe_str_offset..pe_str_offset + index_pre.len()];
+    // check if pe_str is really 'This program cannot be run in DOS mode'
+    let pe_string = std::str::from_utf8_mut(pe_str).unwrap();
+    if pe_string != "This program cannot be run in DOS mode" {
+        eprintln!("Failed to find pe string");
+        return;
+    }
+    pe_str.copy_from_slice(&index_pre);
+    // copy base to output, not closing output file
+    println!("Writing base...");
+    output.write_all(&base_data).await.unwrap();
+    // write index
+    println!("Writing index...");
+    let index_bytes = index_to_bin(&index);
+    write_header(&mut output, "\0INDEX", index_bytes.len() as u32)
+        .await
+        .unwrap();
+    output.write_all(&index_bytes).await.unwrap();
+    // write config
+    println!("Writing config...");
     let config_bytes = config_bytes.as_bytes();
-    let res = write_header(&mut output, ".config.json", config_bytes.len() as u32).await;
+    let res = write_header(&mut output, "\0CONFIG", config_bytes.len() as u32).await;
     if res.is_err() {
         eprintln!("Failed to write header: {:?}", res.err());
         return;
@@ -182,26 +268,19 @@ pub async fn pack(
         }
     }
     // if metadata exists, write metadata
-    if let Some(metadata) = config.metadata {
-        println!("Writing metadata...");
-        let mut metadata = serde_json::json!(metadata);
-        metadata.sort_all_objects();
-        let metadata_bytes = serde_json::to_string(&metadata).unwrap();
-        let metadata_bytes = metadata_bytes.as_bytes();
-        let res = write_header(&mut output, ".metadata.json", metadata_bytes.len() as u32).await;
+    if let Some(metadata_bytes) = metadata_bytes {
+        let res = write_header(&mut output, "\0META", metadata_bytes.len() as u32).await;
         if res.is_err() {
             eprintln!("Failed to write header: {:?}", res.err());
             return;
         }
-        let res = output.write_all(metadata_bytes).await;
+        let res = output.write_all(&metadata_bytes).await;
         if res.is_err() {
             eprintln!("Failed to write metadata: {:?}", res.err());
             return;
         }
     }
     // write files
-    let mut files = config.files;
-    files.sort_by_key(|x| x.name.clone());
     for file in files.iter_mut() {
         println!("Writing file: {}", file.name);
         let res = write_file(&mut output, file).await;
@@ -225,7 +304,7 @@ pub async fn write_header(
     name: &str,
     size: u32,
 ) -> Result<(), tokio::io::Error> {
-    let header = "!ins".to_ascii_uppercase();
+    let header = "!in\0".to_ascii_uppercase();
     let header = header.as_bytes();
     let name = name.as_bytes();
     let size = size.to_be_bytes();
@@ -235,6 +314,40 @@ pub async fn write_header(
     output.write_all(name).await?;
     output.write_all(&size).await?;
     Ok(())
+}
+
+pub fn get_header_size(name: &str) -> usize {
+    "!in\0".len() + 2 + name.len() + 4
+}
+
+pub fn index_to_bin(index: &Vec<(String, u32, u32)>) -> Vec<u8> {
+    let mut data = vec![];
+    // u8: name_len var: name u32: size u32: offset
+    for (name, size, offset) in index.iter() {
+        let name = name.as_bytes();
+        let name_len = name.len() as u8;
+        data.push(name_len);
+        data.extend_from_slice(name);
+        data.extend_from_slice(&size.to_be_bytes());
+        data.extend_from_slice(&offset.to_be_bytes());
+    }
+    data
+}
+
+pub fn gen_index_header(
+    base_end: u32,
+    index_end: u32,
+    config_end: u32,
+    theme_end: u32,
+    manifest_end: u32,
+) -> Vec<u8> {
+    let mut data = "!KachinaInstaller!".as_bytes().to_vec();
+    data.extend_from_slice(&base_end.to_be_bytes());
+    data.extend_from_slice(&index_end.to_be_bytes());
+    data.extend_from_slice(&config_end.to_be_bytes());
+    data.extend_from_slice(&theme_end.to_be_bytes());
+    data.extend_from_slice(&manifest_end.to_be_bytes());
+    data
 }
 
 pub async fn write_file(

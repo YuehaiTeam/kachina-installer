@@ -18,7 +18,7 @@ pub async fn mmap() -> &'static AsyncMmapFile {
 }
 
 async fn search_pattern() -> Result<Vec<usize>, String> {
-    let pattern = "!ins".to_ascii_uppercase();
+    let pattern = "!in\0".to_ascii_uppercase();
     let pattern: &[u8; 4] = pattern.as_bytes().try_into().unwrap();
     let file = mmap().await;
     let mut reader = file.reader(0).map_err(|e| e.to_string())?;
@@ -85,7 +85,7 @@ pub async fn get_embedded() -> Result<Vec<Embedded>, String> {
             continue;
         }
         // TLV
-        // header: !INS
+        // header: !IN\0
         // name length: 2 bytes big endian
         // name: variable length
         // content length: 4 bytes big endian
@@ -113,28 +113,58 @@ pub async fn get_embedded() -> Result<Vec<Embedded>, String> {
 
 pub async fn get_config_from_embedded(
     embedded: &[Embedded],
-) -> Result<(Option<Value>, Option<Value>), String> {
+) -> Result<(Option<Value>, Option<Value>, Option<Vec<Embedded>>), String> {
     let file = mmap().await;
     let mut config = None;
     let mut metadata = None;
+    let mut index: Option<Vec<Embedded>> = None;
     for entry in embedded.iter() {
-        if entry.name == ".config.json" {
+        if entry.name == "\0CONFIG" {
             let content = file.slice(entry.offset, entry.size);
             let content = String::from_utf8_lossy(content);
             config = Some(serde_json::from_str(&content).map_err(|e| e.to_string())?);
-        } else if entry.name == ".metadata.json" {
+        } else if entry.name == "\0META" {
             let content = file.slice(entry.offset, entry.size);
             let content = String::from_utf8_lossy(content);
             metadata = Some(serde_json::from_str(&content).map_err(|e| e.to_string())?);
+        } else if entry.name == "\0INDEX" {
+            // u8: name_len var: name u32: size u32: offset
+            let content = file.slice(entry.offset, entry.size);
+            let mut index_entries = Vec::new();
+            let mut offset = 0;
+            while offset < content.len() {
+                let name_len = content[offset] as usize;
+                offset += 1;
+                let name = String::from_utf8_lossy(&content[offset..offset + name_len]).to_string();
+                offset += name_len;
+                let size =
+                    u32::from_be_bytes(content[offset..offset + 4].try_into().unwrap()) as usize;
+                offset += 4;
+                let file_offset =
+                    u32::from_be_bytes(content[offset..offset + 4].try_into().unwrap()) as usize;
+                offset += 4;
+                index_entries.push(Embedded {
+                    raw_offset: entry.raw_offset + file_offset - get_header_size(&name),
+                    name,
+                    offset: entry.raw_offset + file_offset,
+                    size,
+                });
+            }
+            index = Some(index_entries);
         }
     }
-    Ok((config, metadata))
+    Ok((config, metadata, index))
+}
+
+pub fn get_header_size(name: &str) -> usize {
+    "!in\0".len() + 2 + name.len() + 4
 }
 
 pub async fn get_base_with_config() -> Result<AsyncMmapFileReader<'static>, String> {
     let embedded = get_embedded().await?;
-    let config_index = embedded.iter().position(|x| x.name == ".config.json");
-    let image_index = embedded.iter().position(|x| x.name == ".image");
+    let config_index = embedded.iter().position(|x| x.name == "\0CONFIG");
+    let image_index = embedded.iter().position(|x| x.name == "\0IMAGE");
+    let index_index = embedded.iter().position(|x| x.name == "\0INDEX");
     if config_index.is_none() {
         if embedded.is_empty() {
             return mmap().await.reader(0).map_err(|e| e.to_string());
@@ -143,7 +173,7 @@ pub async fn get_base_with_config() -> Result<AsyncMmapFileReader<'static>, Stri
     }
     let config_index = config_index.unwrap();
     // config index should be 0
-    if config_index != 0 {
+    if config_index != 0 || index_index.is_some() && config_index != 1 {
         return Err("Malformed packed files: config not at index 0".to_string());
     }
     let mut end_pos = embedded[config_index].offset + embedded[config_index].size;

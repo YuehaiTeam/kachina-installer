@@ -442,6 +442,7 @@ const INSTALLER_CONFIG: InstallerConfig = reactive({
   embedded_config: null,
   enbedded_metadata: null,
   embedded_files: [],
+  embedded_index: [],
   exe_path: '',
   args: {
     target: null,
@@ -755,7 +756,7 @@ onMounted(async () => {
       if (
         INSTALLER_CONFIG.embedded_files &&
         INSTALLER_CONFIG.embedded_files.length > 0 &&
-        !INSTALLER_CONFIG.embedded_files.find((e) => e.name === '.config.json')
+        !INSTALLER_CONFIG.embedded_files.find((e) => e.name === '\0CONFIG')
       ) {
         error('打包错误，请确保配置文件被正确打包');
       }
@@ -767,6 +768,33 @@ onMounted(async () => {
     const win = getCurrentWindow();
     win.close();
     return;
+  }
+  if (INSTALLER_CONFIG.embedded_index && INSTALLER_CONFIG.embedded_files) {
+    let hasWrongIndex = false;
+    for (const i of INSTALLER_CONFIG.embedded_index) {
+      const target = INSTALLER_CONFIG.embedded_files.find(
+        (e) => e.name === i.name,
+      );
+      if (!target) {
+        console.warn('Unfound index', target, i);
+        hasWrongIndex = true;
+        continue;
+      }
+      if (target.offset !== i.offset || target.raw_offset !== i.raw_offset) {
+        console.warn('Wrong index', target, i);
+        hasWrongIndex = true;
+      }
+    }
+    if (hasWrongIndex) {
+      if (process.env.NODE_ENV === 'development') {
+        error('打包错误，请确保索引文件正确');
+      } else {
+        await error('安装包损坏，请重新下载');
+        const win = getCurrentWindow();
+        win.close();
+        return;
+      }
+    }
   }
   if (INSTALLER_CONFIG.install_path_exists) isUpdate.value = true;
   await win.setTitle(PROJECT_CONFIG.windowTitle);
