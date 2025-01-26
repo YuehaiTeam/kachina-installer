@@ -92,6 +92,9 @@ pub async fn pack_cli(args: PackArgs) {
                         eprintln!("No hash found for file: {:?}", file.file_name);
                         return;
                     };
+                    if files.iter().any(|x: &PackFile| x.name == *hash) {
+                        continue;
+                    }
                     let path = data_dir.join(&hash);
                     let size = tokio::fs::metadata(&path).await.unwrap().len() as usize;
                     let f = tokio::fs::File::open(path).await;
@@ -212,7 +215,7 @@ pub async fn pack(
     // write pre-index to pe header
     let index_pre = gen_index_header(
         base_data.len() as u32,
-        index_len as u32,
+        (index_len + get_header_size("\0INDEX")) as u32,
         (config_bytes.len() + get_header_size("\0CONFIG")) as u32,
         if let Some(img) = config.image.as_ref() {
             (img.size + get_header_size(&img.name)) as u32

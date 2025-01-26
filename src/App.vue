@@ -781,7 +781,7 @@ onMounted(async () => {
         continue;
       }
       if (target.offset !== i.offset || target.raw_offset !== i.raw_offset) {
-        console.warn('Wrong index', target, i);
+        console.warn('Wrong index: pack=', target, 'index=', i);
         hasWrongIndex = true;
       }
     }

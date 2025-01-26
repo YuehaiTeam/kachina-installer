@@ -65,7 +65,7 @@ pub async fn gen_cli(args: GenArgs) {
 
     // create a progress bar to track overall status
     let pb_main = multi_pg.add(ProgressBar::new(metadata.len() as u64));
-    pb_main.set_style(pb_style_total);
+    pb_main.set_style(pb_style_total.clone());
     pb_main.set_message("TOTAL");
 
     // Make the main progress bar render immediately rather than waiting for the
@@ -82,6 +82,7 @@ pub async fn gen_cli(args: GenArgs) {
     // spawn a background task for each download (do_stuff)
     // Does not spawn more tasks than MAX_CONCURRENT "allows"
     for (index, file) in metadata.iter().enumerate() {
+        let pb_main_ = pb_main.clone();
         if index == metadata.len() - 1 {
             last_item = true;
         }
@@ -116,21 +117,17 @@ pub async fn gen_cli(args: GenArgs) {
                 let output_path = output.join(hash);
                 pb_task.set_message(format!("     {:?}", display_name));
                 let task_ = pb_task.clone();
+                let pb_main_ = pb_main_.clone();
                 let reader = tokio::fs::File::open(file_path).await.unwrap();
                 let reader = ReadWithCallback {
                     reader,
                     callback: move |chunk| {
                         task_.inc(chunk as u64);
+                        pb_main_.tick();
                     },
                 };
                 let reader = tokio::io::BufReader::new(reader);
-                let mut encoder = ZstdEncoder::with_quality_and_params(
-                    reader,
-                    async_compression::Level::Best,
-                    &[async_compression::zstd::CParameter::nb_workers(
-                        num_cpus::get() as u32,
-                    )],
-                );
+                let mut encoder = ZstdEncoder::with_quality(reader, async_compression::Level::Best);
                 let mut writer = tokio::fs::File::create(output_path).await.unwrap();
                 tokio::io::copy(&mut encoder, &mut writer)
                     .await
@@ -202,121 +199,163 @@ pub async fn gen_cli(args: GenArgs) {
             let mut diffs = Vec::new();
             // loop through diff_versions
             for diff_ver in diff_vers.iter() {
-                println!("Generating diff for {}", diff_ver);
                 // loop through current metadata
-                for file in metadata.iter() {
-                    if ignore
-                        .matched_path_or_any_parents(&file.file_name, false)
-                        .is_ignore()
-                    {
-                        println!("File {:?} ignored", file.file_name);
-                        continue;
+                let multi_pg = MultiProgress::new();
+
+                // create a progress bar to track overall status
+                let pb_main = multi_pg.add(ProgressBar::new(metadata.len() as u64));
+                pb_main.set_style(pb_style_total.clone());
+                pb_main.set_message(format!("DIFF TOTAL {}", diff_ver));
+
+                // Make the main progress bar render immediately rather than waiting for the
+                // first task to finish.
+                pb_main.tick();
+
+                // tokio::task::JoinSet
+                // setup the JoinSet to manage the join handles for our futures
+                let mut set = JoinSet::new();
+
+                let mut last_item = false;
+                for (index, file) in metadata.iter().enumerate() {
+                    if index == metadata.len() - 1 {
+                        last_item = true;
                     }
-                    // file should > 1M
-                    if file.size < 1024 * 1024 {
-                        println!("File {:?} too small, skipped", file.file_name);
-                        continue;
-                    }
-                    // check if file exists in diff_ver
-                    let diff_file = Path::new(diff_ver).join(&file.file_name);
-                    if !diff_file.exists() {
-                        // file not found in diff_ver, skip
-                        println!("File {:?} not found in diff_ver, skipped", file.file_name);
-                        continue;
-                    }
-                    // file found, hash it
-                    let old_hash = run_hash("xxh", diff_file.to_str().unwrap())
-                        .await
-                        .expect("failed to hash diff file");
-                    if old_hash == *file.xxh.as_ref().unwrap() {
-                        // hash same, skip
-                        println!("File {:?} hash same, skipped", file.file_name);
-                        continue;
-                    }
-                    // hash different, generate diff
-                    let output_path = args.output_dir.join(format!(
-                        "{}_{}.hdiff",
-                        old_hash,
-                        file.xxh.as_ref().unwrap()
-                    ));
-                    let compressed_path = args.output_dir.join(format!(
-                        "{}_{}",
-                        old_hash,
-                        file.xxh.as_ref().unwrap()
-                    ));
-                    println!("Generating diff for {:?} to {:?}", diff_file, output_path);
-                    // read old_data and new_data to memory
-                    let old_data = tokio::fs::read(&diff_file)
-                        .await
-                        .expect("failed to read old data");
-                    let new_data = tokio::fs::read(args.input_dir.join(&file.file_name))
-                        .await
-                        .expect("failed to read new data");
-                    let output_file =
-                        std::fs::File::create(&output_path).expect("failed to create output file");
-                    tokio::task::spawn_blocking(move || {
-                        // create output file
-                        safe_create_single_patch(&new_data, &old_data, output_file, 7)
-                    })
-                    .await
-                    .expect("failed to create diff")
-                    .expect("failed to create diff");
-                    // compress diff file
-                    let reader = tokio::fs::File::open(&output_path)
-                        .await
-                        .expect("failed to open diff file");
-                    let reader = tokio::io::BufReader::new(reader);
-                    let mut encoder = ZstdEncoder::with_quality_and_params(
-                        reader,
-                        async_compression::Level::Best,
-                        &[async_compression::zstd::CParameter::nb_workers(
-                            num_cpus::get() as u32,
-                        )],
-                    );
-                    let mut writer = tokio::fs::File::create(&compressed_path)
-                        .await
-                        .expect("failed to create compressed diff file");
-                    tokio::io::copy(&mut encoder, &mut writer)
-                        .await
-                        .expect("failed to compress diff");
-                    // flush writer
-                    writer.flush().await.expect("failed to flush writer");
-                    // close file
-                    drop(writer);
-                    // delete uncompressed diff
-                    tokio::fs::remove_file(&output_path)
-                        .await
-                        .expect("failed to remove uncompressed diff");
-                    // if diff size is 50%+ of new file size, delete diff and skip
-                    let diff_size = tokio::fs::metadata(&compressed_path)
-                        .await
-                        .expect("failed to get diff size")
-                        .len();
-                    let old_size = tokio::fs::metadata(&diff_file)
-                        .await
-                        .expect("failed to get old size")
-                        .len();
-                    if diff_size > (file.size / 2) {
-                        tokio::fs::remove_file(&compressed_path)
+
+                    let input_dir = args.input_dir.clone();
+                    let output_dir = args.output_dir.clone();
+                    let diff_ver = diff_ver.clone();
+
+                    // spawns a background task immediatly no matter if the future is awaited
+                    // https://docs.rs/tokio/latest/tokio/task/struct.JoinSet.html#method.spawn
+                    let file = file.clone();
+                    let ignore = ignore.clone();
+                    set.spawn(async move {
+                        if ignore
+                            .matched_path_or_any_parents(&file.file_name, false)
+                            .is_ignore()
+                        {
+                            println!("File {:?} ignored", file.file_name);
+                            return None;
+                        }
+                        // file should > 1M
+                        if file.size < 1024 * 1024 {
+                            println!("File {:?} too small, skipped", file.file_name);
+                            return None;
+                        }
+                        // check if file exists in diff_ver
+                        let diff_file = Path::new(&diff_ver).join(&file.file_name);
+                        if !diff_file.exists() {
+                            // file not found in diff_ver, skip
+                            println!("File {:?} not found in diff_ver, skipped", file.file_name);
+                            return None;
+                        }
+                        // file found, hash it
+                        let old_hash = run_hash("xxh", diff_file.to_str().unwrap())
                             .await
-                            .expect("failed to remove diff");
-                        println!("File {:?} diff too large, skipped", file.file_name);
-                        continue;
-                    }
-                    diffs.push(PatchInfo {
-                        file_name: file.file_name.clone(),
-                        size: diff_size,
-                        from: PatchItem {
-                            md5: None,
-                            xxh: Some(old_hash.clone()),
-                            size: old_size,
-                        },
-                        to: PatchItem {
-                            md5: None,
-                            xxh: Some(file.xxh.clone().unwrap()),
-                            size: file.size,
-                        },
+                            .expect("failed to hash diff file");
+                        if old_hash == *file.xxh.as_ref().unwrap() {
+                            // hash same, skip
+                            println!("File {:?} hash same, skipped", file.file_name);
+                            return None;
+                        }
+                        // hash different, generate diff
+                        let output_path = output_dir.join(format!(
+                            "{}_{}.hdiff",
+                            old_hash,
+                            file.xxh.as_ref().unwrap()
+                        ));
+                        let compressed_path =
+                            output_dir.join(format!("{}_{}", old_hash, file.xxh.as_ref().unwrap()));
+                        println!("Generating diff for {:?} to {:?}", diff_file, output_path);
+                        // read old_data and new_data to memory
+                        let old_data = tokio::fs::read(&diff_file)
+                            .await
+                            .expect("failed to read old data");
+                        let new_data = tokio::fs::read(input_dir.join(&file.file_name))
+                            .await
+                            .expect("failed to read new data");
+                        let output_file = std::fs::File::create(&output_path)
+                            .expect("failed to create output file");
+                        tokio::task::spawn_blocking(move || {
+                            // create output file
+                            safe_create_single_patch(&new_data, &old_data, output_file, 7)
+                        })
+                        .await
+                        .expect("failed to create diff")
+                        .expect("failed to create diff");
+                        // compress diff file
+                        let reader = tokio::fs::File::open(&output_path)
+                            .await
+                            .expect("failed to open diff file");
+                        let reader = tokio::io::BufReader::new(reader);
+                        let mut encoder =
+                            ZstdEncoder::with_quality(reader, async_compression::Level::Best);
+                        let mut writer = tokio::fs::File::create(&compressed_path)
+                            .await
+                            .expect("failed to create compressed diff file");
+                        tokio::io::copy(&mut encoder, &mut writer)
+                            .await
+                            .expect("failed to compress diff");
+                        // flush writer
+                        writer.flush().await.expect("failed to flush writer");
+                        // close file
+                        drop(writer);
+                        // delete uncompressed diff
+                        tokio::fs::remove_file(&output_path)
+                            .await
+                            .expect("failed to remove uncompressed diff");
+                        // if diff size is 50%+ of new file size, delete diff and skip
+                        let diff_size = tokio::fs::metadata(&compressed_path)
+                            .await
+                            .expect("failed to get diff size")
+                            .len();
+                        let old_size = tokio::fs::metadata(&diff_file)
+                            .await
+                            .expect("failed to get old size")
+                            .len();
+                        if diff_size > (file.size / 2) {
+                            tokio::fs::remove_file(&compressed_path)
+                                .await
+                                .expect("failed to remove diff");
+                            println!("File {:?} diff too large, skipped", file.file_name);
+                            return None;
+                        }
+                        return Some(PatchInfo {
+                            file_name: file.file_name.clone(),
+                            size: diff_size,
+                            from: PatchItem {
+                                md5: None,
+                                xxh: Some(old_hash.clone()),
+                                size: old_size,
+                            },
+                            to: PatchItem {
+                                md5: None,
+                                xxh: Some(file.xxh.clone().unwrap()),
+                                size: file.size,
+                            },
+                        });
                     });
+                    while set.len() >= args.zstd_concurrency || last_item {
+                        match set.join_next().await {
+                            Some(res) => {
+                                if let Err(e) = res {
+                                    eprintln!("Diff Task Error: {:?}", e);
+                                    std::process::exit(1);
+                                }
+                                let res = res.unwrap();
+                                match res {
+                                    Some(diff) => {
+                                        diffs.push(diff);
+                                    }
+                                    None => {}
+                                }
+                            }
+                            None => {
+                                break;
+                            }
+                        };
+                        pb_main.inc(1);
+                    }
                 }
             }
             repometa.patches = Some(diffs);
