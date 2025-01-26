@@ -300,6 +300,10 @@ pub async fn gen_cli(args: GenArgs) {
                         writer.flush().await.expect("failed to flush writer");
                         // close file
                         drop(writer);
+                        let diff_original_size = tokio::fs::metadata(&output_path)
+                            .await
+                            .expect("failed to get diff size")
+                            .len();
                         // delete uncompressed diff
                         tokio::fs::remove_file(&output_path)
                             .await
@@ -322,7 +326,7 @@ pub async fn gen_cli(args: GenArgs) {
                         }
                         Some(PatchInfo {
                             file_name: file.file_name.clone(),
-                            size: diff_size,
+                            size: diff_original_size,
                             from: PatchItem {
                                 md5: None,
                                 xxh: Some(old_hash.clone()),
