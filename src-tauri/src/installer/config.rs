@@ -123,13 +123,11 @@ pub async fn get_installer_config(args: State<'_, InstallArgs>) -> Result<Instal
         return Ok(config.fill(exe_dir, true, "CURRENT_DIR"));
     }
     let exe_parent_dir = exe_dir.parent();
-    if exe_parent_dir.is_none() {
-        return Err("Failed to get exe parent dir".to_string());
-    }
-    let exe_parent_dir = exe_parent_dir.unwrap();
-    let exe_path = exe_parent_dir.join(exe_name);
-    if exe_path.exists() {
-        return Ok(config.fill(exe_parent_dir, true, "PARENT_DIR"));
+    if let Some(exe_parent_dir) = exe_parent_dir {
+        let exe_path = exe_parent_dir.join(exe_name);
+        if exe_path.exists() {
+            return Ok(config.fill(exe_parent_dir, true, "PARENT_DIR"));
+        }
     }
     let key = winreg::RegKey::predef(winreg::enums::HKEY_LOCAL_MACHINE).open_subkey(format!(
         "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\{}",

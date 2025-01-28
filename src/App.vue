@@ -741,96 +741,112 @@ async function install(): Promise<void> {
 }
 
 onMounted(async () => {
-  const win = getCurrentWindow();
-  if (process.env.NODE_ENV === 'development') {
-    await win.show();
-  }
-  const rsrc = await getSource();
-  log('INSTALLER_CONFIG: ', rsrc);
-  Object.assign(INSTALLER_CONFIG, rsrc);
-  source.value = INSTALLER_CONFIG.args.target || INSTALLER_CONFIG.install_path;
-  const seldir = await invoke<InvokeSelectDirRes>('select_dir', {
-    exeName: PROJECT_CONFIG.exeName,
-    silent: true,
-    path: source.value,
-  });
-  if (seldir) {
-    setUacByState(seldir.state, PROJECT_CONFIG.uacStrategy);
-  }
-  if (!rsrc.args.silent) {
-    await win.show();
-  }
-  if (INSTALLER_CONFIG.embedded_config) {
-    Object.assign(PROJECT_CONFIG, INSTALLER_CONFIG.embedded_config);
-    if (process.env.NODE_ENV === 'development') {
-      if (
-        INSTALLER_CONFIG.embedded_files &&
-        INSTALLER_CONFIG.embedded_files.length > 0 &&
-        !INSTALLER_CONFIG.embedded_files.find((e) => e.name === '\0CONFIG')
-      ) {
-        error('打包错误，请确保配置文件被正确打包');
-      }
-    }
-  } else if (process.env.NODE_ENV === 'development') {
-    error('未找到配置文件，请将配置文件放在exe同目录下');
-  } else {
-    await error('安装包损坏，请重新下载');
+  try {
     const win = getCurrentWindow();
-    win.close();
-    return;
-  }
-  if (INSTALLER_CONFIG.embedded_index && INSTALLER_CONFIG.embedded_files) {
-    let hasWrongIndex = false;
-    for (const i of INSTALLER_CONFIG.embedded_index) {
-      const target = INSTALLER_CONFIG.embedded_files.find(
-        (e) => e.name === i.name,
-      );
-      if (!target) {
-        log('Unfound index', target, i);
-        hasWrongIndex = true;
-        continue;
+    if (process.env.NODE_ENV === 'development') {
+      await win.show();
+    }
+    const rsrc = await getSource();
+    log('INSTALLER_CONFIG: ', rsrc);
+    Object.assign(INSTALLER_CONFIG, rsrc);
+    source.value =
+      INSTALLER_CONFIG.args.target || INSTALLER_CONFIG.install_path;
+    const seldir = await invoke<InvokeSelectDirRes>('select_dir', {
+      exeName: PROJECT_CONFIG.exeName,
+      silent: true,
+      path: source.value,
+    });
+    if (seldir) {
+      setUacByState(seldir.state, PROJECT_CONFIG.uacStrategy);
+    }
+    if (!rsrc.args.silent) {
+      await win.show();
+    }
+    if (INSTALLER_CONFIG.embedded_config) {
+      Object.assign(PROJECT_CONFIG, INSTALLER_CONFIG.embedded_config);
+      if (process.env.NODE_ENV === 'development') {
+        if (
+          INSTALLER_CONFIG.embedded_files &&
+          INSTALLER_CONFIG.embedded_files.length > 0 &&
+          !INSTALLER_CONFIG.embedded_files.find((e) => e.name === '\0CONFIG')
+        ) {
+          error('打包错误，请确保配置文件被正确打包');
+        }
       }
-      if (target.offset !== i.offset || target.raw_offset !== i.raw_offset) {
-        log('Wrong index: pack=', target, 'index=', i);
-        hasWrongIndex = true;
+    } else if (process.env.NODE_ENV === 'development') {
+      error('未找到配置文件，请将配置文件放在exe同目录下');
+    } else {
+      await error('安装包损坏，请重新下载');
+      const win = getCurrentWindow();
+      win.close();
+      return;
+    }
+    if (INSTALLER_CONFIG.embedded_index && INSTALLER_CONFIG.embedded_files) {
+      let hasWrongIndex = false;
+      for (const i of INSTALLER_CONFIG.embedded_index) {
+        const target = INSTALLER_CONFIG.embedded_files.find(
+          (e) => e.name === i.name,
+        );
+        if (!target) {
+          log('Unfound index', target, i);
+          hasWrongIndex = true;
+          continue;
+        }
+        if (target.offset !== i.offset || target.raw_offset !== i.raw_offset) {
+          log('Wrong index: pack=', target, 'index=', i);
+          hasWrongIndex = true;
+        }
+      }
+      if (hasWrongIndex) {
+        if (process.env.NODE_ENV === 'development') {
+          error('打包错误，请确保索引文件正确');
+        } else {
+          await error('安装包损坏，请重新下载');
+          const win = getCurrentWindow();
+          win.close();
+          return;
+        }
       }
     }
-    if (hasWrongIndex) {
-      if (process.env.NODE_ENV === 'development') {
-        error('打包错误，请确保索引文件正确');
-      } else {
-        await error('安装包损坏，请重新下载');
-        const win = getCurrentWindow();
-        win.close();
+    if (INSTALLER_CONFIG.install_path_exists) isUpdate.value = true;
+    await win.setTitle(PROJECT_CONFIG.windowTitle);
+    INSTALLER_CONFIG.is_uninstall =
+      INSTALLER_CONFIG.is_uninstall || INSTALLER_CONFIG.args.uninstall;
+    if (INSTALLER_CONFIG.is_uninstall) {
+      const uninstallConfig = await invoke(
+        'read_uninstall_metadata',
+        PROJECT_CONFIG,
+      ).catch(log);
+      log('UNINSTALL_METADATA: ', uninstallConfig);
+      if (!uninstallConfig) {
+        await error('未找到卸载配置文件，请重新安装后再卸载');
+        if (process.env.NODE_ENV !== 'development') {
+          const win = getCurrentWindow();
+          win.close();
+        }
         return;
       }
     }
-  }
-  if (INSTALLER_CONFIG.install_path_exists) isUpdate.value = true;
-  await win.setTitle(PROJECT_CONFIG.windowTitle);
-  INSTALLER_CONFIG.is_uninstall =
-    INSTALLER_CONFIG.is_uninstall || INSTALLER_CONFIG.args.uninstall;
-  if (INSTALLER_CONFIG.is_uninstall) {
-    const uninstallConfig = await invoke(
-      'read_uninstall_metadata',
-      PROJECT_CONFIG,
-    ).catch(log);
-    log('UNINSTALL_METADATA: ', uninstallConfig);
-    if (!uninstallConfig) {
-      await error('未找到卸载配置文件，请重新安装后再卸载');
-      if (process.env.NODE_ENV !== 'development') {
-        const win = getCurrentWindow();
-        win.close();
+    init.value = true;
+    if (INSTALLER_CONFIG.args.silent || INSTALLER_CONFIG.args.non_interactive) {
+      if (INSTALLER_CONFIG.args.uninstall || INSTALLER_CONFIG.is_uninstall) {
+        uninstall();
+      } else {
+        install();
       }
-      return;
     }
-  }
-  init.value = true;
-  if (INSTALLER_CONFIG.args.silent || INSTALLER_CONFIG.args.non_interactive) {
-    if (INSTALLER_CONFIG.args.uninstall || INSTALLER_CONFIG.is_uninstall) {
-      uninstall();
-    } else {
-      install();
+  } catch (e) {
+    log(e);
+    if (e instanceof Error)
+      await error(e.stack || e.toString(), '安装程序初始化失败');
+    else
+      await error(
+        typeof e === 'string' ? e : JSON.stringify(e),
+        '安装程序初始化失败',
+      );
+    if (process.env.NODE_ENV !== 'development') {
+      const win = getCurrentWindow();
+      win.close();
     }
   }
 });
