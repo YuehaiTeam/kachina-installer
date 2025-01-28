@@ -119,7 +119,23 @@ async fn tauri_main(args: InstallArgs) {
         .manage(args)
         .manage(ipc::manager::ManagedElevate::new())
         .setup(move |app| {
-            let main_window = app.get_webview_window("main").unwrap();
+            let temp_dir_for_data = temp_dir.join("KachinaInstaller");
+            let mut main_window = tauri::WebviewWindowBuilder::new(
+                app,
+                "main",
+                tauri::WebviewUrl::App("index.html".into()),
+            )
+            .title(" ")
+            .resizable(false)
+            .maximizable(false)
+            .transparent(true)
+            .visible(false)
+            .inner_size(520.0, 250.0)
+            .center();
+            if cfg!(debug_assertions) {
+                main_window = main_window.data_directory(temp_dir_for_data).visible(true);
+            }
+            let main_window = main_window.build().unwrap();
             #[cfg(debug_assertions)]
             {
                 let window = app.get_webview_window("main");

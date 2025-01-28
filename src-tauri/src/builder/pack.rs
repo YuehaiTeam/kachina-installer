@@ -365,7 +365,7 @@ pub fn get_header_size(name: &str) -> usize {
     "!in\0".len() + 2 + name.len() + 4
 }
 
-pub fn index_to_bin(index: &Vec<(String, u32, u32)>) -> Vec<u8> {
+pub fn index_to_bin(index: &[(String, u32, u32)]) -> Vec<u8> {
     let mut data = vec![];
     // u8: name_len var: name u32: size u32: offset
     for (name, size, offset) in index.iter() {

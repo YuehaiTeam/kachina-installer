@@ -1,8 +1,10 @@
 use super::operation::run_opr;
 use super::operation::IpcOperation;
+use crate::utils::acl::create_security_attributes;
 use crate::utils::uac::check_elevated;
 use crate::utils::uac::run_elevated;
 use crate::utils::uac::SendableHandle;
+use std::ffi::c_void;
 use std::time::Duration;
 use tauri::Emitter;
 use tokio::io::AsyncBufReadExt;
@@ -49,7 +51,21 @@ impl ManagedElevate {
             already_elevated: check_elevated().unwrap_or(false),
         }
     }
-    pub async fn start(&self) -> bool {
+    pub fn create_pipe(name: &str) -> Result<NamedPipeServer, String> {
+        let mut attr = create_security_attributes();
+        let server = unsafe {
+            ServerOptions::new()
+                .first_pipe_instance(true)
+                .reject_remote_clients(true)
+                .pipe_mode(PipeMode::Message)
+                .create_with_security_attributes_raw(name, &mut attr as *mut _ as *mut c_void)
+        };
+        match server {
+            Ok(server) => Ok(server),
+            Err(err) => Err(format!("{:?}", err)),
+        }
+    }
+    pub async fn start(&self) -> Result<(), String> {
         let mut process = self.process.write().await;
         if process.is_none() {
             let command = run_elevated(
@@ -59,31 +75,26 @@ impl ManagedElevate {
             let command = match command {
                 Ok(cmd) => cmd,
                 Err(e) => {
-                    println!("Failed to start elevate process: {:?}", e);
-                    return false;
+                    return Err(format!("Failed to start elevate process: {:?}", e));
                 }
             };
             process.replace(command);
             let name = self.pipe_id.clone();
             let name = format!(r"\\.\pipe\{}", name);
-            let server = ServerOptions::new()
-                .first_pipe_instance(true)
-                .pipe_mode(PipeMode::Message)
-                .create(name.clone());
+            let server = Self::create_pipe(&name);
             if server.is_err() {
-                println!("Failed to create pipe listener: {:?}", server.err());
-                return false;
+                return Err("Failed to create pipe listener".to_string());
             }
             println!("Pipe listener created at {:?}", name);
             let mut server = server.unwrap();
             let tx = self.broadcast_tx.clone();
             let rx = self.mpsc_rx.write().await.take().unwrap();
             if !wait_conn(&mut server).await {
-                return false;
+                return Err("Failed to wait for connection".to_string());
             }
             handle_pipe(server, tx, rx).await;
         }
-        true
+        Ok(())
     }
 }
 
@@ -154,8 +165,8 @@ pub async fn managed_operation(
     } else {
         if mgr.process.read().await.is_none() {
             println!("Elevate process not started, starting...");
-            if !mgr.start().await {
-                return Err("Failed to start elevate process".to_string());
+            if let Err(e) = mgr.start().await {
+                return Err(format!("Failed to start elevate process: {:?}", e));
             }
             println!("Elevate process started");
         }
