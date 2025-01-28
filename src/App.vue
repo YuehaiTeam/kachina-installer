@@ -586,10 +586,7 @@ async function runInstall(): Promise<void> {
   console.log('Files to install:', diff_files);
   subStep.value = 2;
   current.value = '准备下载……';
-  const total_size = diff_files.reduce(
-    (acc, cur) => acc + (cur?.patch?.size || cur.size),
-    0,
-  );
+  const total_size = diff_files.reduce((acc, cur) => acc + cur.size, 0);
   let stat: InstallStat = {
     speedLastSize: 0,
     lastTime: performance.now(),

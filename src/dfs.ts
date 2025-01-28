@@ -319,7 +319,6 @@ export const runDfsDownload = async (
     : `/${item.file_name}`;
   item.downloaded = 0;
   const onProgress = ({ payload }: { payload: number }) => {
-    log('progress', payload);
     if (isNaN(payload)) return;
     item.downloaded = payload;
   };
