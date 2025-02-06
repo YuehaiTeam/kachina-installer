@@ -49,6 +49,7 @@ interface DfsUpdateTask extends DfsMetadataHashInfo {
   downloaded: number;
   running: boolean;
   old_hash?: string;
+  unwritable: boolean;
 }
 
 type InvokeGetDfsMetadataRes = {
@@ -66,6 +67,7 @@ type InvokeDeepReaddirWithMetadataRes = Array<{
   file_name: string;
   size: number;
   hash: string;
+  unwritable: boolean;
 }>;
 
 type InvokeGetDfsRes = {

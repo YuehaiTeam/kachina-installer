@@ -1,4 +1,5 @@
 use tauri::{AppHandle, WebviewWindow};
+use windows::Win32::{Foundation::CloseHandle, System::Diagnostics::ToolHelp::PROCESSENTRY32W};
 
 use crate::utils::dir::in_private_folder;
 
@@ -108,6 +109,105 @@ pub async fn select_dir(
         empty,
         upgrade,
     })
+}
+
+#[tauri::command]
+pub async fn kill_process(pid: u32) -> Result<(), String> {
+    // use the windows crate
+    let handle = unsafe {
+        windows::Win32::System::Threading::OpenProcess(
+            windows::Win32::System::Threading::PROCESS_TERMINATE,
+            false,
+            pid,
+        )
+    };
+    if let Err(e) = handle {
+        return Err(format!("Failed to open process: {:?}", e));
+    }
+    let handle = handle.unwrap();
+    let ret = unsafe { windows::Win32::System::Threading::TerminateProcess(handle, 1) };
+    if let Err(e) = ret {
+        return Err(format!("Failed to terminate process: {:?}", e));
+    }
+    Ok(())
+}
+
+fn get_process_path(pid: u32) -> Option<String> {
+    // QueryFullProcessImageName
+    let handle = unsafe {
+        windows::Win32::System::Threading::OpenProcess(
+            windows::Win32::System::Threading::PROCESS_QUERY_LIMITED_INFORMATION,
+            false,
+            pid,
+        )
+    };
+    if handle.is_err() {
+        return None;
+    }
+    let handle = handle.unwrap();
+    let mut buffer = [0u16; 1024];
+    let mut size = buffer.len() as u32;
+    let ret = unsafe {
+        windows::Win32::System::Threading::QueryFullProcessImageNameW(
+            handle,
+            windows::Win32::System::Threading::PROCESS_NAME_FORMAT(0),
+            windows::core::PWSTR(buffer.as_mut_ptr()),
+            &mut size,
+        )
+    };
+    let _ = unsafe { CloseHandle(handle) };
+    if ret.is_err() {
+        return None;
+    }
+    let path = String::from_utf16_lossy(&buffer[..size as usize]);
+    Some(path)
+}
+
+#[tauri::command]
+pub async fn find_process_by_name(name: String) -> Result<Vec<(u32, String)>, String> {
+    let mut processes = Vec::new();
+    unsafe {
+        let snapshot = windows::Win32::System::Diagnostics::ToolHelp::CreateToolhelp32Snapshot(
+            windows::Win32::System::Diagnostics::ToolHelp::TH32CS_SNAPPROCESS,
+            0,
+        );
+        if let Err(e) = snapshot {
+            return Err(format!("Failed to create snapshot: {:?}", e));
+        }
+        let snapshot = snapshot.unwrap();
+        if snapshot.is_invalid() {
+            return Err("Failed to create snapshot: invalid handle".to_string());
+        }
+        let mut entry: PROCESSENTRY32W = std::mem::zeroed();
+        entry.dwSize = size_of::<PROCESSENTRY32W>() as u32;
+
+        if windows::Win32::System::Diagnostics::ToolHelp::Process32FirstW(snapshot, &mut entry)
+            .is_ok()
+        {
+            loop {
+                let current_name = String::from_utf16_lossy(&entry.szExeFile)
+                    .trim_end_matches('\0')
+                    .to_lowercase();
+                if current_name == name.to_lowercase() {
+                    if let Some(path) = get_process_path(entry.th32ProcessID) {
+                        processes.push((entry.th32ProcessID, path));
+                    } else {
+                        processes.push((entry.th32ProcessID, "".to_string()));
+                    }
+                }
+
+                if windows::Win32::System::Diagnostics::ToolHelp::Process32NextW(
+                    snapshot, &mut entry,
+                )
+                .is_err()
+                {
+                    break;
+                }
+            }
+        }
+        let _ = CloseHandle(snapshot);
+    }
+    Ok(processes)
 }
 
 #[tauri::command]

@@ -389,6 +389,8 @@ import { getDfsMetadata, runDfsDownload } from './dfs';
 import {
   ipcCreateLnk,
   ipcCreateUninstaller,
+  ipcFindProcessByName,
+  ipcKillProcess,
   ipcRunUninstall,
   ipcWriteRegistry,
   ipPrepare,
@@ -514,6 +516,31 @@ async function runInstall(): Promise<void> {
     }
   }
   await ipPrepare(needElevate.value);
+  const target_exe_path = `${source.value}${sep()}${PROJECT_CONFIG.exeName}`;
+  const runningExes =
+    (await ipcFindProcessByName(PROJECT_CONFIG.exeName).catch(log)) || [];
+  if (
+    runningExes.find(
+      (e) =>
+        e[1].toLowerCase().replace(/\\/g, '/') ===
+        target_exe_path.toLowerCase().replace(/\\/g, '/'),
+    )
+  ) {
+    const result =
+      INSTALLER_CONFIG.args.non_interactive ||
+      INSTALLER_CONFIG.args.silent ||
+      (await confirm(
+        `检测到${PROJECT_CONFIG.appName}正在运行，是否结束进程并继续安装？`,
+        '提示',
+      ));
+    if (!result) {
+      step.value = 1;
+      return;
+    } else {
+      await Promise.all(runningExes.map((e) => ipcKillProcess(e[0])));
+      return runInstall();
+    }
+  }
   let hashKey = '';
   if (latest_meta.hashed.every((e) => e.md5)) {
     hashKey = 'md5';
@@ -574,6 +601,7 @@ async function runInstall(): Promise<void> {
         downloaded: 0,
         running: false,
         old_hash: local?.hash,
+        unwritable: local?.unwritable || false,
       });
     }
   }
@@ -583,6 +611,17 @@ async function runInstall(): Promise<void> {
     await finishInstall(latest_meta);
     return;
   }
+  // TODO: 检查占用需要用管理员权限运行
+  // if (diff_files.find((e) => e.unwritable)) {
+  //   if (
+  //     !INSTALLER_CONFIG.args.non_interactive &&
+  //     !INSTALLER_CONFIG.args.silent &&
+  //     !(await confirm('检测到部分文件被占用，继续安装可能无法成功，是否继续？'))
+  //   ) {
+  //     step.value = 1;
+  //     return;
+  //   }
+  // }
   console.log('Files to install:', diff_files);
   subStep.value = 2;
   current.value = '准备下载……';
@@ -727,6 +766,7 @@ async function install(): Promise<void> {
   } catch (e) {
     log(e);
     if (e instanceof Error) await error(e.stack || e.toString());
+    else if (typeof e === 'string') await error(e);
     else await error(JSON.stringify(e));
     step.value = 1;
     subStep.value = 0;
@@ -957,6 +997,7 @@ async function uninstall() {
   } catch (e) {
     log(e);
     if (e instanceof Error) await error(e.stack || e.toString());
+    else if (typeof e === 'string') await error(e);
     else await error(JSON.stringify(e));
     step.value = 1;
   }

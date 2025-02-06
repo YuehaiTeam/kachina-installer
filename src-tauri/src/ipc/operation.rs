@@ -7,6 +7,8 @@ pub enum IpcOperation {
     WriteRegistry(crate::installer::registry::WriteRegistryParams),
     CreateUninstaller(crate::installer::uninstall::CreateUninstallerArgs),
     RunUninstall(crate::installer::uninstall::RunUninstallArgs),
+    FindProcessByName { name: String },
+    KillProcess { pid: u32 },
 }
 
 pub async fn run_opr(
@@ -32,6 +34,12 @@ pub async fn run_opr(
         IpcOperation::CreateLnk(args) => {
             crate::installer::lnk::create_lnk_with_args(args).await?;
             Ok(serde_json::Value::Null)
+        }
+        IpcOperation::FindProcessByName { name } => Ok(serde_json::json!(
+            crate::installer::find_process_by_name(name).await
+        )),
+        IpcOperation::KillProcess { pid } => {
+            Ok(serde_json::json!(crate::installer::kill_process(pid).await))
         }
     }
 }

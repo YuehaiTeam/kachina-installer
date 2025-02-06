@@ -2,7 +2,7 @@ use std::{
     os::windows::process::CommandExt,
     path::{Path, PathBuf},
 };
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use windows::Win32::System::Threading::CREATE_NO_WINDOW;
 
 lazy_static::lazy_static!(
@@ -240,12 +240,7 @@ pub async fn create_uninstaller(
     }
     let current_exe_path = current_exe_path.unwrap();
     let updater_is_self = current_exe_path == updater_path;
-    if updater_path.exists() && !updater_is_self {
-        let res = tokio::fs::copy(&current_exe_path, &updater_path).await;
-        if res.is_err() {
-            return Err(format!("Failed to create updater: {:?}", res.err()));
-        }
-    } else {
+    if !updater_is_self {
         // else, overwrite uninstaller and updater
         let mut self_configured_mmap = crate::local::get_base_with_config().await?;
         let output_file = tokio::fs::File::create(&uninstaller_path)
@@ -260,6 +255,44 @@ pub async fn create_uninstaller(
             .flush()
             .await
             .map_err(|e| format!("Failed to flush: {:?}", e))?;
+        // drop
+        drop(output);
+        // open again with rw
+        let mut output_file = tokio::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&uninstaller_path)
+            .await
+            .map_err(|e| format!("Failed to modify uninstaller: {:?}", e))?;
+        // read first 256 bytes to buffer
+        let mut buffer = [0u8; 256];
+        let read = output_file.read(&mut buffer).await;
+        if let Err(e) = read {
+            return Err(format!("Failed to read uninstaller: {:?}", e));
+        }
+        // convert to string with ascii
+        let buffer = buffer.iter().map(|b| *b as char).collect::<String>();
+        // find '!KachinaInstaller!'
+        let find = buffer.find("!KachinaInstaller!");
+        if let Some(index_mark) = find {
+            let index_start = index_mark + "!KachinaInstaller!".len();
+            // PE header replaced with index. Remove it.
+            // write 5*4 bytes of 0 after index_start
+            let res = output_file
+                .seek(tokio::io::SeekFrom::Start(index_start as u64))
+                .await;
+            if let Err(e) = res {
+                return Err(format!("Failed to seek uninstaller: {:?}", e));
+            }
+            let zero = [0u8; 5 * 4];
+            let res = output_file.write(&zero).await;
+            if let Err(e) = res {
+                return Err(format!("Failed to write uninstaller: {:?}", e));
+            }
+        }
+        // close file
+        drop(output_file);
+        // find
         let res = tokio::fs::copy(&uninstaller_path, &updater_path).await;
         if res.is_err() {
             return Err(format!("Failed to create updater: {:?}", res.err()));

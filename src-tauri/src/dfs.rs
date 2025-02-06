@@ -16,8 +16,14 @@ pub struct DownloadResp {
 }
 
 #[tauri::command]
-pub async fn get_dfs(url: String) -> Result<DownloadResp, String> {
-    let res: Result<reqwest::Response, reqwest::Error> = REQUEST_CLIENT.post(&url).send().await;
+pub async fn get_dfs(url: String, range: Option<String>) -> Result<DownloadResp, String> {
+    let url_with_range_in_query = if let Some(range) = range {
+        format!("{}?range={}", url, range)
+    } else {
+        format!("{}?", url)
+    };
+    let res: Result<reqwest::Response, reqwest::Error> =
+        REQUEST_CLIENT.post(&url_with_range_in_query).send().await;
     if res.is_err() {
         return Err(format!("Failed to send http request: {:?}", res.err()));
     }
@@ -25,7 +31,14 @@ pub async fn get_dfs(url: String) -> Result<DownloadResp, String> {
     // check status code if is not 200 or 401
     if res.status() != reqwest::StatusCode::OK && res.status() != reqwest::StatusCode::UNAUTHORIZED
     {
-        return Err(format!("{}", res.status()));
+        let status = res.status();
+        // check if body exists
+        let body = res.text().await;
+        if body.is_err() {
+            return Err(format!("{}", status));
+        } else {
+            return Err(format!("{}: {}", status, body.unwrap()));
+        }
     }
     let json: Result<DownloadResp, reqwest::Error> = res.json().await;
     if json.is_err() {
@@ -58,7 +71,7 @@ pub async fn get_dfs(url: String) -> Result<DownloadResp, String> {
     if solve.is_empty() {
         return Err("Failed to solve challenge".to_string());
     }
-    let url = format!("{}?sid={}", url, solve);
+    let url = format!("{}&sid={}", url_with_range_in_query, solve);
     let res: Result<reqwest::Response, reqwest::Error> = REQUEST_CLIENT.post(&url).send().await;
     if res.is_err() {
         return Err(format!("Failed to send http request: {:?}", res.err()));

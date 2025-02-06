@@ -63,13 +63,12 @@ export const getDfsMetadata = async (
   source: string,
 ): Promise<InvokeGetDfsMetadataRes> => {
   const { remote, storage, url } = getDfsSourceType(source);
-  const full_file_url = remote === 'direct' ? url : await getDfsFileUrl(url);
   if (storage === 'hashed') {
   } else {
     if (dfsIndexCache.has(source)) {
       return dfsIndexCache.get(source)?.metadata as InvokeGetDfsMetadataRes;
     } else {
-      await refreshDfsIndex(source, full_file_url);
+      await refreshDfsIndex(source, url, remote);
       if (dfsIndexCache.has(source)) {
         return dfsIndexCache.get(source)?.metadata as InvokeGetDfsMetadataRes;
       }
@@ -77,7 +76,13 @@ export const getDfsMetadata = async (
   }
   throw new Error('Get metadata failed');
 };
-export async function refreshDfsIndex(source: string, binurl: string) {
+export async function refreshDfsIndex(
+  source: string,
+  apiurl: string,
+  remote: 'direct' | 'dfs',
+) {
+  const binurl =
+    remote === 'direct' ? apiurl : await getDfsFileUrl(apiurl, 256);
   const pre_index: [number, number[]] = await invoke('get_http_with_range', {
     url: binurl,
     offset: 0,
@@ -199,12 +204,13 @@ export async function refreshDfsIndex(source: string, binurl: string) {
 }
 export const getDfsIndexCache = async (
   source: string,
-  binurl: string,
+  apiurl: string,
+  remote: 'direct' | 'dfs',
 ): Promise<Map<string, Embedded>> => {
   if (dfsIndexCache.has(source)) {
     return dfsIndexCache.get(source)?.index as Map<string, Embedded>;
   } else {
-    await refreshDfsIndex(source, binurl);
+    await refreshDfsIndex(source, apiurl, remote);
     if (dfsIndexCache.has(source)) {
       return dfsIndexCache.get(source)?.index as Map<string, Embedded>;
     }
@@ -235,21 +241,27 @@ export const getDfsUrl = async (
       size: 0,
     };
   } else {
-    const full_file_url = remote === 'direct' ? url : await getDfsFileUrl(url);
-    const cache = await getDfsIndexCache(source, full_file_url);
+    const end = dfsIndexCache.get(source)?.installer_end || 0;
+    const cache = await getDfsIndexCache(source, url, remote);
     const file = cache.get(hash);
     if (!file) {
       if (installer) {
+        const full_file_url =
+          remote === 'direct' ? url : await getDfsFileUrl(url, end);
         return {
           url: full_file_url,
           offset: 0,
-          size: dfsIndexCache.get(source)?.installer_end || 0,
+          size: end,
           skip_decompress: true,
           skip_hash: true,
         };
       }
       throw new Error('No file in remote binary');
     }
+    const full_file_url =
+      remote === 'direct'
+        ? url
+        : await getDfsFileUrl(url, file.size, file.offset);
     return {
       url: full_file_url,
       offset: file.offset,
@@ -267,9 +279,14 @@ export const dfsJsonUrlToHashed = (jsonUrl: string, hash: string): string => {
   return `${url.origin}${dir}/hashed/${hash}`;
 };
 
-export const getDfsFileUrl = async (apiurl: string): Promise<string> => {
+export const getDfsFileUrl = async (
+  apiurl: string,
+  length?: number,
+  start = 0,
+): Promise<string> => {
   const dfs_result = await invoke<InvokeGetDfsRes>('get_dfs', {
     url: apiurl,
+    range: length ? `${start}-${start + length - 1}` : undefined,
   });
   let url = dfs_result.url;
   if (!url && dfs_result.tests && dfs_result.tests.length > 0) {

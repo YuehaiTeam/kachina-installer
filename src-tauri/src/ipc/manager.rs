@@ -165,9 +165,7 @@ pub async fn managed_operation(
     } else {
         if mgr.process.read().await.is_none() {
             println!("Elevate process not started, starting...");
-            if let Err(e) = mgr.start().await {
-                return Err(format!("Failed to start elevate process: {:?}", e));
-            }
+            mgr.start().await?;
             println!("Elevate process started");
         }
         let _ = mgr

@@ -18,13 +18,33 @@ use tauri_utils::{config::WindowEffectsConfig, WindowEffect};
 
 lazy_static::lazy_static! {
     pub static ref REQUEST_CLIENT: reqwest::Client = reqwest::Client::builder()
-        .user_agent(format!("KachinaInstaller/{}", env!("CARGO_PKG_VERSION")))
+        .user_agent(ua_string())
         .gzip(true)
         .zstd(true)
         .read_timeout(Duration::from_secs(30))
         .connect_timeout(std::time::Duration::from_secs(5))
         .build()
         .unwrap();
+}
+
+fn ua_string() -> String {
+    let winver = nt_version::get();
+    let cpu_cores = num_cpus::get();
+    let wv2ver = tauri::webview_version();
+    let wv2ver = if wv2ver.is_ok() {
+        wv2ver.unwrap()
+    } else {
+        "Unknown".to_string()
+    };
+    format!(
+        "KachinaInstaller/{} Webview2/{} Windows/{}.{}.{} Threads/{}",
+        env!("CARGO_PKG_VERSION"),
+        wv2ver,
+        winver.0,
+        winver.1,
+        winver.2 & 0xffff,
+        cpu_cores
+    )
 }
 
 fn main() {
@@ -129,11 +149,10 @@ async fn tauri_main(args: InstallArgs) {
             .resizable(false)
             .maximizable(false)
             .transparent(true)
-            .visible(false)
             .inner_size(520.0, 250.0)
             .center();
-            if cfg!(debug_assertions) {
-                main_window = main_window.data_directory(temp_dir_for_data).visible(true);
+            if !cfg!(debug_assertions) {
+                main_window = main_window.data_directory(temp_dir_for_data).visible(false);
             }
             let main_window = main_window.build().unwrap();
             #[cfg(debug_assertions)]

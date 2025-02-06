@@ -15,6 +15,7 @@ pub struct Metadata {
     pub file_name: String,
     pub hash: String,
     pub size: u64,
+    pub unwritable: bool,
 }
 
 #[tauri::command]
@@ -50,6 +51,7 @@ pub async fn deep_readdir_with_metadata(
                         file_name: path.to_string(),
                         hash: "".to_string(),
                         size,
+                        unwritable: false,
                     });
                 }
             }
@@ -68,12 +70,22 @@ pub async fn deep_readdir_with_metadata(
         let hash_algorithm = hash_algorithm.clone();
         let mut file = file.clone();
         joinset.spawn(async move {
-            let res = run_hash(&hash_algorithm, &file.file_name).await;
-            if res.is_err() {
-                return Err(res.err().unwrap());
+            let exists = Path::new(&file.file_name).exists();
+            let writable = !exists || tokio::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&file.file_name)
+                .await.is_ok();
+            if !writable {
+                file.unwritable = true;
+            } else {
+                let res = run_hash(&hash_algorithm, &file.file_name).await;
+                if res.is_err() {
+                    return Err(res.err().unwrap());
+                }
+                let hash = res.unwrap();
+                file.hash = hash;
             }
-            let hash = res.unwrap();
-            file.hash = hash;
             Ok(file)
         });
     }

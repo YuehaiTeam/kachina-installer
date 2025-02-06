@@ -75,6 +75,15 @@ interface IpcRunUninstall {
   uninstall_name: string;
 }
 
+interface IpcKillProcess {
+  type: 'KillProcess';
+  pid: number;
+}
+
+interface IpcFindProcessByName {
+  type: 'FindProcessByName';
+  name: string;
+}
 export async function ipcCreateLnk(
   target: string,
   lnk: string,
@@ -114,6 +123,16 @@ export async function ipcWriteRegistry(
 ) {
   return ipc<IpcWriteRegistry, void, void>(
     { type: 'WriteRegistry', ...args },
+    elevate,
+  );
+}
+
+export async function ipcKillProcess(pid: number, elevate = false) {
+  return ipc<IpcKillProcess, void, void>({ type: 'KillProcess', pid }, elevate);
+}
+export async function ipcFindProcessByName(name: string, elevate = false) {
+  return ipc<IpcFindProcessByName, [number, string][], void>(
+    { type: 'FindProcessByName', name },
     elevate,
   );
 }

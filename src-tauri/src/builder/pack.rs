@@ -254,21 +254,26 @@ pub async fn pack(
         *offset += index_len as u32;
     }
     // write pre-index to pe header
-    let index_pre = gen_index_header(
-        base_data.len() as u32,
-        (config_bytes.len() + get_header_size("\0CONFIG")) as u32,
-        if let Some(img) = config.image.as_ref() {
-            (img.size + get_header_size(&img.name)) as u32
-        } else {
-            0
-        },
-        index_len as u32,
-        if let Some(metadata_bytes) = metadata_bytes.as_ref() {
-            (metadata_bytes.len() + get_header_size("\0META")) as u32
-        } else {
-            0
-        },
-    );
+    let index_pre = if files.len() > 0 {
+        gen_index_header(
+            base_data.len() as u32,
+            (config_bytes.len() + get_header_size("\0CONFIG")) as u32,
+            if let Some(img) = config.image.as_ref() {
+                (img.size + get_header_size(&img.name)) as u32
+            } else {
+                0
+            },
+            index_len as u32,
+            if let Some(metadata_bytes) = metadata_bytes.as_ref() {
+                (metadata_bytes.len() + get_header_size("\0META")) as u32
+            } else {
+                0
+            },
+        )
+    } else {
+        // 5*4 zeros
+        [0u8; 5 * 4].to_vec()
+    };
     // replace 'This program cannot be run in DOS mode' in pe header to index_pre
     let pe_str_offset = base_data.iter().position(|x| *x == 0x54).unwrap();
     let pe_str = &mut base_data[pe_str_offset..pe_str_offset + index_pre.len()];
