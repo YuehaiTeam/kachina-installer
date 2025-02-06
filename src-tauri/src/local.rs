@@ -8,7 +8,11 @@ static MMAP_SELF: OnceCell<AsyncMmapFile> = OnceCell::const_new();
 pub async fn mmap() -> &'static AsyncMmapFile {
     MMAP_SELF
         .get_or_init(|| async {
-            let exe_path = std::env::current_exe().map_err(|e| e.to_string()).unwrap();
+            let exe_path = if cfg!(debug_assertions) {
+                std::env::current_exe().unwrap().with_extension("bin")
+            } else {
+                std::env::current_exe().map_err(|e| e.to_string()).unwrap()
+            };
             AsyncMmapFile::open(exe_path)
                 .await
                 .map_err(|e| e.to_string())
@@ -24,45 +28,38 @@ async fn search_pattern() -> Result<Vec<usize>, String> {
     let mut reader = file.reader(0).map_err(|e| e.to_string())?;
     let mut buffer = [0u8; 4096];
     let mut offset: usize = 0;
-    let mut previous_bytes = Vec::new();
     let mut founds = Vec::new();
+    let mut read = 0;
 
     loop {
-        let bytes_read = reader.read(&mut buffer).await.map_err(|e| e.to_string())?;
-        if bytes_read == 0 {
+        // move last 4 bytes to the beginning of the buffer
+        if read > 4 {
+            buffer[0] = buffer[read - 4];
+            buffer[1] = buffer[read - 3];
+            buffer[2] = buffer[read - 2];
+            buffer[3] = buffer[read - 1];
+        }
+        read = reader
+            .read(&mut buffer[4..])
+            .await
+            .map_err(|e| e.to_string())?;
+        if read == 0 {
             break;
         }
-
-        // Step 1: Check across previous_bytes and buffer
-        if !previous_bytes.is_empty() {
-            let pb_len = previous_bytes.len();
-            let needed = 4 - pb_len;
-            if bytes_read >= needed {
-                let combined: Vec<u8> = previous_bytes
-                    .iter()
-                    .cloned()
-                    .chain(buffer[..needed].iter().cloned())
-                    .collect();
-                if combined == pattern[..] {
-                    founds.push(offset - (pb_len));
+        for i in 0..read + 4 - 1 {
+            if buffer[i] == pattern[0] {
+                if i + 3 > read + 3 {
+                    continue;
+                }
+                if buffer[i + 1] == pattern[1]
+                    && buffer[i + 2] == pattern[2]
+                    && buffer[i + 3] == pattern[3]
+                {
+                    founds.push(offset + i - 4);
                 }
             }
         }
-
-        // Step 2: Check within the buffer
-        for i in 0..bytes_read - 3 {
-            if buffer[i..i + 4] == *pattern {
-                founds.push(offset + i);
-            }
-        }
-
-        // Step 3: Update previous_bytes
-        if bytes_read > 0 {
-            let start = bytes_read - std::cmp::min(3, bytes_read);
-            previous_bytes = buffer[start..bytes_read].to_vec();
-        }
-
-        offset += bytes_read as usize;
+        offset += read;
     }
 
     Ok(founds)
@@ -82,7 +79,6 @@ pub async fn get_embedded() -> Result<Vec<Embedded>, String> {
     for offset in offsets.iter() {
         if *offset < last_offset {
             // in case of content includes header
-            println!("Skipping offset: {}", offset);
             continue;
         }
         // TLV
