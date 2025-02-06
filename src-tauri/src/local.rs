@@ -82,6 +82,7 @@ pub async fn get_embedded() -> Result<Vec<Embedded>, String> {
     for offset in offsets.iter() {
         if *offset < last_offset {
             // in case of content includes header
+            println!("Skipping offset: {}", offset);
             continue;
         }
         // TLV

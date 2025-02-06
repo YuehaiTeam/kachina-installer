@@ -271,8 +271,7 @@ pub async fn pack(
             },
         )
     } else {
-        // 5*4 zeros
-        [0u8; 5 * 4].to_vec()
+        gen_index_header(0, 0, 0, 0, 0)
     };
     // replace 'This program cannot be run in DOS mode' in pe header to index_pre
     let pe_str_offset = base_data.iter().position(|x| *x == 0x54).unwrap();
@@ -280,7 +279,7 @@ pub async fn pack(
     // check if pe_str is really 'This program cannot be run in DOS mode'
     let pe_string = std::str::from_utf8_mut(pe_str).unwrap();
     if pe_string != "This program cannot be run in DOS mode" {
-        eprintln!("Failed to find pe string");
+        eprintln!("Failed to find pe string: {:?}", pe_string);
         return;
     }
     pe_str.copy_from_slice(&index_pre);
