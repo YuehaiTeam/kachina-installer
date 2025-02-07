@@ -34,10 +34,10 @@ async fn search_pattern() -> Result<Vec<usize>, String> {
     loop {
         // move last 4 bytes to the beginning of the buffer
         if read > 4 {
-            buffer[0] = buffer[read - 4];
-            buffer[1] = buffer[read - 3];
-            buffer[2] = buffer[read - 2];
-            buffer[3] = buffer[read - 1];
+            buffer[0] = buffer[read + 4 - 4];
+            buffer[1] = buffer[read + 4 - 3];
+            buffer[2] = buffer[read + 4 - 2];
+            buffer[3] = buffer[read + 4 - 1];
         }
         read = reader
             .read(&mut buffer[4..])

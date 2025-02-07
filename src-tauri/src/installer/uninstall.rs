@@ -270,24 +270,27 @@ pub async fn create_uninstaller(
         if let Err(e) = read {
             return Err(format!("Failed to read uninstaller: {:?}", e));
         }
-        // convert to string with ascii
-        let buffer = buffer.iter().map(|b| *b as char).collect::<String>();
-        // find '!KachinaInstaller!'
-        let find = buffer.find("!KachinaInstaller!");
-        if let Some(index_mark) = find {
-            let index_start = index_mark + "!KachinaInstaller!".len();
-            // PE header replaced with index. Remove it.
-            // write 5*4 bytes of 0 after index_start
-            let res = output_file
-                .seek(tokio::io::SeekFrom::Start(index_start as u64))
-                .await;
-            if let Err(e) = res {
-                return Err(format!("Failed to seek uninstaller: {:?}", e));
-            }
-            let zero = [0u8; 5 * 4];
-            let res = output_file.write(&zero).await;
-            if let Err(e) = res {
-                return Err(format!("Failed to write uninstaller: {:?}", e));
+        // check ! and K
+        let mark_pos = buffer.windows(2).position(|w| w == b"!K".as_ref());
+        if let Some(mark_pos) = mark_pos {
+            // check if equals !KachinaInstaller!
+            let mark_str = "!KachinaInstaller!";
+            let mark_real = String::from_utf8_lossy(&buffer[mark_pos..mark_pos + mark_str.len()]);
+            if mark_real == mark_str {
+                let index_start = mark_pos + mark_str.len();
+                // PE header replaced with index. Remove it.
+                // write 5*4 bytes of 0 after index_start
+                let res = output_file
+                    .seek(tokio::io::SeekFrom::Start(index_start as u64))
+                    .await;
+                if let Err(e) = res {
+                    return Err(format!("Failed to seek uninstaller: {:?}", e));
+                }
+                let zero = [0u8; 5 * 4];
+                let res = output_file.write(&zero).await;
+                if let Err(e) = res {
+                    return Err(format!("Failed to write uninstaller: {:?}", e));
+                }
             }
         }
         // close file

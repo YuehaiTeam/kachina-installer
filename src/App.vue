@@ -486,7 +486,8 @@ async function runInstall(): Promise<void> {
     if (
       !INSTALLER_CONFIG.args.non_interactive &&
       !INSTALLER_CONFIG.args.silent &&
-      (isUpdate.value ||
+      ((isUpdate.value &&
+        (INSTALLER_CONFIG.embedded_index?.length || 0) <= 0) ||
         (await confirm('当前安装包不是最新版本，是否直接安装最新版本？')))
     ) {
       latest_meta = online_meta;

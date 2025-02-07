@@ -308,14 +308,16 @@ pub async fn pack(
             return;
         }
     }
-    // write index
-    println!("Writing index...");
-    let index_bytes = index_to_bin(&index);
-    write_header(&mut output, "\0INDEX", index_bytes.len() as u32)
-        .await
-        .unwrap();
+    if files.len() > 0 {
+        // write index
+        println!("Writing index...");
+        let index_bytes = index_to_bin(&index);
+        write_header(&mut output, "\0INDEX", index_bytes.len() as u32)
+            .await
+            .unwrap();
 
-    output.write_all(&index_bytes).await.unwrap();
+        output.write_all(&index_bytes).await.unwrap();
+    }
     // if metadata exists, write metadata
     if let Some(metadata_bytes) = metadata_bytes {
         let res = write_header(&mut output, "\0META", metadata_bytes.len() as u32).await;
