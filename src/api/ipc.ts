@@ -84,6 +84,12 @@ interface IpcFindProcessByName {
   type: 'FindProcessByName';
   name: string;
 }
+
+interface IpcRmList {
+  type: 'RmList';
+  list: string[];
+}
+
 export async function ipcCreateLnk(
   target: string,
   lnk: string,
@@ -130,11 +136,16 @@ export async function ipcWriteRegistry(
 export async function ipcKillProcess(pid: number, elevate = false) {
   return ipc<IpcKillProcess, void, void>({ type: 'KillProcess', pid }, elevate);
 }
+
 export async function ipcFindProcessByName(name: string, elevate = false) {
   return ipc<IpcFindProcessByName, [number, string][], void>(
     { type: 'FindProcessByName', name },
     elevate,
   );
+}
+
+export async function ipcRmList(list: string[], elevate = false) {
+  return ipc<IpcRmList, void, void>({ type: 'RmList', list }, elevate);
 }
 
 export function log(...args: any[]) {

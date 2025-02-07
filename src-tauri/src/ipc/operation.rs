@@ -9,6 +9,7 @@ pub enum IpcOperation {
     RunUninstall(crate::installer::uninstall::RunUninstallArgs),
     FindProcessByName { name: String },
     KillProcess { pid: u32 },
+    RmList { list: Vec<String> },
 }
 
 pub async fn run_opr(
@@ -40,6 +41,12 @@ pub async fn run_opr(
         )),
         IpcOperation::KillProcess { pid } => {
             Ok(serde_json::json!(crate::installer::kill_process(pid).await))
+        }
+        IpcOperation::RmList { list } => {
+            let list = list.into_iter().map(std::path::PathBuf::from).collect();
+            Ok(serde_json::json!(
+                crate::installer::uninstall::rm_list(list).await
+            ))
         }
     }
 }

@@ -391,6 +391,7 @@ import {
   ipcCreateUninstaller,
   ipcFindProcessByName,
   ipcKillProcess,
+  ipcRmList,
   ipcRunUninstall,
   ipcWriteRegistry,
   ipPrepare,
@@ -686,6 +687,22 @@ async function runInstall(): Promise<void> {
     }
   });
   clearInterval(progressInterval.value);
+  if (
+    latest_meta.deletes &&
+    Array.isArray(latest_meta.deletes) &&
+    latest_meta.deletes.length > 0
+  ) {
+    current.value = '删除旧版残留文件……';
+    try {
+      await ipcRmList(
+        latest_meta.deletes.map((e) => `${source.value}${sep()}${e}`),
+        needElevate.value,
+      );
+    } catch (e) {
+      log(e);
+    }
+  }
+  current.value = '很快就好……';
   await finishInstall(latest_meta);
   current.value = '安装完成';
   step.value = 3;

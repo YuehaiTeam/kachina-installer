@@ -61,6 +61,7 @@ type InvokeGetDfsMetadataRes = {
     md5?: string;
     xxh?: string;
   };
+  deletes?: string[];
 };
 
 type InvokeDeepReaddirWithMetadataRes = Array<{
