@@ -894,7 +894,7 @@ onMounted(async () => {
         }
       }
     }
-    sendInsight(getInsightBase(), 'open');
+    sendInsight(getInsightBase());
     if (INSTALLER_CONFIG.install_path_exists) isUpdate.value = true;
     await win.setTitle(PROJECT_CONFIG.windowTitle);
     INSTALLER_CONFIG.is_uninstall =
