@@ -396,6 +396,7 @@ import {
   ipcWriteRegistry,
   ipPrepare,
   log,
+  sendInsight,
 } from './api/ipc';
 import IconSheild from './IconSheild.vue';
 import { version_compare } from './utils/version';
@@ -458,6 +459,26 @@ const INSTALLER_CONFIG: InstallerConfig = reactive({
   elevated: false,
 });
 
+const getInsightBase = () => {
+  const qs = new URLSearchParams();
+  if (INSTALLER_CONFIG.args.non_interactive) {
+    qs.set('non_interactive', '1');
+  }
+  if (INSTALLER_CONFIG.args.silent) {
+    qs.set('silent', '1');
+  }
+  if (INSTALLER_CONFIG.args.uninstall) {
+    qs.set('uninstall', '1');
+  }
+  if (INSTALLER_CONFIG.args.online) {
+    qs.set('online', '1');
+  }
+  if ((INSTALLER_CONFIG.embedded_index?.length || 0) > 0) {
+    qs.set('pack', '1');
+  }
+  return `/${PROJECT_CONFIG.appName}?${qs.toString()}`;
+};
+
 async function getSource(): Promise<InstallerConfig> {
   return await invoke<InstallerConfig>('get_installer_config');
 }
@@ -518,6 +539,10 @@ async function runInstall(): Promise<void> {
     }
   }
   await ipPrepare(needElevate.value);
+  sendInsight(
+    getInsightBase(),
+    `${isUpdate.value ? 'update' : 'install'}/${INSTALLER_CONFIG.embedded_index?.length ? 'packed/' : ''}${latest_meta?.tag_name}`,
+  );
   const target_exe_path = `${source.value}${sep()}${PROJECT_CONFIG.exeName}`;
   const runningExes =
     (await ipcFindProcessByName(PROJECT_CONFIG.exeName).catch(log)) || [];
@@ -724,6 +749,7 @@ async function getLnkPath() {
 async function finishInstall(
   latest_meta: InvokeGetDfsMetadataRes,
 ): Promise<void> {
+  sendInsight(getInsightBase(), 'finish');
   const { program, desktop, uninstall } = await getLnkPath();
   const exePath = `${source.value}${sep()}${PROJECT_CONFIG.exeName}`;
   if (createLnk.value && !isUpdate.value) {
@@ -783,9 +809,14 @@ async function install(): Promise<void> {
     await runInstall();
   } catch (e) {
     log(e);
-    if (e instanceof Error) await error(e.stack || e.toString());
-    else if (typeof e === 'string') await error(e);
-    else await error(JSON.stringify(e));
+    const errstr =
+      e instanceof Error
+        ? e.stack || e.toString()
+        : typeof e === 'string'
+          ? e
+          : JSON.stringify(e);
+    await error(errstr);
+    await sendInsight(getInsightBase(), 'error', { error: errstr });
     step.value = 1;
     subStep.value = 0;
     percent.value = 0;
@@ -863,6 +894,7 @@ onMounted(async () => {
         }
       }
     }
+    sendInsight(getInsightBase(), 'open');
     if (INSTALLER_CONFIG.install_path_exists) isUpdate.value = true;
     await win.setTitle(PROJECT_CONFIG.windowTitle);
     INSTALLER_CONFIG.is_uninstall =
@@ -976,6 +1008,7 @@ async function confirm(message: string, title = '提示'): Promise<boolean> {
 }
 async function uninstall() {
   step.value = 5;
+  sendInsight(getInsightBase(), 'uninstall');
   try {
     const uninstallConfig = (await invoke(
       'read_uninstall_metadata',
@@ -1014,9 +1047,14 @@ async function uninstall() {
     }
   } catch (e) {
     log(e);
-    if (e instanceof Error) await error(e.stack || e.toString());
-    else if (typeof e === 'string') await error(e);
-    else await error(JSON.stringify(e));
+    const errstr =
+      e instanceof Error
+        ? e.stack || e.toString()
+        : typeof e === 'string'
+          ? e
+          : JSON.stringify(e);
+    await error(errstr);
+    await sendInsight(getInsightBase(), 'error', { error: errstr });
     step.value = 1;
   }
 }
