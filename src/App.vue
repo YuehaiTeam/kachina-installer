@@ -564,7 +564,13 @@ async function runInstall(): Promise<void> {
       step.value = 1;
       return;
     } else {
-      await Promise.all(runningExes.map((e) => ipcKillProcess(e[0])));
+      try {
+        await Promise.all(
+          runningExes.map((e) => ipcKillProcess(e[0], needElevate.value)),
+        );
+      } catch (e) {
+        await Promise.all(runningExes.map((e) => ipcKillProcess(e[0], true)));
+      }
       return runInstall();
     }
   }
