@@ -980,12 +980,19 @@ async function changeSource() {
     setUacByState(seldir.state, PROJECT_CONFIG.uacStrategy);
     isUpdate.value = seldir.upgrade;
     if (!seldir.empty && !seldir.upgrade) {
-      const confirmRes = await confirm(
-        '当前目录不为空，是仍要继续？按【否】将创建一层新目录。',
-        '提示',
-      );
-      if (!confirmRes) {
-        source.value = `${seldir.path}${sep()}${PROJECT_CONFIG.appName}`;
+      const isDriveRoot = seldir.path.replace(/\\/g, '/').match(/^\w:\/$/);
+      const confirmRes =
+        isDriveRoot ||
+        (await confirm(
+          '您选择的目录不为空，是否创建新文件夹再安装？选【否】将可能影响原有数据。',
+          '提示',
+        ));
+      if (confirmRes) {
+        source.value =
+          `${seldir.path}${sep()}${PROJECT_CONFIG.appName}`.replace(
+            /\\\\/g,
+            '\\',
+          );
       } else {
         source.value = seldir.path;
       }
