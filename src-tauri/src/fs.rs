@@ -191,7 +191,7 @@ pub async fn prepare_target(target: &str) -> Result<(), String> {
     let exe_path = std::env::current_exe();
     if let Ok(exe_path) = exe_path {
         // check if target is the same as exe path
-        if exe_path == target {
+        if exe_path == target && exe_path.exists() {
             // if same, rename the exe to exe.old
             let old_exe = exe_path.with_extension("old");
             let res = tokio::fs::rename(&exe_path, &old_exe).await;
