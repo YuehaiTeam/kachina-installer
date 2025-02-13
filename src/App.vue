@@ -593,7 +593,12 @@ async function runInstall(): Promise<void> {
   const local_meta = (
     await invoke<InvokeDeepReaddirWithMetadataRes>(
       'deep_readdir_with_metadata',
-      { id, source: source.value, hashAlgorithm: hashKey },
+      {
+        id,
+        source: source.value,
+        hashAlgorithm: hashKey,
+        fileList: latest_meta.hashed.map((e) => e.file_name),
+      },
     )
   ).map((e) => {
     return {

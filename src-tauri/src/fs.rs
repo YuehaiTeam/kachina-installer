@@ -24,6 +24,7 @@ pub async fn deep_readdir_with_metadata(
     source: String,
     app: AppHandle,
     hash_algorithm: String,
+    file_list: Vec<String>,
 ) -> Result<Vec<Metadata>, String> {
     let path = Path::new(&source);
     if !path.exists() {
@@ -47,12 +48,14 @@ pub async fn deep_readdir_with_metadata(
                     }
                     let path = path.unwrap();
                     let size = entry.metadata().await.unwrap().len();
-                    files.push(Metadata {
-                        file_name: path.to_string(),
-                        hash: "".to_string(),
-                        size,
-                        unwritable: false,
-                    });
+                    if file_list.contains(&path.to_string()) {
+                        files.push(Metadata {
+                            file_name: path.to_string(),
+                            hash: "".to_string(),
+                            size,
+                            unwritable: false,
+                        });
+                    }
                 }
             }
             Some(Err(e)) => {
@@ -71,11 +74,13 @@ pub async fn deep_readdir_with_metadata(
         let mut file = file.clone();
         joinset.spawn(async move {
             let exists = Path::new(&file.file_name).exists();
-            let writable = !exists || tokio::fs::OpenOptions::new()
-                .read(true)
-                .write(true)
-                .open(&file.file_name)
-                .await.is_ok();
+            let writable = !exists
+                || tokio::fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open(&file.file_name)
+                    .await
+                    .is_ok();
             if !writable {
                 file.unwritable = true;
             } else {
