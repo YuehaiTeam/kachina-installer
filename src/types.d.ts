@@ -18,6 +18,7 @@ type ProjectConfig = {
   // prefer-user: 只在用户没有权限写入的目录请求UAC
   // force: 强制请求UAC
   uacStrategy: 'prefer-admin' | 'prefer-user' | 'force';
+  runtimes?: string[];
 };
 
 type InstallStat = {

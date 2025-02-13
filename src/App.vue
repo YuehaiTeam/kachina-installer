@@ -390,6 +390,7 @@ import {
   ipcCreateLnk,
   ipcCreateUninstaller,
   ipcFindProcessByName,
+  ipcInstallRuntime,
   ipcKillProcess,
   ipcRmList,
   ipcRunUninstall,
@@ -400,6 +401,7 @@ import {
 } from './api/ipc';
 import IconSheild from './IconSheild.vue';
 import { version_compare } from './utils/version';
+import { getRuntimeName } from './consts';
 
 const init = ref(false);
 
@@ -407,6 +409,7 @@ const subStepList: ReadonlyArray<string> = [
   '获取最新版本',
   '校验更新内容',
   '下载和解压文件',
+  '准备运行环境',
 ];
 
 const isUpdate = ref<boolean>(false);
@@ -513,6 +516,8 @@ async function runInstall(): Promise<void> {
         (await confirm('当前安装包不是最新版本，是否直接安装最新版本？')))
     ) {
       latest_meta = online_meta;
+    } else {
+      log('Has version update but use local meta');
     }
   } else {
     log('Local meta found, use local meta');
@@ -738,6 +743,37 @@ async function runInstall(): Promise<void> {
       log(e);
     }
   }
+  if (PROJECT_CONFIG.runtimes) {
+    log('latest_meta.runtimes', PROJECT_CONFIG.runtimes);
+    subStep.value = 3;
+    current.value = '安装运行库……';
+    for (const tag of PROJECT_CONFIG.runtimes) {
+      log(`Installing runtime: ${tag}`);
+      current.value = `安装${getRuntimeName(tag)}……`;
+      try {
+        await ipcInstallRuntime(
+          tag,
+          ({ payload }) => {
+            const currentSize = formatSize(payload[0]);
+            const targetSize = payload[1] ? formatSize(payload[1]) : '';
+            if (payload[0] >= payload[1] - 1) {
+              current.value = `安装 ${getRuntimeName(tag)} ……`;
+            } else {
+              current.value = `下载 ${getRuntimeName(tag)} ……<br>${currentSize}${targetSize ? ` / ${targetSize}` : ''}`;
+            }
+          },
+          needElevate.value,
+        );
+      } catch (e) {
+        log(e);
+        await error(
+          `安装${getRuntimeName(tag)}失败: ${e}，请手动安装`,
+          '出错了',
+        );
+      }
+    }
+  }
+
   current.value = '很快就好……';
   await finishInstall(latest_meta);
   current.value = '安装完成';
@@ -1106,4 +1142,5 @@ function setUacByState(
       break;
   }
 }
+window.ipcInstallRuntime = ipcInstallRuntime;
 </script>

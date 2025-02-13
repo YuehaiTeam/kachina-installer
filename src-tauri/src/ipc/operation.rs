@@ -10,6 +10,7 @@ pub enum IpcOperation {
     FindProcessByName { name: String },
     KillProcess { pid: u32 },
     RmList { list: Vec<String> },
+    InstallRuntime { tag: String },
 }
 
 pub async fn run_opr(
@@ -47,6 +48,9 @@ pub async fn run_opr(
             Ok(serde_json::json!(
                 crate::installer::uninstall::rm_list(list).await
             ))
+        }
+        IpcOperation::InstallRuntime { tag } => {
+            Ok(serde_json::json!(crate::installer::runtimes::install_runtime(tag, notify).await))
         }
     }
 }

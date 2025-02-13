@@ -48,14 +48,20 @@ pub async fn deep_readdir_with_metadata(
                     }
                     let path = path.unwrap();
                     let size = entry.metadata().await.unwrap().len();
-                    if file_list.contains(&path.to_string()) {
-                        files.push(Metadata {
-                            file_name: path.to_string(),
-                            hash: "".to_string(),
-                            size,
-                            unwritable: false,
-                        });
-                    }
+                    file_list.iter().for_each(|file| {
+                        if path
+                            .to_lowercase()
+                            .replace("\\", "/")
+                            .ends_with(&file.to_lowercase().replace("\\", "/"))
+                        {
+                            files.push(Metadata {
+                                file_name: path.to_string(),
+                                hash: "".to_string(),
+                                size,
+                                unwritable: false,
+                            });
+                        }
+                    });
                 }
             }
             Some(Err(e)) => {
@@ -150,7 +156,13 @@ pub async fn create_http_stream(
     offset: usize,
     size: usize,
     skip_decompress: bool,
-) -> Result<Box<dyn tokio::io::AsyncRead + Unpin + std::marker::Send>, String> {
+) -> Result<
+    (
+        Box<dyn tokio::io::AsyncRead + Unpin + std::marker::Send>,
+        u64,
+    ),
+    String,
+> {
     let mut res = REQUEST_CLIENT.get(url);
     let has_range = offset > 0 || size > 0;
     if has_range {
@@ -166,13 +178,14 @@ pub async fn create_http_stream(
     if (!has_range && code != 200) || (has_range && code != 206) {
         return Err(format!("Failed to download: URL {} returned {}", url, code));
     }
+    let content_length = res.content_length().unwrap_or(0);
     let stream = futures::TryStreamExt::map_err(res.bytes_stream(), std::io::Error::other);
     let reader = tokio_util::io::StreamReader::new(stream);
     if skip_decompress {
-        return Ok(Box::new(reader));
+        return Ok((Box::new(reader), content_length));
     }
     let decoder = TokioZstdDecoder::new(reader);
-    Ok(Box::new(decoder))
+    Ok((Box::new(decoder), content_length))
 }
 
 pub async fn create_local_stream(

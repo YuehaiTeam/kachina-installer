@@ -90,6 +90,11 @@ interface IpcRmList {
   list: string[];
 }
 
+interface IpcInstallRuntime {
+  type: 'InstallRuntime';
+  tag: string;
+}
+
 export async function ipcCreateLnk(
   target: string,
   lnk: string,
@@ -146,6 +151,18 @@ export async function ipcFindProcessByName(name: string, elevate = false) {
 
 export async function ipcRmList(list: string[], elevate = false) {
   return ipc<IpcRmList, void, void>({ type: 'RmList', list }, elevate);
+}
+
+export async function ipcInstallRuntime(
+  tag: string,
+  cb: (p: Event<[number, number]>) => void,
+  elevate = false,
+) {
+  return ipc<IpcInstallRuntime, void, [number, number]>(
+    { type: 'InstallRuntime', tag },
+    elevate,
+    cb,
+  );
 }
 
 export function log(...args: any[]) {

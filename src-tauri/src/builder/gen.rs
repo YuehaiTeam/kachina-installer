@@ -55,6 +55,7 @@ pub async fn gen_cli(args: GenArgs) {
         hashed: Some(metadata.clone()),
         patches: None,
         installer,
+        deletes: None,
     };
     let metadata_str = serde_json::to_string(&repometa).expect("failed to serialize metadata");
     tokio::fs::write(&args.output_metadata, metadata_str)

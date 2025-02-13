@@ -7,6 +7,7 @@ pub mod config;
 pub mod lnk;
 pub mod registry;
 pub mod uninstall;
+pub mod runtimes;
 
 #[tauri::command]
 pub async fn launch_and_exit(path: String, app: AppHandle) {

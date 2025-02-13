@@ -57,7 +57,7 @@ async fn create_stream_by_source(
             offset,
             size,
             skip_decompress,
-        } => Ok(create_http_stream(&url, offset, size, skip_decompress).await?),
+        } => Ok(create_http_stream(&url, offset, size, skip_decompress).await?.0),
         InstallFileSource::Local {
             offset,
             size,

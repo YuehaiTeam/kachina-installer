@@ -51,6 +51,8 @@ pub struct RepoMetadata {
     pub patches: Option<Vec<PatchInfo>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub installer: Option<InstallerInfo>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deletes: Option<Vec<String>>,
 }
 
 pub async fn deep_generate_metadata(source: &PathBuf) -> Result<Vec<Metadata>, String> {
