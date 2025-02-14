@@ -7,6 +7,7 @@ pub mod fs;
 pub mod installer;
 pub mod ipc;
 pub mod local;
+pub mod module;
 pub mod utils;
 
 use clap::Parser;
@@ -48,12 +49,8 @@ fn ua_string() -> String {
 }
 
 fn main() {
-    let mut has_console = false;
-    let is_help = std::env::args().any(|arg| arg == "-h" || arg == "--help");
-    if is_help {
-        get_console();
-        has_console = true;
-    }
+    use windows::Win32::System::Console::{AttachConsole, ATTACH_PARENT_PROCESS};
+    let _ = unsafe { AttachConsole(ATTACH_PARENT_PROCESS) };
     let cli = cli::Cli::parse();
     let mut command = cli.command();
     let wv2ver = tauri::webview_version();
@@ -76,22 +73,17 @@ fn main() {
                 .unwrap()
                 .block_on(ipc::manager::uac_ipc_main(args));
         }
-        cli => {
-            if !has_console {
-                get_console();
-            }
+        Command::InstallWebview2 => {
             tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
                 .build()
                 .unwrap()
-                .block_on(cli_main(cli));
+                .block_on(module::wv2::install_webview2());
         }
     }
 }
 
 async fn tauri_main(args: InstallArgs) {
-    use windows::Win32::System::Console::{AttachConsole, ATTACH_PARENT_PROCESS};
-    let _ = unsafe { AttachConsole(ATTACH_PARENT_PROCESS) };
     tauri::async_runtime::set(tokio::runtime::Handle::current());
     let (major, minor, build) = nt_version::get();
     let build = (build & 0xffff) as u16;
@@ -120,7 +112,6 @@ async fn tauri_main(args: InstallArgs) {
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
             // things which can be run directly
-            fs::deep_readdir_with_metadata,
             fs::is_dir_empty,
             dfs::get_dfs,
             dfs::get_dfs_metadata,
@@ -198,21 +189,4 @@ async fn tauri_main(args: InstallArgs) {
         })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
-}
-
-async fn cli_main(cli: Command) {
-    if let Command::InstallWebview2 = cli {
-        cli::install_webview2().await
-    }
-}
-
-pub fn get_console() {
-    // try attach parent console
-    use windows::Win32::System::Console::{AttachConsole, ATTACH_PARENT_PROCESS};
-    let attach_res = unsafe { AttachConsole(ATTACH_PARENT_PROCESS) };
-    if attach_res.is_err() {
-        // no parent console, alloc new console
-        use windows::Win32::System::Console::AllocConsole;
-        let _ = unsafe { AllocConsole() };
-    }
 }

@@ -380,13 +380,13 @@
 </style>
 <script lang="ts" setup>
 import { onMounted, reactive, ref } from 'vue';
-import { v4 as uuid } from 'uuid';
 import { mapLimit } from 'async';
 import Checkbox from './Checkbox.vue';
 import CircleSuccess from './CircleSuccess.vue';
-import { getCurrentWindow, invoke, listen, sep } from './tauri';
+import { getCurrentWindow, invoke, sep } from './tauri';
 import { getDfsMetadata, runDfsDownload } from './dfs';
 import {
+  ipcCheckLocalFiles,
   ipcCreateLnk,
   ipcCreateUninstaller,
   ipcFindProcessByName,
@@ -589,21 +589,19 @@ async function runInstall(): Promise<void> {
   }
   subStep.value = 1;
   percent.value = 5;
-  let id = uuid();
-  let idUnListen = await listen<[number, number]>(id, ({ payload }) => {
-    const [currentValue, total] = payload;
-    current.value = `${currentValue} / ${total}`;
-    percent.value = 5 + (currentValue / total) * 15;
-  });
   const local_meta = (
-    await invoke<InvokeDeepReaddirWithMetadataRes>(
-      'deep_readdir_with_metadata',
+    await ipcCheckLocalFiles(
       {
-        id,
         source: source.value,
-        hashAlgorithm: hashKey,
-        fileList: latest_meta.hashed.map((e) => e.file_name),
+        hash_algorithm: hashKey,
+        file_list: latest_meta.hashed.map((e) => e.file_name),
       },
+      ({ payload }) => {
+        const [currentValue, total] = payload;
+        current.value = `${currentValue} / ${total}`;
+        percent.value = 5 + (currentValue / total) * 15;
+      },
+      needElevate.value,
     )
   ).map((e) => {
     return {
@@ -611,7 +609,6 @@ async function runInstall(): Promise<void> {
       file_name: e.file_name.replace(source.value, ''),
     };
   });
-  idUnListen();
   current.value = '校验本地文件……';
   const diff_files: Array<DfsUpdateTask> = [];
   const strip_first_slash = (s: string) => {
@@ -654,17 +651,16 @@ async function runInstall(): Promise<void> {
     await finishInstall(latest_meta);
     return;
   }
-  // TODO: 检查占用需要用管理员权限运行
-  // if (diff_files.find((e) => e.unwritable)) {
-  //   if (
-  //     !INSTALLER_CONFIG.args.non_interactive &&
-  //     !INSTALLER_CONFIG.args.silent &&
-  //     !(await confirm('检测到部分文件被占用，继续安装可能无法成功，是否继续？'))
-  //   ) {
-  //     step.value = 1;
-  //     return;
-  //   }
-  // }
+  if (diff_files.find((e) => e.unwritable)) {
+    if (
+      !INSTALLER_CONFIG.args.non_interactive &&
+      !INSTALLER_CONFIG.args.silent &&
+      !(await confirm('检测到部分文件被占用，继续安装可能无法成功，是否继续？'))
+    ) {
+      step.value = 1;
+      return;
+    }
+  }
   console.log('Files to install:', diff_files);
   subStep.value = 2;
   current.value = '准备下载……';
@@ -1142,5 +1138,4 @@ function setUacByState(
       break;
   }
 }
-window.ipcInstallRuntime = ipcInstallRuntime;
 </script>

@@ -3,7 +3,6 @@ use fmmap::tokio::AsyncMmapFileExt;
 use futures::StreamExt;
 use serde::Serialize;
 use std::{os::windows::fs::MetadataExt, path::Path};
-use tauri::{AppHandle, Emitter};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use crate::{
@@ -18,13 +17,11 @@ pub struct Metadata {
     pub unwritable: bool,
 }
 
-#[tauri::command]
-pub async fn deep_readdir_with_metadata(
-    id: String,
+pub async fn check_local_files(
     source: String,
-    app: AppHandle,
     hash_algorithm: String,
     file_list: Vec<String>,
+    notify: impl Fn(serde_json::Value) + std::marker::Send + 'static,
 ) -> Result<Vec<Metadata>, String> {
     let path = Path::new(&source);
     if !path.exists() {
@@ -71,7 +68,7 @@ pub async fn deep_readdir_with_metadata(
         }
     }
     // send first progress
-    let _ = app.emit(&id, (0, files.len()));
+    notify(serde_json::json!((0, files.len())));
     let len = files.len();
     let mut joinset = tokio::task::JoinSet::new();
 
@@ -114,7 +111,7 @@ pub async fn deep_readdir_with_metadata(
         }
         let res = res.unwrap();
         finished += 1;
-        let _ = app.emit(&id, (finished, len));
+        notify(serde_json::json!((finished, len)));
         finished_hashes.push(res);
     }
     Ok(finished_hashes)

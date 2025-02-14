@@ -95,6 +95,13 @@ interface IpcInstallRuntime {
   tag: string;
 }
 
+interface IpcCheckLocalFiles {
+  type: 'CheckLocalFiles';
+  source: string;
+  hash_algorithm: string;
+  file_list: string[];
+}
+
 export async function ipcCreateLnk(
   target: string,
   lnk: string,
@@ -163,6 +170,18 @@ export async function ipcInstallRuntime(
     elevate,
     cb,
   );
+}
+
+export async function ipcCheckLocalFiles(
+  args: Omit<IpcCheckLocalFiles, 'type'>,
+  cb: (p: Event<[number, number]>) => void,
+  elevate = false,
+) {
+  return ipc<
+    IpcCheckLocalFiles,
+    InvokeDeepReaddirWithMetadataRes,
+    [number, number]
+  >({ type: 'CheckLocalFiles', ...args }, elevate, cb);
 }
 
 export function log(...args: any[]) {
