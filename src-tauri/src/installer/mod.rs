@@ -6,8 +6,8 @@ use crate::utils::dir::in_private_folder;
 pub mod config;
 pub mod lnk;
 pub mod registry;
-pub mod uninstall;
 pub mod runtimes;
+pub mod uninstall;
 
 #[tauri::command]
 pub async fn launch_and_exit(path: String, app: AppHandle) {

@@ -55,7 +55,7 @@ pub async fn install_webview2() {
         _l_param: LPARAM,
         lp_ref_data: isize,
     ) -> HRESULT {
-        let conf = std::mem::transmute::<isize, *mut Option<HWND>>(lp_ref_data);
+        let conf = lp_ref_data as *mut std::option::Option<windows::Win32::Foundation::HWND>;
         match msg {
             TDN_CREATED => {
                 (*conf).replace(hwnd);
@@ -133,7 +133,7 @@ pub async fn install_webview2() {
         .collect::<Vec<u16>>();
     unsafe {
         SendMessageW(
-            dialog_hwnd.as_ref().unwrap().clone(),
+            *dialog_hwnd.as_ref().unwrap(),
             TDM_UPDATE_ELEMENT_TEXT.0 as u32,
             WPARAM(TDE_CONTENT.0.try_into().unwrap()),
             LPARAM(content_utf16_nul.as_ptr() as isize),

@@ -17,7 +17,6 @@ pub fn create_security_attributes() -> SECURITY_ATTRIBUTES {
         )
         .unwrap();
 
-        
         SECURITY_ATTRIBUTES {
             nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
             lpSecurityDescriptor: security_descriptor.0,

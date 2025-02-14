@@ -1,5 +1,8 @@
 use pin_project::pin_project;
-use std::{pin::Pin, task::{Context, Poll}};
+use std::{
+    pin::Pin,
+    task::{Context, Poll},
+};
 use tokio::io::{AsyncRead, ReadBuf};
 
 #[pin_project]

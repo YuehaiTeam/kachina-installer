@@ -14,7 +14,7 @@ use clap::Parser;
 use cli::arg::{Command, InstallArgs};
 use installer::uninstall::delete_self_on_exit;
 use std::time::Duration;
-use tauri::{window::Color, Manager, WindowEvent};
+use tauri::{window::Color, WindowEvent};
 use tauri_utils::{config::WindowEffectsConfig, WindowEffect};
 
 lazy_static::lazy_static! {
@@ -32,8 +32,8 @@ fn ua_string() -> String {
     let winver = nt_version::get();
     let cpu_cores = num_cpus::get();
     let wv2ver = tauri::webview_version();
-    let wv2ver = if wv2ver.is_ok() {
-        wv2ver.unwrap()
+    let wv2ver = if let Ok(ver) = wv2ver {
+        ver
     } else {
         "Unknown".to_string()
     };
@@ -148,7 +148,7 @@ async fn tauri_main(args: InstallArgs) {
             let main_window = main_window.build().unwrap();
             #[cfg(debug_assertions)]
             {
-                let window = app.get_webview_window("main");
+                let window = tauri::Manager::get_webview_window(app, "main");
                 if let Some(window) = window {
                     window.open_devtools();
                 }

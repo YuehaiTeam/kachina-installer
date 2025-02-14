@@ -57,7 +57,9 @@ async fn create_stream_by_source(
             offset,
             size,
             skip_decompress,
-        } => Ok(create_http_stream(&url, offset, size, skip_decompress).await?.0),
+        } => Ok(create_http_stream(&url, offset, size, skip_decompress)
+            .await?
+            .0),
         InstallFileSource::Local {
             offset,
             size,
@@ -96,10 +98,7 @@ pub async fn ipc_install_file(
             verify_hash(&target, args.md5, args.xxh).await?;
             Ok(serde_json::json!(res))
         }
-        InstallFileMode::HybridPatch {
-            diff,
-            source,
-        } => {
+        InstallFileMode::HybridPatch { diff, source } => {
             // first extract source
             let source = create_stream_by_source(source).await?;
             let target_fs = create_target_file(&target).await?;

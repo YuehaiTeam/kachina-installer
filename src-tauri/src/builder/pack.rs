@@ -254,7 +254,7 @@ pub async fn pack(
         *offset += index_len as u32;
     }
     // write pre-index to pe header
-    let index_pre = if files.len() > 0 {
+    let index_pre = if !files.is_empty() {
         gen_index_header(
             base_data.len() as u32,
             (config_bytes.len() + get_header_size("\0CONFIG")) as u32,
@@ -308,7 +308,7 @@ pub async fn pack(
             return;
         }
     }
-    if files.len() > 0 {
+    if !files.is_empty() {
         // write index
         println!("Writing index...");
         let index_bytes = index_to_bin(&index);

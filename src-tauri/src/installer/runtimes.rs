@@ -48,7 +48,7 @@ pub async fn install_dotnet(
     if let Ok(output) = cmd {
         if output.status.success() {
             let stdout = String::from_utf8_lossy(&output.stdout);
-            let version_primary = tag.split('.').skip(3).next();
+            let version_primary = tag.split('.').nth(3);
             if version_primary.is_none() {
                 return Err(format!("Unsupported dotnet runtime tag: {}", tag));
             }
