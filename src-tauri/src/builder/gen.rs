@@ -189,6 +189,21 @@ pub async fn gen_cli(args: GenArgs) {
     }
     // check diffs
     if let Some(diff_vers) = args.diff_vers {
+        let mut metadata_with_installer = metadata.clone();
+        if let Some(installer) = repometa.installer.as_ref() {
+            metadata_with_installer.push(crate::metadata::Metadata {
+                file_name: if let Some(name) = args.updater_name.as_ref() {
+                    name.clone()
+                } else if let Some(name) = args.updater.as_ref().unwrap().file_name() {
+                    name.to_string_lossy().to_string()
+                } else {
+                    panic!("failed to get updater name");
+                },
+                size: installer.size,
+                md5: installer.md5.clone(),
+                xxh: installer.xxh.clone(),
+            });
+        }
         if !diff_vers.is_empty() {
             let mut ignore = ignore::gitignore::GitignoreBuilder::new("/");
             if let Some(diff_ignore) = args.diff_ignore {
@@ -204,7 +219,7 @@ pub async fn gen_cli(args: GenArgs) {
                 let multi_pg = MultiProgress::new();
 
                 // create a progress bar to track overall status
-                let pb_main = multi_pg.add(ProgressBar::new(metadata.len() as u64));
+                let pb_main = multi_pg.add(ProgressBar::new(metadata_with_installer.len() as u64));
                 pb_main.set_style(pb_style_total.clone());
                 pb_main.set_message(format!("DIFF TOTAL {}", diff_ver));
 
@@ -217,7 +232,8 @@ pub async fn gen_cli(args: GenArgs) {
                 let mut set = JoinSet::new();
 
                 let mut last_item = false;
-                for (index, file) in metadata.iter().enumerate() {
+
+                for (index, file) in metadata_with_installer.iter().enumerate() {
                     if index == metadata.len() - 1 {
                         last_item = true;
                     }
