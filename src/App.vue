@@ -483,8 +483,10 @@ const getInsightBase = () => {
   return `/${PROJECT_CONFIG.appName}?${qs.toString()}`;
 };
 
-async function getSource(): Promise<InstallerConfig> {
-  return await invoke<InstallerConfig>('get_installer_config');
+async function getSource(scan: boolean): Promise<InstallerConfig> {
+  return await invoke<InstallerConfig>('get_installer_config', {
+    scanExe: scan,
+  });
 }
 
 async function runInstall(): Promise<void> {
@@ -895,12 +897,20 @@ async function install(): Promise<void> {
 onMounted(async () => {
   try {
     const win = getCurrentWindow();
+    const ps = [];
+    ps.push(win.setTitle(' '));
     if (process.env.NODE_ENV === 'development') {
+      ps.push(win.show());
+    }
+    let rsrc = await getSource(false);
+    Object.assign(INSTALLER_CONFIG, rsrc);
+    if (!rsrc.args.silent) {
       await win.show();
     }
-    const rsrc = await getSource();
-    log('INSTALLER_CONFIG: ', rsrc);
+    await Promise.all(ps);
+    rsrc = await getSource(true);
     Object.assign(INSTALLER_CONFIG, rsrc);
+    log('INSTALLER_CONFIG: ', rsrc);
     source.value =
       INSTALLER_CONFIG.args.target || INSTALLER_CONFIG.install_path;
     const seldir = await invoke<InvokeSelectDirRes>('select_dir', {
@@ -910,9 +920,6 @@ onMounted(async () => {
     });
     if (seldir) {
       setUacByState(seldir.state, PROJECT_CONFIG.uacStrategy);
-    }
-    if (!rsrc.args.silent) {
-      await win.show();
     }
     if (INSTALLER_CONFIG.embedded_config) {
       Object.assign(PROJECT_CONFIG, INSTALLER_CONFIG.embedded_config);

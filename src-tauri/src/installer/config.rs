@@ -26,35 +26,38 @@ pub struct InstallerConfig {
 pub async fn get_config_pre(
     exe_path_path: &Path,
     args: InstallArgs,
+    scan_exe: bool,
 ) -> Result<InstallerConfig, String> {
     let exe_path = exe_path_path.to_string_lossy().to_string();
     let mut embedded_files = None;
     let mut embedded_config = None;
     let mut enbedded_metadata = None;
     let mut embedded_index = None;
-    if let Ok(embedded_files_res) = get_embedded().await {
-        if let Ok(res) = get_config_from_embedded(&embedded_files_res).await {
-            embedded_config = res.0;
-            enbedded_metadata = res.1;
-            embedded_index = res.2;
-        }
-
-        embedded_files = Some(embedded_files_res);
-    }
-    #[cfg(debug_assertions)]
-    {
-        if embedded_config.is_none() {
-            let exe_dir = exe_path_path.parent();
-            if exe_dir.is_none() {
-                return Err("Failed to get exe dir".to_string());
+    if scan_exe {
+        if let Ok(embedded_files_res) = get_embedded().await {
+            if let Ok(res) = get_config_from_embedded(&embedded_files_res).await {
+                embedded_config = res.0;
+                enbedded_metadata = res.1;
+                embedded_index = res.2;
             }
-            let exe_dir = exe_dir.unwrap();
-            let config_json = exe_dir.join(".config.json");
-            if config_json.exists() {
-                let config = tokio::fs::read(&config_json)
-                    .await
-                    .map_err(|e| e.to_string())?;
-                embedded_config = Some(serde_json::from_slice(&config).map_err(|e| e.to_string())?);
+            embedded_files = Some(embedded_files_res);
+        }
+        #[cfg(debug_assertions)]
+        {
+            if embedded_config.is_none() {
+                let exe_dir = exe_path_path.parent();
+                if exe_dir.is_none() {
+                    return Err("Failed to get exe dir".to_string());
+                }
+                let exe_dir = exe_dir.unwrap();
+                let config_json = exe_dir.join(".config.json");
+                if config_json.exists() {
+                    let config = tokio::fs::read(&config_json)
+                        .await
+                        .map_err(|e| e.to_string())?;
+                    embedded_config =
+                        Some(serde_json::from_slice(&config).map_err(|e| e.to_string())?);
+                }
             }
         }
     }
@@ -88,7 +91,10 @@ impl InstallerConfig {
 }
 
 #[tauri::command]
-pub async fn get_installer_config(args: State<'_, InstallArgs>) -> Result<InstallerConfig, String> {
+pub async fn get_installer_config(
+    args: State<'_, InstallArgs>,
+    scan_exe: bool,
+) -> Result<InstallerConfig, String> {
     // check if current dir has exeName
     let exe_path = std::env::current_exe();
     if exe_path.is_err() {
@@ -98,7 +104,7 @@ pub async fn get_installer_config(args: State<'_, InstallArgs>) -> Result<Instal
         ));
     }
     let exe_path = exe_path.unwrap();
-    let mut config = get_config_pre(&exe_path, args.inner().clone()).await?;
+    let mut config = get_config_pre(&exe_path, args.inner().clone(), scan_exe).await?;
     let mut uninstall_name = "uninst.exe";
     let mut exe_name = "main.exe";
     let mut program_files_path = "KachinaInstaller";
