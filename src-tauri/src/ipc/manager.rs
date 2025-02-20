@@ -16,6 +16,11 @@ use tokio::net::windows::named_pipe::ServerOptions;
 use tokio::time;
 use windows::Win32::Foundation::ERROR_PIPE_BUSY;
 
+// 100k buffer size
+static PIPE_BUFFER_SIZE: usize = 1024 * 100;
+// 4k chunk size due to https://github.com/tokio-rs/mio/pull/1778
+static PIPE_CHUNK_SIZE: usize = 1024 * 4;
+
 #[derive(serde::Deserialize, serde::Serialize, Clone, Debug)]
 pub struct IpcInner {
     op: IpcOperation,
@@ -41,7 +46,7 @@ impl ManagedElevate {
     pub fn new() -> Self {
         let (broadcast_tx, _broadcast_rx) = tokio::sync::broadcast::channel(100);
         let (mpsc_tx, mpsc_rx) = tokio::sync::mpsc::channel(100);
-        let pipe_id = format!("Kachina-Elevate-{}", uuid::Uuid::new_v4());
+        let pipe_id = format!("{}", uuid::Uuid::new_v4());
         Self {
             process: tokio::sync::RwLock::new(None),
             broadcast_tx,
@@ -80,7 +85,7 @@ impl ManagedElevate {
             };
             process.replace(command);
             let name = self.pipe_id.clone();
-            let name = format!(r"\\.\pipe\{}", name);
+            let name = format!(r"\\.\pipe\Kachina-Elevate-{}", name);
             let server = Self::create_pipe(&name);
             if server.is_err() {
                 return Err("Failed to create pipe listener".to_string());
@@ -114,7 +119,7 @@ pub async fn handle_pipe(
     // let mut rx = mgr.mpsc_rx.write().await.take().unwrap();
     tokio::spawn(async move {
         let (serverrx, mut servertx) = tokio::io::split(server);
-        let mut serverrx = tokio::io::BufReader::new(serverrx);
+        let mut serverrx = tokio::io::BufReader::with_capacity(PIPE_BUFFER_SIZE, serverrx);
         loop {
             let mut buf = String::new();
             tokio::select! {
@@ -136,7 +141,14 @@ pub async fn handle_pipe(
                         let b = serde_json::to_vec(&v);
                         if let Ok(mut b) = b {
                             b.push(b'\n');
-                            let _ = servertx.write(&b).await;
+                            // split into 4k chunks
+                            let chunks = b.chunks(PIPE_CHUNK_SIZE);
+                            for b in chunks{
+                                let res = servertx.write(b).await;
+                                if let Err(err) = res{
+                                    println!("Failed to write to pipe: {:?}", err);
+                                }
+                            }
                         }else{
                             println!("Failed to serialize message: {:?}", b.err());
                         }
@@ -194,7 +206,7 @@ pub async fn managed_operation(
 }
 
 pub async fn uac_ipc_main(args: crate::cli::arg::UacArgs) {
-    let pipe_name = format!(r"\\.\pipe\{}", args.pipe_id);
+    let pipe_name = format!(r"\\.\pipe\Kachina-Elevate-{}", args.pipe_id);
     let mut try_times = 0;
     let client = loop {
         let pipe = ClientOptions::new().open(pipe_name.clone());
@@ -215,13 +227,13 @@ pub async fn uac_ipc_main(args: crate::cli::arg::UacArgs) {
     if let Err(err) = client {
         rfd::MessageDialog::new()
             .set_title("Elevate Fail")
-            .set_description(format!("Failed to connect to pipe: {:?}", err))
+            .set_description(format!("Client: Failed to connect to pipe: {:?}", err))
             .show();
         return;
     }
     let client = client.unwrap();
     let (clientrx, mut clienttx) = tokio::io::split(client);
-    let mut clientrx = tokio::io::BufReader::new(clientrx);
+    let mut clientrx = tokio::io::BufReader::with_capacity(PIPE_BUFFER_SIZE, clientrx);
 
     let (tx, mut rx) = tokio::sync::mpsc::channel(100);
     loop {
@@ -230,7 +242,7 @@ pub async fn uac_ipc_main(args: crate::cli::arg::UacArgs) {
             v = clientrx.read_line(&mut buf) => {
                 if let Ok(v) = v {
                     if v == 0 {
-                        println!("Client disconnected");
+                        println!("Client: disconnected");
                         break;
                     }
                     let res = serde_json::from_str::<IpcInner>(&buf);
@@ -239,7 +251,7 @@ pub async fn uac_ipc_main(args: crate::cli::arg::UacArgs) {
                         let id = res.id.clone();
                         tokio::spawn(async move {
                             let tx2 = tx.clone();
-                            println!("Operation started: {:?}", id);
+                            println!("Client: Operation started: {:?}", id);
                             let res = run_opr(res.op, move |opr| {
                                 let id = res.id.clone();
                                 let tx_clone = tx.clone();
@@ -250,16 +262,16 @@ pub async fn uac_ipc_main(args: crate::cli::arg::UacArgs) {
                                 });
                             })
                             .await;
-                            println!("Operation done: {:?}", id);
+                            println!("Client: Operation done: {:?}", id);
                             let _ = tx2
                                 .send(serde_json::json!({ "id": id, "data": res, "done": true }))
                                 .await;
                         });
                     } else {
-                        println!("Failed to parse message: {:?} {:?}", res.err(), buf);
+                        println!("Client: Failed to parse message: {:?} {:?}", res.err(), buf);
                     }
                 } else {
-                    println!("Failed to read from pipe: {:?}", v.err());
+                    println!("Client: Failed to read from pipe: {:?}", v.err());
                     break;
                 }
             },
@@ -268,12 +280,20 @@ pub async fn uac_ipc_main(args: crate::cli::arg::UacArgs) {
                     let b = serde_json::to_vec(&v);
                     if let Ok(mut b) = b {
                         b.push(b'\n');
-                        let _ = clienttx.write(&b).await;
+                        // split into chunks
+                        let chunks = b.chunks(PIPE_CHUNK_SIZE);
+                        for b in chunks {
+                            let res = clienttx.write(b).await;
+                            if let Err(err) = res {
+                                println!("Client: Failed to write to pipe: {:?}", err);
+                                break;
+                            }
+                        }
                     } else {
-                        println!("Failed to serialize message: {:?}", b.err());
+                        println!("Client: Failed to serialize message: {:?}", b.err());
                     }
                 } else {
-                    println!("Failed to receive message from channel");
+                    println!("Client: Failed to receive message from channel");
                     break;
                 }
             }
