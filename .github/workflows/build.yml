@@ -38,7 +38,7 @@ jobs:
       - name: Build
         run: pnpm build
       - name: Copy Binary
-        run: copy src-tauri/target/release/kachina-builder-bundle.exe kachina-builder.exe
+        run: copy src-tauri/target/release/kachina-builder.exe kachina-builder.exe
       - name: Artifact
         uses: actions/upload-artifact@v4.6.0
         with:
