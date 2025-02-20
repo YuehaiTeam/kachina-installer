@@ -2,7 +2,10 @@ use async_compression::tokio::bufread::ZstdDecoder as TokioZstdDecoder;
 use fmmap::tokio::AsyncMmapFileExt;
 use futures::StreamExt;
 use serde::Serialize;
-use std::{os::windows::fs::MetadataExt, path::Path};
+use std::{
+    os::windows::fs::MetadataExt,
+    path::{Path, PathBuf},
+};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use crate::{
@@ -201,18 +204,23 @@ pub async fn create_local_stream(
     Ok(Box::new(decoder))
 }
 
-pub async fn prepare_target(target: &str) -> Result<(), String> {
+pub async fn prepare_target(target: &str) -> Result<Option<PathBuf>, String> {
     let target = Path::new(&target);
     let exe_path = std::env::current_exe();
+    let mut override_path = None;
     if let Ok(exe_path) = exe_path {
         // check if target is the same as exe path
         if exe_path == target && exe_path.exists() {
             // if same, rename the exe to exe.old
-            let old_exe = exe_path.with_extension("old");
+            let old_exe = exe_path.with_extension("instbak");
+            // delete old_exe if exists
+            let _ = tokio::fs::remove_file(&old_exe).await;
+            // rename current exe to old_exe
             let res = tokio::fs::rename(&exe_path, &old_exe).await;
             if res.is_err() {
                 return Err(format!("Failed to rename current exe: {:?}", res.err()));
             }
+            override_path = Some(old_exe);
         }
     }
     // ensure dir
@@ -225,7 +233,7 @@ pub async fn prepare_target(target: &str) -> Result<(), String> {
     if res.is_err() {
         return Err(format!("Failed to create parent dir: {:?}", res.err()));
     }
-    Ok(())
+    Ok(override_path)
 }
 
 pub async fn create_target_file(target: &str) -> Result<impl AsyncWrite, String> {
@@ -285,6 +293,7 @@ pub async fn progressed_hpatch<R, F>(
     target: &str,
     diff_size: usize,
     on_progress: F,
+    override_old_path: Option<PathBuf>,
 ) -> Result<usize, String>
 where
     R: AsyncRead + std::marker::Unpin + Send + 'static,
@@ -300,7 +309,7 @@ where
     };
     let target = target.to_string();
     let target_cl = Path::new(&target);
-    let old_target_old = target_cl.with_extension("old");
+    let old_target_old = target_cl.with_extension("patchold");
     // try remove old_target_old, do not throw error if failed
     let _ = tokio::fs::remove_file(old_target_old).await;
     let new_target = target_cl.with_extension("patching");
@@ -309,8 +318,14 @@ where
         .map_err(|e| format!("Failed to get target size: {:?}", e))?;
     let target_file = std::fs::File::create(new_target.clone())
         .map_err(|e| format!("Failed to create new target: {:?}", e))?;
-    let old_target_file = std::fs::File::open(target.clone())
-        .map_err(|e| format!("Failed to open target: {:?}", e))?;
+    let old_target_file = std::fs::File::open(
+        if let Some(override_old_path) = override_old_path.as_ref() {
+            override_old_path.clone()
+        } else {
+            PathBuf::from(target.clone())
+        },
+    )
+    .map_err(|e| format!("Failed to open target: {:?}", e))?;
     let diff_file = tokio_util::io::SyncIoBridge::new(decoder);
     let res = tokio::task::spawn_blocking(move || {
         hpatch_sys::safe_patch_single_stream(
@@ -327,20 +342,33 @@ where
         // move target to target.old
         let old_target = target_cl.with_extension("old");
         let exe_path = std::env::current_exe();
-        let exe_path = exe_path.map_err(|e| format!("Failed to get exe path: {:?}", e))?;
-        // rename to .old
-        tokio::fs::rename(target_cl, old_target.clone())
-            .await
-            .map_err(|e| format!("Failed to rename target: {:?}", e))?;
-        // rename new file to original
-        tokio::fs::rename(new_target, target_cl)
-            .await
-            .map_err(|e| format!("Failed to rename new target: {:?}", e))?;
+        let exe_path: PathBuf = exe_path.map_err(|e| format!("Failed to get exe path: {:?}", e))?;
+        // if old file is not self
         if exe_path != target_cl {
-            // if old file is not self, delete old file
+            // rename to .old
+            tokio::fs::rename(target_cl, old_target.clone())
+                .await
+                .map_err(|e| format!("Failed to rename target: {:?}", e))?;
+            // rename new file to original
+            tokio::fs::rename(new_target, target_cl)
+                .await
+                .map_err(|e| format!("Failed to rename new target: {:?}", e))?;
+
+            // delete old file
             tokio::fs::remove_file(old_target)
                 .await
                 .map_err(|e| format!("Failed to remove old target: {:?}", e))?;
+        } else {
+            if override_old_path.is_none() {
+                // rename to .old
+                tokio::fs::rename(target_cl, old_target.clone())
+                    .await
+                    .map_err(|e| format!("Failed to rename target: {:?}", e))?;
+            }
+            // self is already renamed and cannot be deleted, just replace the new file
+            tokio::fs::rename(new_target, target_cl)
+                .await
+                .map_err(|e| format!("Failed to rename new target: {:?}", e))?;
         }
     } else {
         // delete new target

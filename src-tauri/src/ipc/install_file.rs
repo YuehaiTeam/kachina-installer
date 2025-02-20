@@ -72,7 +72,7 @@ pub async fn ipc_install_file(
     notify: impl Fn(serde_json::Value) + std::marker::Send + 'static,
 ) -> Result<serde_json::Value, String> {
     let target = args.target;
-    prepare_target(&target).await?;
+    let override_old_path = prepare_target(&target).await?;
     let progress_noti = move |downloaded: usize| {
         notify(serde_json::json!(downloaded));
     };
@@ -93,6 +93,7 @@ pub async fn ipc_install_file(
                 &target,
                 diff_size,
                 progress_noti,
+                override_old_path,
             )
             .await?;
             verify_hash(&target, args.md5, args.xxh).await?;
@@ -108,7 +109,14 @@ pub async fn ipc_install_file(
                 InstallFileSource::Url { size, .. } => size,
                 InstallFileSource::Local { size, .. } => size,
             };
-            progressed_hpatch(create_stream_by_source(diff).await?, &target, size, |_| {}).await?;
+            progressed_hpatch(
+                create_stream_by_source(diff).await?,
+                &target,
+                size,
+                |_| {},
+                None,
+            )
+            .await?;
             verify_hash(&target, args.md5, args.xxh).await?;
             Ok(serde_json::json!(()))
         }

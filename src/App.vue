@@ -392,6 +392,7 @@ import {
   ipcFindProcessByName,
   ipcInstallRuntime,
   ipcKillProcess,
+  ipcPatchInstaller,
   ipcRmList,
   ipcRunUninstall,
   ipcWriteRegistry,
@@ -702,6 +703,17 @@ async function runInstall(): Promise<void> {
     let hasError = false;
     for (let i = 0; i < 3; i++) {
       try {
+        if (item.installer) {
+          try {
+            // 自更新前后都清除下载的安装器里的index，尽量保证hash一致性
+            await ipcPatchInstaller(
+              `${source.value}${sep()}${PROJECT_CONFIG.updaterName}`,
+              needElevate.value,
+            );
+          } catch (e) {
+            log(e);
+          }
+        }
         await runDfsDownload(
           PROJECT_CONFIG.source,
           INSTALLER_CONFIG.embedded_files || [],
@@ -712,6 +724,17 @@ async function runInstall(): Promise<void> {
           hasError || INSTALLER_CONFIG.args.online,
           needElevate.value,
         );
+        if (item.installer) {
+          try {
+            // 清除下载的安装器里的index
+            await ipcPatchInstaller(
+              `${source.value}${sep()}${PROJECT_CONFIG.updaterName}`,
+              needElevate.value,
+            );
+          } catch (e) {
+            log(e);
+          }
+        }
         break;
       } catch (e) {
         hasError = true;

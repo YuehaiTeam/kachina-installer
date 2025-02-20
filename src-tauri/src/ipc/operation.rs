@@ -24,6 +24,9 @@ pub enum IpcOperation {
         hash_algorithm: String,
         file_list: Vec<String>,
     },
+    PatchInstaller {
+        installer: String,
+    },
 }
 
 pub async fn run_opr(
@@ -71,6 +74,10 @@ pub async fn run_opr(
             file_list,
         } => Ok(serde_json::json!(
             crate::fs::check_local_files(source, hash_algorithm, file_list, notify).await?
+        )),
+        IpcOperation::PatchInstaller { installer } => Ok(serde_json::json!(
+            crate::installer::uninstall::clear_index_mark(&std::path::PathBuf::from(installer))
+                .await?
         )),
     }
 }

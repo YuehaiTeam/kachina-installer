@@ -102,6 +102,11 @@ interface IpcCheckLocalFiles {
   file_list: string[];
 }
 
+interface IpcPatchInstaller {
+  type: 'PatchInstaller';
+  installer: string;
+}
+
 export async function ipcCreateLnk(
   target: string,
   lnk: string,
@@ -182,6 +187,13 @@ export async function ipcCheckLocalFiles(
     InvokeDeepReaddirWithMetadataRes,
     [number, number]
   >({ type: 'CheckLocalFiles', ...args }, elevate, cb);
+}
+
+export async function ipcPatchInstaller(installer: string, elevate = false) {
+  return ipc<IpcPatchInstaller, void, void>(
+    { type: 'PatchInstaller', installer },
+    elevate,
+  );
 }
 
 export function log(...args: any[]) {
