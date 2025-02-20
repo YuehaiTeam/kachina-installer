@@ -72,6 +72,7 @@ ignore = "0.4.23"
 num_cpus = "1.16.0"
 indicatif = { version = "0.17.9", features = ["tokio"] }
 console = "0.15.10"
+rcedit = { version = "0.1.0", git = "https://github.com/Devolutions/rcedit-rs.git" }
 
 [[bin]]
 name = "kachina-installer"

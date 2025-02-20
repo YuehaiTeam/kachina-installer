@@ -6,11 +6,29 @@ static MMAP_SELF: OnceCell<AsyncMmapFile> = OnceCell::const_new();
 pub async fn mmap() -> &'static AsyncMmapFile {
     MMAP_SELF
         .get_or_init(|| async {
-            let exe_path = std::env::current_exe().map_err(|e| e.to_string()).unwrap();
-            AsyncMmapFile::open(exe_path)
-                .await
-                .map_err(|e| e.to_string())
-                .unwrap()
+            let exe_path = {
+                #[cfg(debug_assertions)]
+                {
+                    // use last release build
+                    let exe_path = std::env::current_exe().unwrap();
+                    // ../release/${basename}
+                    let exe_path = exe_path
+                        .parent()
+                        .ok_or("Failed to get parent dir".to_string())
+                        .unwrap()
+                        .parent()
+                        .ok_or("Failed to get parent dir".to_string())
+                        .unwrap()
+                        .join("release")
+                        .join("kachina-builder-bundle.exe");
+                    exe_path
+                }
+                #[cfg(not(debug_assertions))]
+                {
+                    std::env::current_exe().unwrap()
+                }
+            };
+            AsyncMmapFile::open(exe_path).await.unwrap()
         })
         .await
 }

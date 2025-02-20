@@ -194,9 +194,45 @@ pub async fn pack(
     mut output: impl AsyncWrite + std::marker::Unpin,
     mut config: PackConfig,
 ) {
+    println!("Generating exe with version info...");
+    // write base to tmp file
+    let tmppath = std::env::temp_dir().join("kachina_installer_tmp.exe");
+    let mut tmpfile = tokio::fs::File::create(tmppath.clone()).await.unwrap();
+    tokio::io::copy(&mut base, &mut tmpfile).await.unwrap();
+    // close tmp file
+    tmpfile.shutdown().await.unwrap();
+    drop(tmpfile);
+    // open resource file
+    let mut updater = rcedit::ResourceUpdater::new();
+    updater.load(&tmppath).unwrap();
+    let unwrapped_config = config.config.as_object().unwrap();
+    let title = unwrapped_config
+        .get("windowTitle")
+        .unwrap()
+        .as_str()
+        .unwrap();
+    let product = unwrapped_config.get("appName").unwrap().as_str().unwrap();
+    updater
+        .set_version_string("FileDescription", title)
+        .unwrap();
+    updater.set_version_string("ProductName", product).unwrap();
+    if let Some(metadata) = config.metadata.as_ref() {
+        updater
+            .set_version_string("ProductVersion", &metadata.tag_name)
+            .unwrap();
+    }
+    updater.commit().unwrap();
+    drop(updater);
     println!("Reading base...");
     let mut base_data = vec![];
-    tokio::io::copy(&mut base, &mut base_data).await.unwrap();
+    // read tmp file
+    let mut tmpfile = tokio::fs::File::open(tmppath.clone()).await.unwrap();
+    tokio::io::copy(&mut tmpfile, &mut base_data).await.unwrap();
+    // close tmp file
+    tmpfile.shutdown().await.unwrap();
+    drop(tmpfile);
+    // remove tmp file
+    tokio::fs::remove_file(tmppath).await.unwrap();
     let metadata_bytes = if let Some(metadata) = config.metadata {
         println!("Writing metadata...");
         let mut metadata = serde_json::json!(metadata);

@@ -2434,6 +2434,7 @@ dependencies = [
  "num_cpus",
  "open",
  "pin-project",
+ "rcedit",
  "reqwest",
  "rfd",
  "serde",
@@ -3630,6 +3631,24 @@ name = "raw-window-handle"
 version = "0.6.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "20675572f6f24e9e76ef639bc5552774ed45f1c30e2951e1e99c59888861c539"
+
+[[package]]
+name = "rcedit"
+version = "0.1.0"
+source = "git+https://github.com/Devolutions/rcedit-rs.git#595e39b7cdf53734712d5c74580c77447836b365"
+dependencies = [
+ "rcedit-sys",
+ "thiserror 1.0.69",
+ "widestring",
+]
+
+[[package]]
+name = "rcedit-sys"
+version = "0.1.0"
+source = "git+https://github.com/Devolutions/rcedit-rs.git#595e39b7cdf53734712d5c74580c77447836b365"
+dependencies = [
+ "cc",
+]
 
 [[package]]
 name = "redox_syscall"
@@ -5406,6 +5425,12 @@ dependencies = [
  "windows",
  "windows-core 0.58.0",
 ]
+
+[[package]]
+name = "widestring"
+version = "0.4.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c168940144dd21fd8046987c16a46a33d5fc84eec29ef9dcddc2ac9e31526b7c"
 
 [[package]]
 name = "winapi"

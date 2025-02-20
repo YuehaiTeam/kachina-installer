@@ -13,12 +13,19 @@
     "withGlobalTauri": true,
     "windows": [],
     "security": {
-      "csp": null
+      "csp": {
+        "default-src": "'self' customprotocol: asset:",
+        "connect-src": "ipc: http://ipc.localhost",
+        "img-src": "'self' asset: http://asset.localhost blob: data:",
+        "style-src": "'unsafe-inline' 'self'",
+        "script-src": "'self' 'unsafe-eval' 'unsafe-inline'"
+      }
     }
   },
   "bundle": {
     "active": false,
     "targets": "all",
+    "copyright": "Built by Kachina Installer",
     "icon": ["icons/icon.ico"]
   }
 }
