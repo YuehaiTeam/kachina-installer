@@ -135,14 +135,26 @@ pub async fn get_installer_config(
             return Ok(config.fill(exe_parent_dir, true, "PARENT_DIR"));
         }
     }
-    let key = winreg::RegKey::predef(winreg::enums::HKEY_LOCAL_MACHINE).open_subkey(format!(
+    let key_path = format!(
         "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\{}",
         reg_name
-    ));
+    );
+
+    // First try HKLM, if not exist, try HKCU
+    let key = windows_registry::LOCAL_MACHINE
+        .options()
+        .read()
+        .open(&key_path)
+        .or_else(|_| {
+            windows_registry::CURRENT_USER
+                .options()
+                .read()
+                .open(&key_path)
+        });
     if key.is_ok() {
         let key = key.unwrap();
         let path: String = key
-            .get_value("InstallLocation")
+            .get_string("InstallLocation")
             .map_err(|e| e.to_string())?;
         let path = Path::new(&path);
         let exe_path = Path::new(&path).join(exe_name);

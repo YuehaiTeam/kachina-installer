@@ -180,7 +180,7 @@ pub async fn run_uninstall(
     .map_err(|e| format!("Failed to clear empty dirs: {:?}", e))??;
 
     // delete registry
-    let _ = winreg::RegKey::predef(winreg::enums::HKEY_LOCAL_MACHINE).delete_subkey_all(format!(
+    let _ = windows_registry::LOCAL_MACHINE.remove_tree(format!(
         "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\{}",
         reg_name
     ));

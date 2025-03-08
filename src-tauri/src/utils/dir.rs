@@ -13,7 +13,7 @@ use windows::{
 
 pub fn get_dir(dir: &GUID) -> Result<String, String> {
     let pwstr = unsafe {
-        SHGetKnownFolderPath(dir, KF_FLAG_DEFAULT, HANDLE::default())
+        SHGetKnownFolderPath(dir, KF_FLAG_DEFAULT, None)
             .map(|pwstr| {
                 pwstr
                     .to_string()
@@ -29,7 +29,7 @@ pub fn get_userprofile() -> Result<String, String> {
     let mut buffer = [0u16; 1024];
     let pwstr = PWSTR::from_raw(buffer.as_mut_ptr());
     let mut size = buffer.len() as u32;
-    let res = unsafe { GetUserProfileDirectoryW(HANDLE::default(), pwstr, &mut size) };
+    let res = unsafe { GetUserProfileDirectoryW(HANDLE::default(), Some(pwstr), &mut size) };
     if res.is_err() {
         return Err(format!(
             "Failed to get user profile directory: {:?}",

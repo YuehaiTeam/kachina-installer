@@ -1,8 +1,6 @@
 use crate::utils::uac::check_elevated;
 use serde_json::Value;
 
-// 如果有权限，写HKLM，否则写HKCU
-
 #[derive(serde::Deserialize, serde::Serialize, Debug, Clone)]
 pub struct WriteRegistryParams {
     pub reg_name: String,
@@ -44,71 +42,68 @@ pub async fn write_registry(
     publisher: String,
 ) -> Result<(), String> {
     let elevated = check_elevated().unwrap_or(false);
-    let regbase = if elevated {
-        winreg::enums::HKEY_LOCAL_MACHINE
+    let hive = if elevated {
+        windows_registry::LOCAL_MACHINE
     } else {
-        winreg::enums::HKEY_CURRENT_USER
-    };
-    let key = winreg::RegKey::predef(regbase).open_subkey_with_flags(
-        format!(
-            "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\{}",
-            reg_name
-        ),
-        winreg::enums::KEY_READ | winreg::enums::KEY_WRITE | winreg::enums::KEY_QUERY_VALUE,
-    );
-    let key = if let Ok(key) = key {
-        key
-    } else {
-        let create = winreg::RegKey::predef(regbase)
-            .create_subkey(format!(
-                "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\{}",
-                reg_name
-            ))
-            .map_err(|e| format!("Failed to create subkey: {:?}", e))?;
-        create.0
+        windows_registry::CURRENT_USER
     };
 
-    key.set_value("DisplayName", &name)
+    let key_path = format!(
+        "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\{}",
+        reg_name
+    );
+
+    let key = hive
+        .create(&key_path)
+        .map_err(|e| format!("Failed to create/open registry key: {:?}", e))?;
+
+    key.set_string("DisplayName", &name)
         .map_err(|e| format!("Failed to set DisplayName: {:?}", e))?;
-    key.set_value("DisplayVersion", &version)
+    key.set_string("DisplayVersion", &version)
         .map_err(|e| format!("Failed to set DisplayVersion: {:?}", e))?;
-    key.set_value("UninstallString", &uninstaller)
+    key.set_string("UninstallString", &uninstaller)
         .map_err(|e| format!("Failed to set UninstallString: {:?}", e))?;
-    key.set_value("InstallLocation", &source)
+    key.set_string("InstallLocation", &source)
         .map_err(|e| format!("Failed to set InstallLocation: {:?}", e))?;
-    key.set_value("DisplayIcon", &exe)
+    key.set_string("DisplayIcon", &exe)
         .map_err(|e| format!("Failed to set DisplayIcon: {:?}", e))?;
-    key.set_value("Publisher", &publisher)
+    key.set_string("Publisher", &publisher)
         .map_err(|e| format!("Failed to set Publisher: {:?}", e))?;
-    key.set_value("EstimatedSize", &size)
+    key.set_u32("EstimatedSize", size as u32)
         .map_err(|e| format!("Failed to set EstimatedSize: {:?}", e))?;
-    key.set_value("NoModify", &1u32)
+    key.set_u32("NoModify", 1u32)
         .map_err(|e| format!("Failed to set NoModify: {:?}", e))?;
-    key.set_value("NoRepair", &1u32)
+    key.set_u32("NoRepair", 1u32)
         .map_err(|e| format!("Failed to set NoRepair: {:?}", e))?;
-    key.set_value("InstallerMeta", &metadata)
+    key.set_string("InstallerMeta", &metadata)
         .map_err(|e| format!("Failed to set UninstallData: {:?}", e))?;
     Ok(())
 }
 
 #[tauri::command]
 pub async fn read_uninstall_metadata(reg_name: String) -> Result<Value, String> {
-    // First try HKLM, if not exist, try HKCU
-    let mut key = winreg::RegKey::predef(winreg::enums::HKEY_LOCAL_MACHINE).open_subkey(format!(
+    let key_path = format!(
         "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\{}",
         reg_name
-    ));
-    if key.is_err() {
-        key = winreg::RegKey::predef(winreg::enums::HKEY_CURRENT_USER).open_subkey(format!(
-            "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\{}",
-            reg_name
-        ));
-    }
-    if key.is_err() {
-        return Err("Failed to open registry key".to_string());
-    }
-    let key = key.unwrap();
-    let metadata: String = key.get_value("InstallerMeta").map_err(|e| e.to_string())?;
+    );
+
+    // First try HKLM, if not exist, try HKCU
+    let key = windows_registry::LOCAL_MACHINE
+        .options()
+        .read()
+        .open(&key_path)
+        .or_else(|_| {
+            windows_registry::CURRENT_USER
+                .options()
+                .read()
+                .open(&key_path)
+        })
+        .map_err(|e| format!("Failed to open registry key: {:?}", e))?;
+
+    let metadata: String = key
+        .get_string("InstallerMeta")
+        .map_err(|e| format!("Failed to read InstallerMeta: {:?}", e))?;
+
     let metadata: Value = serde_json::from_str(&metadata).map_err(|e| e.to_string())?;
     Ok(metadata)
 }

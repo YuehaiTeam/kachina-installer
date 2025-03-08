@@ -62,8 +62,8 @@ pub async fn install_webview2() {
                 SendMessageW(
                     hwnd,
                     TDM_SET_PROGRESS_BAR_MARQUEE.0 as u32,
-                    WPARAM(1),
-                    LPARAM(1),
+                    Some(WPARAM(1)),
+                    Some(LPARAM(1)),
                 );
             }
             TDN_DESTROYED => {
@@ -81,7 +81,7 @@ pub async fn install_webview2() {
         let hmodule = unsafe { GetModuleHandleW(PCWSTR(null_mut())).unwrap() };
         let hicon = unsafe {
             LoadIconW(
-                hmodule,
+                Some(hmodule.into()),
                 windows::Win32::UI::WindowsAndMessaging::IDI_APPLICATION,
             )
         };
@@ -135,8 +135,8 @@ pub async fn install_webview2() {
         SendMessageW(
             *dialog_hwnd.as_ref().unwrap(),
             TDM_UPDATE_ELEMENT_TEXT.0 as u32,
-            WPARAM(TDE_CONTENT.0.try_into().unwrap()),
-            LPARAM(content_utf16_nul.as_ptr() as isize),
+            Some(WPARAM(TDE_CONTENT.0.try_into().unwrap())),
+            Some(LPARAM(content_utf16_nul.as_ptr() as isize)),
         );
     }
     // run the installer
@@ -151,14 +151,14 @@ pub async fn install_webview2() {
         // close the dialog
         let hwnd = dialog_hwnd.take();
         unsafe {
-            SendMessageW(hwnd.unwrap(), WM_CLOSE, WPARAM(0), LPARAM(0));
+            SendMessageW(hwnd.unwrap(), WM_CLOSE, Some(WPARAM(0)), Some(LPARAM(0)));
         }
         let _ = tokio::process::Command::new(std::env::current_exe().unwrap()).spawn();
         // delete the installer
     } else {
         let hwnd = dialog_hwnd.take();
         unsafe {
-            SendMessageW(hwnd.unwrap(), WM_CLOSE, WPARAM(0), LPARAM(0));
+            SendMessageW(hwnd.unwrap(), WM_CLOSE, Some(WPARAM(0)), Some(LPARAM(0)));
         }
         rfd::MessageDialog::new()
             .set_title("出错了")

@@ -160,11 +160,10 @@ async fn tauri_main(args: InstallArgs) {
                 }));
             } else {
                 // if mica is not available, just use solid background.
-                let _ = match dark_light::detect()? {
-                    dark_light::Mode::Dark => {
-                        main_window.set_background_color(Some(Color(0, 0, 0, 255)))
-                    }
-                    _ => main_window.set_background_color(Some(Color(255, 255, 255, 255))),
+                let _ = if utils::gui::is_dark_mode().unwrap_or(false) {
+                    main_window.set_background_color(Some(Color(0, 0, 0, 255)))
+                } else {
+                    main_window.set_background_color(Some(Color(255, 255, 255, 255)))
                 };
             }
             Ok(())
