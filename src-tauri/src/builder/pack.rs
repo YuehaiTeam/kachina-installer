@@ -216,11 +216,6 @@ pub async fn pack(
         .set_version_string("FileDescription", title)
         .unwrap();
     updater.set_version_string("ProductName", product).unwrap();
-    if let Some(metadata) = config.metadata.as_ref() {
-        updater
-            .set_version_string("ProductVersion", &metadata.tag_name)
-            .unwrap();
-    }
     updater.commit().unwrap();
     drop(updater);
     println!("Reading base...");
