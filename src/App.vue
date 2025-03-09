@@ -654,7 +654,11 @@ async function runInstall(): Promise<void> {
     await finishInstall(latest_meta);
     return;
   }
-  if (diff_files.find((e) => e.unwritable)) {
+  if (
+    diff_files.find(
+      (e) => e.unwritable && e.file_name !== PROJECT_CONFIG.updaterName,
+    )
+  ) {
     if (
       !INSTALLER_CONFIG.args.non_interactive &&
       !INSTALLER_CONFIG.args.silent &&
