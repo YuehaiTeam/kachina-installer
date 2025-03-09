@@ -1,3 +1,5 @@
+use windows::Win32::System::Threading::CREATE_NO_WINDOW;
+
 use crate::fs::{create_http_stream, create_target_file, progressed_copy};
 
 pub async fn install_runtime(
@@ -33,7 +35,7 @@ pub async fn install_dotnet(
         "Microsoft.DotNet.Runtime" => (
             "https://builds.dotnet.microsoft.com/dotnet/Runtime/$/latest.version",
             "https://builds.dotnet.microsoft.com/dotnet/Runtime/$/dotnet-runtime-$-win-x64.exe",
-            "Microsoft.WindowsDesktop.App"
+            "Microsoft.NETCore.App"
         ),
         _ => {
             return Err(format!("Unsupported tag: {}", tag));
@@ -42,6 +44,7 @@ pub async fn install_dotnet(
     // check if runtime is installed by running dotnet --list-runtimes
     let cmd = tokio::process::Command::new("dotnet")
         .arg("--list-runtimes")
+        .creation_flags(CREATE_NO_WINDOW.0)
         .output()
         .await;
     // if installed, continue; if check failed, return error
