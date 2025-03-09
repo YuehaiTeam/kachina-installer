@@ -9,7 +9,12 @@ pub async fn mmap() -> &'static AsyncMmapFile {
     MMAP_SELF
         .get_or_init(|| async {
             let exe_path = if cfg!(debug_assertions) {
-                std::env::current_exe().unwrap().with_extension("bin")
+                let extbin = std::env::current_exe().unwrap().with_extension("bin");
+                if extbin.exists() {
+                    extbin
+                } else {
+                    std::env::current_exe().unwrap()
+                }
             } else {
                 std::env::current_exe().map_err(|e| e.to_string()).unwrap()
             };

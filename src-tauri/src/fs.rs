@@ -89,14 +89,14 @@ pub async fn check_local_files(
                     .is_ok();
             if !writable {
                 file.unwritable = true;
-            } else {
-                let res = run_hash(&hash_algorithm, &file.file_name).await;
-                if res.is_err() {
-                    return Err(res.err().unwrap());
-                }
-                let hash = res.unwrap();
-                file.hash = hash;
             }
+            let res = run_hash(&hash_algorithm, &file.file_name).await;
+            if res.is_err() && writable {
+                return Err(res.err().unwrap());
+            }
+            let hash = res.unwrap();
+            file.hash = hash;
+
             Ok(file)
         });
     }
