@@ -6,7 +6,7 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use windows::Win32::System::Threading::CREATE_NO_WINDOW;
 
 lazy_static::lazy_static!(
-    static ref DELETE_SELF_ON_EXIT_PATH: std::sync::RwLock<Option<String>> = std::sync::RwLock::new(None);
+    pub static ref DELETE_SELF_ON_EXIT_PATH: std::sync::RwLock<Option<String>> = std::sync::RwLock::new(None);
 );
 
 pub fn run_clear_empty_dirs(path: &Path) -> Result<(), std::io::Error> {

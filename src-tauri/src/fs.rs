@@ -9,7 +9,7 @@ use std::{
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use crate::{
-    local::mmap, utils::hash::run_hash, utils::progressed_read::ReadWithCallback, REQUEST_CLIENT,
+    installer::uninstall::DELETE_SELF_ON_EXIT_PATH, local::mmap, utils::{hash::run_hash, progressed_read::ReadWithCallback}, REQUEST_CLIENT
 };
 
 #[derive(Serialize, Debug, Clone)]
@@ -220,7 +220,11 @@ pub async fn prepare_target(target: &str) -> Result<Option<PathBuf>, String> {
             if res.is_err() {
                 return Err(format!("Failed to rename current exe: {:?}", res.err()));
             }
-            override_path = Some(old_exe);
+            override_path = Some(old_exe.clone());
+            DELETE_SELF_ON_EXIT_PATH
+                .write()
+                .unwrap()
+                .replace(old_exe.to_string_lossy().to_string());
         }
     }
     // ensure dir
