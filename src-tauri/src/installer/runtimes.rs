@@ -10,6 +10,9 @@ pub async fn install_runtime(
     if tag.starts_with("Microsoft.DotNet") {
         return install_dotnet(tag, notify).await;
     }
+    if tag.starts_with("Microsoft.VCRedist") {
+        return install_vcredist(tag, notify).await;
+    }
     // else not supported
     Err(format!("Unsupported runtime tag: {}", tag))
 }
@@ -126,4 +129,79 @@ pub async fn install_dotnet(
     // remove installer
     let _ = tokio::fs::remove_file(&installer_path).await;
     Ok("NEWLY_INSTALLED".to_string())
+}
+
+pub fn check_vcredist(reg: &str) -> bool {
+    let key = windows_registry::LOCAL_MACHINE.options().read().open(reg);
+    if let Ok(key) = key {
+        let installed = key.get_u32("Installed");
+        if let Ok(installed) = installed {
+            if installed == 1 {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+pub async fn install_vcredist(
+    tag: String,
+    notify: impl Fn(serde_json::Value) + std::marker::Send + 'static,
+) -> Result<String, String> {
+    let x64_prefix = "SOFTWARE\\Microsoft\\VisualStudio\\14.0\\VC\\Runtimes\\";
+    let x86_prefix = "SOFTWARE\\Wow6432Node\\Microsoft\\VisualStudio\\14.0\\VC\\Runtimes\\";
+    let (url, reg) = match tag.as_str() {
+        "Microsoft.VCRedist.2015+.x64" => (
+            "https://aka.ms/vs/17/release/vc_redist.x64.exe",
+            format!("{}{}", x64_prefix, "x64"),
+        ),
+        "Microsoft.VCRedist.2015+.x86" => (
+            "https://aka.ms/vs/17/release/vc_redist.x86.exe",
+            format!("{}{}", x86_prefix, "x86"),
+        ),
+        _ => {
+            return Err(format!("Unsupported tag: {}", tag));
+        }
+    };
+    // check registry for already installed
+    if check_vcredist(&reg) {
+        return Ok("ALREADY_INSTALLED".to_string());
+    }
+    // download to tmp folder
+    let temp_dir = std::env::temp_dir();
+    let installer_path = temp_dir
+        .as_path()
+        .join(format!("Kachina.RuntimePackage.{}.exe", tag));
+    let (mut stream, len) = create_http_stream(url, 0, 0, true)
+        .await
+        .map_err(|e| format!("Failed to download vcredist installer: {:?}", e))?;
+    let mut target = create_target_file(installer_path.as_os_str().to_str().unwrap())
+        .await
+        .map_err(|e| format!("Failed to create vcredist installer: {:?}", e))?;
+    let progress_noti = move |downloaded: usize| {
+        notify(serde_json::json!((downloaded, len)));
+    };
+    progressed_copy(&mut stream, &mut target, progress_noti).await?;
+    // close streams
+    drop(stream);
+    drop(target);
+    let cmd = tokio::process::Command::new(&installer_path)
+        .arg("/install")
+        .arg("/quiet")
+        .arg("/norestart")
+        .spawn();
+    if let Err(e) = cmd {
+        return Err(format!("Failed to run vcredist installer: {:?}", e));
+    }
+    let mut cmd = cmd.unwrap();
+    let status = cmd.wait().await;
+    if let Err(e) = status {
+        return Err(format!("Failed to wait for vcredist installer: {:?}", e));
+    }
+    let status = status.unwrap();
+    if !status.success() {
+        return Err(format!("Failed to install vcredist: {:?}", status));
+    }
+    let _ = tokio::fs::remove_file(installer_path).await;
+    Ok(("NEWLY_INSTALLED").to_string())
 }
