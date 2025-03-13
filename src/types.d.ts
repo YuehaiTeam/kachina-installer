@@ -51,6 +51,7 @@ interface DfsUpdateTask extends DfsMetadataHashInfo {
   running: boolean;
   old_hash?: string;
   unwritable: boolean;
+  failed?: true;
 }
 
 type InvokeGetDfsMetadataRes = {

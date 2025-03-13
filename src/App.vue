@@ -671,13 +671,18 @@ async function runInstall(): Promise<void> {
   console.log('Files to install:', diff_files);
   subStep.value = 2;
   current.value = '准备下载……';
-  const total_size = diff_files.reduce((acc, cur) => acc + cur.size, 0);
   let stat: InstallStat = {
     speedLastSize: 0,
     lastTime: performance.now(),
     speed: 0,
   };
   progressInterval.value = setInterval(() => {
+    const total_size = diff_files.reduce(
+      (acc, cur) =>
+        acc +
+        ((!cur.failed && (cur?.patch?.size || cur?.lpatch?.size)) || cur.size),
+      0,
+    );
     const now = performance.now();
     const time_diff = now - stat.lastTime;
     const downloadedTotalSize = diff_files.reduce(
@@ -706,7 +711,6 @@ async function runInstall(): Promise<void> {
     percent.value = 20 + (downloadedTotalSize / total_size) * 80;
   }, 30);
   await mapLimit(diff_files, 6, async (item: (typeof diff_files)[0]) => {
-    let hasError = false;
     for (let i = 0; i < 3; i++) {
       try {
         if (item.installer) {
@@ -726,8 +730,8 @@ async function runInstall(): Promise<void> {
           source.value,
           hashKey as DfsMetadataHashType,
           item,
-          hasError,
-          hasError || INSTALLER_CONFIG.args.online,
+          item.failed,
+          item.failed || INSTALLER_CONFIG.args.online,
           needElevate.value,
         );
         if (item.installer) {
@@ -743,7 +747,7 @@ async function runInstall(): Promise<void> {
         }
         break;
       } catch (e) {
-        hasError = true;
+        item.failed = true;
         log(e);
         if (i === 2) {
           await error(`释放文件${item.file_name}失败: ${e}`, '出错了');
