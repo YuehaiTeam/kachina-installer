@@ -619,12 +619,23 @@ async function runInstall(): Promise<void> {
     if (ss.startsWith('/')) return ss.slice(1);
     return ss;
   };
+  const userDataPath = PROJECT_CONFIG.userDataPath.map(replacePathEnvirables);
   for (const item of latest_meta.hashed) {
     const local = local_meta.find(
       (e) =>
         strip_first_slash(e.file_name.toLowerCase()) ===
         strip_first_slash(item.file_name.toLowerCase()),
     );
+    if (
+      local &&
+      userDataPath.some((userData) =>
+        strip_first_slash(local.file_name)
+          .toLowerCase()
+          .startsWith(strip_first_slash(userData).toLowerCase()),
+      )
+    ) {
+      continue;
+    }
     if (!local || local.hash !== item[hashKey as DfsMetadataHashType]) {
       let patch = latest_meta.patches?.find(
         (e) =>
@@ -662,7 +673,15 @@ async function runInstall(): Promise<void> {
     if (
       !INSTALLER_CONFIG.args.non_interactive &&
       !INSTALLER_CONFIG.args.silent &&
-      !(await confirm('检测到部分文件被占用，继续安装可能无法成功，是否继续？'))
+      !(await confirm(
+        '检测到部分文件被占用，继续安装可能无法成功，是否继续？\n\n被占用的文件列表：' +
+          diff_files
+            .filter(
+              (e) => e.unwritable && e.file_name !== PROJECT_CONFIG.updaterName,
+            )
+            .map((e) => e.file_name)
+            .join('\n'),
+      ))
     ) {
       step.value = 1;
       return;
@@ -891,8 +910,8 @@ async function install(): Promise<void> {
         : typeof e === 'string'
           ? e
           : JSON.stringify(e);
+    sendInsight(getInsightBase(), 'error', { error: errstr });
     await error(errstr);
-    await sendInsight(getInsightBase(), 'error', { error: errstr });
     step.value = 1;
     subStep.value = 0;
     percent.value = 0;
