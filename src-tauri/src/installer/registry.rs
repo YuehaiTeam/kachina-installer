@@ -69,7 +69,7 @@ pub async fn write_registry(
         .map_err(|e| format!("Failed to set DisplayIcon: {:?}", e))?;
     key.set_string("Publisher", &publisher)
         .map_err(|e| format!("Failed to set Publisher: {:?}", e))?;
-    key.set_u32("EstimatedSize", size as u32)
+    key.set_u32("EstimatedSize", (size as u32) / 1024)
         .map_err(|e| format!("Failed to set EstimatedSize: {:?}", e))?;
     key.set_u32("NoModify", 1u32)
         .map_err(|e| format!("Failed to set NoModify: {:?}", e))?;
