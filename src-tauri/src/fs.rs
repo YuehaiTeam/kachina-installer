@@ -9,7 +9,10 @@ use std::{
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use crate::{
-    installer::uninstall::DELETE_SELF_ON_EXIT_PATH, local::mmap, utils::{hash::run_hash, progressed_read::ReadWithCallback}, REQUEST_CLIENT
+    installer::uninstall::DELETE_SELF_ON_EXIT_PATH,
+    local::mmap,
+    utils::{hash::run_hash, progressed_read::ReadWithCallback},
+    REQUEST_CLIENT,
 };
 
 #[derive(Serialize, Debug, Clone)]
@@ -312,7 +315,11 @@ where
         },
     };
     let target = target.to_string();
-    let target_cl = Path::new(&target);
+    let target_cl = if let Some(override_old_path) = override_old_path.as_ref() {
+        Path::new(override_old_path)
+    } else {
+        Path::new(&target)
+    };
     let old_target_old = target_cl.with_extension("patchold");
     // try remove old_target_old, do not throw error if failed
     let _ = tokio::fs::remove_file(old_target_old).await;
