@@ -798,26 +798,35 @@ async function runInstall(): Promise<void> {
     for (const tag of PROJECT_CONFIG.runtimes) {
       log(`Installing runtime: ${tag}`);
       current.value = `安装${getRuntimeName(tag)}……`;
-      try {
-        await ipcInstallRuntime(
-          tag,
-          ({ payload }) => {
-            const currentSize = formatSize(payload[0]);
-            const targetSize = payload[1] ? formatSize(payload[1]) : '';
-            if (payload[0] >= payload[1] - 1) {
-              current.value = `安装 ${getRuntimeName(tag)} ……`;
-            } else {
-              current.value = `下载 ${getRuntimeName(tag)} ……<br>${currentSize}${targetSize ? ` / ${targetSize}` : ''}`;
-            }
-          },
-          needElevate.value,
-        );
-      } catch (e) {
-        log(e);
-        await error(
-          `安装${getRuntimeName(tag)}失败: ${e}，请手动安装`,
-          '出错了',
-        );
+      const tryTimes = 3;
+      for (let i = 0; i < tryTimes; i++) {
+        try {
+          await ipcInstallRuntime(
+            tag,
+            ({ payload }) => {
+              const currentSize = formatSize(payload[0]);
+              const targetSize = payload[1] ? formatSize(payload[1]) : '';
+              if (payload[0] >= payload[1] - 1) {
+                current.value = `安装 ${getRuntimeName(tag)} ……`;
+              } else {
+                current.value = `下载 ${getRuntimeName(tag)} ……<br>${currentSize}${targetSize ? ` / ${targetSize}` : ''}`;
+              }
+            },
+            needElevate.value,
+          );
+          break;
+        } catch (e) {
+          if (i === tryTimes - 1) {
+            log(e);
+            await error(
+              `安装${getRuntimeName(tag)}失败: ${e}，请手动安装`,
+              '出错了',
+            );
+            break;
+          } else {
+            log(`安装${getRuntimeName(tag)}失败: ${e}，重试中`);
+          }
+        }
       }
     }
   }
