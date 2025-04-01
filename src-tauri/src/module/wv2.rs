@@ -112,19 +112,54 @@ pub async fn install_webview2() {
     let res = REQUEST_CLIENT
         .get("https://go.microsoft.com/fwlink/p/?LinkId=2124703")
         .send()
-        .await
-        .expect("failed to download WebView2 installer");
-    let wv2_installer_blob = res
-        .bytes()
-        .await
-        .expect("failed to download WebView2 installer");
+        .await;
+    if let Err(e) = res {
+        let hwnd = dialog_hwnd.take();
+        unsafe {
+            SendMessageW(hwnd.unwrap(), WM_CLOSE, Some(WPARAM(0)), Some(LPARAM(0)));
+        }
+        rfd::MessageDialog::new()
+            .set_title("出错了")
+            .set_description(format!("WebView2 运行时下载失败: {}", e))
+            .set_level(rfd::MessageLevel::Error)
+            .show();
+        std::process::exit(0);
+    }
+    let res = res.unwrap();
+    let wv2_installer_blob = res.bytes().await;
+    if let Err(e) = wv2_installer_blob {
+        let hwnd = dialog_hwnd.take();
+        unsafe {
+            SendMessageW(hwnd.unwrap(), WM_CLOSE, Some(WPARAM(0)), Some(LPARAM(0)));
+        }
+        rfd::MessageDialog::new()
+            .set_title("出错了")
+            .set_description(format!("WebView2 运行时下载失败: {}", e))
+            .set_level(rfd::MessageLevel::Error)
+            .show();
+        std::process::exit(0);
+    }
+    let wv2_installer_blob = wv2_installer_blob.unwrap();
     let temp_dir = std::env::temp_dir();
     let installer_path = temp_dir
         .as_path()
         .join("kachina.MicrosoftEdgeWebview2Setup.exe");
-    tokio::fs::write(&installer_path, wv2_installer_blob)
-        .await
-        .expect("failed to write installer to temp dir");
+    let res = tokio::fs::write(&installer_path, wv2_installer_blob).await;
+    if let Err(e) = res {
+        let hwnd = dialog_hwnd.take();
+        unsafe {
+            SendMessageW(hwnd.unwrap(), WM_CLOSE, Some(WPARAM(0)), Some(LPARAM(0)));
+        }
+        rfd::MessageDialog::new()
+            .set_title("出错了")
+            .set_description(format!(
+                "WebView2 运行时安装程序写入失败: {}",
+                e
+            ))
+            .set_level(rfd::MessageLevel::Error)
+            .show();
+        std::process::exit(0);
+    }
     // change content of the dialog
     let content = "正在安装 WebView2 运行时...";
     let content_utf16_nul = content
@@ -143,8 +178,20 @@ pub async fn install_webview2() {
     let status = tokio::process::Command::new(installer_path.clone())
         .arg("/install")
         .status()
-        .await
-        .expect("failed to run installer");
+        .await;
+    if let Err(e) = status {
+        let hwnd = dialog_hwnd.take();
+        unsafe {
+            SendMessageW(hwnd.unwrap(), WM_CLOSE, Some(WPARAM(0)), Some(LPARAM(0)));
+        }
+        rfd::MessageDialog::new()
+            .set_title("出错了")
+            .set_description(format!("WebView2 运行时安装失败: {}", e))
+            .set_level(rfd::MessageLevel::Error)
+            .show();
+        std::process::exit(0);
+    }
+    let status = status.unwrap();
     let _ = tokio::fs::remove_file(installer_path).await;
     if status.success() {
         dialog_hwnd.take();
