@@ -14,7 +14,7 @@
    - 只需要提供一个离线安装包链接即可完成以上所有操作，无需额外部署
  - 运行库安装
    - 支持自动安装 .Net Runtime/Desktop 和 VCRedist
-   - 自动安装Webview2
+   - 自动安装Webview2以保证`Tauri`的正常运行
  - 混合安装
    - 通过旧版安装包和在线更新直接安装最新版
  - 卸载
@@ -42,7 +42,7 @@
     // 默认安装路径，和Program Files相对
     "programFilesPath": "KachinaInstaller",
     // GUI里的标题
-    "title": "BetterGI",
+    "title": "Kachina Installer",
     // GUI里的副标题
     "description": "快速多功能的安装器",
     // 窗口标题
@@ -78,4 +78,5 @@ kachina-builder.exe gen -j 8 -i {AppDir} -m metadata.json -o hashed -r {AppId} -
 ```bat
 kachina-builder.exe pack -c kachina.config.json -m metadata.json -d hashed -o Kachina.Install.exe
 ```
-5. 部署离线包到服务器上，确保可以通过json里的url下载到。此时第二步得到的更新器可以直接作为在线安装包使用。
+5. 部署离线包到服务器上，确保可以通过json里的url下载到。在目前版本里，你不需要部署压缩产生的`hashed`文件夹和metadata文件，这些文件是在构建过程中临时使用的。
+6. 此时第二步得到的更新器可以直接作为在线安装包使用。
