@@ -19,7 +19,7 @@ pub struct InstallArgs {
     pub override_source: Option<String>,
     // dfs extra data
     #[clap(hide = true)]
-    pub dfs_extra: Option<String>,
+    pub dfs_extras: Option<String>,
     #[clap(hide = true)]
     pub mirrorc_cdk: Option<String>,
     #[clap(hide = true)]

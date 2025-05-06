@@ -116,6 +116,10 @@ interface InstallerConfig {
     silent: boolean;
     online: boolean;
     uninstall: boolean;
+    override_source?: string;
+    dfs_extras?: string;
+    mirrorc_cdk?: string;
+    mirrorc_channel?: string;
   };
   elevated: boolean;
 }

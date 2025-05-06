@@ -502,7 +502,10 @@ async function runInstall(): Promise<void> {
   let latest_meta = INSTALLER_CONFIG.enbedded_metadata;
   let online_meta: InvokeGetDfsMetadataRes | null = null;
   try {
-    online_meta = await getDfsMetadata(PROJECT_CONFIG.source);
+    online_meta = await getDfsMetadata(
+      PROJECT_CONFIG.source,
+      INSTALLER_CONFIG.args.dfs_extras,
+    );
   } catch (e) {
     log(e);
   }
@@ -760,6 +763,7 @@ async function runInstall(): Promise<void> {
         }
         await runDfsDownload(
           PROJECT_CONFIG.source,
+          INSTALLER_CONFIG.args.dfs_extras,
           INSTALLER_CONFIG.embedded_files || [],
           source.value,
           hashKey as DfsMetadataHashType,

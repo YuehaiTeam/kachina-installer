@@ -61,6 +61,7 @@ export const getDfsSourceType = (
 };
 export const getDfsMetadata = async (
   source: string,
+  extras?: string,
 ): Promise<InvokeGetDfsMetadataRes> => {
   const { remote, storage, url } = getDfsSourceType(source);
   if (storage === 'hashed') {
@@ -68,7 +69,7 @@ export const getDfsMetadata = async (
     if (dfsIndexCache.has(source)) {
       return dfsIndexCache.get(source)?.metadata as InvokeGetDfsMetadataRes;
     } else {
-      await refreshDfsIndex(source, url, remote);
+      await refreshDfsIndex(source, url, remote, extras);
       if (dfsIndexCache.has(source)) {
         return dfsIndexCache.get(source)?.metadata as InvokeGetDfsMetadataRes;
       }
@@ -80,9 +81,10 @@ export async function refreshDfsIndex(
   source: string,
   apiurl: string,
   remote: 'direct' | 'dfs',
+  extras?: string,
 ) {
   const binurl =
-    remote === 'direct' ? apiurl : await getDfsFileUrl(apiurl, 256);
+    remote === 'direct' ? apiurl : await getDfsFileUrl(apiurl, extras, 256);
   const pre_index: [number, number[]] = await invoke('get_http_with_range', {
     url: binurl,
     offset: 0,
@@ -220,6 +222,7 @@ export const getDfsIndexCache = async (
 export const getDfsUrl = async (
   source: string,
   hash: string,
+  extras?: string,
   installer?: boolean,
 ): Promise<{
   url: string;
@@ -247,7 +250,7 @@ export const getDfsUrl = async (
     if (!file) {
       if (installer) {
         const full_file_url =
-          remote === 'direct' ? url : await getDfsFileUrl(url, end);
+          remote === 'direct' ? url : await getDfsFileUrl(url, extras, end);
         return {
           url: full_file_url,
           offset: 0,
@@ -261,7 +264,7 @@ export const getDfsUrl = async (
     const full_file_url =
       remote === 'direct'
         ? url
-        : await getDfsFileUrl(url, file.size, file.offset);
+        : await getDfsFileUrl(url, extras, file.size, file.offset);
     return {
       url: full_file_url,
       offset: file.offset,
@@ -281,11 +284,13 @@ export const dfsJsonUrlToHashed = (jsonUrl: string, hash: string): string => {
 
 export const getDfsFileUrl = async (
   apiurl: string,
+  extras?: string,
   length?: number,
   start = 0,
 ): Promise<string> => {
   const dfs_result = await invoke<InvokeGetDfsRes>('get_dfs', {
     url: apiurl,
+    extras: extras || undefined,
     range: length ? `${start}-${start + length - 1}` : undefined,
   });
   let url = dfs_result.url;
@@ -323,6 +328,7 @@ export const getDfsFileUrl = async (
 
 export const runDfsDownload = async (
   dfsSource: string,
+  extras: string | undefined,
   local: Embedded[],
   source: string,
   hashKey: DfsMetadataHashType,
@@ -392,7 +398,7 @@ export const runDfsDownload = async (
       );
     } else {
       const hash = item[hashKey] as string;
-      const url = await getDfsUrl(dfsSource, hash, item.installer);
+      const url = await getDfsUrl(dfsSource, hash, extras, item.installer);
       log('>DOWNLOAD', filename_with_first_slash, url, item.installer);
       await ipc(
         InstallFile(url, source + filename_with_first_slash, {
