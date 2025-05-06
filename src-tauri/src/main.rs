@@ -51,6 +51,13 @@ fn ua_string() -> String {
 fn main() {
     use windows::Win32::System::Console::{AttachConsole, ATTACH_PARENT_PROCESS};
     let _ = unsafe { AttachConsole(ATTACH_PARENT_PROCESS) };
+
+    let _guard = sentry::init(sentry::ClientOptions {
+        release: sentry::release_name!(),
+        traces_sample_rate: 1.0,
+        ..sentry::ClientOptions::default()
+    });
+
     let cli = cli::Cli::parse();
     let mut command = cli.command();
     let wv2ver = tauri::webview_version();
