@@ -9,6 +9,7 @@ pub mod ipc;
 pub mod local;
 pub mod module;
 pub mod utils;
+pub mod thirdparty;
 
 use clap::Parser;
 use cli::arg::{Command, InstallArgs};

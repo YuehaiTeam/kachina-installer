@@ -27,13 +27,19 @@
             同时删除用户数据
           </div>
           <div class="more">
-            <span v-if="!isUpdate && !INSTALLER_CONFIG.is_uninstall">
-              安装到
+            <span>
+              <template v-if="!INSTALLER_CONFIG.is_uninstall">
+                <span>从 </span>
+                <a>Mirror酱 (aa**zz)</a>
+              </template>
+              <span v-if="!isUpdate && !INSTALLER_CONFIG.is_uninstall">
+                安装到
+              </span>
+              <span v-if="isUpdate && !INSTALLER_CONFIG.is_uninstall">
+                更新到
+              </span>
+              <span v-if="INSTALLER_CONFIG.is_uninstall"> 卸载自 </span>
             </span>
-            <span v-if="isUpdate && !INSTALLER_CONFIG.is_uninstall">
-              更新到
-            </span>
-            <span v-if="INSTALLER_CONFIG.is_uninstall"> 卸载自 </span>
             <a @click="changeSource">{{ source }}</a>
           </div>
           <button
@@ -226,7 +232,9 @@
   flex-direction: column;
 
   span {
-    opacity: 0.8;
+    span {
+      opacity: 0.8;
+    }
   }
 
   a {

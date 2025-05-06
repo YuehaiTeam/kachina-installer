@@ -1,6 +1,6 @@
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 
-use crate::{cli::PackArgs, local::get_reader_for_bundle, metadata::RepoMetadata};
+use crate::{cli::PackArgs, local::get_reader_for_bundle, utils::metadata::RepoMetadata};
 
 pub struct PackFile {
     pub name: String,

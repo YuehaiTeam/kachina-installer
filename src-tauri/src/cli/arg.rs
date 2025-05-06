@@ -14,6 +14,16 @@ pub struct InstallArgs {
     pub online: bool,
     #[clap(short = 'U', help = "Uninstall")]
     pub uninstall: bool,
+    // override install source
+    #[clap(hide = true)]
+    pub override_source: Option<String>,
+    // dfs extra data
+    #[clap(hide = true)]
+    pub dfs_extra: Option<String>,
+    #[clap(hide = true)]
+    pub mirrorc_cdk: Option<String>,
+    #[clap(hide = true)]
+    pub mirrorc_channel: Option<String>,
 }
 
 #[derive(Debug, Clone, clap::Args)]

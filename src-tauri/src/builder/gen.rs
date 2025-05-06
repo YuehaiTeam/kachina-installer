@@ -7,8 +7,12 @@ use tokio::{io::AsyncWriteExt, task::JoinSet};
 
 use crate::{
     cli::GenArgs,
-    metadata::{deep_generate_metadata, InstallerInfo, PatchInfo, PatchItem, RepoMetadata},
-    utils::{hash::run_hash, progressed_read::ReadWithCallback},
+    metadata::deep_generate_metadata,
+    utils::{
+        hash::run_hash,
+        metadata::{InstallerInfo, Metadata, PatchInfo, PatchItem, RepoMetadata},
+        progressed_read::ReadWithCallback,
+    },
 };
 
 pub async fn gen_cli(args: GenArgs) {
@@ -191,7 +195,7 @@ pub async fn gen_cli(args: GenArgs) {
     if let Some(diff_vers) = args.diff_vers {
         let mut metadata_with_installer = metadata.clone();
         if let Some(installer) = repometa.installer.as_ref() {
-            metadata_with_installer.push(crate::metadata::Metadata {
+            metadata_with_installer.push(Metadata {
                 file_name: if let Some(name) = args.updater_name.as_ref() {
                     name.clone()
                 } else if let Some(name) = args.updater.as_ref().unwrap().file_name() {
