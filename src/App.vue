@@ -573,13 +573,20 @@ async function runInstall(): Promise<void> {
       return;
     } else {
       try {
-        await Promise.all(
-          runningExes.map((e) => ipcKillProcess(e[0], needElevate.value)),
-        );
+        try {
+          await Promise.all(
+            runningExes.map((e) => ipcKillProcess(e[0], needElevate.value)),
+          );
+        } catch (e) {
+          await Promise.all(runningExes.map((e) => ipcKillProcess(e[0], true)));
+        }
+        return runInstall();
       } catch (e) {
-        await Promise.all(runningExes.map((e) => ipcKillProcess(e[0], true)));
+        log(e);
+        await error(`结束进程失败: ${e}`, '出错了');
+        step.value = 1;
+        return;
       }
-      return runInstall();
     }
   }
   let hashKey = '';

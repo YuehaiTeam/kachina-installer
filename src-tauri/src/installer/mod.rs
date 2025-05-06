@@ -1,5 +1,8 @@
 use tauri::{AppHandle, WebviewWindow};
-use windows::Win32::{Foundation::CloseHandle, System::Diagnostics::ToolHelp::PROCESSENTRY32W};
+use windows::Win32::{
+    Foundation::{CloseHandle, WAIT_FAILED, WAIT_TIMEOUT},
+    System::Diagnostics::ToolHelp::PROCESSENTRY32W,
+};
 
 use crate::utils::dir::in_private_folder;
 
@@ -114,23 +117,42 @@ pub async fn select_dir(
 
 #[tauri::command]
 pub async fn kill_process(pid: u32) -> Result<(), String> {
-    // use the windows crate
-    let handle = unsafe {
-        windows::Win32::System::Threading::OpenProcess(
-            windows::Win32::System::Threading::PROCESS_TERMINATE,
-            false,
-            pid,
-        )
-    };
-    if let Err(e) = handle {
-        return Err(format!("Failed to open process: {:?}", e));
-    }
-    let handle = handle.unwrap();
-    let ret = unsafe { windows::Win32::System::Threading::TerminateProcess(handle, 1) };
+    let ret = tokio::task::spawn_blocking(move || {
+        // use the windows crate
+        let handle = unsafe {
+            windows::Win32::System::Threading::OpenProcess(
+                windows::Win32::System::Threading::PROCESS_TERMINATE,
+                false,
+                pid,
+            )
+        };
+        if let Err(e) = handle {
+            return Err(format!("Failed to open process: {:?}", e));
+        }
+        let handle = handle.unwrap();
+        let ret = unsafe { windows::Win32::System::Threading::TerminateProcess(handle, 1) };
+        if let Err(e) = ret {
+            return Err(format!("Failed to terminate process: {:?}", e));
+        }
+        // wait for the process to exit, timeout 10s
+        let ret = unsafe { windows::Win32::System::Threading::WaitForSingleObject(handle, 10000) };
+        match ret {
+            WAIT_FAILED => {
+                return Err(format!("Failed to wait for process: {:?}", ret));
+            }
+            WAIT_TIMEOUT => {
+                return Err("Process did not exit in time".to_string());
+            }
+            _ => {}
+        };
+        let _ = unsafe { CloseHandle(handle) };
+        return Ok(());
+    })
+    .await;
     if let Err(e) = ret {
-        return Err(format!("Failed to terminate process: {:?}", e));
+        return Err(format!("Failed to kill process: {:?}", e));
     }
-    Ok(())
+    ret.unwrap()
 }
 
 fn get_process_path(pid: u32) -> Option<String> {
