@@ -5,6 +5,7 @@ use windows::Win32::{
 };
 
 use crate::utils::dir::in_private_folder;
+use anyhow::{Context, Result};
 
 pub mod config;
 pub mod lnk;
@@ -116,7 +117,7 @@ pub async fn select_dir(
 }
 
 #[tauri::command]
-pub async fn kill_process(pid: u32) -> Result<(), String> {
+pub async fn kill_process(pid: u32) -> Result<()> {
     let ret = tokio::task::spawn_blocking(move || {
         // use the windows crate
         let handle = unsafe {
@@ -125,32 +126,30 @@ pub async fn kill_process(pid: u32) -> Result<(), String> {
                 false,
                 pid,
             )
-        };
-        if let Err(e) = handle {
-            return Err(format!("Failed to open process: {:?}", e));
         }
-        let handle = handle.unwrap();
-        let ret = unsafe { windows::Win32::System::Threading::TerminateProcess(handle, 1) };
-        if let Err(e) = ret {
-            return Err(format!("Failed to terminate process: {:?}", e));
-        }
+        .context("OPEN_PROCESS_ERR")?;
+        unsafe { windows::Win32::System::Threading::TerminateProcess(handle, 1) }
+            .context("KILL_PROCESS_ERR")?;
         // wait for the process to exit, timeout 10s
         let ret = unsafe { windows::Win32::System::Threading::WaitForSingleObject(handle, 10000) };
         match ret {
             WAIT_FAILED => {
-                return Err(format!("Failed to wait for process: {:?}", ret));
+                return Err(anyhow::anyhow!("Failed to wait for process: {:?}", ret)
+                    .context("KILL_PROCESS_ERR"));
             }
             WAIT_TIMEOUT => {
-                return Err("Process did not exit in time".to_string());
+                return Err(
+                    anyhow::anyhow!("Process did not exit in time").context("KILL_PROCESS_TIMEOUT")
+                );
             }
             _ => {}
         };
         let _ = unsafe { CloseHandle(handle) };
-        return Ok(());
+        Ok(())
     })
     .await;
     if let Err(e) = ret {
-        return Err(format!("Failed to kill process: {:?}", e));
+        return Err(anyhow::Error::new(e).context("KILL_PROCESS_ERR"));
     }
     ret.unwrap()
 }
@@ -187,19 +186,17 @@ fn get_process_path(pid: u32) -> Option<String> {
 }
 
 #[tauri::command]
-pub async fn find_process_by_name(name: String) -> Result<Vec<(u32, String)>, String> {
+pub async fn find_process_by_name(name: String) -> Result<Vec<(u32, String)>> {
     let mut processes = Vec::new();
     unsafe {
         let snapshot = windows::Win32::System::Diagnostics::ToolHelp::CreateToolhelp32Snapshot(
             windows::Win32::System::Diagnostics::ToolHelp::TH32CS_SNAPPROCESS,
             0,
-        );
-        if let Err(e) = snapshot {
-            return Err(format!("Failed to create snapshot: {:?}", e));
-        }
-        let snapshot = snapshot.unwrap();
+        )
+        .context("FIND_PROCESS_ERR")?;
         if snapshot.is_invalid() {
-            return Err("Failed to create snapshot: invalid handle".to_string());
+            return Err(anyhow::anyhow!("Failed to create snapshot: invalid handle")
+                .context("FIND_PROCESS_ERR"));
         }
         let mut entry: PROCESSENTRY32W = std::mem::zeroed();
         entry.dwSize = size_of::<PROCESSENTRY32W>() as u32;

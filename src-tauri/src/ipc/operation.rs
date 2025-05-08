@@ -1,3 +1,4 @@
+use crate::utils::error::{IntoTAResult, TAResult};
 #[derive(serde::Deserialize, serde::Serialize, Clone, Debug)]
 #[serde(tag = "type")]
 pub enum IpcOperation {
@@ -32,12 +33,12 @@ pub enum IpcOperation {
 pub async fn run_opr(
     op: IpcOperation,
     notify: impl Fn(serde_json::Value) + std::marker::Send + 'static,
-) -> Result<serde_json::Value, String> {
+) -> TAResult<serde_json::Value> {
     match op {
         IpcOperation::Ping => Ok(serde_json::value::Value::Null),
-        IpcOperation::InstallFile(args) => {
-            super::install_file::ipc_install_file(args, notify).await
-        }
+        IpcOperation::InstallFile(args) => super::install_file::ipc_install_file(args, notify)
+            .await
+            .into_ta_result(),
         IpcOperation::WriteRegistry(params) => {
             crate::installer::registry::write_registry_with_params(params).await?;
             Ok(serde_json::Value::Null)

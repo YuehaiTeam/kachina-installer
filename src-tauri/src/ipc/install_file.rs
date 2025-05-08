@@ -3,6 +3,8 @@ use crate::fs::{
     progressed_hpatch, verify_hash,
 };
 
+use anyhow::Result;
+
 fn default_as_false() -> bool {
     false
 }
@@ -50,7 +52,7 @@ pub struct InstallFileArgs {
 }
 async fn create_stream_by_source(
     source: InstallFileSource,
-) -> Result<Box<dyn tokio::io::AsyncRead + Unpin + std::marker::Send>, String> {
+) -> Result<Box<dyn tokio::io::AsyncRead + Unpin + std::marker::Send>> {
     match source {
         InstallFileSource::Url {
             url,
@@ -70,7 +72,7 @@ async fn create_stream_by_source(
 pub async fn ipc_install_file(
     args: InstallFileArgs,
     notify: impl Fn(serde_json::Value) + std::marker::Send + 'static,
-) -> Result<serde_json::Value, String> {
+) -> Result<serde_json::Value> {
     let target = args.target;
     let override_old_path = prepare_target(&target).await?;
     let progress_noti = move |downloaded: usize| {

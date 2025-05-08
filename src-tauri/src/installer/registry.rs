@@ -1,4 +1,8 @@
-use crate::utils::uac::check_elevated;
+use crate::utils::{
+    error::{IntoTAResult, TAResult},
+    uac::check_elevated,
+};
+use anyhow::{Context, Result};
 use serde_json::Value;
 
 #[derive(serde::Deserialize, serde::Serialize, Debug, Clone)]
@@ -14,7 +18,7 @@ pub struct WriteRegistryParams {
     pub publisher: String,
 }
 
-pub async fn write_registry_with_params(params: WriteRegistryParams) -> Result<(), String> {
+pub async fn write_registry_with_params(params: WriteRegistryParams) -> TAResult<()> {
     write_registry(
         params.reg_name,
         params.name,
@@ -40,7 +44,32 @@ pub async fn write_registry(
     metadata: String,
     size: u64,
     publisher: String,
-) -> Result<(), String> {
+) -> TAResult<()> {
+    write_registry_raw(
+        reg_name,
+        name,
+        version,
+        exe,
+        source,
+        uninstaller,
+        metadata,
+        size,
+        publisher,
+    )
+    .await
+    .into_ta_result()
+}
+pub async fn write_registry_raw(
+    reg_name: String,
+    name: String,
+    version: String,
+    exe: String,
+    source: String,
+    uninstaller: String,
+    metadata: String,
+    size: u64,
+    publisher: String,
+) -> Result<()> {
     let elevated = check_elevated().unwrap_or(false);
     let hive = if elevated {
         windows_registry::LOCAL_MACHINE
@@ -53,35 +82,25 @@ pub async fn write_registry(
         reg_name
     );
 
-    let key = hive
-        .create(&key_path)
-        .map_err(|e| format!("Failed to create/open registry key: {:?}", e))?;
-
-    key.set_string("DisplayName", &name)
-        .map_err(|e| format!("Failed to set DisplayName: {:?}", e))?;
-    key.set_string("DisplayVersion", &version)
-        .map_err(|e| format!("Failed to set DisplayVersion: {:?}", e))?;
-    key.set_string("UninstallString", &uninstaller)
-        .map_err(|e| format!("Failed to set UninstallString: {:?}", e))?;
-    key.set_string("InstallLocation", &source)
-        .map_err(|e| format!("Failed to set InstallLocation: {:?}", e))?;
-    key.set_string("DisplayIcon", &exe)
-        .map_err(|e| format!("Failed to set DisplayIcon: {:?}", e))?;
-    key.set_string("Publisher", &publisher)
-        .map_err(|e| format!("Failed to set Publisher: {:?}", e))?;
-    key.set_u32("EstimatedSize", (size as u32) / 1024)
-        .map_err(|e| format!("Failed to set EstimatedSize: {:?}", e))?;
-    key.set_u32("NoModify", 1u32)
-        .map_err(|e| format!("Failed to set NoModify: {:?}", e))?;
-    key.set_u32("NoRepair", 1u32)
-        .map_err(|e| format!("Failed to set NoRepair: {:?}", e))?;
-    key.set_string("InstallerMeta", &metadata)
-        .map_err(|e| format!("Failed to set UninstallData: {:?}", e))?;
-    Ok(())
+    let key = hive.create(&key_path).context("OPEN_REG_ERR")?;
+    {
+        key.set_string("DisplayName", &name)?;
+        key.set_string("DisplayVersion", &version)?;
+        key.set_string("UninstallString", &uninstaller)?;
+        key.set_string("InstallLocation", &source)?;
+        key.set_string("DisplayIcon", &exe)?;
+        key.set_string("Publisher", &publisher)?;
+        key.set_u32("EstimatedSize", (size as u32) / 1024)?;
+        key.set_u32("NoModify", 1u32)?;
+        key.set_u32("NoRepair", 1u32)?;
+        key.set_string("InstallerMeta", &metadata)?;
+        Ok::<(), anyhow::Error>(())
+    }
+    .context("WRITE_REG_ERR")
 }
 
 #[tauri::command]
-pub async fn read_uninstall_metadata(reg_name: String) -> Result<Value, String> {
+pub async fn read_uninstall_metadata(reg_name: String) -> TAResult<Value> {
     let key_path = format!(
         "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\{}",
         reg_name
@@ -98,12 +117,12 @@ pub async fn read_uninstall_metadata(reg_name: String) -> Result<Value, String> 
                 .read()
                 .open(&key_path)
         })
-        .map_err(|e| format!("Failed to open registry key: {:?}", e))?;
+        .context("GET_INSTALLMETA_ERR")?;
 
     let metadata: String = key
         .get_string("InstallerMeta")
-        .map_err(|e| format!("Failed to read InstallerMeta: {:?}", e))?;
+        .context("GET_INSTALLMETA_ERR")?;
 
-    let metadata: Value = serde_json::from_str(&metadata).map_err(|e| e.to_string())?;
+    let metadata: Value = serde_json::from_str(&metadata).context("GET_INSTALLMETA_ERR")?;
     Ok(metadata)
 }

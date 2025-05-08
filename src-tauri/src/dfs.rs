@@ -1,7 +1,7 @@
+use anyhow::Context;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 
-use crate::REQUEST_CLIENT;
+use crate::{utils::error::TAResult, REQUEST_CLIENT};
 
 #[derive(Deserialize, Serialize, Debug)]
 pub struct DownloadResp {
@@ -107,58 +107,18 @@ pub async fn get_dfs(
 }
 
 #[tauri::command]
-pub async fn get_http_with_range(
-    url: String,
-    offset: u64,
-    size: u64,
-) -> Result<(u16, Vec<u8>), String> {
+pub async fn get_http_with_range(url: String, offset: u64, size: u64) -> TAResult<(u16, Vec<u8>)> {
     let mut res = REQUEST_CLIENT.get(&url);
     if offset != 0 || size != 0 {
         res = res.header("Range", format!("bytes={}-{}", offset, offset + size - 1));
     }
-    let res = res.send().await;
-    if res.is_err() {
-        return Err(format!("Failed to send http request: {:?}", res.err()));
-    }
-    let res = res.unwrap();
+    let res = res.send().await.context("HTTP_REQ_ERR")?;
     let status = res.status();
-    let bytes: Result<Vec<u8>, reqwest::Error> = res.bytes().await.map(|b| b.to_vec());
-    if bytes.is_err() {
-        return Err(format!("Failed to get bytes: {:?}", bytes.err()));
-    }
-    Ok((status.as_u16(), bytes.unwrap()))
-}
+    let bytes = res
+        .bytes()
+        .await
+        .map(|b| b.to_vec())
+        .context("HTTP_READ_ERR")?;
 
-#[tauri::command]
-pub async fn get_dfs_metadata(prefix: String) -> Result<Value, String> {
-    // retry for 3 times
-    let mut res: Result<Value, String> = run_get_dfs_metadata(prefix.clone()).await;
-    if res.is_err() {
-        for _ in 0..2 {
-            res = run_get_dfs_metadata(prefix.clone()).await;
-            if res.is_ok() {
-                break;
-            }
-        }
-    }
-    res
-}
-
-pub async fn run_get_dfs_metadata(prefix: String) -> Result<Value, String> {
-    let url = format!("https://77.cocogoat.cn/v2/dfs/{}/.metadata.json", prefix);
-    let res: Result<reqwest::Response, reqwest::Error> = REQUEST_CLIENT.get(&url).send().await;
-    if res.is_err() {
-        return Err(format!("Failed to send http request: {:?}", res.err()));
-    }
-    let res = res.unwrap();
-    // check status code if is not 200 or 401
-    if res.status() != reqwest::StatusCode::OK {
-        return Err(format!("{}", res.status()));
-    }
-    let json: Result<Value, reqwest::Error> = res.json().await;
-    if json.is_err() {
-        return Err(format!("Failed to parse json: {:?}", json.err()));
-    }
-    let json = json.unwrap();
-    Ok(json)
+    Ok((status.as_u16(), bytes))
 }

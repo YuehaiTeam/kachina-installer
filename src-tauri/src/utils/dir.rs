@@ -1,3 +1,4 @@
+use anyhow::{Context, Result};
 use std::path::Path;
 use windows::{
     core::{GUID, PWSTR},
@@ -11,36 +12,22 @@ use windows::{
     },
 };
 
-pub fn get_dir(dir: &GUID) -> Result<String, String> {
+pub fn get_dir(dir: &GUID) -> Result<String> {
     let pwstr = unsafe {
         SHGetKnownFolderPath(dir, KF_FLAG_DEFAULT, None)
-            .map(|pwstr| {
-                pwstr
-                    .to_string()
-                    .map_err(|e| format!("Failed to convert pwstr: {:?}", e))
-            })
-            .map_err(|e| format!("Failed to get known folder path: {:?}", e))??
+            .map(|pwstr| pwstr.to_string().context("INTERNAL_ERROR"))
+            .context("GET_KNOWNFOLDER_ERR")??
     };
     Ok(pwstr)
 }
 
-pub fn get_userprofile() -> Result<String, String> {
-    // GetUserProfileDirectoryW(htoken, lpprofiledir, lpcchsize)
+pub fn get_userprofile() -> Result<String> {
     let mut buffer = [0u16; 1024];
     let pwstr = PWSTR::from_raw(buffer.as_mut_ptr());
     let mut size = buffer.len() as u32;
-    let res = unsafe { GetUserProfileDirectoryW(HANDLE::default(), Some(pwstr), &mut size) };
-    if res.is_err() {
-        return Err(format!(
-            "Failed to get user profile directory: {:?}",
-            res.err()
-        ));
-    }
-    Ok(unsafe {
-        pwstr
-            .to_string()
-            .map_err(|e| format!("Failed to convert pwstr: {:?}", e))?
-    })
+    unsafe { GetUserProfileDirectoryW(HANDLE::default(), Some(pwstr), &mut size) }
+        .context("GET_KNOWNFOLDER_ERR")?;
+    Ok(unsafe { pwstr.to_string().context("INTERNAL_ERROR")? })
 }
 
 pub fn in_private_folder(path: &Path) -> bool {

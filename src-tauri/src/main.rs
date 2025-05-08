@@ -8,8 +8,8 @@ pub mod installer;
 pub mod ipc;
 pub mod local;
 pub mod module;
-pub mod utils;
 pub mod thirdparty;
+pub mod utils;
 
 use clap::Parser;
 use cli::arg::{Command, InstallArgs};
@@ -122,7 +122,6 @@ async fn tauri_main(args: InstallArgs) {
             // things which can be run directly
             fs::is_dir_empty,
             dfs::get_dfs,
-            dfs::get_dfs_metadata,
             dfs::get_http_with_range,
             installer::log,
             installer::launch_and_exit,
@@ -132,6 +131,10 @@ async fn tauri_main(args: InstallArgs) {
             installer::select_dir,
             installer::error_dialog,
             installer::confirm_dialog,
+            // wincred
+            utils::wincred::wincred_write,
+            utils::wincred::wincred_read,
+            utils::wincred::wincred_delete,
             // new mamaned operation
             ipc::manager::managed_operation,
         ])

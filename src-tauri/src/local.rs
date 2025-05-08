@@ -1,8 +1,11 @@
+use anyhow::Context;
 use fmmap::tokio::{AsyncMmapFile, AsyncMmapFileExt, AsyncMmapFileReader};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::io::AsyncReadExt;
 use tokio::sync::OnceCell;
+
+use crate::utils::error::return_anyhow_result;
 static MMAP_SELF: OnceCell<AsyncMmapFile> = OnceCell::const_new();
 
 pub async fn mmap() -> &'static AsyncMmapFile {
@@ -26,11 +29,11 @@ pub async fn mmap() -> &'static AsyncMmapFile {
         .await
 }
 
-async fn search_pattern() -> Result<Vec<usize>, String> {
+async fn search_pattern() -> anyhow::Result<Vec<usize>> {
     let pattern = "!in\0".to_ascii_uppercase();
     let pattern: &[u8; 4] = pattern.as_bytes().try_into().unwrap();
     let file = mmap().await;
-    let mut reader = file.reader(0).map_err(|e| e.to_string())?;
+    let mut reader = file.reader(0).context("MMAP_ERR")?;
     let mut buffer = [0u8; 4096];
     let mut offset: usize = 0;
     let mut founds = Vec::new();
@@ -47,7 +50,7 @@ async fn search_pattern() -> Result<Vec<usize>, String> {
         read = reader
             .read(&mut buffer[4..])
             .await
-            .map_err(|e| e.to_string())?;
+            .context("MMAP_ERR")?;
         if read == 0 {
             break;
         }
@@ -76,7 +79,7 @@ pub struct Embedded {
     pub raw_offset: usize,
     pub size: usize,
 }
-pub async fn get_embedded() -> Result<Vec<Embedded>, String> {
+pub async fn get_embedded() -> anyhow::Result<Vec<Embedded>> {
     let offsets = search_pattern().await?;
     let mut entries = Vec::new();
     let file = mmap().await;
@@ -115,7 +118,7 @@ pub async fn get_embedded() -> Result<Vec<Embedded>, String> {
 
 pub async fn get_config_from_embedded(
     embedded: &[Embedded],
-) -> Result<(Option<Value>, Option<Value>, Option<Vec<Embedded>>), String> {
+) -> anyhow::Result<(Option<Value>, Option<Value>, Option<Vec<Embedded>>)> {
     let file = mmap().await;
     let mut config = None;
     let mut metadata = None;
@@ -129,11 +132,11 @@ pub async fn get_config_from_embedded(
         if entry.name == "\0CONFIG" {
             let content = file.slice(entry.offset, entry.size);
             let content = String::from_utf8_lossy(content);
-            config = Some(serde_json::from_str(&content).map_err(|e| e.to_string())?);
+            config = Some(serde_json::from_str(&content).context("LOCAL_CONFIG_ERR")?);
         } else if entry.name == "\0META" {
             let content = file.slice(entry.offset, entry.size);
             let content = String::from_utf8_lossy(content);
-            metadata = Some(serde_json::from_str(&content).map_err(|e| e.to_string())?);
+            metadata = Some(serde_json::from_str(&content).context("LOCAL_CONFIG_ERR")?);
         } else if entry.name == "\0INDEX" {
             // u8: name_len var: name u32: size u32: offset
             let content: &[u8] = file.slice(entry.offset, entry.size);
@@ -167,31 +170,37 @@ pub fn get_header_size(name: &str) -> usize {
     "!in\0".len() + 2 + name.len() + 4
 }
 
-pub async fn get_base_with_config() -> Result<AsyncMmapFileReader<'static>, String> {
+pub async fn get_base_with_config() -> anyhow::Result<AsyncMmapFileReader<'static>> {
     let embedded = get_embedded().await?;
     let config_index = embedded.iter().position(|x| x.name == "\0CONFIG");
     let image_index = embedded.iter().position(|x| x.name == "\0IMAGE");
     if config_index.is_none() {
         if embedded.is_empty() {
-            return mmap().await.reader(0).map_err(|e| e.to_string());
+            return mmap().await.reader(0).context("MMAP_ERR");
         }
-        return Err("Malformed packed files: missing config".to_string());
+        return return_anyhow_result(
+            "Malformed packed files: missing config".to_string(),
+            "LOCAL_PACK_ERR",
+        );
     }
     let config_index = config_index.unwrap();
     // config index should be 0
     if config_index != 0 {
-        return Err("Malformed packed files: config not at index 0".to_string());
+        return return_anyhow_result(
+            "Malformed packed files: config not at index 0".to_string(),
+            "LOCAL_PACK_ERR",
+        );
     }
     let mut end_pos = embedded[config_index].offset + embedded[config_index].size;
     if let Some(image_index) = image_index {
         // image index should be 1
         if image_index != 1 {
-            return Err("Malformed packed files: image not at index 1".to_string());
+            return return_anyhow_result(
+                "Malformed packed files: image not at index 1".to_string(),
+                "LOCAL_PACK_ERR",
+            );
         }
         end_pos = embedded[image_index].offset + embedded[image_index].size;
     }
-    mmap()
-        .await
-        .range_reader(0, end_pos)
-        .map_err(|e| e.to_string())
+    mmap().await.range_reader(0, end_pos).context("MMAP_ERR")
 }

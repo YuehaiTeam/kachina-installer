@@ -1,9 +1,12 @@
+use anyhow::Context;
 use std::{
     os::windows::process::CommandExt,
     path::{Path, PathBuf},
 };
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use windows::Win32::System::Threading::CREATE_NO_WINDOW;
+
+use crate::utils::error::{return_ta_result, TAResult};
 
 lazy_static::lazy_static!(
     pub static ref DELETE_SELF_ON_EXIT_PATH: std::sync::RwLock<Option<String>> = std::sync::RwLock::new(None);
@@ -56,15 +59,15 @@ pub async fn rm_list(key: Vec<PathBuf>) -> Vec<String> {
     errs
 }
 
-pub async fn clear_empty_dirs(key: String) -> Result<(), String> {
+pub async fn clear_empty_dirs(key: String) -> anyhow::Result<()> {
     tokio::task::spawn_blocking(move || {
         let path = Path::new(&key);
-        run_clear_empty_dirs(path).map_err(|e| format!("Failed to clear empty dirs: {:?}", e))?;
-        delete_dir_if_empty(path).map_err(|e| format!("Failed to clear empty dirs: {:?}", e))?;
+        run_clear_empty_dirs(path)?;
+        delete_dir_if_empty(path)?;
         Ok(())
     })
     .await
-    .map_err(|e| format!("Failed to clear empty dirs: {:?}", e))?
+    .context("CLEAR_EMPTY_DIR_ERR")?
 }
 
 #[derive(serde::Deserialize, serde::Serialize, Clone, Debug)]
@@ -76,7 +79,7 @@ pub struct RunUninstallArgs {
     reg_name: String,
     uninstall_name: String,
 }
-pub async fn run_uninstall_with_args(args: RunUninstallArgs) -> Result<Vec<String>, String> {
+pub async fn run_uninstall_with_args(args: RunUninstallArgs) -> TAResult<Vec<String>> {
     run_uninstall(
         args.source,
         args.files,
@@ -96,15 +99,8 @@ pub async fn run_uninstall(
     extra_uninstall_path: Vec<String>,
     reg_name: String,
     uninstall_name: String,
-) -> Result<Vec<String>, String> {
-    let exe_path = std::env::current_exe();
-    if exe_path.is_err() {
-        return Err(format!(
-            "Failed to get current exe path: {:?}",
-            exe_path.err()
-        ));
-    }
-    let exe_path = exe_path.unwrap();
+) -> TAResult<Vec<String>> {
+    let exe_path = std::env::current_exe().context("GET_EXE_PATH_ERR")?;
     // check if exe_path is in source
     if DELETE_SELF_ON_EXIT_PATH.read().unwrap().is_none() && exe_path.starts_with(&source) {
         let tmp_dir = std::env::temp_dir();
@@ -123,12 +119,14 @@ pub async fn run_uninstall(
                     "kachina.uninst.{}.exe",
                     chrono::Utc::now().timestamp()
                 ));
-                let res = tokio::fs::rename(&exe_path, &tmp_uninstaller_path).await;
-                if res.is_err() {
-                    return Err(format!("Failed to move exe to parent dir: {:?}", res.err()));
-                }
+                tokio::fs::rename(&exe_path, &tmp_uninstaller_path)
+                    .await
+                    .context("SELF_UNINSTALL_ERR")?;
             } else {
-                return Err("Insecure uninstall: installer is in root dir".to_string());
+                return return_ta_result(
+                    "Insecure uninstall: installer is in root dir".to_string(),
+                    "INSECURE_UNINSTALL_ERR",
+                );
             }
         }
         // write delete_on_exit value
@@ -159,25 +157,23 @@ pub async fn run_uninstall(
             if path.is_file() {
                 tokio::fs::remove_file(path)
                     .await
-                    .map_err(|e| format!("Failed to remove user data file {}: {:?}", pathstr, e))?;
+                    .map_err(|e| {
+                        anyhow::anyhow!("Failed to remove user data file {}: {:?}", pathstr, e)
+                    })
+                    .context("RM_USERDATA_ERR")?;
             } else {
-                tokio::fs::remove_dir_all(path).await.map_err(|e| {
-                    format!("Failed to remove user data folder {}: {:?}", pathstr, e)
-                })?;
+                tokio::fs::remove_dir_all(path)
+                    .await
+                    .map_err(|e| {
+                        anyhow::anyhow!("Failed to remove user data folder {}: {:?}", pathstr, e)
+                    })
+                    .context("RM_USERDATA_ERR")?;
             }
         }
     }
 
     // recursively delete empty folders
-    let source_path = source.clone();
-    tokio::task::spawn_blocking(move || {
-        let path = Path::new(&source_path);
-        run_clear_empty_dirs(path).map_err(|e| format!("Failed to clear empty dirs: {:?}", e))?;
-        delete_dir_if_empty(path).map_err(|e| format!("Failed to clear empty dirs: {:?}", e))?;
-        Ok::<(), String>(())
-    })
-    .await
-    .map_err(|e| format!("Failed to clear empty dirs: {:?}", e))??;
+    clear_empty_dirs(source).await?;
 
     // delete registry
     let _ = windows_registry::LOCAL_MACHINE.remove_tree(format!(
@@ -218,7 +214,7 @@ pub struct CreateUninstallerArgs {
     uninstaller_name: String,
     updater_name: String,
 }
-pub async fn create_uninstaller_with_args(args: CreateUninstallerArgs) -> Result<(), String> {
+pub async fn create_uninstaller_with_args(args: CreateUninstallerArgs) -> TAResult<()> {
     create_uninstaller(args.source, args.uninstaller_name, args.updater_name).await
 }
 
@@ -227,63 +223,53 @@ pub async fn create_uninstaller(
     source: String,
     uninstaller_name: String,
     updater_name: String,
-) -> Result<(), String> {
+) -> TAResult<()> {
     let source = Path::new(&source);
     let uninstaller_path = source.join(uninstaller_name);
     let updater_path = source.join(updater_name);
-    let current_exe_path = std::env::current_exe();
-    if current_exe_path.is_err() {
-        return Err(format!(
-            "Failed to get current exe path: {:?}",
-            current_exe_path.err()
-        ));
-    }
-    let current_exe_path = current_exe_path.unwrap();
+    let current_exe_path = std::env::current_exe().context("GET_EXE_PATH_ERR")?;
     let updater_is_self = current_exe_path == updater_path;
     if !updater_is_self {
         // else, overwrite uninstaller and updater
         let mut self_configured_mmap = crate::local::get_base_with_config().await?;
         let output_file = tokio::fs::File::create(&uninstaller_path)
             .await
-            .map_err(|e| format!("Failed to create uninstaller: {:?}", e))?;
+            .context("CREATE_UNINSTALLER_ERR")?;
         let mut output = tokio::io::BufWriter::new(output_file);
         tokio::io::copy(&mut self_configured_mmap, &mut output)
             .await
-            .map_err(|e| format!("Failed to write uninstaller: {:?}", e))?;
+            .context("CREATE_UNINSTALLER_ERR")?;
         // flush
-        output
-            .flush()
-            .await
-            .map_err(|e| format!("Failed to flush: {:?}", e))?;
+        output.flush().await.context("CREATE_UNINSTALLER_ERR")?;
         // drop
         drop(output);
         // open again with rw
         clear_index_mark(&uninstaller_path).await?;
         // find
-        let res = tokio::fs::copy(&uninstaller_path, &updater_path).await;
-        if res.is_err() {
-            return Err(format!("Failed to create updater: {:?}", res.err()));
-        }
+        tokio::fs::copy(&uninstaller_path, &updater_path)
+            .await
+            .context("CREATE_UPDATER_ERR")?;
     } else {
         // try modify updater, if fail, silently ignore
         let _ = clear_index_mark(&updater_path).await;
     }
     Ok(())
 }
-pub async fn clear_index_mark(path: &PathBuf) -> Result<(), String> {
+pub async fn clear_index_mark(path: &PathBuf) -> anyhow::Result<()> {
     // open again with rw
     let mut output_file = tokio::fs::OpenOptions::new()
         .read(true)
         .write(true)
         .open(&path)
         .await
-        .map_err(|e| format!("Failed to modify updater: {:?}", e))?;
+        .context("SELF_UPDATE_ERR")?;
     // read first 256 bytes to buffer
     let mut buffer = [0u8; 256];
-    let read = output_file.read(&mut buffer).await;
-    if let Err(e) = read {
-        return Err(format!("Failed to read updater: {:?}", e));
-    }
+    output_file
+        .read(&mut buffer)
+        .await
+        .context("SELF_UPDATE_ERR")?;
+
     // check ! and K
     let mark_pos = buffer.windows(2).position(|w| w == b"!K".as_ref());
     if let Some(mark_pos) = mark_pos {
@@ -294,17 +280,12 @@ pub async fn clear_index_mark(path: &PathBuf) -> Result<(), String> {
             let index_start = mark_pos + mark_str.len();
             // PE header replaced with index. Remove it.
             // write 5*4 bytes of 0 after index_start
-            let res = output_file
+            output_file
                 .seek(tokio::io::SeekFrom::Start(index_start as u64))
-                .await;
-            if let Err(e) = res {
-                return Err(format!("Failed to seek uninstaller: {:?}", e));
-            }
+                .await
+                .context("SELF_UPDATE_ERR")?;
             let zero = [0u8; 5 * 4];
-            let res = output_file.write(&zero).await;
-            if let Err(e) = res {
-                return Err(format!("Failed to write uninstaller: {:?}", e));
-            }
+            output_file.write(&zero).await.context("SELF_UPDATE_ERR")?;
         }
     }
     // close file

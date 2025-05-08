@@ -1,8 +1,12 @@
 use crate::{
     cli::arg::InstallArgs,
     local::{get_config_from_embedded, get_embedded, Embedded},
-    utils::uac::check_elevated,
+    utils::{
+        error::{return_ta_result, TAResult},
+        uac::check_elevated,
+    },
 };
+use anyhow::Context;
 use serde::Serialize;
 use serde_json::Value;
 use std::path::Path;
@@ -27,7 +31,7 @@ pub async fn get_config_pre(
     exe_path_path: &Path,
     args: InstallArgs,
     scan_exe: bool,
-) -> Result<InstallerConfig, String> {
+) -> anyhow::Result<InstallerConfig> {
     let exe_path = exe_path_path.to_string_lossy().to_string();
     let mut embedded_files = None;
     let mut embedded_config = None;
@@ -47,16 +51,16 @@ pub async fn get_config_pre(
             if embedded_config.is_none() {
                 let exe_dir = exe_path_path.parent();
                 if exe_dir.is_none() {
-                    return Err("Failed to get exe dir".to_string());
+                    return Err(anyhow::anyhow!("Failed to get exe dir").context("GET_EXE_DIR_ERR"));
                 }
                 let exe_dir = exe_dir.unwrap();
                 let config_json = exe_dir.join(".config.json");
                 if config_json.exists() {
                     let config = tokio::fs::read(&config_json)
                         .await
-                        .map_err(|e| e.to_string())?;
+                        .context("DEBUG_READ_CONFIG_ERR")?;
                     embedded_config =
-                        Some(serde_json::from_slice(&config).map_err(|e| e.to_string())?);
+                        Some(serde_json::from_slice(&config).context("DEBUG_READ_CONFIG_ERR")?);
                 }
             }
         }
@@ -94,16 +98,9 @@ impl InstallerConfig {
 pub async fn get_installer_config(
     args: State<'_, InstallArgs>,
     scan_exe: bool,
-) -> Result<InstallerConfig, String> {
+) -> TAResult<InstallerConfig> {
     // check if current dir has exeName
-    let exe_path = std::env::current_exe();
-    if exe_path.is_err() {
-        return Err(format!(
-            "Failed to get current exe path: {:?}",
-            exe_path.err()
-        ));
-    }
-    let exe_path = exe_path.unwrap();
+    let exe_path = std::env::current_exe().context("GET_EXE_PATH_ERR")?;
     let mut config = get_config_pre(&exe_path, args.inner().clone(), scan_exe).await?;
     let mut uninstall_name = "uninst.exe";
     let mut exe_name = "main.exe";
@@ -121,7 +118,7 @@ pub async fn get_installer_config(
     config.is_uninstall = is_uninstall;
     let exe_dir = exe_path.parent();
     if exe_dir.is_none() {
-        return Err("Failed to get exe dir".to_string());
+        return return_ta_result("Failed to get exe dir".to_string(), "GET_EXE_PATH_ERR");
     }
     let exe_dir = exe_dir.unwrap();
     let exe_path = exe_dir.join(exe_name);
@@ -155,7 +152,7 @@ pub async fn get_installer_config(
         let key = key.unwrap();
         let path: String = key
             .get_string("InstallLocation")
-            .map_err(|e| e.to_string())?;
+            .context("READ_REG_ERR")?;
         let path = Path::new(&path);
         let exe_path = Path::new(&path).join(exe_name);
         if exe_path.exists() {
@@ -167,14 +164,7 @@ pub async fn get_installer_config(
             return Ok(config.fill(&sub_exe_dir, true, "REG_FOLDED"));
         }
     }
-    let program_files = std::env::var("ProgramFiles");
-    if program_files.is_err() {
-        return Err(format!(
-            "Failed to get ProgramFiles: {:?}",
-            program_files.err()
-        ));
-    }
-    let program_files = program_files.unwrap();
+    let program_files = std::env::var("ProgramFiles").context("GET_KNOWNFOLDER_ERR")?;
     let program_files_real_path = Path::new(&program_files).join(program_files_path);
     let program_files_exe_path = program_files_real_path.join(exe_name);
     Ok(config.fill(

@@ -1,9 +1,11 @@
 use super::operation::run_opr;
 use super::operation::IpcOperation;
 use crate::utils::acl::create_security_attributes;
+use crate::utils::error::TAResult;
 use crate::utils::uac::check_elevated;
 use crate::utils::uac::run_elevated;
 use crate::utils::uac::SendableHandle;
+use anyhow::Context;
 use std::ffi::c_void;
 use std::time::Duration;
 use tauri::Emitter;
@@ -56,46 +58,33 @@ impl ManagedElevate {
             already_elevated: check_elevated().unwrap_or(false),
         }
     }
-    pub fn create_pipe(name: &str) -> Result<NamedPipeServer, String> {
+    pub fn create_pipe(name: &str) -> anyhow::Result<NamedPipeServer> {
         let mut attr = create_security_attributes();
-        let server = unsafe {
+        Ok(unsafe {
             ServerOptions::new()
                 .first_pipe_instance(true)
                 .reject_remote_clients(true)
                 .pipe_mode(PipeMode::Message)
                 .create_with_security_attributes_raw(name, &mut attr as *mut _ as *mut c_void)
-        };
-        match server {
-            Ok(server) => Ok(server),
-            Err(err) => Err(format!("{:?}", err)),
-        }
+        }?)
     }
-    pub async fn start(&self) -> Result<(), String> {
+    pub async fn start(&self) -> anyhow::Result<()> {
         let mut process = self.process.write().await;
         if process.is_none() {
             let command = run_elevated(
                 std::env::current_exe().unwrap(),
                 format!("headless-uac {}", self.pipe_id),
-            );
-            let command = match command {
-                Ok(cmd) => cmd,
-                Err(e) => {
-                    return Err(format!("Failed to start elevate process: {:?}", e));
-                }
-            };
+            )
+            .context("ELEVATE_ERR")?;
             process.replace(command);
             let name = self.pipe_id.clone();
             let name = format!(r"\\.\pipe\Kachina-Elevate-{}", name);
-            let server = Self::create_pipe(&name);
-            if server.is_err() {
-                return Err("Failed to create pipe listener".to_string());
-            }
+            let mut server = Self::create_pipe(&name).context("ELEVATE_ERR")?;
             println!("Pipe listener created at {:?}", name);
-            let mut server = server.unwrap();
             let tx = self.broadcast_tx.clone();
             let rx = self.mpsc_rx.write().await.take().unwrap();
             if !wait_conn(&mut server).await {
-                return Err("Failed to wait for connection".to_string());
+                return Err(anyhow::anyhow!("Failed to wait for connection").context("ELEVATE_ERR"));
             }
             handle_pipe(server, tx, rx).await;
         }
@@ -120,6 +109,7 @@ pub async fn handle_pipe(
     tokio::spawn(async move {
         let (serverrx, mut servertx) = tokio::io::split(server);
         let mut serverrx = tokio::io::BufReader::with_capacity(PIPE_BUFFER_SIZE, serverrx);
+        let mut fail_times = 0;
         loop {
             let mut buf = String::new();
             tokio::select! {
@@ -130,6 +120,12 @@ pub async fn handle_pipe(
                             let _ = tx.send(res);
                         }else{
                             println!("Failed to parse message: {:?} {:?}", res.err(), buf);
+                            fail_times += 1;
+                            if fail_times > 30 {
+                                println!("Failed to parse message too many times, closing pipe");
+                                let _ = tx.send(serde_json::json!({ "Err": "PIPE_DISCONNECT_ERR" }));
+                                break;
+                            }
                         }
                     }else{
                         println!("Failed to read from pipe: {:?}", v.err());
@@ -168,7 +164,7 @@ pub async fn managed_operation(
     elevate: bool,
     mgr: tauri::State<'_, ManagedElevate>,
     window: tauri::WebviewWindow,
-) -> Result<serde_json::Value, String> {
+) -> TAResult<serde_json::Value> {
     if !elevate || mgr.already_elevated {
         run_opr(ipc, move |opr| {
             let _ = window.emit(&id, opr);
@@ -201,7 +197,11 @@ pub async fn managed_operation(
                 }
             }
         }
-        Err("Failed to receive response from elevate process".to_string())
+        Err(
+            anyhow::anyhow!("Failed to receive response from elevate process")
+                .context("IPC_ERR")
+                .into(),
+        )
     }
 }
 

@@ -1,6 +1,11 @@
 use std::io::Read;
 
-use crate::utils::metadata::RepoMetadata;
+use crate::{
+    fs::{create_http_stream, prepare_target},
+    utils::metadata::RepoMetadata,
+};
+
+pub static MIRRORC_CRED_PREFIX: &str = "KachinaInstaller_MirrorChyanCDK_";
 
 #[derive(serde::Deserialize, Debug)]
 pub struct MirrorcChangeset {
@@ -89,4 +94,35 @@ pub fn run_mirrorc_install(
     Ok((metadata, changeset))
 }
 
-pub async fn run_mirrorc_download() {}
+pub async fn get_mirrorc_status(
+    resource_id: &str,
+    current_version: &str,
+    cdk: &str,
+) -> Result<serde_json::Value, anyhow::Error> {
+    let mirrorc_url = format!("https://mirrorchyan.com/api/resources/{}/latest?current_version={}&cdk={}&user_agent=KachinaInstaller", resource_id, current_version, cdk);
+    let resp = crate::REQUEST_CLIENT.get(&mirrorc_url).send().await;
+    match resp {
+        Ok(resp) => {
+            if resp.status().is_success() {
+                let status: serde_json::Value = resp.json().await?;
+                Ok(status)
+            } else {
+                Err(anyhow::anyhow!(
+                    "Failed to get mirrorc status: HTTP {}",
+                    resp.status()
+                ))
+            }
+        }
+        Err(e) => Err(anyhow::anyhow!("Failed to get mirrorc status: {}", e)),
+    }
+}
+
+pub async fn run_mirrorc_download(
+    zip_path: &str,
+    url: &str,
+    notify: impl Fn(serde_json::Value) + std::marker::Send + 'static,
+) -> Result<(), anyhow::Error> {
+    let stream = create_http_stream(url, 0, 0, true).await?;
+    let target = prepare_target(zip_path).await?;
+    Ok(())
+}
