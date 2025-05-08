@@ -561,13 +561,28 @@
     border 0.1s cubic-bezier(0.33, 0, 0.67, 1),
     color 0.1s cubic-bezier(0.33, 0, 0.67, 1);
   vertical-align: middle;
+  &.neutral {
+    background-color: var(--colorNeutralBackground1);
+    color: var(--colorNeutralForeground1);
+    border-color: var(--colorNeutralStroke1);
+  }
 }
 .btn:hover {
   border-color: transparent;
   background-color: var(--colorBrandBackgroundHover);
+  &.neutral {
+    background-color: var(--colorNeutralBackground1Hover);
+    color: var(--colorNeutralForeground1Hover);
+    border-color: var(--colorNeutralStroke1Hover);
+  }
 }
 .btn:focus {
   background-color: var(--colorBrandBackgroundPressed);
+  &.neutral {
+    background-color: var(--colorNeutralBackground1Pressed);
+    color: var(--colorNeutralForeground1Pressed);
+    border-color: var(--colorNeutralStroke1Pressed);
+  }
 }
 .btn[disabled] {
   opacity: 0.5;
@@ -724,4 +739,61 @@ a:hover {
 }
 .progress-bar {
   background: var(--colorBrandForeground1);
+}
+.input-div {
+  border: 1px solid var(--colorNeutralStroke1);
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: nowrap;
+  position: relative;
+  box-sizing: border-box;
+  vertical-align: middle;
+  min-height: 32px;
+  font-family: var(--fontFamilyBase);
+  font-size: var(--fontSizeBase300);
+  font-weight: var(--fontWeightRegular);
+  line-height: var(--lineHeightBase300);
+  background-color: var(--colorNeutralBackground1);
+  border-bottom-color: var(--colorNeutralStrokeAccessible);
+  gap: var(--spacingHorizontalXXS);
+  border-radius: var(--borderRadiusMedium);
+  transition: all .1s;
+  input {
+    align-self: stretch;
+    box-sizing: border-box;
+    flex-grow: 1;
+    min-width: 0px;
+    border-style: none;
+    padding: 0 var(--spacingHorizontalM);
+    color: var(--colorNeutralForeground1);
+    background-color: transparent;
+    outline-style: none;
+    font-family: inherit;
+    font-size: inherit;
+    font-weight: inherit;
+    line-height: inherit;
+  }
+  &::after {
+    box-sizing: border-box;
+    content: ' ';
+    height: max(2px, var(--borderRadiusMedium));
+    border-bottom-left-radius: var(--borderRadiusMedium);
+    border-bottom-right-radius: var(--borderRadiusMedium);
+    border-bottom: 2px solid var(--colorCompoundBrandStroke);
+    clip-path: inset(calc(100% - 2px) 0 0);
+    transition: transform 0.05s;
+    position: absolute;
+    bottom: -1px;
+    left: -1px;
+    right: -1px;
+    transform: scaleX(0);
+  }
+  &.active::after {
+    transform: scaleX(1);
+  }
+  &.active {
+    background-color: var(--colorNeutralBackground1Pressed);
+    color: var(--colorNeutralForeground1Pressed);
+    border-color: var(--colorNeutralStroke1Pressed);
+  }
 }

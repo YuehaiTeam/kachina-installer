@@ -5,7 +5,7 @@
         <span class="fui-Spinner__spinnerTail"></span>
       </span>
     </div>
-    <div v-show="init" class="content">
+    <div v-show="init && !dialog" class="content">
       <div class="image">
         <img src="./left.webp" :alt="PROJECT_CONFIG.title" />
       </div>
@@ -31,17 +31,17 @@
               <template
                 v-if="
                   !INSTALLER_CONFIG.is_uninstall &&
-                  Array.isArray(PROJECT_CONFIG.source)
+                  Array.isArray(PROJECT_CONFIG.source) &&
+                  !INSTALLER_CONFIG.embedded_index?.length
                 "
               >
                 <span>从 </span>
-                <a>
+                <a @click="dialog = 'source'">
                   {{
                     PROJECT_CONFIG.source.find((e) => e.uri === selectedSource)
                       ?.name
-                  }}
-                  <template v-if="installMode === 'mirrorc'">
-                    ({{ markedKey }})
+                  }}<template v-if="installMode === 'mirrorc'">
+                    ({{ mirrorcKey ? markedKey : '无CDK' }})
                   </template>
                 </a>
               </template>
@@ -141,6 +141,59 @@
         </div>
       </div>
     </div>
+    <Dialog v-show="dialog === 'source'">
+      <template #title>
+        <div class="title">选择安装源</div>
+      </template>
+      <template #desc>
+        <div class="desc">当前软件支持多种在线安装方式。</div>
+      </template>
+      <template #body v-if="Array.isArray(PROJECT_CONFIG.source)">
+        <div class="card-container">
+          <div
+            class="card"
+            v-for="i in PROJECT_CONFIG.source"
+            :key="i.id"
+            :class="{ active: i.uri === selectedSource }"
+            @click="changeSelectedSource(i.uri)"
+          >
+            <Feedback v-if="i.uri.includes('=beta')" />
+            <CloudPaid v-else-if="i.uri.startsWith('mirrorc://')" />
+            <Cloud v-else />
+            <span>{{ i.name }}</span>
+          </div>
+        </div>
+      </template>
+    </Dialog>
+    <Dialog v-show="dialog === 'mirrorc'">
+      <template #title><div class="title">设置 Mirror酱 CDK</div></template>
+      <template #desc>
+        <div class="desc">
+          Mirror酱是独立的第三方软件下载平台，提供付费的软件下载加速服务。<br />
+          如果你有 Mirror酱的 CDK，可以在这里输入。
+        </div>
+      </template>
+      <template #body>
+        <FInput
+          class="cdk-input"
+          v-model="mirrorcTempKey"
+          type="text"
+          placeholder="请输入 Mirror酱 CDK"
+        />
+        <div class="desc">
+          <a style="cursor: pointer" @click="openMirrorc">获取 CDK</a>
+        </div>
+      </template>
+      <template #footer>
+        <button
+          class="btn btn-install btn-install-2rd neutral"
+          @click="dialog = ''"
+        >
+          取消
+        </button>
+        <button class="btn btn-install" @click="changeMirrorcKey">确定</button>
+      </template>
+    </Dialog>
   </div>
 </template>
 
@@ -215,6 +268,10 @@
   position: absolute;
   bottom: 20px;
   right: 8px;
+  &.btn-install-2rd {
+    right: 158px;
+    width: 100px;
+  }
 }
 
 .actions {
@@ -400,6 +457,50 @@
   width: 36px;
   min-width: 36px;
 }
+.cdk-input {
+  margin: 30px 10px;
+  margin-bottom: 48px;
+  width: 320px;
+  input {
+    font-family: Consolas, monospace !important;
+  }
+}
+.card {
+  padding: 8px 10px;
+  font-size: 12px;
+  opacity: 0.6;
+  border: 1px solid #fff;
+  border-radius: 5px;
+  width: 74px;
+  height: 74px;
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-evenly;
+  align-items: center;
+  cursor: pointer;
+  transition: all 0.1s ease-in-out;
+  &:hover {
+    opacity: 1;
+  }
+  &.active {
+    background: rgba(255, 255, 255, 0.1);
+    opacity: 1;
+  }
+}
+
+.card-container {
+  padding: 8px 10px;
+  display: flex;
+  gap: 18px;
+  justify-content: center;
+  align-items: center;
+  height: 150px;
+}
+
+.card svg {
+  width: 40px;
+}
 </style>
 <script lang="ts" setup>
 import { computed, onMounted, reactive, ref, watch } from 'vue';
@@ -431,6 +532,11 @@ import {
 import IconSheild from './IconSheild.vue';
 import { version_compare } from './utils/version';
 import { getRuntimeName } from './consts';
+import Dialog from './Dialog.vue';
+import Cloud from './Cloud.vue';
+import CloudPaid from './CloudPaid.vue';
+import Feedback from './Feedback.vue';
+import FInput from './FInput.vue';
 
 const init = ref(false);
 
@@ -459,6 +565,8 @@ const current = ref<string>('');
 const percent = ref<number>(0);
 const source = ref<string>('');
 const progressInterval = ref<number>(0);
+
+const dialog = ref<'' | 'mirrorc' | 'source'>('');
 
 const selectedSource = ref<string>('');
 const installMode = computed<'default' | 'mirrorc'>(() => {
@@ -925,6 +1033,10 @@ async function runInstall(): Promise<void> {
 }
 
 async function runMirrorcInstall() {
+  if (!mirrorcKey.value) {
+    await dialog_error('请先设置 Mirror酱 CDK', '出错了');
+    return;
+  }
   step.value = 2;
   if (await installPrepare()) return runMirrorcInstall();
   const source_version = '0.44.4';
@@ -1365,6 +1477,46 @@ async function changeSource() {
   }
 }
 
+const mirrorcTempUrl = ref('');
+const mirrorcTempKey = ref('');
+async function changeSelectedSource(url: string) {
+  const isMirrorc = url.startsWith('mirrorc://');
+  dialog.value = isMirrorc ? 'mirrorc' : '';
+  if (isMirrorc) {
+    try {
+      mirrorcKey.value = await invoke('wincred_read', {
+        target: `KachinaInstaller_MirrorChyanCDK_${PROJECT_CONFIG.appName}`,
+      });
+    } catch (e) {}
+    mirrorcTempUrl.value = url;
+    mirrorcTempKey.value = mirrorcKey.value;
+  } else {
+    selectedSource.value = url;
+    mirrorcTempUrl.value = '';
+    mirrorcTempKey.value = '';
+  }
+}
+
+async function changeMirrorcKey() {
+  if (!mirrorcKey.value) {
+    try {
+      await invoke('wincred_delete', {
+        target: `KachinaInstaller_MirrorChyanCDK_${PROJECT_CONFIG.appName}`,
+      });
+    } catch (e) {}
+  } else {
+    try {
+      await invoke('wincred_write', {
+        target: `KachinaInstaller_MirrorChyanCDK_${PROJECT_CONFIG.appName}`,
+        value: mirrorcKey.value,
+      });
+    } catch (e) {}
+  }
+  mirrorcKey.value = mirrorcTempKey.value;
+  selectedSource.value = mirrorcTempUrl.value;
+  dialog.value = '';
+}
+
 async function dialog_error(message: string, title = '出错了'): Promise<void> {
   await invoke('error_dialog', {
     message: message.replace(new RegExp(location.origin, 'g'), ''),
@@ -1459,5 +1611,10 @@ function setUacByState(
       needElevate.value = state === 'Unwritable';
       break;
   }
+}
+function openMirrorc() {
+  invoke('launch', {
+    path: 'https://mirrorchyan.com',
+  });
 }
 </script>

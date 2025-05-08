@@ -154,6 +154,7 @@ async fn tauri_main(args: InstallArgs) {
             installer::log,
             installer::warn,
             installer::error,
+            installer::launch,
             installer::launch_and_exit,
             installer::config::get_installer_config,
             installer::lnk::get_dirs,

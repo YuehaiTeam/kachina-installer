@@ -14,6 +14,11 @@ pub mod runtimes;
 pub mod uninstall;
 
 #[tauri::command]
+pub async fn launch(path: String) {
+    let _ = open::that(path);
+}
+
+#[tauri::command]
 pub async fn launch_and_exit(path: String, app: AppHandle) {
     let _ = open::that(path);
     app.exit(0);
