@@ -1039,7 +1039,9 @@ async function runMirrorcInstall() {
   }
   step.value = 2;
   if (await installPrepare()) return runMirrorcInstall();
-  const source_version = '0.44.4';
+  const source_version = await invoke<string>('get_exe_version', {
+    exeName: `${source.value}${sep()}${PROJECT_CONFIG.exeName}`,
+  });
   const source_url = new URL(selectedSource.value);
   const mirrorc_status = await invoke<MirrorcUpdate>('get_mirrorc_status', {
     resourceId: source_url.hostname,
@@ -1487,7 +1489,10 @@ async function changeSelectedSource(url: string) {
       mirrorcKey.value = await invoke('wincred_read', {
         target: `KachinaInstaller_MirrorChyanCDK_${PROJECT_CONFIG.appName}`,
       });
-    } catch (e) {}
+      console.log('mirrorcKey', mirrorcKey.value);
+    } catch (e) {
+      console.warn(e);
+    }
     mirrorcTempUrl.value = url;
     mirrorcTempKey.value = mirrorcKey.value;
   } else {
@@ -1498,21 +1503,26 @@ async function changeSelectedSource(url: string) {
 }
 
 async function changeMirrorcKey() {
+  mirrorcKey.value = mirrorcTempKey.value;
   if (!mirrorcKey.value) {
     try {
       await invoke('wincred_delete', {
         target: `KachinaInstaller_MirrorChyanCDK_${PROJECT_CONFIG.appName}`,
       });
-    } catch (e) {}
+    } catch (e) {
+      console.warn(e);
+    }
   } else {
     try {
       await invoke('wincred_write', {
         target: `KachinaInstaller_MirrorChyanCDK_${PROJECT_CONFIG.appName}`,
-        value: mirrorcKey.value,
+        token: mirrorcKey.value,
+        comment: 'MirrorChyan CDK for BetterGI',
       });
-    } catch (e) {}
+    } catch (e) {
+      console.warn(e);
+    }
   }
-  mirrorcKey.value = mirrorcTempKey.value;
   selectedSource.value = mirrorcTempUrl.value;
   dialog.value = '';
 }

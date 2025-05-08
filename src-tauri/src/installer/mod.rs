@@ -241,6 +241,11 @@ pub async fn find_process_by_name(name: String) -> Result<Vec<(u32, String)>> {
 }
 
 #[tauri::command]
+pub async fn get_exe_version(exe_name: String) -> String {
+    return "".to_string();
+}
+
+#[tauri::command]
 pub async fn error_dialog(title: String, message: String, window: WebviewWindow) {
     rfd::MessageDialog::new()
         .set_title(&title)

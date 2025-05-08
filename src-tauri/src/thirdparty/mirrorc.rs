@@ -99,7 +99,7 @@ pub fn run_mirrorc_install_sync(
             .strip_prefix(&prefix)
             .unwrap_or(file.name())
             .to_string();
-        if file_name == "changes.json" {
+        if file_name == "changes.json" || file_name == ".metadata.json" || file_name == format!("{}.metadata.json", prefix) {
             continue;
         }
         let mut out_path = std::path::PathBuf::from(target_path);

@@ -162,6 +162,7 @@ async fn tauri_main(args: InstallArgs) {
             installer::select_dir,
             installer::error_dialog,
             installer::confirm_dialog,
+            installer::get_exe_version,
             // wincred
             utils::wincred::wincred_write,
             utils::wincred::wincred_read,
