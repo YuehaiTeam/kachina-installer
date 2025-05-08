@@ -62,15 +62,11 @@ fn main() {
     if wv2ver.is_err() {
         command = Command::InstallWebview2;
     }
-    let is_uac_thread = match command {
-        Command::HeadlessUac(_) => true,
-        _ => false,
-    };
-    let _guard = sentry_init(is_uac_thread);
+    let _guard = sentry_init(matches!(command, Command::HeadlessUac(_)));
     utils::sentry::sentry_set_info();
-    let sentry_layer = sentry_tracing::layer().event_filter(|md| match md.level() {
-        &tracing::Level::TRACE => EventFilter::Ignore,
-        &tracing::Level::DEBUG => EventFilter::Ignore,
+    let sentry_layer = sentry_tracing::layer().event_filter(|md| match *md.level() {
+        tracing::Level::TRACE => EventFilter::Ignore,
+        tracing::Level::DEBUG => EventFilter::Ignore,
         _ => EventFilter::Breadcrumb,
     });
     let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));

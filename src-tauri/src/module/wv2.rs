@@ -152,10 +152,7 @@ pub async fn install_webview2() {
         }
         rfd::MessageDialog::new()
             .set_title("出错了")
-            .set_description(format!(
-                "WebView2 运行时安装程序写入失败: {}",
-                e
-            ))
+            .set_description(format!("WebView2 运行时安装程序写入失败: {}", e))
             .set_level(rfd::MessageLevel::Error)
             .show();
         std::process::exit(0);

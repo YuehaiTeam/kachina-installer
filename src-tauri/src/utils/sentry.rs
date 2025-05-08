@@ -15,6 +15,12 @@ pub struct AutoTransportFactory {
     pub mpsc_rx: Arc<RwLock<tokio::sync::mpsc::Receiver<SentryData>>>,
     mpsc_tx: Arc<tokio::sync::mpsc::Sender<SentryData>>,
 }
+impl Default for AutoTransportFactory {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl AutoTransportFactory {
     pub fn new() -> Self {
         let (mpsc_tx, mpsc_rx) = tokio::sync::mpsc::channel(10);
@@ -95,7 +101,7 @@ pub fn sentry_init(use_mpsc: bool) -> sentry::ClientInitGuard {
     ))
 }
 
-pub fn forward_envelope(envelope: sentry::Envelope) -> () {
+pub fn forward_envelope(envelope: sentry::Envelope) {
     if let Some(event) = envelope.event().cloned() {
         sentry::capture_event(event);
     } else {
@@ -108,7 +114,7 @@ pub fn forward_envelope(envelope: sentry::Envelope) -> () {
     }
 }
 
-pub fn forward_breadcrumb(breadcrumb: sentry::Breadcrumb) -> () {
+pub fn forward_breadcrumb(breadcrumb: sentry::Breadcrumb) {
     tracing::info!("Forwarding breadcrumb: {:?}", breadcrumb);
     sentry::add_breadcrumb(breadcrumb);
 }
@@ -142,11 +148,7 @@ pub fn sentry_set_info() {
                 ..Default::default()
             })),
         );
-        let did = if let Ok(did) = crate::utils::get_device_id() {
-            Some(did)
-        } else {
-            None
-        };
+        let did = crate::utils::get_device_id().ok();
         scope.set_user(Some(sentry::User {
             id: did,
             ip_address: Some(sentry::protocol::IpAddress::Auto),
