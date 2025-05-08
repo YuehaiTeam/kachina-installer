@@ -42,11 +42,19 @@ pub fn wincred_write(target: &str, token: &str, comment: &str) -> TAResult<()> {
 
 #[tauri::command]
 pub fn wincred_read(target: &str) -> TAResult<String> {
-    let target_name = PWSTR(target.encode_utf16().collect::<Vec<u16>>().as_mut_ptr());
+    let mut target_name = target.encode_utf16().collect::<Vec<u16>>();
+    target_name.push(0); // Null-terminate the string
     let mut credential_ptr: *mut CREDENTIALW = std::ptr::null_mut();
-    unsafe { CredReadW(target_name, CRED_TYPE_GENERIC, None, &mut credential_ptr) }
-        .map_err(|e| anyhow::anyhow!(e))
-        .context("READ_CRED_ERR")?;
+    unsafe {
+        CredReadW(
+            PWSTR(target_name.as_mut_ptr()),
+            CRED_TYPE_GENERIC,
+            None,
+            &mut credential_ptr,
+        )
+    }
+    .map_err(|e| anyhow::anyhow!(e))
+    .context("READ_CRED_ERR")?;
     let credential = unsafe { &*credential_ptr };
     let token = unsafe {
         std::slice::from_raw_parts(
@@ -63,8 +71,9 @@ pub fn wincred_read(target: &str) -> TAResult<String> {
 
 #[tauri::command]
 pub fn wincred_delete(target: &str) -> TAResult<()> {
-    let target_name = PWSTR(target.encode_utf16().collect::<Vec<u16>>().as_mut_ptr());
-    unsafe { CredDeleteW(target_name, CRED_TYPE_GENERIC, None) }
+    let mut target_name = target.encode_utf16().collect::<Vec<u16>>();
+    target_name.push(0); // Null-terminate the string
+    unsafe { CredDeleteW(PWSTR(target_name.as_mut_ptr()), CRED_TYPE_GENERIC, None) }
         .map_err(|e| anyhow::anyhow!(e))
         .context("DELETE_CRED_ERR")?;
     Ok(())

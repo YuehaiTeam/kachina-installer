@@ -1,69 +1,143 @@
 use std::io::Read;
 
+use anyhow::Context;
+
 use crate::{
-    fs::{create_http_stream, prepare_target},
-    utils::metadata::RepoMetadata,
+    fs::{create_http_stream, create_target_file, prepare_target, progressed_copy},
+    installer::uninstall::DELETE_SELF_ON_EXIT_PATH,
+    utils::{
+        error::{return_ta_result, IntoTAResult, TAResult},
+        metadata::RepoMetadata,
+    },
 };
 
 pub static MIRRORC_CRED_PREFIX: &str = "KachinaInstaller_MirrorChyanCDK_";
 
-#[derive(serde::Deserialize, Debug)]
+#[derive(serde::Deserialize, serde::Serialize, Clone, Debug)]
 pub struct MirrorcChangeset {
     pub added: Vec<String>,
     pub deleted: Vec<String>,
     pub modified: Vec<String>,
 }
-pub fn run_mirrorc_install(
+
+pub async fn run_mirrorc_install(
     zip_path: &str,
     target_path: &str,
     notify: impl Fn(serde_json::Value) + std::marker::Send + 'static,
-) -> Result<(Option<RepoMetadata>, Option<MirrorcChangeset>), anyhow::Error> {
-    let file = std::fs::File::open(zip_path)?;
-    let mut archive = zip::ZipArchive::new(file)?;
+) -> TAResult<(Option<RepoMetadata>, Option<MirrorcChangeset>)> {
+    let zip_path = zip_path.to_string();
+    let target_path = target_path.to_string();
+    tokio::task::spawn_blocking(move || run_mirrorc_install_sync(&zip_path, &target_path, notify))
+        .await
+        .into_ta_result()?
+}
+
+pub fn run_mirrorc_install_sync(
+    zip_path: &str,
+    target_path: &str,
+    notify: impl Fn(serde_json::Value) + std::marker::Send + 'static,
+) -> TAResult<(Option<RepoMetadata>, Option<MirrorcChangeset>)> {
+    let file = std::fs::File::open(zip_path).into_ta_result()?;
+    let mut archive = zip::ZipArchive::new(file).into_ta_result()?;
     let total_len = archive.len() - 1;
+
+    let file_lists = archive
+        .file_names()
+        .map(|s| s.to_string())
+        .filter(|s| s != "changes.json" && s != ".metadata.json")
+        .collect::<Vec<String>>();
+    let prefix = longest_common_prefix(file_lists);
+    // split last '/', get the prefix
+    let mut prefix = prefix.split('/').collect::<Vec<&str>>();
+    prefix.pop();
+    let mut prefix = prefix.join("/");
+    if !prefix.is_empty() && !prefix.ends_with('/') {
+        prefix.push('/');
+    }
 
     // changes.json
     let changeset: Option<MirrorcChangeset> = match archive.by_name("changes.json") {
         Ok(mut changeset) => {
             let mut changeset_str = String::new();
-            changeset.read_to_string(&mut changeset_str)?;
-            Some(serde_json::from_str(&changeset_str)?)
+            changeset
+                .read_to_string(&mut changeset_str)
+                .into_ta_result()?;
+            Some(serde_json::from_str(&changeset_str).into_ta_result()?)
         }
         Err(_) => None,
     };
 
     // .metadata.json
-    let metadata: Option<RepoMetadata> = match archive.by_name(".metadata.json") {
+    let metadata: Option<RepoMetadata> = match archive.by_name(&format!("{}.metadata.json", prefix))
+    {
         Ok(mut metadata) => {
             let mut metadata_str = String::new();
-            metadata.read_to_string(&mut metadata_str)?;
-            Some(serde_json::from_str(&metadata_str)?)
+            metadata
+                .read_to_string(&mut metadata_str)
+                .into_ta_result()?;
+            Some(serde_json::from_str(&metadata_str).into_ta_result()?)
         }
         Err(_) => None,
     };
 
     // if both changeset and metadata are None, return error
     if changeset.is_none() && metadata.is_none() {
-        return Err(anyhow::anyhow!(
+        return return_ta_result(
             "Not a valid mirrorc archive: neither changes.json nor .metadata.json found"
-        ));
+                .to_string(),
+            "MIRRORC_ARCHIVE_ERR",
+        );
     }
+
+    let current_exe = std::env::current_exe().context("GET_EXE_PATH_ERR")?;
 
     let len = total_len - 1;
     for i in 0..len {
-        let mut file = archive.by_index(i)?;
-        let file_name = file.name().to_string();
+        let mut file = archive.by_index(i).into_ta_result()?;
+        let file_name = file
+            .name()
+            .strip_prefix(&prefix)
+            .unwrap_or(file.name())
+            .to_string();
         if file_name == "changes.json" {
             continue;
         }
         let mut out_path = std::path::PathBuf::from(target_path);
         out_path.push(file_name.clone());
         if file.is_dir() {
-            std::fs::create_dir_all(&out_path)?;
             continue;
         }
-        let mut out_file = std::fs::File::create(&out_path)?;
-        std::io::copy(&mut file, &mut out_file)?;
+        if out_path == current_exe {
+            // delete .instbak if exists
+            let instbak = out_path.clone().with_extension("instbak");
+            if instbak.exists() {
+                std::fs::remove_file(&instbak)
+                    .into_ta_result()
+                    .context("SELF_UPDATE_ERR")?;
+            }
+            // mv current exe to .instbak
+            std::fs::rename(&current_exe, &instbak)
+                .into_ta_result()
+                .context("SELF_UPDATE_ERR")?;
+            DELETE_SELF_ON_EXIT_PATH
+                .write()
+                .unwrap()
+                .replace(instbak.to_string_lossy().to_string());
+        }
+        let parent = out_path.parent();
+        if let Some(parent) = parent {
+            if !parent.exists() {
+                std::fs::create_dir_all(parent)
+                    .into_ta_result()
+                    .context("CREATE_DIR_ERR")?;
+            }
+        }
+        let mut out_file = std::fs::File::create(&out_path)
+            .into_ta_result()
+            .context(format!("CREATE_FILE_ERR: {}", out_path.display()))?;
+        std::io::copy(&mut file, &mut out_file)
+            .into_ta_result()
+            .context(format!("WRITE_FILE_ERR: {}", out_path.display()))?;
         notify(serde_json::json!({"type": "extract", "file": file_name, "count": i, "total": len}));
     }
 
@@ -71,10 +145,11 @@ pub fn run_mirrorc_install(
     if let Some(changeset) = changeset.as_ref() {
         for file in &changeset.deleted {
             let mut out_path = std::path::PathBuf::from(target_path);
-            out_path.push(file.clone());
+            let strip_path = file.strip_prefix(&prefix).unwrap_or(file);
+            out_path.push(strip_path);
             if out_path.exists() {
-                std::fs::remove_file(out_path)?;
-                notify(serde_json::json!({"type": "delete", "file": file}));
+                std::fs::remove_file(out_path).into_ta_result()?;
+                notify(serde_json::json!({"type": "delete", "file": strip_path}));
             }
         }
     }
@@ -85,44 +160,62 @@ pub fn run_mirrorc_install(
                 let mut out_path = std::path::PathBuf::from(target_path);
                 out_path.push(file.clone());
                 if out_path.exists() {
-                    std::fs::remove_file(out_path)?;
+                    std::fs::remove_file(out_path).into_ta_result()?;
                     notify(serde_json::json!({"type": "delete", "file": file}));
                 }
             }
         }
     }
+    // delete zip file
+    let _ = std::fs::remove_file(zip_path);
     Ok((metadata, changeset))
 }
 
+#[tauri::command]
 pub async fn get_mirrorc_status(
     resource_id: &str,
     current_version: &str,
     cdk: &str,
-) -> Result<serde_json::Value, anyhow::Error> {
-    let mirrorc_url = format!("https://mirrorchyan.com/api/resources/{}/latest?current_version={}&cdk={}&user_agent=KachinaInstaller", resource_id, current_version, cdk);
-    let resp = crate::REQUEST_CLIENT.get(&mirrorc_url).send().await;
-    match resp {
-        Ok(resp) => {
-            if resp.status().is_success() {
-                let status: serde_json::Value = resp.json().await?;
-                Ok(status)
-            } else {
-                Err(anyhow::anyhow!(
-                    "Failed to get mirrorc status: HTTP {}",
-                    resp.status()
-                ))
-            }
-        }
-        Err(e) => Err(anyhow::anyhow!("Failed to get mirrorc status: {}", e)),
-    }
+    channel: &str,
+) -> TAResult<serde_json::Value> {
+    let mirrorc_url = format!("https://mirrorchyan.com/api/resources/{}/latest?current_version={}&cdk={}&channel={}&user_agent=KachinaInstaller", resource_id, current_version, cdk, channel);
+    let resp = crate::REQUEST_CLIENT
+        .get(&mirrorc_url)
+        .send()
+        .await
+        .context("MIRRORC_HTTP_ERR")?;
+    let status: serde_json::Value = resp.json().await.into_ta_result()?;
+    Ok(status)
 }
 
 pub async fn run_mirrorc_download(
     zip_path: &str,
     url: &str,
     notify: impl Fn(serde_json::Value) + std::marker::Send + 'static,
-) -> Result<(), anyhow::Error> {
-    let stream = create_http_stream(url, 0, 0, true).await?;
-    let target = prepare_target(zip_path).await?;
+) -> TAResult<()> {
+    let (stream, len) = create_http_stream(url, 0, 0, true).await?;
+    prepare_target(zip_path).await?;
+    let target = create_target_file(zip_path).await?;
+    progressed_copy(stream, target, |downloaded| {
+        notify(serde_json::json!({"type": "download", "downloaded": downloaded, "total": len}));
+    })
+    .await
+    .context("MIRRORC_DOWNLOAD_ERR")?;
     Ok(())
+}
+
+pub fn longest_common_prefix(strs: Vec<String>) -> String {
+    if strs.is_empty() {
+        return String::new();
+    }
+    let mut prefix = strs[0].clone();
+    for s in strs.iter() {
+        while !s.starts_with(&prefix) {
+            if prefix.is_empty() {
+                return String::new();
+            }
+            prefix.pop();
+        }
+    }
+    prefix
 }

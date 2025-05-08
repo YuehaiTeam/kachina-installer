@@ -107,6 +107,18 @@ interface IpcPatchInstaller {
   installer: string;
 }
 
+interface RunMirrorcDownload {
+  type: 'RunMirrorcDownload';
+  url: string;
+  zip_path: string;
+}
+
+interface RunMirrorcInstall {
+  type: 'RunMirrorcInstall';
+  zip_path: string;
+  target_path: string;
+}
+
 export async function ipcCreateLnk(
   target: string,
   lnk: string,
@@ -194,6 +206,93 @@ export async function ipcPatchInstaller(installer: string, elevate = false) {
     { type: 'PatchInstaller', installer },
     elevate,
   );
+}
+
+type MirrorcStatus =
+  | {
+      type: 'delete';
+      file: 'string';
+    }
+  | {
+      type: 'download';
+      downloaded: number;
+      total: number;
+    }
+  | {
+      type: 'extract';
+      file: string;
+      count: number;
+      total: number;
+    };
+
+interface MirrorcChangeset {
+  added: string[];
+  deleted: string[];
+  modified: string[];
+}
+export interface MirrorcUpdate {
+  code: number;
+  data?: {
+    /**
+     * 更新频道，stable | beta | alpha
+     */
+    channel: string;
+    /**
+     * 自定义数据
+     */
+    custom_data: string;
+    /**
+     * 发版日志
+     */
+    release_note: string;
+    /**
+     * sha256
+     */
+    sha256?: string;
+    /**
+     * 更新包类型，incremental | full
+     */
+    update_type?: string;
+    /**
+     * 下载地址
+     */
+    url?: string;
+    /**
+     * 资源版本名称
+     */
+    version_name: string;
+    /**
+     * 资源版本号仅内部使用
+     */
+    version_number: number;
+  };
+  msg: string;
+}
+
+export async function ipcRunMirrorcDownload(
+  url: string,
+  zip_path: string,
+  notify: (value: Event<MirrorcStatus>) => void,
+  elevate = false,
+) {
+  return ipc<RunMirrorcDownload, void, MirrorcStatus>(
+    { type: 'RunMirrorcDownload', url, zip_path },
+    elevate,
+    notify,
+  );
+}
+
+export async function ipcRunMirrorcInstall(
+  zip_path: string,
+  target_path: string,
+  notify: (value: Event<MirrorcStatus>) => void,
+  elevate = false,
+) {
+  return ipc<
+    RunMirrorcInstall,
+    [InvokeGetDfsMetadataRes, MirrorcChangeset],
+    MirrorcStatus
+  >({ type: 'RunMirrorcInstall', zip_path, target_path }, elevate, notify);
 }
 
 export function log(...args: any[]) {

@@ -28,9 +28,22 @@
           </div>
           <div class="more">
             <span>
-              <template v-if="!INSTALLER_CONFIG.is_uninstall">
+              <template
+                v-if="
+                  !INSTALLER_CONFIG.is_uninstall &&
+                  Array.isArray(PROJECT_CONFIG.source)
+                "
+              >
                 <span>从 </span>
-                <a>Mirror酱 (aa**zz)</a>
+                <a>
+                  {{
+                    PROJECT_CONFIG.source.find((e) => e.uri === selectedSource)
+                      ?.name
+                  }}
+                  <template v-if="installMode === 'mirrorc'">
+                    ({{ markedKey }})
+                  </template>
+                </a>
               </template>
               <span v-if="!isUpdate && !INSTALLER_CONFIG.is_uninstall">
                 安装到
@@ -79,7 +92,9 @@
         <div class="progress" v-if="step === 2">
           <div class="step-desc">
             <div
-              v-for="(i, a) in subStepList"
+              v-for="(i, a) in installMode === 'mirrorc'
+                ? subStepListMirrorc
+                : subStepList"
               class="substep"
               :class="{ done: a < subStep }"
               v-show="a <= subStep"
@@ -387,7 +402,7 @@
 }
 </style>
 <script lang="ts" setup>
-import { onMounted, reactive, ref } from 'vue';
+import { computed, onMounted, reactive, ref, watch } from 'vue';
 import { mapLimit } from 'async';
 import Checkbox from './Checkbox.vue';
 import CircleSuccess from './CircleSuccess.vue';
@@ -403,10 +418,13 @@ import {
   ipcKillProcess,
   ipcPatchInstaller,
   ipcRmList,
+  ipcRunMirrorcDownload,
+  ipcRunMirrorcInstall,
   ipcRunUninstall,
   ipcWriteRegistry,
   ipPrepare,
   log,
+  MirrorcUpdate,
   sendInsight,
   warn,
 } from './api/ipc';
@@ -422,6 +440,12 @@ const subStepList: ReadonlyArray<string> = [
   '下载和解压文件',
   '准备运行环境',
 ];
+const subStepListMirrorc: ReadonlyArray<string> = [
+  '从 Mirror酱 获取最新版本',
+  '下载数据包',
+  '解压文件',
+  '准备运行环境',
+];
 
 const isUpdate = ref<boolean>(false);
 const acceptEula = ref<boolean>(true);
@@ -435,6 +459,35 @@ const current = ref<string>('');
 const percent = ref<number>(0);
 const source = ref<string>('');
 const progressInterval = ref<number>(0);
+
+const selectedSource = ref<string>('');
+const installMode = computed<'default' | 'mirrorc'>(() => {
+  if (selectedSource.value.startsWith('mirrorc://')) {
+    return 'mirrorc';
+  } else {
+    return 'default';
+  }
+});
+const mirrorcKey = ref<string>('');
+const markedKey = computed(() => {
+  return (
+    mirrorcKey.value.substring(0, 4) +
+    '****' +
+    mirrorcKey.value.substring(mirrorcKey.value.length - 4)
+  );
+});
+watch(
+  () => installMode.value,
+  async (newValue) => {
+    if (newValue === 'mirrorc' && !mirrorcKey.value) {
+      try {
+        mirrorcKey.value = await invoke('wincred_read', {
+          target: `KachinaInstaller_MirrorChyanCDK_${PROJECT_CONFIG.appName}`,
+        });
+      } catch (e) {}
+    }
+  },
+);
 
 const PROJECT_CONFIG: ProjectConfig = reactive({
   source: '',
@@ -499,13 +552,104 @@ async function getSource(scan: boolean): Promise<InstallerConfig> {
   });
 }
 
+async function installPrepare(
+  latest_meta?: InvokeGetDfsMetadataRes,
+): Promise<boolean> {
+  await ipPrepare(needElevate.value);
+  sendInsight(
+    getInsightBase(),
+    `${isUpdate.value ? 'update' : 'install'}/${INSTALLER_CONFIG.embedded_index?.length ? 'packed/' : ''}${latest_meta?.tag_name}`,
+  );
+  const target_exe_path = `${source.value}${sep()}${PROJECT_CONFIG.exeName}`;
+  const runningExes =
+    (await ipcFindProcessByName(PROJECT_CONFIG.exeName).catch(log)) || [];
+  if (
+    runningExes.find(
+      (e) =>
+        e[1].toLowerCase().replace(/\\/g, '/') ===
+        target_exe_path.toLowerCase().replace(/\\/g, '/'),
+    )
+  ) {
+    const result =
+      INSTALLER_CONFIG.args.non_interactive ||
+      INSTALLER_CONFIG.args.silent ||
+      (await confirm(
+        `检测到${PROJECT_CONFIG.appName}正在运行，是否结束进程并继续安装？`,
+        '提示',
+      ));
+    if (!result) {
+      step.value = 1;
+      return false;
+    } else {
+      try {
+        try {
+          await Promise.all(
+            runningExes.map((e) => ipcKillProcess(e[0], needElevate.value)),
+          );
+        } catch (e) {
+          await Promise.all(runningExes.map((e) => ipcKillProcess(e[0], true)));
+        }
+        return true;
+      } catch (e) {
+        error(e);
+        await dialog_error(`结束进程失败: ${e}`, '出错了');
+        step.value = 1;
+        return false;
+      }
+    }
+  }
+  return false;
+}
+
+async function installRuntimes() {
+  if (PROJECT_CONFIG.runtimes) {
+    log('latest_meta.runtimes', PROJECT_CONFIG.runtimes);
+    subStep.value = 3;
+    current.value = '安装运行库……';
+    for (const tag of PROJECT_CONFIG.runtimes) {
+      log(`Installing runtime: ${tag}`);
+      current.value = `安装${getRuntimeName(tag)}……`;
+      const tryTimes = 3;
+      for (let i = 0; i < tryTimes; i++) {
+        try {
+          await ipcInstallRuntime(
+            tag,
+            ({ payload }) => {
+              const currentSize = formatSize(payload[0]);
+              const targetSize = payload[1] ? formatSize(payload[1]) : '';
+              if (payload[0] >= payload[1] - 1) {
+                current.value = `安装 ${getRuntimeName(tag)} ……`;
+              } else {
+                current.value = `下载 ${getRuntimeName(tag)} ……<br>${currentSize}${targetSize ? ` / ${targetSize}` : ''}`;
+              }
+            },
+            needElevate.value,
+          );
+          break;
+        } catch (e) {
+          if (i === tryTimes - 1) {
+            error(e);
+            await dialog_error(
+              `安装${getRuntimeName(tag)}失败: ${e}，请手动安装`,
+              '出错了',
+            );
+            break;
+          } else {
+            log(`安装${getRuntimeName(tag)}失败: ${e}，重试中`);
+          }
+        }
+      }
+    }
+  }
+}
+
 async function runInstall(): Promise<void> {
   step.value = 2;
   let latest_meta = INSTALLER_CONFIG.enbedded_metadata;
   let online_meta: InvokeGetDfsMetadataRes | null = null;
   try {
     online_meta = await getDfsMetadata(
-      PROJECT_CONFIG.source,
+      selectedSource.value,
       INSTALLER_CONFIG.args.dfs_extras,
     );
   } catch (e) {
@@ -559,49 +703,7 @@ async function runInstall(): Promise<void> {
       latest_meta.hashed.push(installerMeta);
     }
   }
-  await ipPrepare(needElevate.value);
-  sendInsight(
-    getInsightBase(),
-    `${isUpdate.value ? 'update' : 'install'}/${INSTALLER_CONFIG.embedded_index?.length ? 'packed/' : ''}${latest_meta?.tag_name}`,
-  );
-  const target_exe_path = `${source.value}${sep()}${PROJECT_CONFIG.exeName}`;
-  const runningExes =
-    (await ipcFindProcessByName(PROJECT_CONFIG.exeName).catch(log)) || [];
-  if (
-    runningExes.find(
-      (e) =>
-        e[1].toLowerCase().replace(/\\/g, '/') ===
-        target_exe_path.toLowerCase().replace(/\\/g, '/'),
-    )
-  ) {
-    const result =
-      INSTALLER_CONFIG.args.non_interactive ||
-      INSTALLER_CONFIG.args.silent ||
-      (await confirm(
-        `检测到${PROJECT_CONFIG.appName}正在运行，是否结束进程并继续安装？`,
-        '提示',
-      ));
-    if (!result) {
-      step.value = 1;
-      return;
-    } else {
-      try {
-        try {
-          await Promise.all(
-            runningExes.map((e) => ipcKillProcess(e[0], needElevate.value)),
-          );
-        } catch (e) {
-          await Promise.all(runningExes.map((e) => ipcKillProcess(e[0], true)));
-        }
-        return runInstall();
-      } catch (e) {
-        error(e);
-        await dialog_error(`结束进程失败: ${e}`, '出错了');
-        step.value = 1;
-        return;
-      }
-    }
-  }
+  if (await installPrepare()) return runInstall();
   let hashKey = '';
   if (latest_meta.hashed.every((e) => e.md5)) {
     hashKey = 'md5';
@@ -764,7 +866,7 @@ async function runInstall(): Promise<void> {
           }
         }
         await runDfsDownload(
-          PROJECT_CONFIG.source,
+          selectedSource.value,
           INSTALLER_CONFIG.args.dfs_extras,
           INSTALLER_CONFIG.embedded_files || [],
           source.value,
@@ -812,48 +914,162 @@ async function runInstall(): Promise<void> {
       warn(e);
     }
   }
-  if (PROJECT_CONFIG.runtimes) {
-    log('latest_meta.runtimes', PROJECT_CONFIG.runtimes);
-    subStep.value = 3;
-    current.value = '安装运行库……';
-    for (const tag of PROJECT_CONFIG.runtimes) {
-      log(`Installing runtime: ${tag}`);
-      current.value = `安装${getRuntimeName(tag)}……`;
-      const tryTimes = 3;
-      for (let i = 0; i < tryTimes; i++) {
-        try {
-          await ipcInstallRuntime(
-            tag,
-            ({ payload }) => {
-              const currentSize = formatSize(payload[0]);
-              const targetSize = payload[1] ? formatSize(payload[1]) : '';
-              if (payload[0] >= payload[1] - 1) {
-                current.value = `安装 ${getRuntimeName(tag)} ……`;
-              } else {
-                current.value = `下载 ${getRuntimeName(tag)} ……<br>${currentSize}${targetSize ? ` / ${targetSize}` : ''}`;
-              }
-            },
-            needElevate.value,
-          );
-          break;
-        } catch (e) {
-          if (i === tryTimes - 1) {
-            error(e);
-            await dialog_error(
-              `安装${getRuntimeName(tag)}失败: ${e}，请手动安装`,
-              '出错了',
-            );
-            break;
-          } else {
-            log(`安装${getRuntimeName(tag)}失败: ${e}，重试中`);
-          }
-        }
-      }
-    }
-  }
+
+  await installRuntimes();
 
   current.value = '很快就好……';
   await finishInstall(latest_meta);
+  current.value = '安装完成';
+  step.value = 3;
+  percent.value = 100;
+}
+
+async function runMirrorcInstall() {
+  step.value = 2;
+  if (await installPrepare()) return runMirrorcInstall();
+  const source_version = '0.44.4';
+  const source_url = new URL(selectedSource.value);
+  const mirrorc_status = await invoke<MirrorcUpdate>('get_mirrorc_status', {
+    resourceId: source_url.hostname,
+    cdk: mirrorcKey.value,
+    currentVersion: source_version,
+    channel: source_url.searchParams.get('channel') || 'stable',
+  });
+  // 400	1001	INVALID_PARAMS	参数不正确，请参考集成文档
+  // 400	7001	KEY_EXPIRED	CDK 已过期
+  // 403	7002	KEY_INVALID	CDK 错误
+  // 403	7003	RESOURCE_QUOTA_EXHAUSTED	CDK 今日下载次数已达上限
+  // 403	7004	KEY_MISMATCHED	CDK 类型和待下载的资源不匹配
+  // 403	7005	KEY_BLOCKED	CDK 已被封禁
+  // 404	8001	RESOURCE_NOT_FOUND	对应架构和系统下的资源不存在
+  // 400	8002	INVALID_OS	错误的系统参数
+  // 400	8003	INVALID_ARCH	错误的架构参数
+  // 400	8004	INVALID_CHANNEL	错误的更新通道参数
+  // -	1	UNDIVIDED	未区分的业务错误，以响应体 JSON 的 msg 为准
+  switch (mirrorc_status.code) {
+    case 1001:
+      await dialog_error('Mirror酱参数错误，请检查打包配置', '出错了');
+      return;
+    case 7001:
+      await dialog_error('Mirror酱 CDK 已过期', '出错了');
+      return;
+    case 7002:
+      await dialog_error(
+        'Mirror酱 CDK 错误，请检查设置的 CDK 是否正确',
+        '出错了',
+      );
+      return;
+    case 7003:
+      await dialog_error(
+        'Mirror酱 CDK 今日下载次数已达上限，请更换 CDK 或明天再试',
+        '出错了',
+      );
+      return;
+    case 7004:
+      await dialog_error(
+        'Mirror酱 CDK 类型和待下载的资源不匹配，请检查设置的 CDK 是否正确',
+        '出错了',
+      );
+      return;
+    case 7005:
+      await dialog_error('Mirror酱 CDK 已被封禁，请更换 CDK', '出错了');
+      return;
+    case 8001:
+      await dialog_error('从Mirror酱获取更新失败，请检查打包配置', '出错了');
+      return;
+    case 8002:
+      await dialog_error('Mirror酱参数错误，请检查打包配置', '出错了');
+      return;
+    case 8003:
+      await dialog_error('Mirror酱参数错误，请检查打包配置', '出错了');
+      return;
+    case 8004:
+      await dialog_error('Mirror酱参数错误，请检查打包配置', '出错了');
+      return;
+  }
+  if (mirrorc_status.code !== 0) {
+    await dialog_error(
+      `从Mirror酱获取更新失败: ${mirrorc_status.msg}，请联系Mirror酱客服`,
+      '出错了',
+    );
+    return;
+  }
+  if (!mirrorc_status.data?.url) {
+    await dialog_error(
+      '从Mirror酱获取更新失败: 下载地址为空，请联系Mirror酱客服',
+      '出错了',
+    );
+    return;
+  }
+  if (!mirrorc_status.data?.sha256) {
+    await dialog_error(
+      '从Mirror酱获取更新失败: 校验数据为空，请联系Mirror酱客服',
+      '出错了',
+    );
+    return;
+  }
+  console.log(mirrorc_status);
+  log('Mirrorc URL', mirrorc_status.data.url);
+  const mirrorc_zip_url = mirrorc_status.data.url;
+  const mirrorc_zip_path = `${source.value}${sep()}KachinaInstaller_Mirrorc_${mirrorc_status.data.sha256}.zip`;
+  subStep.value = 1;
+  percent.value = 5;
+  current.value = '准备从Mirror酱下载……';
+  let lastDownloaded = 0;
+  let lastSpeedCalcTime = 0;
+  let lastSpeedStr = '';
+  await ipcRunMirrorcDownload(
+    mirrorc_zip_url,
+    mirrorc_zip_path,
+    ({ payload }) => {
+      if (payload.type === 'download') {
+        const { downloaded, total } = payload;
+        if (lastSpeedCalcTime !== 0) {
+          const now = performance.now();
+          const time_diff = now - lastSpeedCalcTime;
+          if (time_diff > 100) {
+            const speed = (downloaded - lastDownloaded) / time_diff;
+            lastDownloaded = downloaded;
+            lastSpeedCalcTime = now;
+            lastSpeedStr = `(${formatSize(speed * 1000)}/s)`;
+            lastSpeedCalcTime = now;
+          }
+        } else {
+          lastSpeedCalcTime = performance.now();
+        }
+        current.value = `${formatSize(downloaded)} / ${formatSize(
+          total,
+        )} ${lastSpeedStr}`;
+        percent.value = 5 + (downloaded / total) * 65;
+      }
+    },
+    needElevate.value,
+  );
+  subStep.value = 2;
+  current.value = '检查压缩包……';
+  const [meta, changeset] = await ipcRunMirrorcInstall(
+    mirrorc_zip_path,
+    source.value,
+    ({ payload }) => {
+      console.log(payload);
+      switch (payload.type) {
+        case 'extract':
+          current.value = `<div class="d-single-stat">解压 ${payload.file}</div>`;
+          percent.value = 70 + (payload.count / payload.total) * 25;
+          break;
+        case 'delete':
+          current.value = `<div class="d-single-stat">删除 ${payload.file}</div>`;
+          percent.value = 97;
+          break;
+      }
+    },
+    needElevate.value,
+  );
+  console.log(changeset, meta);
+  await installRuntimes();
+
+  current.value = '很快就好……';
+  await finishInstall(meta);
   current.value = '安装完成';
   step.value = 3;
   percent.value = 100;
@@ -931,7 +1147,11 @@ async function finishInstall(
 
 async function install(): Promise<void> {
   try {
-    await runInstall();
+    if (installMode.value === 'mirrorc') {
+      await runMirrorcInstall();
+    } else {
+      await runInstall();
+    }
   } catch (e) {
     error(e);
     const errstr =
@@ -973,16 +1193,6 @@ onMounted(async () => {
       embedded_files: undefined,
       enbedded_metadata: undefined,
     });
-    source.value =
-      INSTALLER_CONFIG.args.target || INSTALLER_CONFIG.install_path;
-    const seldir = await invoke<InvokeSelectDirRes>('select_dir', {
-      exeName: PROJECT_CONFIG.exeName,
-      silent: true,
-      path: source.value,
-    });
-    if (seldir) {
-      setUacByState(seldir.state, PROJECT_CONFIG.uacStrategy);
-    }
     if (INSTALLER_CONFIG.embedded_config) {
       Object.assign(PROJECT_CONFIG, INSTALLER_CONFIG.embedded_config);
       if (process.env.NODE_ENV === 'development') {
@@ -1001,6 +1211,26 @@ onMounted(async () => {
       const win = getCurrentWindow();
       win.close();
       return;
+    }
+    const xsrc = rsrc.embedded_config?.source;
+    if (!xsrc) {
+      throw new Error('打包错误，请确保配置文件被正确打包');
+    }
+    if (!Array.isArray(xsrc)) {
+      selectedSource.value = xsrc;
+    } else if (xsrc.length > 0) {
+      selectedSource.value =
+        xsrc.find((e) => e.id === rsrc.args.source)?.uri || xsrc[0]?.uri;
+    }
+    source.value =
+      INSTALLER_CONFIG.args.target || INSTALLER_CONFIG.install_path;
+    const seldir = await invoke<InvokeSelectDirRes>('select_dir', {
+      exeName: PROJECT_CONFIG.exeName,
+      silent: true,
+      path: source.value,
+    });
+    if (seldir) {
+      setUacByState(seldir.state, PROJECT_CONFIG.uacStrategy);
     }
     if (INSTALLER_CONFIG.embedded_index && INSTALLER_CONFIG.embedded_files) {
       let hasWrongIndex = false;

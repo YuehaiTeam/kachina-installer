@@ -28,6 +28,14 @@ pub enum IpcOperation {
     PatchInstaller {
         installer: String,
     },
+    RunMirrorcDownload {
+        zip_path: String,
+        url: String,
+    },
+    RunMirrorcInstall {
+        zip_path: String,
+        target_path: String,
+    },
 }
 
 pub async fn run_opr(
@@ -48,6 +56,8 @@ pub async fn run_opr(
         IpcOperation::InstallRuntime { .. } => "InstallRuntime",
         IpcOperation::CheckLocalFiles { .. } => "CheckLocalFiles",
         IpcOperation::PatchInstaller { .. } => "PatchInstaller",
+        IpcOperation::RunMirrorcDownload { .. } => "RunMirrorcDownload",
+        IpcOperation::RunMirrorcInstall { .. } => "RunMirrorcInstall",
     };
     tracing::info!("IPC operation: {}", op_name);
     let ctx_str = context
@@ -100,6 +110,17 @@ pub async fn run_opr(
         )),
         IpcOperation::PatchInstaller { installer } => Ok(serde_json::json!(
             crate::installer::uninstall::clear_index_mark(&std::path::PathBuf::from(installer))
+                .await?
+        )),
+        IpcOperation::RunMirrorcDownload { zip_path, url } => {
+            crate::thirdparty::mirrorc::run_mirrorc_download(&zip_path, &url, notify).await?;
+            Ok(serde_json::Value::Null)
+        }
+        IpcOperation::RunMirrorcInstall {
+            zip_path,
+            target_path,
+        } => Ok(serde_json::json!(
+            crate::thirdparty::mirrorc::run_mirrorc_install(&zip_path, &target_path, notify)
                 .await?
         )),
     };

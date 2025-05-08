@@ -81,7 +81,7 @@ tracing-subscriber = { version = "0.3", features = [
     "registry",
 ] }
 sentry-tracing = "0.37"
-zip = "2.6.1"
+zip = { git = "https://github.com/xytoki/zip2.git" }
 anyhow = "1.0"
 reqwest-middleware = "0.4"
 tracing = "0.1"

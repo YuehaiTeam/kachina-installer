@@ -1,6 +1,12 @@
 // ^(?:(dfs)\+)?(?:(hashed|packed|auto)\+)?(http(?:s)?:\/\/(?:.*?))$
+interface SourceItem {
+  uri: string;
+  id: string;
+  name: string;
+  hidden: boolean;
+}
 type ProjectConfig = {
-  source: string;
+  source: string | SourceItem[];
   appName: string;
   publisher: string;
   regName: string;
@@ -116,10 +122,9 @@ interface InstallerConfig {
     silent: boolean;
     online: boolean;
     uninstall: boolean;
-    override_source?: string;
+    source?: string;
     dfs_extras?: string;
     mirrorc_cdk?: string;
-    mirrorc_channel?: string;
   };
   elevated: boolean;
 }

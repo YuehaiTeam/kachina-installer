@@ -6391,8 +6391,7 @@ dependencies = [
 [[package]]
 name = "zip"
 version = "2.6.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1dcb24d0152526ae49b9b96c1dcf71850ca1e0b882e4e28ed898a93c41334744"
+source = "git+https://github.com/xytoki/zip2.git#033c2603e435ba49ff344ab504397950db24a404"
 dependencies = [
  "aes",
  "arbitrary",

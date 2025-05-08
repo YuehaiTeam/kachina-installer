@@ -165,6 +165,8 @@ async fn tauri_main(args: InstallArgs) {
             utils::wincred::wincred_write,
             utils::wincred::wincred_read,
             utils::wincred::wincred_delete,
+            // mirrorc
+            thirdparty::mirrorc::get_mirrorc_status,
             // new mamaned operation
             ipc::manager::managed_operation,
         ])
