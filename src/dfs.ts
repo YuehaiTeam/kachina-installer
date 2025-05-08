@@ -1,5 +1,5 @@
 import { hybridPatch, InstallFile } from './api/installFile';
-import { ipc, log } from './api/ipc';
+import { ipc, log, warn } from './api/ipc';
 import { invoke } from './tauri';
 
 const connectableOrigins = new Set();
@@ -410,7 +410,7 @@ export const runDfsDownload = async (
       );
     }
   } catch (e) {
-    log(e);
+    warn(e);
     item.downloaded = 0;
     throw e;
   } finally {

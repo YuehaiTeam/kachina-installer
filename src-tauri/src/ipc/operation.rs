@@ -33,8 +33,30 @@ pub enum IpcOperation {
 pub async fn run_opr(
     op: IpcOperation,
     notify: impl Fn(serde_json::Value) + std::marker::Send + 'static,
+    context: Vec<(String, String)>,
 ) -> TAResult<serde_json::Value> {
-    match op {
+    let op_name = match &op {
+        IpcOperation::Ping => "Ping",
+        IpcOperation::InstallFile(_) => "InstallFile",
+        IpcOperation::CreateLnk(_) => "CreateLnk",
+        IpcOperation::WriteRegistry(_) => "WriteRegistry",
+        IpcOperation::CreateUninstaller(_) => "CreateUninstaller",
+        IpcOperation::RunUninstall(_) => "RunUninstall",
+        IpcOperation::FindProcessByName { .. } => "FindProcessByName",
+        IpcOperation::KillProcess { .. } => "KillProcess",
+        IpcOperation::RmList { .. } => "RmList",
+        IpcOperation::InstallRuntime { .. } => "InstallRuntime",
+        IpcOperation::CheckLocalFiles { .. } => "CheckLocalFiles",
+        IpcOperation::PatchInstaller { .. } => "PatchInstaller",
+    };
+    tracing::info!("IPC operation: {}", op_name);
+    let ctx_str = context
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect::<Vec<_>>();
+    let tx_ctx = sentry::TransactionContext::continue_from_headers(op_name, op_name, ctx_str);
+    let transaction = sentry::start_transaction(tx_ctx);
+    let ret = match op {
         IpcOperation::Ping => Ok(serde_json::value::Value::Null),
         IpcOperation::InstallFile(args) => super::install_file::ipc_install_file(args, notify)
             .await
@@ -80,5 +102,7 @@ pub async fn run_opr(
             crate::installer::uninstall::clear_index_mark(&std::path::PathBuf::from(installer))
                 .await?
         )),
-    }
+    };
+    transaction.finish();
+    ret
 }

@@ -122,20 +122,25 @@ pub async fn kill_process(pid: u32) -> Result<()> {
         // use the windows crate
         let handle = unsafe {
             windows::Win32::System::Threading::OpenProcess(
-                windows::Win32::System::Threading::PROCESS_TERMINATE,
+                windows::Win32::System::Threading::PROCESS_TERMINATE
+                    | windows::Win32::System::Threading::PROCESS_SYNCHRONIZE,
                 false,
                 pid,
             )
         }
         .context("OPEN_PROCESS_ERR")?;
-        unsafe { windows::Win32::System::Threading::TerminateProcess(handle, 1) }
-            .context("KILL_PROCESS_ERR")?;
+        let ret = unsafe { windows::Win32::System::Threading::TerminateProcess(handle, 1) }
+            .context("KILL_PROCESS_ERR");
+        if ret.is_err() {
+            let _ = unsafe { CloseHandle(handle) };
+            return ret;
+        }
         // wait for the process to exit, timeout 10s
         let ret = unsafe { windows::Win32::System::Threading::WaitForSingleObject(handle, 10000) };
         match ret {
             WAIT_FAILED => {
-                return Err(anyhow::anyhow!("Failed to wait for process: {:?}", ret)
-                    .context("KILL_PROCESS_ERR"));
+                let oserr = windows::core::Error::from_win32();
+                return Err(anyhow::anyhow!(oserr).context("WAIT_PROCESS_ERR"));
             }
             WAIT_TIMEOUT => {
                 return Err(
@@ -255,5 +260,15 @@ pub async fn confirm_dialog(title: String, message: String, window: WebviewWindo
 
 #[tauri::command]
 pub fn log(data: String) {
-    println!("{}", data);
+    tracing::info!("{}", data);
+}
+
+#[tauri::command]
+pub fn warn(data: String) {
+    tracing::warn!("{}", data);
+}
+
+#[tauri::command]
+pub fn error(data: String) {
+    tracing::error!("{}", data);
 }

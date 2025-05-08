@@ -394,6 +394,7 @@ import CircleSuccess from './CircleSuccess.vue';
 import { getCurrentWindow, invoke, sep } from './tauri';
 import { getDfsMetadata, runDfsDownload } from './dfs';
 import {
+  error,
   ipcCheckLocalFiles,
   ipcCreateLnk,
   ipcCreateUninstaller,
@@ -407,6 +408,7 @@ import {
   ipPrepare,
   log,
   sendInsight,
+  warn,
 } from './api/ipc';
 import IconSheild from './IconSheild.vue';
 import { version_compare } from './utils/version';
@@ -507,10 +509,10 @@ async function runInstall(): Promise<void> {
       INSTALLER_CONFIG.args.dfs_extras,
     );
   } catch (e) {
-    log(e);
+    error(e);
   }
   if (!latest_meta && !online_meta) {
-    await error('获取更新信息失败，请检查网络连接');
+    await dialog_error('获取更新信息失败，请检查网络连接');
     step.value = 1;
     return;
   } else if (!latest_meta) {
@@ -593,8 +595,8 @@ async function runInstall(): Promise<void> {
         }
         return runInstall();
       } catch (e) {
-        log(e);
-        await error(`结束进程失败: ${e}`, '出错了');
+        error(e);
+        await dialog_error(`结束进程失败: ${e}`, '出错了');
         step.value = 1;
         return;
       }
@@ -758,7 +760,7 @@ async function runInstall(): Promise<void> {
               needElevate.value,
             );
           } catch (e) {
-            log(e);
+            warn(e);
           }
         }
         await runDfsDownload(
@@ -780,15 +782,15 @@ async function runInstall(): Promise<void> {
               needElevate.value,
             );
           } catch (e) {
-            log(e);
+            warn(e);
           }
         }
         break;
       } catch (e) {
         item.failed = true;
-        log(e);
+        error(e);
         if (i === 2) {
-          await error(`释放文件${item.file_name}失败: ${e}`, '出错了');
+          await dialog_error(`释放文件${item.file_name}失败: ${e}`, '出错了');
           throw e;
         }
       }
@@ -807,7 +809,7 @@ async function runInstall(): Promise<void> {
         needElevate.value,
       );
     } catch (e) {
-      log(e);
+      warn(e);
     }
   }
   if (PROJECT_CONFIG.runtimes) {
@@ -836,8 +838,8 @@ async function runInstall(): Promise<void> {
           break;
         } catch (e) {
           if (i === tryTimes - 1) {
-            log(e);
-            await error(
+            error(e);
+            await dialog_error(
               `安装${getRuntimeName(tag)}失败: ${e}，请手动安装`,
               '出错了',
             );
@@ -893,8 +895,8 @@ async function finishInstall(
         needElevate.value,
       );
     } catch (e) {
-      error(`创建卸载程序失败: ${e}`, '出错了');
-      log(e);
+      dialog_error(`创建卸载程序失败: ${e}`, '出错了');
+      warn(e);
     }
     try {
       await ipcWriteRegistry(
@@ -912,8 +914,8 @@ async function finishInstall(
         needElevate.value,
       );
     } catch (e) {
-      error(`写入注册表失败: ${e}`, '出错了');
-      log(e);
+      dialog_error(`写入注册表失败: ${e}`, '出错了');
+      warn(e);
     }
     await ipcCreateLnk(
       `${source.value}${sep()}${PROJECT_CONFIG.uninstallName}`,
@@ -931,7 +933,7 @@ async function install(): Promise<void> {
   try {
     await runInstall();
   } catch (e) {
-    log(e);
+    error(e);
     const errstr =
       e instanceof Error
         ? e.stack || e.toString()
@@ -939,7 +941,7 @@ async function install(): Promise<void> {
           ? e
           : JSON.stringify(e);
     sendInsight(getInsightBase(), 'error', { error: errstr });
-    await error(errstr);
+    await dialog_error(errstr);
     step.value = 1;
     subStep.value = 0;
     percent.value = 0;
@@ -965,7 +967,12 @@ onMounted(async () => {
     await Promise.all(ps);
     rsrc = await getSource(true);
     Object.assign(INSTALLER_CONFIG, rsrc);
-    log('INSTALLER_CONFIG: ', rsrc);
+    log('INSTALLER_CONFIG: ', {
+      ...rsrc,
+      embedded_index: undefined,
+      embedded_files: undefined,
+      enbedded_metadata: undefined,
+    });
     source.value =
       INSTALLER_CONFIG.args.target || INSTALLER_CONFIG.install_path;
     const seldir = await invoke<InvokeSelectDirRes>('select_dir', {
@@ -984,13 +991,13 @@ onMounted(async () => {
           INSTALLER_CONFIG.embedded_files.length > 0 &&
           !INSTALLER_CONFIG.embedded_files.find((e) => e.name === '\0CONFIG')
         ) {
-          error('打包错误，请确保配置文件被正确打包');
+          dialog_error('打包错误，请确保配置文件被正确打包');
         }
       }
     } else if (process.env.NODE_ENV === 'development') {
-      error('未找到配置文件，请将配置文件放在exe同目录下');
+      dialog_error('未找到配置文件，请将配置文件放在exe同目录下');
     } else {
-      await error('安装包损坏，请重新下载');
+      await dialog_error('安装包损坏，请重新下载');
       const win = getCurrentWindow();
       win.close();
       return;
@@ -1013,9 +1020,9 @@ onMounted(async () => {
       }
       if (hasWrongIndex) {
         if (process.env.NODE_ENV === 'development') {
-          error('打包错误，请确保索引文件正确');
+          dialog_error('打包错误，请确保索引文件正确');
         } else {
-          await error('安装包损坏，请重新下载');
+          await dialog_error('安装包损坏，请重新下载');
           const win = getCurrentWindow();
           win.close();
           return;
@@ -1034,7 +1041,7 @@ onMounted(async () => {
       ).catch(log);
       log('UNINSTALL_METADATA: ', uninstallConfig);
       if (!uninstallConfig) {
-        await error('未找到卸载配置文件，请重新安装后再卸载');
+        await dialog_error('未找到卸载配置文件，请重新安装后再卸载');
         if (process.env.NODE_ENV !== 'development') {
           const win = getCurrentWindow();
           win.close();
@@ -1051,11 +1058,11 @@ onMounted(async () => {
       }
     }
   } catch (e) {
-    log(e);
+    error(e);
     if (e instanceof Error)
-      await error(e.stack || e.toString(), '安装程序初始化失败');
+      await dialog_error(e.stack || e.toString(), '安装程序初始化失败');
     else
-      await error(
+      await dialog_error(
         typeof e === 'string' ? e : JSON.stringify(e),
         '安装程序初始化失败',
       );
@@ -1122,13 +1129,13 @@ async function changeSource() {
       source.value = seldir.path;
     }
   } catch (e) {
-    if (e instanceof Error) await error(e.stack || e.toString());
-    else await error(JSON.stringify(e));
+    if (e instanceof Error) await dialog_error(e.stack || e.toString());
+    else await dialog_error(JSON.stringify(e));
     throw e;
   }
 }
 
-async function error(message: string, title = '出错了'): Promise<void> {
+async function dialog_error(message: string, title = '出错了'): Promise<void> {
   await invoke('error_dialog', {
     message: message.replace(new RegExp(location.origin, 'g'), ''),
     title,
@@ -1181,14 +1188,14 @@ async function uninstall() {
       win.close();
     }
   } catch (e) {
-    log(e);
+    error(e);
     const errstr =
       e instanceof Error
         ? e.stack || e.toString()
         : typeof e === 'string'
           ? e
           : JSON.stringify(e);
-    await error(errstr);
+    await dialog_error(errstr);
     await sendInsight(getInsightBase(), 'error', { error: errstr });
     step.value = 1;
   }

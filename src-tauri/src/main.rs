@@ -14,9 +14,12 @@ pub mod utils;
 use clap::Parser;
 use cli::arg::{Command, InstallArgs};
 use installer::uninstall::delete_self_on_exit;
+use sentry_tracing::EventFilter;
 use std::time::Duration;
 use tauri::{window::Color, WindowEvent};
 use tauri_utils::{config::WindowEffectsConfig, WindowEffect};
+use tracing_subscriber::{prelude::*, EnvFilter};
+use utils::sentry::sentry_init;
 
 lazy_static::lazy_static! {
     pub static ref REQUEST_CLIENT: reqwest::Client = reqwest::Client::builder()
@@ -53,21 +56,38 @@ fn main() {
     use windows::Win32::System::Console::{AttachConsole, ATTACH_PARENT_PROCESS};
     let _ = unsafe { AttachConsole(ATTACH_PARENT_PROCESS) };
 
-    let _guard = sentry::init(sentry::ClientOptions {
-        release: sentry::release_name!(),
-        traces_sample_rate: 1.0,
-        ..sentry::ClientOptions::default()
-    });
-
     let cli = cli::Cli::parse();
     let mut command = cli.command();
     let wv2ver = tauri::webview_version();
     if wv2ver.is_err() {
         command = Command::InstallWebview2;
     }
+    let is_uac_thread = match command {
+        Command::HeadlessUac(_) => true,
+        _ => false,
+    };
+    let _guard = sentry_init(is_uac_thread);
+    utils::sentry::sentry_set_info();
+    let sentry_layer = sentry_tracing::layer().event_filter(|md| match md.level() {
+        &tracing::Level::TRACE => EventFilter::Ignore,
+        &tracing::Level::DEBUG => EventFilter::Ignore,
+        _ => EventFilter::Breadcrumb,
+    });
+    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+
+    tracing_subscriber::registry()
+        .with(sentry_layer)
+        .with(tracing_subscriber::fmt::layer().with_filter(env_filter))
+        .init();
     // command is not  Command::Install, can be anything
     match command {
         Command::Install(install) => {
+            sentry::add_breadcrumb(sentry::Breadcrumb {
+                category: Some("app".into()),
+                message: Some("KachinaInstaller started".into()),
+                level: sentry::Level::Info,
+                ..Default::default()
+            });
             tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
                 .build()
@@ -75,6 +95,12 @@ fn main() {
                 .block_on(tauri_main(install));
         }
         Command::HeadlessUac(args) => {
+            sentry::add_breadcrumb(sentry::Breadcrumb {
+                category: Some("app".into()),
+                message: Some("KachinaInstaller started as UAC Thread".into()),
+                level: sentry::Level::Info,
+                ..Default::default()
+            });
             tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
                 .build()
@@ -82,6 +108,12 @@ fn main() {
                 .block_on(ipc::manager::uac_ipc_main(args));
         }
         Command::InstallWebview2 => {
+            sentry::add_breadcrumb(sentry::Breadcrumb {
+                category: Some("app".into()),
+                message: Some("KachinaInstaller started as Webview2 Installer".into()),
+                level: sentry::Level::Info,
+                ..Default::default()
+            });
             tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
                 .build()
@@ -124,6 +156,8 @@ async fn tauri_main(args: InstallArgs) {
             dfs::get_dfs,
             dfs::get_http_with_range,
             installer::log,
+            installer::warn,
+            installer::error,
             installer::launch_and_exit,
             installer::config::get_installer_config,
             installer::lnk::get_dirs,

@@ -204,10 +204,27 @@ export function log(...args: any[]) {
     }
     return acc + ' ' + JSON.stringify(arg);
   });
-  const timestr = new Date().toISOString();
-  invoke('log', {
-    data: `${timestr}: ${logstr}`,
+  invoke('log', { data: logstr });
+}
+export function warn(...args: any[]) {
+  console.warn(...args);
+  const logstr = args.reduce((acc, arg) => {
+    if (typeof arg === 'string') {
+      return acc + ' ' + arg;
+    }
+    return acc + ' ' + JSON.stringify(arg);
   });
+  invoke('warn', { data: logstr });
+}
+export function error(...args: any[]) {
+  console.error(...args);
+  const logstr = args.reduce((acc, arg) => {
+    if (typeof arg === 'string') {
+      return acc + ' ' + arg;
+    }
+    return acc + ' ' + JSON.stringify(arg);
+  });
+  invoke('error', { data: logstr });
 }
 
 export async function sendInsight(url: string, event?: string, data?: unknown) {

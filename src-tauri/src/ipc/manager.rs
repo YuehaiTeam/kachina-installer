@@ -2,6 +2,8 @@ use super::operation::run_opr;
 use super::operation::IpcOperation;
 use crate::utils::acl::create_security_attributes;
 use crate::utils::error::TAResult;
+use crate::utils::sentry::forward_envelope;
+use crate::utils::sentry::AUTO_TRANSPORT;
 use crate::utils::uac::check_elevated;
 use crate::utils::uac::run_elevated;
 use crate::utils::uac::SendableHandle;
@@ -27,8 +29,10 @@ static PIPE_CHUNK_SIZE: usize = 1024 * 4;
 pub struct IpcInner {
     op: IpcOperation,
     id: String,
+    context: Vec<(String, String)>,
 }
 
+#[derive(Debug)]
 pub struct ManagedElevate {
     process: tokio::sync::RwLock<Option<SendableHandle>>,
     mpsc_tx: tokio::sync::mpsc::Sender<IpcInner>,
@@ -80,7 +84,7 @@ impl ManagedElevate {
             let name = self.pipe_id.clone();
             let name = format!(r"\\.\pipe\Kachina-Elevate-{}", name);
             let mut server = Self::create_pipe(&name).context("ELEVATE_ERR")?;
-            println!("Pipe listener created at {:?}", name);
+            tracing::info!("Pipe listener created at {:?}", name);
             let tx = self.broadcast_tx.clone();
             let rx = self.mpsc_rx.write().await.take().unwrap();
             if !wait_conn(&mut server).await {
@@ -94,10 +98,10 @@ impl ManagedElevate {
 
 pub async fn wait_conn(server: &mut NamedPipeServer) -> bool {
     if let Err(err) = server.connect().await {
-        println!("Failed to accept pipe connection: {:?}", err);
+        tracing::warn!("Failed to accept pipe connection: {:?}", err);
         return false;
     }
-    println!("Client connected to pipe");
+    tracing::info!("Client connected to pipe");
     true
 }
 pub async fn handle_pipe(
@@ -117,18 +121,36 @@ pub async fn handle_pipe(
                     if v.is_ok() {
                         let res = serde_json::from_str::<serde_json::Value>(&buf);
                         if let Ok(res) = res {
+                            // sentry envelope
+                            if let Some(envelope) = res["envelope"].as_str() {
+                                let envelope = sentry::Envelope::from_slice(envelope.as_bytes());
+                                match envelope {
+                                    Ok(envelope) => {
+                                        forward_envelope(envelope);
+                                    }
+                                    Err(err) => {
+                                        tracing::warn!("Failed to parse envelope: {:?}", err);
+                                    }
+                                }
+                            }
+                            // sentry breadcrumb
+                            if res["breadcrumb"].is_object() {
+                                let breadcrumb = res["breadcrumb"].clone();
+                                if let Ok(breadcrumb) = serde_json::from_value::<sentry::Breadcrumb>(breadcrumb) {
+                                    sentry::add_breadcrumb(breadcrumb);
+                                }
+                            }
                             let _ = tx.send(res);
                         }else{
-                            println!("Failed to parse message: {:?} {:?}", res.err(), buf);
                             fail_times += 1;
                             if fail_times > 30 {
-                                println!("Failed to parse message too many times, closing pipe");
-                                let _ = tx.send(serde_json::json!({ "Err": "PIPE_DISCONNECT_ERR" }));
+                                tracing::error!("Failed to parse message too many times, closing pipe");
+                                let _ = tx.send(serde_json::json!({ "PipeErr": "PIPE_DISCONNECT_ERR" }));
                                 break;
                             }
                         }
                     }else{
-                        println!("Failed to read from pipe: {:?}", v.err());
+                        tracing::error!("Failed to read from pipe: {:?}", v.err());
                         break;
                     }
                 }
@@ -142,14 +164,14 @@ pub async fn handle_pipe(
                             for b in chunks{
                                 let res = servertx.write(b).await;
                                 if let Err(err) = res{
-                                    println!("Failed to write to pipe: {:?}", err);
+                                    tracing::warn!("Failed to write to pipe: {:?}", err);
                                 }
                             }
                         }else{
-                            println!("Failed to serialize message: {:?}", b.err());
+                            tracing::warn!("Failed to serialize message: {:?}", b.err());
                         }
                     }else{
-                        println!("Failed to receive message from channel");
+                        tracing::error!("Failed to receive message from channel");
                         break;
                     }
                 }
@@ -157,6 +179,7 @@ pub async fn handle_pipe(
         }
     });
 }
+#[tracing::instrument(skip(ipc, mgr, window))]
 #[tauri::command]
 pub async fn managed_operation(
     ipc: IpcOperation,
@@ -166,21 +189,32 @@ pub async fn managed_operation(
     window: tauri::WebviewWindow,
 ) -> TAResult<serde_json::Value> {
     if !elevate || mgr.already_elevated {
-        run_opr(ipc, move |opr| {
-            let _ = window.emit(&id, opr);
-        })
+        run_opr(
+            ipc,
+            move |opr| {
+                let _ = window.emit(&id, opr);
+            },
+            vec![],
+        )
         .await
     } else {
         if mgr.process.read().await.is_none() {
-            println!("Elevate process not started, starting...");
+            tracing::info!("Elevate process not started, starting...");
             mgr.start().await?;
-            println!("Elevate process started");
+            tracing::info!("Elevate process started");
+        }
+        let mut context = vec![];
+        if let Some(span) = sentry::configure_scope(|scope| scope.get_span()) {
+            for (k, v) in span.iter_headers() {
+                context.push((k.to_string(), v.to_string()));
+            }
         }
         let _ = mgr
             .mpsc_tx
             .send(IpcInner {
                 op: ipc,
                 id: id.clone(),
+                context,
             })
             .await;
         let mut rx = mgr.broadcast_tx.subscribe();
@@ -195,6 +229,12 @@ pub async fn managed_operation(
                     }
                     let _ = window.emit(&id, v["data"].clone());
                 }
+            }
+            let pipeerr = v["PipeErr"].as_str();
+            if let Some(pipeerr) = pipeerr {
+                return Err(anyhow::anyhow!("Elevate process disconnected: {}", pipeerr)
+                    .context("IPC_ERR")
+                    .into());
             }
         }
         Err(
@@ -235,14 +275,15 @@ pub async fn uac_ipc_main(args: crate::cli::arg::UacArgs) {
     let (clientrx, mut clienttx) = tokio::io::split(client);
     let mut clientrx = tokio::io::BufReader::with_capacity(PIPE_BUFFER_SIZE, clientrx);
 
-    let (tx, mut rx) = tokio::sync::mpsc::channel(100);
+    let (tx, mut rx) = tokio::sync::mpsc::channel(500);
+    let mut sentry_rx = AUTO_TRANSPORT.mpsc_rx.write().await;
     loop {
         let mut buf = String::new();
         tokio::select! {
             v = clientrx.read_line(&mut buf) => {
                 if let Ok(v) = v {
                     if v == 0 {
-                        println!("Client: disconnected");
+                        tracing::warn!("Client: disconnected");
                         break;
                     }
                     let res = serde_json::from_str::<IpcInner>(&buf);
@@ -251,7 +292,7 @@ pub async fn uac_ipc_main(args: crate::cli::arg::UacArgs) {
                         let id = res.id.clone();
                         tokio::spawn(async move {
                             let tx2 = tx.clone();
-                            println!("Client: Operation started: {:?}", id);
+                            tracing::info!("Client: Operation started: {:?}", id);
                             let res = run_opr(res.op, move |opr| {
                                 let id = res.id.clone();
                                 let tx_clone = tx.clone();
@@ -260,18 +301,22 @@ pub async fn uac_ipc_main(args: crate::cli::arg::UacArgs) {
                                         .send(serde_json::json!({ "id": id, "data": opr }))
                                         .await;
                                 });
-                            })
+                            },res.context)
                             .await;
-                            println!("Client: Operation done: {:?}", id);
+                            if let Err(err) = res.as_ref() {
+                                tracing::error!("Client: Operation failed: {:?}", err);
+                            }else{
+                                tracing::info!("Client: Operation done: {:?}", id);
+                            }
                             let _ = tx2
                                 .send(serde_json::json!({ "id": id, "data": res, "done": true }))
                                 .await;
                         });
                     } else {
-                        println!("Client: Failed to parse message: {:?} {:?}", res.err(), buf);
+                        tracing::warn!("Client: Failed to parse message: {:?} {:?}", res.err(), buf);
                     }
                 } else {
-                    println!("Client: Failed to read from pipe: {:?}", v.err());
+                    tracing::warn!("Client: Failed to read from pipe: {:?}", v.err());
                     break;
                 }
             },
@@ -285,16 +330,31 @@ pub async fn uac_ipc_main(args: crate::cli::arg::UacArgs) {
                         for b in chunks {
                             let res = clienttx.write(b).await;
                             if let Err(err) = res {
-                                println!("Client: Failed to write to pipe: {:?}", err);
+                                tracing::warn!("Client: Failed to write to pipe: {:?}", err);
                                 break;
                             }
                         }
                     } else {
-                        println!("Client: Failed to serialize message: {:?}", b.err());
+                        tracing::warn!("Client: Failed to serialize message: {:?}", b.err());
                     }
                 } else {
-                    println!("Client: Failed to receive message from channel");
+                    tracing::warn!("Client: Failed to receive message from channel");
                     break;
+                }
+            },
+            v = sentry_rx.recv() => {
+                if let Some(v) = v {
+                    match v {
+                        crate::utils::sentry::SentryData::Breadcrumb(b) => {
+                            let _ = tx.send(serde_json::json!({ "breadcrumb": b })).await;
+                        },
+                        crate::utils::sentry::SentryData::Envelope(v) => {
+                            let mut vec = Vec::new();
+                            v.to_writer(&mut vec).unwrap();
+                            let str = String::from_utf8_lossy(&vec).to_string();
+                            let _ = tx.send(serde_json::json!({ "envelope": str })).await;
+                        }
+                    }
                 }
             }
         }

@@ -47,10 +47,7 @@ async fn search_pattern() -> anyhow::Result<Vec<usize>> {
             buffer[2] = buffer[read + 4 - 2];
             buffer[3] = buffer[read + 4 - 1];
         }
-        read = reader
-            .read(&mut buffer[4..])
-            .await
-            .context("MMAP_ERR")?;
+        read = reader.read(&mut buffer[4..]).await.context("MMAP_ERR")?;
         if read == 0 {
             break;
         }

@@ -116,7 +116,9 @@ impl<T> IntoAnyhow<T> for TAResult<T> {
 }
 
 pub fn return_ta_result<T>(msg: String, ctx: &str) -> TAResult<T> {
-    Err(TACommandError(anyhow::anyhow!(msg).context(ctx.to_string())))
+    Err(TACommandError(
+        anyhow::anyhow!(msg).context(ctx.to_string()),
+    ))
 }
 
 pub fn return_anyhow_result<T>(msg: String, ctx: &str) -> anyhow::Result<T> {

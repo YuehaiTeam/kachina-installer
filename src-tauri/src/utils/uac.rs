@@ -8,6 +8,7 @@ use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 use windows::Win32::UI::Shell::{
     ShellExecuteExW, SEE_MASK_NOASYNC, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW,
 };
+#[derive(Debug)]
 pub struct SendableHandle(pub HANDLE);
 unsafe impl Send for SendableHandle {}
 unsafe impl Sync for SendableHandle {}

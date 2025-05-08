@@ -157,7 +157,6 @@ pub async fn create_http_stream(
     let has_range = offset > 0 || size > 0;
     if has_range {
         res = res.header("Range", format!("bytes={}-{}", offset, offset + size - 1));
-        println!("Range: bytes={}-{}", offset, offset + size - 1);
     }
     let res = res.send().await.context("HTTP_REQUEST_ERR")?;
     let code = res.status();

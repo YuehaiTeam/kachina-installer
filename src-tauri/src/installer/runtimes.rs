@@ -34,12 +34,12 @@ pub async fn install_dotnet(
         "Microsoft.DotNet.DesktopRuntime" => (
             "https://builds.dotnet.microsoft.com/dotnet/WindowsDesktop/$/latest.version",
             "https://builds.dotnet.microsoft.com/dotnet/WindowsDesktop/$/windowsdesktop-runtime-$-win-x64.exe",
-            "Microsoft.WindowsDesktop.App"
+            "Microsoft.WindowsDesktop.App",
         ),
         "Microsoft.DotNet.Runtime" => (
             "https://builds.dotnet.microsoft.com/dotnet/Runtime/$/latest.version",
             "https://builds.dotnet.microsoft.com/dotnet/Runtime/$/dotnet-runtime-$-win-x64.exe",
-            "Microsoft.NETCore.App"
+            "Microsoft.NETCore.App",
         ),
         _ => {
             return Err(anyhow::anyhow!("UNSUPPORTED_DOTNET_RUNTIME"));
