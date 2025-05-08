@@ -25,8 +25,8 @@
 1. 编写`kachina.config.json`，作为安装器的配置文件
 ```jsonc
 {
-    // 离线包下载底子，需要固定
-    "source": "packed+https://example.com/Kachina.Install.exe",
+    // 离线包下载地址，需要固定
+    "source": "https://example.com/Kachina.Install.exe",
     // 注册表中的应用名称
     "appName": "Kachina Installer",
     // 注册表中的发布者
@@ -80,6 +80,36 @@ kachina-builder.exe pack -c kachina.config.json -m metadata.json -d hashed -o Ka
 ```
 5. 部署离线包到服务器上，确保可以通过json里的url下载到。在目前版本里，你不需要部署压缩产生的`hashed`文件夹和metadata文件，这些文件是在构建过程中临时使用的。
 6. 此时第二步得到的更新器可以直接作为在线安装包使用。
+
+#### 多安装源
+如果你希望用户可以自由选择安装源，你可以指定多个Source，此时用户主动打开安装器时将在路径选择上方看到安装源选择按钮。
+
+示例配置如下：
+```
+{
+  "source": [
+    {
+      "id": "stable",
+      "name": "正式版",
+      "uri": "https://example.com/Kachina.Install.exe"
+    },
+    {
+      "id": "beta",
+      "name": "测试版",
+      "uri": "https://example.com/Kachina.Install.Beta.exe"
+    }
+  ]
+}
+```
+
+#### Mirror酱平台支持
+[Mirror酱](https://mirrorchyan.com) 是独立的第三方软件下载平台，提供付费的软件下载加速服务。`kachina-installer`接入了Mirror酱的API，允许用户使用Mirror酱更新软件。例如，你可以结合上述的安装源选择功能，让用户选择使用自建服务器更新还是使用Mirror酱更新。
+
+
+如需使用，请设置`source`的值为`mirrorc://{rid}?channel={stable|beta|alpha}`。同时，你需要将前述产生的`metadata.json`放置到上传给Mirror酱的文件中。
+
+Tips：Mirror酱使用独立的文件级增量更新机制，因此当选择Mirror酱作为更新源时候，将无法使用`kachina-installer`自带的版本比对、二进制Patch级增量等功能。
+
 
 ## 部分技术细节
 安装器的离线包是一个可寻址的文件，其中包含了安装器主体、索引、配置、元数据、程序文件、Patch文件。当安装程序运行时，如果程序没有有内嵌资源，会对配置URL中的离线包进行远程寻址，通过文件头中的索引获取资源，并通过HTTP 206 部分下载需要的内容。如果程序有内嵌资源，程序会对比线上和本地的版本，优先使用本地的资源，并在可行的情况下使用先释放本地资源、随后使用服务器上的更新Patch的形式以减少流量损耗。
