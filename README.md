@@ -106,7 +106,20 @@ kachina-builder.exe pack -c kachina.config.json -m metadata.json -d hashed -o Ka
 [Mirror酱](https://mirrorchyan.com) 是独立的第三方软件下载平台，提供付费的软件下载加速服务。`kachina-installer`接入了Mirror酱的API，允许用户使用Mirror酱更新软件。例如，你可以结合上述的安装源选择功能，让用户选择使用自建服务器更新还是使用Mirror酱更新。
 
 
-如需使用，请设置`source`的值为`mirrorc://{rid}?channel={stable|beta|alpha}`。同时，你需要将前述产生的`metadata.json`放置到上传给Mirror酱的文件中。
+如需使用，请设置`source`的值为`mirrorc://{rid}?channel={stable|beta|alpha}`。同时，你需要将前述产生的`.metadata.json`放置到上传给Mirror酱的文件中。示例的上传格式：
+```
+upload_to_mirrorc.zip
+ - .metadata.json
+ - Main.exe
+ - Main.update.exe
+```
+也支持
+```
+upload_to_mirrorc.zip
+ - App/.metadata.json
+ - App/Main.exe
+ - App/Main.update.exe
+```
 
 Tips：Mirror酱使用独立的文件级增量更新机制，因此当选择Mirror酱作为更新源时候，将无法使用`kachina-installer`自带的版本比对、二进制Patch级增量等功能。
 
@@ -115,3 +128,5 @@ Tips：Mirror酱使用独立的文件级增量更新机制，因此当选择Mirr
 安装器的离线包是一个可寻址的文件，其中包含了安装器主体、索引、配置、元数据、程序文件、Patch文件。当安装程序运行时，如果程序没有有内嵌资源，会对配置URL中的离线包进行远程寻址，通过文件头中的索引获取资源，并通过HTTP 206 部分下载需要的内容。如果程序有内嵌资源，程序会对比线上和本地的版本，优先使用本地的资源，并在可行的情况下使用先释放本地资源、随后使用服务器上的更新Patch的形式以减少流量损耗。
 
 安装程序和dfs服务器不是强绑定关系，任何可以通过HTTP提供离线包下载的服务器都可以作为更新服务器。dfs在本项目中仅作为一个获取下载地址的API使用。
+
+更多技术细节可以看看 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/YuehaiTeam/kachina-installer) ，我觉得DeepWiki写得挺好的。
