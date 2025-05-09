@@ -18,7 +18,7 @@ use sentry_tracing::EventFilter;
 use std::time::Duration;
 use tauri::{window::Color, WindowEvent};
 use tauri_utils::{config::WindowEffectsConfig, WindowEffect};
-use tracing_subscriber::{prelude::*, EnvFilter};
+use tracing_subscriber::prelude::*;
 use utils::sentry::sentry_init;
 
 lazy_static::lazy_static! {
@@ -66,14 +66,12 @@ fn main() {
     utils::sentry::sentry_set_info();
     let sentry_layer = sentry_tracing::layer().event_filter(|md| match *md.level() {
         tracing::Level::TRACE => EventFilter::Ignore,
-        tracing::Level::DEBUG => EventFilter::Ignore,
         _ => EventFilter::Breadcrumb,
     });
-    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
-
+    let info_filter = utils::sentry::InfoFilter {};
     tracing_subscriber::registry()
         .with(sentry_layer)
-        .with(tracing_subscriber::fmt::layer().with_filter(env_filter))
+        .with(tracing_subscriber::fmt::layer().with_filter(info_filter))
         .init();
     // command is not  Command::Install, can be anything
     match command {

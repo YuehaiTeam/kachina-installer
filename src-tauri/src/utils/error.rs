@@ -20,7 +20,7 @@ impl Serialize for TACommandError {
         S: serde::Serializer,
     {
         // send to sentry on serialize
-        sentry::integrations::anyhow::capture_anyhow(&self.0);
+        super::sentry::capture_anyhow(&self.0);
         serializer.serialize_str(&format!("{:#}", self.0))
     }
 }

@@ -156,3 +156,58 @@ pub fn sentry_set_info() {
         }));
     });
 }
+
+pub struct InfoFilter {}
+
+impl InfoFilter {
+    fn is_enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
+        metadata.level() <= &tracing::Level::INFO
+    }
+}
+
+impl<S> tracing_subscriber::layer::Filter<S> for InfoFilter {
+    fn enabled(
+        &self,
+        metadata: &tracing::Metadata<'_>,
+        _: &tracing_subscriber::layer::Context<'_, S>,
+    ) -> bool {
+        self.is_enabled(metadata)
+    }
+}
+
+/** sentry-anyhow without backtrace */
+
+/// Captures an [`anyhow::Error`].
+///
+/// This will capture an anyhow error as a sentry event if a
+/// [`sentry::Client`](../../struct.Client.html) is initialised, otherwise it will be a
+/// no-op.  The event is dispatched to the thread-local hub, with semantics as described in
+/// [`Hub::current`].
+///
+/// See [module level documentation](index.html) for more information.
+///
+/// [`anyhow::Error`]: https://docs.rs/anyhow/*/anyhow/struct.Error.html
+pub fn capture_anyhow(e: &anyhow::Error) -> uuid::Uuid {
+    sentry::Hub::with_active(|hub| hub.capture_anyhow(e))
+}
+
+/// Helper function to create an event from a `anyhow::Error`.
+pub fn event_from_error(err: &anyhow::Error) -> sentry::protocol::Event<'static> {
+    let dyn_err: &dyn std::error::Error = err.as_ref();
+    #[allow(unused_mut)]
+    let mut event = sentry::event_from_error(dyn_err);
+    event
+}
+
+/// Hub extension methods for working with [`anyhow`].
+pub trait AnyhowHubExt {
+    /// Captures an [`anyhow::Error`] on a specific hub.
+    fn capture_anyhow(&self, e: &anyhow::Error) -> uuid::Uuid;
+}
+
+impl AnyhowHubExt for sentry::Hub {
+    fn capture_anyhow(&self, anyhow_error: &anyhow::Error) -> uuid::Uuid {
+        let event = event_from_error(anyhow_error);
+        self.capture_event(event)
+    }
+}

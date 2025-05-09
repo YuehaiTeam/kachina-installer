@@ -4,7 +4,10 @@ use windows::Win32::{
     System::Diagnostics::ToolHelp::PROCESSENTRY32W,
 };
 
-use crate::utils::dir::in_private_folder;
+use crate::utils::{
+    dir::in_private_folder,
+    error::{IntoTAResult, TAResult},
+};
 use anyhow::{Context, Result};
 
 pub mod config;
@@ -241,8 +244,9 @@ pub async fn find_process_by_name(name: String) -> Result<Vec<(u32, String)>> {
 }
 
 #[tauri::command]
-pub async fn get_exe_version(exe_name: String) -> String {
-    return "".to_string();
+pub async fn get_exe_version(exe_name: String) -> TAResult<String> {
+    let info = win32_version_info::VersionInfo::from_file(exe_name).into_ta_result()?;
+    return Ok(info.file_version);
 }
 
 #[tauri::command]

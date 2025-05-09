@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "tauri dev --exit-on-panic",
-    "build": "cross-env STATIC_VCRUNTIME=false tauri build && cd src-tauri/target/release && ren kachina-builder.exe kachina-builder-standalone.exe && del kachina-builder.exe && copy /b kachina-builder-standalone.exe+kachina-installer.exe kachina-builder.exe",
+    "build": "cross-env STATIC_VCRUNTIME=false tauri build -- -Z build-std=std,panic_abort -Z build-std-features=\"optimize_for_size\" && cd src-tauri/target/release && ren kachina-builder.exe kachina-builder-standalone.exe && del kachina-builder.exe && copy /b kachina-builder-standalone.exe+kachina-installer.exe kachina-builder.exe",
     "debug": "tauri build --debug && pnpm dev:uac",
     "preview": "rsbuild preview",
     "tauri": "tauri"

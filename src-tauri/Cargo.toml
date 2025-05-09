@@ -1,3 +1,4 @@
+cargo-features = ["profile-rustflags", "trim-paths"]
 [package]
 name = "kachina-installer"
 version = "0.1.0"
@@ -73,19 +74,26 @@ num_cpus = "1.16.0"
 indicatif = { version = "0.17.9", features = ["tokio"] }
 console = "0.15.10"
 rcedit = { version = "0.1.0", git = "https://github.com/Devolutions/rcedit-rs.git" }
-windows-registry = "0.5.0"
-sentry = { version = "0.37.0", features = ["anyhow"] }
-tracing-subscriber = { version = "0.3", features = [
-    "fmt",
-    "env-filter",
-    "registry",
-] }
+windows-registry = "0.5"
+sentry = { version = "0.37.0", features = [
+    "contexts",
+    "contexts",
+    "transport",
+    "reqwest",
+    "native-tls",
+], default-features = false }
+tracing-subscriber = { version = "0.3", features = ["fmt", "registry"] }
 sentry-tracing = "0.37"
-zip = { git = "https://github.com/xytoki/zip2.git" }
+zip = { git = "https://github.com/xytoki/zip2.git", default-features = false, features = [
+    "deflate",
+    "deflate64",
+    "zstd",
+] }
 anyhow = "1.0"
 reqwest-middleware = "0.4"
 tracing = "0.1"
 whoami = "1.6.0"
+win32-version-info = "0.2.0"
 
 [[bin]]
 name = "kachina-installer"
@@ -95,9 +103,15 @@ path = "src/main.rs"
 name = "kachina-builder"
 path = "src/builder/main.rs"
 
+[profile.dev]
+incremental = true # Compile your binary in smaller steps.
+rustflags = ["-Zthreads=8"] # Better compile performance.
+
 [profile.release]
 codegen-units = 1 # Allows LLVM to perform better optimization.
-lto = true        # Enables link-time-optimizations.
-opt-level = "s"   # Prioritizes small binary size. Use `3` if you prefer speed.
-panic = "abort"   # Higher performance by disabling panic handlers.
-strip = true      # Ensures debug symbols are removed.
+lto = true # Enables link-time-optimizations.
+opt-level = "s" # Prioritizes small binary size. Use `3` if you prefer speed.
+panic = "abort" # Higher performance by disabling panic handlers.
+strip = true # Ensures debug symbols are removed.
+trim-paths = "all" # Removes potentially privileged information from your binaries.
+rustflags = ["-Cdebuginfo=0", "-Zthreads=8"] # Better compile performance.
