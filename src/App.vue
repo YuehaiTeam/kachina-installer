@@ -150,18 +150,20 @@
       </template>
       <template #body v-if="Array.isArray(PROJECT_CONFIG.source)">
         <div class="card-container">
-          <div
-            class="card"
-            v-for="i in PROJECT_CONFIG.source"
-            :key="i.id"
-            :class="{ active: i.uri === selectedSource }"
-            @click="changeSelectedSource(i.uri)"
-          >
-            <Feedback v-if="i.uri.includes('=beta')" />
-            <CloudPaid v-else-if="i.uri.startsWith('mirrorc://')" />
-            <Cloud v-else />
-            <span>{{ i.name }}</span>
-          </div>
+          <template v-for="i in PROJECT_CONFIG.source">
+            <div
+              class="card"
+              v-if="!i.hidden || INSTALLER_CONFIG.args.source === i.id"
+              :key="i.id"
+              :class="{ active: i.uri === selectedSource }"
+              @click="changeSelectedSource(i.uri)"
+            >
+              <Feedback v-if="i.uri.includes('=beta')" />
+              <CloudPaid v-else-if="i.uri.startsWith('mirrorc://')" />
+              <Cloud v-else />
+              <span>{{ i.name }}</span>
+            </div>
+          </template>
         </div>
       </template>
     </Dialog>
