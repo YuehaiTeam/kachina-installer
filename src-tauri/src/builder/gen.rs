@@ -7,7 +7,7 @@ use tokio::{io::AsyncWriteExt, task::JoinSet};
 
 use crate::{
     cli::GenArgs,
-    metadata::deep_generate_metadata,
+    metadata::{deep_generate_metadata, deep_get_filelist},
     utils::{
         hash::run_hash,
         metadata::{InstallerInfo, Metadata, PatchInfo, PatchItem, RepoMetadata},
@@ -217,6 +217,7 @@ pub async fn gen_cli(args: GenArgs) {
             }
             let ignore = ignore.build().unwrap();
             let mut diffs = Vec::new();
+            let mut deletes = Vec::new();
             // loop through diff_versions
             for diff_ver in diff_vers.iter() {
                 // loop through current metadata
@@ -245,6 +246,7 @@ pub async fn gen_cli(args: GenArgs) {
                     let input_dir = args.input_dir.clone();
                     let output_dir = args.output_dir.clone();
                     let diff_ver = diff_ver.clone();
+                    let diff_ver2 = diff_ver.clone();
 
                     // spawns a background task immediatly no matter if the future is awaited
                     // https://docs.rs/tokio/latest/tokio/task/struct.JoinSet.html#method.spawn
@@ -377,6 +379,21 @@ pub async fn gen_cli(args: GenArgs) {
                             }
                         };
                         pb_main.inc(1);
+                    }
+
+                    let diff_filelist = deep_get_filelist(&diff_ver2.into())
+                        .await
+                        .expect("failed to get diff_ver file list");
+                    for file in diff_filelist.iter() {
+                        // check if file exists in current metadata
+                        if !metadata_with_installer.iter().any(|x| x.file_name == *file) {
+                            // file not found in current metadata, add to deletes
+                            println!(
+                                "File {:?} not found in current metadata, added to deletes",
+                                file
+                            );
+                            deletes.push(file.clone());
+                        }
                     }
                 }
             }

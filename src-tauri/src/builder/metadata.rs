@@ -78,3 +78,42 @@ pub async fn deep_generate_metadata(source: &PathBuf) -> Result<Vec<Metadata>, S
     }
     Ok(finished_hashes)
 }
+
+pub async fn deep_get_filelist(source: &PathBuf) -> Result<Vec<String>, String> {
+    let path = Path::new(&source);
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let mut entries = async_walkdir::WalkDir::new(source);
+    let mut files = Vec::new();
+    loop {
+        match entries.next().await {
+            Some(Ok(entry)) => {
+                let f = entry.file_type().await;
+                if f.is_err() {
+                    return Err(format!("Failed to get file type: {:?}", f.err()));
+                }
+                let f = f.unwrap();
+                if f.is_file() {
+                    let path = entry.path();
+                    let path = path.to_str();
+                    if path.is_none() {
+                        return Err("Failed to convert path to string".to_string());
+                    }
+                    let path = path.unwrap();
+                    let fin_path = path.replace("\\", "/").replacen(
+                        format!("{}/", source.to_str().unwrap()).as_str(),
+                        "",
+                        1,
+                    );
+                    files.push(fin_path);
+                }
+            }
+            Some(Err(e)) => {
+                return Err(format!("Failed to read entry: {:?}", e));
+            }
+            None => break,
+        }
+    }
+    Ok(files)
+}
