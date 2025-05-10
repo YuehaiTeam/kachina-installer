@@ -892,9 +892,9 @@ async function runInstall(): Promise<void> {
     }
   }
   if (diff_files.length === 0) {
+    await finishInstall(latest_meta);
     percent.value = 100;
     step.value = 4;
-    await finishInstall(latest_meta);
     return;
   }
   if (
@@ -1041,14 +1041,17 @@ async function runMirrorcInstall() {
   }
   step.value = 2;
   if (await installPrepare()) return runMirrorcInstall();
-  const source_version = await invoke<string>('get_exe_version', {
-    exeName: `${source.value}${sep()}${PROJECT_CONFIG.exeName}`,
-  });
+  const source_version = await invoke<{ product_version: string }>(
+    'get_exe_version',
+    {
+      exeName: `${source.value}${sep()}${PROJECT_CONFIG.exeName}`,
+    },
+  );
   const source_url = new URL(selectedSource.value);
   const mirrorc_status = await invoke<MirrorcUpdate>('get_mirrorc_status', {
     resourceId: source_url.hostname,
     cdk: mirrorcKey.value,
-    currentVersion: source_version,
+    currentVersion: source_version.product_version,
     channel: source_url.searchParams.get('channel') || 'stable',
   });
   // 400	1001	INVALID_PARAMS	参数不正确，请参考集成文档
@@ -1110,6 +1113,12 @@ async function runMirrorcInstall() {
     );
     return;
   }
+  if (mirrorc_status.data?.version_name === source_version.product_version) {
+    await finishInstall();
+    percent.value = 100;
+    step.value = 4;
+    return;
+  }
   if (!mirrorc_status.data?.url) {
     await dialog_error(
       '从Mirror酱获取更新失败: 下载地址为空，请联系Mirror酱客服',
@@ -1125,6 +1134,9 @@ async function runMirrorcInstall() {
     return;
   }
   console.log(mirrorc_status);
+  log('Mirrorc source version', source_version.product_version);
+  log('Mirrorc target version', mirrorc_status.data.version_name);
+  log('Mirrorc update mode', mirrorc_status.data.update_type);
   log('Mirrorc URL', mirrorc_status.data.url);
   const mirrorc_zip_url = mirrorc_status.data.url;
   const mirrorc_zip_path = `${source.value}${sep()}KachinaInstaller_Mirrorc_${mirrorc_status.data.sha256}.zip`;
@@ -1204,7 +1216,7 @@ async function getLnkPath() {
 }
 
 async function finishInstall(
-  latest_meta: InvokeGetDfsMetadataRes,
+  latest_meta?: InvokeGetDfsMetadataRes,
 ): Promise<void> {
   sendInsight(getInsightBase(), 'finish');
   const { program, desktop, uninstall } = await getLnkPath();
@@ -1230,24 +1242,26 @@ async function finishInstall(
       dialog_error(`创建卸载程序失败: ${e}`, '出错了');
       warn(e);
     }
-    try {
-      await ipcWriteRegistry(
-        {
-          reg_name: PROJECT_CONFIG.regName,
-          name: PROJECT_CONFIG.appName,
-          version: latest_meta.tag_name || '0.0',
-          exe: `${source.value}${sep()}${PROJECT_CONFIG.exeName}`,
-          source: source.value,
-          uninstaller: `${source.value}${sep()}${PROJECT_CONFIG.uninstallName}`,
-          metadata: JSON.stringify(latest_meta),
-          size: latest_meta.hashed.reduce((acc, cur) => acc + cur.size, 0),
-          publisher: PROJECT_CONFIG.publisher,
-        },
-        needElevate.value,
-      );
-    } catch (e) {
-      dialog_error(`写入注册表失败: ${e}`, '出错了');
-      warn(e);
+    if (latest_meta) {
+      try {
+        await ipcWriteRegistry(
+          {
+            reg_name: PROJECT_CONFIG.regName,
+            name: PROJECT_CONFIG.appName,
+            version: latest_meta.tag_name || '0.0',
+            exe: `${source.value}${sep()}${PROJECT_CONFIG.exeName}`,
+            source: source.value,
+            uninstaller: `${source.value}${sep()}${PROJECT_CONFIG.uninstallName}`,
+            metadata: JSON.stringify(latest_meta),
+            size: latest_meta.hashed.reduce((acc, cur) => acc + cur.size, 0),
+            publisher: PROJECT_CONFIG.publisher,
+          },
+          needElevate.value,
+        );
+      } catch (e) {
+        dialog_error(`写入注册表失败: ${e}`, '出错了');
+        warn(e);
+      }
     }
     await ipcCreateLnk(
       `${source.value}${sep()}${PROJECT_CONFIG.uninstallName}`,

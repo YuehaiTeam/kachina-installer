@@ -243,10 +243,52 @@ pub async fn find_process_by_name(name: String) -> Result<Vec<(u32, String)>> {
     Ok(processes)
 }
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[non_exhaustive]
+pub struct VersionInfo {
+    /// The comments associated with the file.
+    pub comments: String,
+    /// The name of the company that produced the file.
+    pub company_name: String,
+    /// The description of the file.
+    pub file_description: String,
+    /// The file version number.
+    pub file_version: String,
+    /// The internal name of the file, if one exists.
+    pub internal_name: String,
+    /// The copyright notices that apply to the specified file.
+    pub legal_copyright: String,
+    /// The trademarks and registered trademarks that apply to the file.
+    pub legal_trademarks: String,
+    /// The name the file was created with.
+    pub original_filename: String,
+    /// The name of the product this file is distributed with.
+    pub product_name: String,
+    /// The version of the product this file is distributed with.
+    pub product_version: String,
+    /// The private build information for the file.
+    pub private_build: String,
+    /// The special build information for the file.
+    pub special_build: String,
+}
+
 #[tauri::command]
-pub async fn get_exe_version(exe_name: String) -> TAResult<String> {
+pub async fn get_exe_version(exe_name: String) -> TAResult<VersionInfo> {
     let info = win32_version_info::VersionInfo::from_file(exe_name).into_ta_result()?;
-    return Ok(info.file_version);
+    return Ok(VersionInfo {
+        comments: info.comments,
+        company_name: info.company_name,
+        file_description: info.file_description,
+        file_version: info.file_version,
+        internal_name: info.internal_name,
+        legal_copyright: info.legal_copyright,
+        legal_trademarks: info.legal_trademarks,
+        original_filename: info.original_filename,
+        product_name: info.product_name,
+        product_version: info.product_version,
+        private_build: info.private_build,
+        special_build: info.special_build,
+    });
 }
 
 #[tauri::command]

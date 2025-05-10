@@ -15,9 +15,9 @@ pub static MIRRORC_CRED_PREFIX: &str = "KachinaInstaller_MirrorChyanCDK_";
 
 #[derive(serde::Deserialize, serde::Serialize, Clone, Debug)]
 pub struct MirrorcChangeset {
-    pub added: Vec<String>,
-    pub deleted: Vec<String>,
-    pub modified: Vec<String>,
+    pub added: Option<Vec<String>>,
+    pub deleted: Option<Vec<String>>,
+    pub modified: Option<Vec<String>>,
 }
 
 pub async fn run_mirrorc_install(
@@ -99,7 +99,10 @@ pub fn run_mirrorc_install_sync(
             .strip_prefix(&prefix)
             .unwrap_or(file.name())
             .to_string();
-        if file_name == "changes.json" || file_name == ".metadata.json" || file_name == format!("{}.metadata.json", prefix) {
+        if file_name == "changes.json"
+            || file_name == ".metadata.json"
+            || file_name == format!("{}.metadata.json", prefix)
+        {
             continue;
         }
         let mut out_path = std::path::PathBuf::from(target_path);
@@ -143,13 +146,15 @@ pub fn run_mirrorc_install_sync(
 
     // delete files in target_path that are not in the changeset
     if let Some(changeset) = changeset.as_ref() {
-        for file in &changeset.deleted {
-            let mut out_path = std::path::PathBuf::from(target_path);
-            let strip_path = file.strip_prefix(&prefix).unwrap_or(file);
-            out_path.push(strip_path);
-            if out_path.exists() {
-                std::fs::remove_file(out_path).into_ta_result()?;
-                notify(serde_json::json!({"type": "delete", "file": strip_path}));
+        if let Some(deletes) = changeset.deleted.as_ref() {
+            for file in deletes {
+                let mut out_path = std::path::PathBuf::from(target_path);
+                let strip_path = file.strip_prefix(&prefix).unwrap_or(file);
+                out_path.push(strip_path);
+                if out_path.exists() {
+                    std::fs::remove_file(out_path).into_ta_result()?;
+                    notify(serde_json::json!({"type": "delete", "file": strip_path}));
+                }
             }
         }
     }

@@ -226,9 +226,9 @@ type MirrorcStatus =
     };
 
 interface MirrorcChangeset {
-  added: string[];
-  deleted: string[];
-  modified: string[];
+  added?: string[];
+  deleted?: string[];
+  modified?: string[];
 }
 export interface MirrorcUpdate {
   code: number;
