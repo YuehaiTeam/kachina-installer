@@ -1041,12 +1041,17 @@ async function runMirrorcInstall() {
   }
   step.value = 2;
   if (await installPrepare()) return runMirrorcInstall();
-  const source_version = await invoke<{ product_version: string }>(
-    'get_exe_version',
-    {
-      exeName: `${source.value}${sep()}${PROJECT_CONFIG.exeName}`,
-    },
-  );
+  let source_version = {
+    product_version: '',
+  } as { product_version: string };
+  try {
+    source_version = await invoke<{ product_version: string }>(
+      'get_exe_version',
+      {
+        exeName: `${source.value}${sep()}${PROJECT_CONFIG.exeName}`,
+      },
+    );
+  } catch (e) {}
   const source_url = new URL(selectedSource.value);
   const mirrorc_status = await invoke<MirrorcUpdate>('get_mirrorc_status', {
     resourceId: source_url.hostname,
