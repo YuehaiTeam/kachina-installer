@@ -16,6 +16,15 @@ pub fn wincred_write(target: &str, token: &str, comment: &str) -> TAResult<()> {
     let mut comment = comment.encode_utf16().collect::<Vec<u16>>();
     comment.push(0); // Null-terminate the string
     let mut target_name = target.encode_utf16().collect::<Vec<u16>>();
+    let token_utf16 = token.encode_utf16().collect::<Vec<u16>>();
+    let token_bytes = token_utf16
+        .iter()
+        .map(|c| {
+            let bytes = c.to_ne_bytes();
+            [bytes[0], bytes[1]]
+        })
+        .flatten()
+        .collect::<Vec<u8>>();
     target_name.push(0); // Null-terminate the string
     let credential = CREDENTIALW {
         Flags: CRED_FLAGS(0),
@@ -26,13 +35,13 @@ pub fn wincred_write(target: &str, token: &str, comment: &str) -> TAResult<()> {
             dwLowDateTime: 0,
             dwHighDateTime: 0,
         },
-        CredentialBlobSize: token.len() as u32,
-        CredentialBlob: token.as_bytes().as_ptr() as *mut u8,
+        CredentialBlobSize: token_bytes.len() as u32,
+        CredentialBlob: token_bytes.as_ptr() as *mut u8,
         Persist: CRED_PERSIST_LOCAL_MACHINE,
         AttributeCount: 0,
         Attributes: std::ptr::null_mut(),
         TargetAlias: PWSTR(std::ptr::null_mut()),
-        UserName: PWSTR(std::ptr::null_mut()),
+        UserName: PWSTR(target_name.as_mut_ptr()),
     };
     unsafe { CredWriteW(&credential, 0) }
         .map_err(|e| anyhow::anyhow!(e))
@@ -63,8 +72,12 @@ pub fn wincred_read(target: &str) -> TAResult<String> {
         )
         .to_vec()
     };
+    let token_16 = token
+        .chunks(2)
+        .map(|chunk| u16::from_ne_bytes([chunk[0], chunk.get(1).copied().unwrap_or(0)]))
+        .collect::<Vec<u16>>();
     unsafe { CredFree(credential_ptr as *const std::ffi::c_void) };
-    Ok(String::from_utf8(token)
+    Ok(String::from_utf16(&token_16)
         .map_err(|e| anyhow::anyhow!(e))
         .context("READ_CRED_ERR")?)
 }
