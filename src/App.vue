@@ -1034,7 +1034,7 @@ async function runInstall(): Promise<void> {
 
 async function runMirrorcInstall() {
   if (!mirrorcKey.value) {
-    await dialog_error('请先设置 Mirror酱 CDK', '出错了');
+    changeSelectedSource(source.value);
     return;
   }
   step.value = 2;
@@ -1055,6 +1055,8 @@ async function runMirrorcInstall() {
     cdk: mirrorcKey.value,
     currentVersion: source_version.product_version,
     channel: source_url.searchParams.get('channel') || 'stable',
+    arch: source_url.searchParams.get('arch') || undefined,
+    os: source_url.searchParams.get('os') || undefined,
   });
   // 400	1001	INVALID_PARAMS	参数不正确，请参考集成文档
   // 400	7001	KEY_EXPIRED	CDK 已过期
@@ -1070,42 +1072,56 @@ async function runMirrorcInstall() {
   switch (mirrorc_status.code) {
     case 1001:
       await dialog_error('Mirror酱参数错误，请检查打包配置', '出错了');
+      step.value = 1;
       return;
     case 7001:
       await dialog_error('Mirror酱 CDK 已过期', '出错了');
+      dialog.value = 'source';
+      step.value = 1;
       return;
     case 7002:
       await dialog_error(
         'Mirror酱 CDK 错误，请检查设置的 CDK 是否正确',
         '出错了',
       );
+      step.value = 1;
+      dialog.value = 'source';
       return;
     case 7003:
       await dialog_error(
         'Mirror酱 CDK 今日下载次数已达上限，请更换 CDK 或明天再试',
         '出错了',
       );
+      step.value = 1;
       return;
     case 7004:
       await dialog_error(
         'Mirror酱 CDK 类型和待下载的资源不匹配，请检查设置的 CDK 是否正确',
         '出错了',
       );
+      step.value = 1;
+      dialog.value = 'source';
       return;
     case 7005:
       await dialog_error('Mirror酱 CDK 已被封禁，请更换 CDK', '出错了');
+      dialog.value = 'source';
+      step.value = 1;
       return;
     case 8001:
       await dialog_error('从Mirror酱获取更新失败，请检查打包配置', '出错了');
+      step.value = 1;
       return;
     case 8002:
       await dialog_error('Mirror酱参数错误，请检查打包配置', '出错了');
+      step.value = 1;
       return;
     case 8003:
       await dialog_error('Mirror酱参数错误，请检查打包配置', '出错了');
+      step.value = 1;
       return;
     case 8004:
       await dialog_error('Mirror酱参数错误，请检查打包配置', '出错了');
+      step.value = 1;
       return;
   }
   if (mirrorc_status.code !== 0) {
@@ -1113,6 +1129,7 @@ async function runMirrorcInstall() {
       `从Mirror酱获取更新失败: ${mirrorc_status.msg}，请联系Mirror酱客服`,
       '出错了',
     );
+    step.value = 1;
     return;
   }
   if (mirrorc_status.data?.version_name === source_version.product_version) {
