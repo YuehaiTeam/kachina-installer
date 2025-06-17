@@ -662,13 +662,11 @@ async function getSource(scan: boolean): Promise<InstallerConfig> {
   });
 }
 
-async function installPrepare(
-  latest_meta?: InvokeGetDfsMetadataRes,
-): Promise<boolean> {
+async function installPrepare(version: string): Promise<boolean> {
   await ipPrepare(needElevate.value);
   sendInsight(
     getInsightBase(),
-    `${isUpdate.value ? 'update' : 'install'}/${INSTALLER_CONFIG.embedded_index?.length ? 'packed/' : ''}${latest_meta?.tag_name}`,
+    `${isUpdate.value ? 'update' : 'install'}/${INSTALLER_CONFIG.embedded_index?.length ? 'packed/' : ''}${version}`,
   );
   const target_exe_path = `${source.value}${sep()}${PROJECT_CONFIG.exeName}`;
   const runningExes =
@@ -813,7 +811,7 @@ async function runInstall(): Promise<void> {
       latest_meta.hashed.push(installerMeta);
     }
   }
-  if (await installPrepare()) return runInstall();
+  if (await installPrepare(latest_meta?.tag_name)) return runInstall();
   let hashKey = '';
   if (latest_meta.hashed.every((e) => e.md5)) {
     hashKey = 'md5';
@@ -1040,7 +1038,6 @@ async function runMirrorcInstall() {
     return;
   }
   step.value = 2;
-  if (await installPrepare()) return runMirrorcInstall();
   let source_version = {
     product_version: '',
   } as { product_version: string };
@@ -1124,6 +1121,12 @@ async function runMirrorcInstall() {
     step.value = 4;
     return;
   }
+  if (
+    await installPrepare(
+      `${mirrorc_status.data?.version_name || 'unknown'}-mirrorc`,
+    )
+  )
+    return runMirrorcInstall();
   if (!mirrorc_status.data?.url) {
     await dialog_error(
       '从Mirror酱获取更新失败: 下载地址为空，请联系Mirror酱客服',
@@ -1645,7 +1648,7 @@ function setUacByState(
 }
 function openMirrorc() {
   invoke('launch', {
-    path: 'https://mirrorchyan.com',
+    path: `https://mirrorchyan.com/?source=KachinaInstaller-${PROJECT_CONFIG.appName}`,
   });
 }
 </script>
