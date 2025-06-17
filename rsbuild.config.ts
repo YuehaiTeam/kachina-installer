@@ -1,7 +1,6 @@
 import { defineConfig } from '@rsbuild/core';
 import { pluginVue } from '@rsbuild/plugin-vue';
-import CompressionPlugin from 'compression-webpack-plugin';
-import PurgeCSSPlugin from '@fullhuman/postcss-purgecss';
+import { purgeCSSPlugin } from '@fullhuman/postcss-purgecss';
 
 export default defineConfig({
   server: {
@@ -43,10 +42,11 @@ export default defineConfig({
         },
       },
     },
+    // @ts-expect-error -- postcss type not compatible
     postcss: {
       postcssOptions: {
         plugins: [
-          PurgeCSSPlugin({
+          purgeCSSPlugin({
             safelist: [/^(?!h[1-6]).*$/],
             variables: true,
           }),
