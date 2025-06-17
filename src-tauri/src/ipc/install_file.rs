@@ -86,7 +86,9 @@ pub async fn ipc_install_file(
                 progress_noti,
             )
             .await?;
-            verify_hash(&target, args.md5, args.xxh).await?;
+            if args.md5.is_some() || args.xxh.is_some() {
+                verify_hash(&target, args.md5, args.xxh).await?;
+            }
             Ok(serde_json::json!(res))
         }
         InstallFileMode::Patch { source, diff_size } => {
@@ -98,7 +100,9 @@ pub async fn ipc_install_file(
                 override_old_path,
             )
             .await?;
-            verify_hash(&target, args.md5, args.xxh).await?;
+            if args.md5.is_some() || args.xxh.is_some() {
+                verify_hash(&target, args.md5, args.xxh).await?;
+            }
             Ok(serde_json::json!(res))
         }
         InstallFileMode::HybridPatch { diff, source } => {
@@ -119,7 +123,9 @@ pub async fn ipc_install_file(
                 None,
             )
             .await?;
-            verify_hash(&target, args.md5, args.xxh).await?;
+            if args.md5.is_some() || args.xxh.is_some() {
+                verify_hash(&target, args.md5, args.xxh).await?;
+            }
             Ok(serde_json::json!(()))
         }
     }
