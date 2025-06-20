@@ -550,13 +550,13 @@ import {
   warn,
 } from './api/ipc';
 import IconSheild from './IconSheild.vue';
-import { version_compare } from './utils/version';
 import { getRuntimeName } from './consts';
 import Dialog from './Dialog.vue';
 import Cloud from './Cloud.vue';
 import CloudPaid from './CloudPaid.vue';
 import Feedback from './Feedback.vue';
 import FInput from './FInput.vue';
+import { compare } from 'compare-versions';
 
 const init = ref(false);
 
@@ -781,6 +781,7 @@ async function runInstall(): Promise<void> {
   } catch (e) {
     error(e);
   }
+  let meta_tag = '';
   if (!latest_meta && !online_meta) {
     await dialog_error('获取更新信息失败，请检查网络连接');
     step.value = 1;
@@ -791,7 +792,7 @@ async function runInstall(): Promise<void> {
   } else if (
     online_meta &&
     online_meta.tag_name !== latest_meta.tag_name &&
-    version_compare(online_meta.tag_name, latest_meta.tag_name) > 0
+    compare(online_meta.tag_name, latest_meta.tag_name, '>')
   ) {
     log('Version update detected');
     if (
@@ -801,6 +802,7 @@ async function runInstall(): Promise<void> {
         (INSTALLER_CONFIG.embedded_index?.length || 0) <= 0) ||
         (await confirm('当前安装包不是最新版本，是否直接安装最新版本？')))
     ) {
+      meta_tag = latest_meta.tag_name;
       latest_meta = online_meta;
     } else {
       log('Has version update but use local meta');
@@ -829,7 +831,12 @@ async function runInstall(): Promise<void> {
       latest_meta.hashed.push(installerMeta);
     }
   }
-  if (await installPrepare(latest_meta?.tag_name)) return runInstall();
+  if (
+    await installPrepare(
+      meta_tag ? `${meta_tag}-update` : latest_meta?.tag_name,
+    )
+  )
+    return runInstall();
   let hashKey = '';
   if (latest_meta.hashed.every((e) => e.md5)) {
     hashKey = 'md5';

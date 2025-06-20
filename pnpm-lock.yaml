@@ -17,6 +17,9 @@ importers:
       async:
         specifier: ^3.2.6
         version: 3.2.6
+      compare-versions:
+        specifier: ^6.1.1
+        version: 6.1.1
       uuid:
         specifier: ^11.1.0
         version: 11.1.0
@@ -680,6 +683,9 @@ packages:
 
   commander@2.20.3:
     resolution: {integrity: sha512-GpVkmM8vF2vQUkj2LvZmD35JxeJOLCwJ9cUkugyk2nuhbv3+mJvpLYYt+0+USMxE+oj+ey/lJEnhZw75x/OMcQ==}
+
+  compare-versions@6.1.1:
+    resolution: {integrity: sha512-4hm4VPpIecmlg59CHXnRDnqGplJFrbLG4aFEl5vl6cK1u76ws3LLvX7ikFnTDl5vo39sjWD6AaDPYodJp/NNHg==}
 
   compression-webpack-plugin@11.1.0:
     resolution: {integrity: sha512-zDOQYp10+upzLxW+VRSjEpRRwBXJdsb5lBMlRxx1g8hckIFBpe3DTI0en2w7h+beuq89576RVzfiXrkdPGrHhA==}
@@ -2006,6 +2012,8 @@ snapshots:
   commander@12.1.0: {}
 
   commander@2.20.3: {}
+
+  compare-versions@6.1.1: {}
 
   compression-webpack-plugin@11.1.0(webpack@5.99.9):
     dependencies:
