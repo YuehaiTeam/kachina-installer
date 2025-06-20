@@ -127,10 +127,15 @@
           <button class="btn btn-install" @click="launch">启动</button>
         </div>
         <div class="uninstall" v-if="step === 5">
-          <span class="fui-Spinner__spinner">
-            <span class="fui-Spinner__spinnerTail"></span>
-          </span>
-          <button class="btn btn-install" disabled>卸载中</button>
+          <button class="btn btn-install" disabled>
+            <span
+              class="fui-Spinner__spinner"
+              style="width: 16px; height: 16px; margin-right: 8px"
+            >
+              <span class="fui-Spinner__spinnerTail"></span>
+            </span>
+            卸载中
+          </button>
         </div>
         <div class="finish" v-if="step === 6">
           <div class="finish-text">
@@ -198,7 +203,11 @@
           :disabled="mirrorcChecking"
           @click="changeMirrorcKey"
         >
-          <span v-if="mirrorcChecking" class="fui-Spinner__spinner">
+          <span
+            v-if="mirrorcChecking"
+            class="fui-Spinner__spinner"
+            style="width: 16px; height: 16px; margin-right: 8px"
+          >
             <span class="fui-Spinner__spinnerTail"></span>
           </span>
           确定
