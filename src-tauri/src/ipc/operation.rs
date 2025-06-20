@@ -19,6 +19,8 @@ pub enum IpcOperation {
     },
     InstallRuntime {
         tag: String,
+        offset: Option<usize>,
+        size: Option<usize>,
     },
     CheckLocalFiles {
         source: String,
@@ -98,8 +100,8 @@ pub async fn run_opr(
                 crate::installer::uninstall::rm_list(list).await
             ))
         }
-        IpcOperation::InstallRuntime { tag } => Ok(serde_json::json!(
-            crate::installer::runtimes::install_runtime(tag, notify).await?
+        IpcOperation::InstallRuntime { tag, offset, size } => Ok(serde_json::json!(
+            crate::installer::runtimes::install_runtime(tag, offset, size, notify).await?
         )),
         IpcOperation::CheckLocalFiles {
             source,

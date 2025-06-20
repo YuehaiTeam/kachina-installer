@@ -43,9 +43,20 @@ pub struct GenArgs {
     pub zstd_concurrency: usize,
 }
 
+#[derive(Debug, Clone, clap::Args)]
+pub struct AppendArgs {
+    #[clap(long, short = 'o', default_value = "output.exe")]
+    pub output: PathBuf,
+    #[clap(long, short = 'f')]
+    pub file: Vec<PathBuf>,
+    #[clap(long, short = 'n')]
+    pub name: Vec<String>,
+}
+
 #[derive(Subcommand, Clone, Debug)]
 pub enum Command {
     Pack(PackArgs),
+    Append(AppendArgs),
     Gen(GenArgs),
 }
 

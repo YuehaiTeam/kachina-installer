@@ -1,18 +1,20 @@
 use anyhow::{Context, Result};
 use windows::Win32::System::Threading::CREATE_NO_WINDOW;
 
-use crate::fs::{create_http_stream, create_target_file, progressed_copy};
+use crate::fs::{create_http_stream, create_local_stream, create_target_file, progressed_copy};
 
 pub async fn install_runtime(
     tag: String,
+    offset: Option<usize>,
+    size: Option<usize>,
     notify: impl Fn(serde_json::Value) + std::marker::Send + 'static,
 ) -> Result<String> {
     // if tag startswith Microsoft.DotNet, install .NET runtime
     if tag.starts_with("Microsoft.DotNet") {
-        return install_dotnet(tag, notify).await;
+        return install_dotnet(tag, offset, size, notify).await;
     }
     if tag.starts_with("Microsoft.VCRedist") {
-        return install_vcredist(tag, notify).await;
+        return install_vcredist(tag, offset, size, notify).await;
     }
     // else not supported
     Err(anyhow::anyhow!("UNSUPPORTED_RUNTIME"))
@@ -27,6 +29,8 @@ pub async fn install_runtime(
  */
 pub async fn install_dotnet(
     tag: String,
+    offset: Option<usize>,
+    size: Option<usize>,
     notify: impl Fn(serde_json::Value) + std::marker::Send + 'static,
 ) -> Result<String> {
     let tag_without_version = tag.split('.').take(3).collect::<Vec<&str>>().join(".");
@@ -65,37 +69,52 @@ pub async fn install_dotnet(
             }
         }
     }
-    let mut vernum = tag.split('.').skip(3).collect::<Vec<&str>>().join(".");
-    // if vernum is release version, get real version
-    if vernum.len() == 1 || vernum.len() == 2 {
-        let relver = if vernum.len() == 1 {
-            format!("{}.0", vernum)
-        } else {
-            vernum.clone()
-        };
-        let url = runtime.0.replace("$", &relver);
-        let resp = reqwest::get(&url)
-            .await
-            .context("RUNTIME_VERSION_FETCH_ERR")?;
-        if !resp.status().is_success() {
-            return Err(anyhow::anyhow!("RUNTIME_VERSION_API_ERR"));
-        }
-        let text = resp.text().await.context("RUNTIME_VERSION_READ_ERR")?;
-        vernum = text.trim().to_string();
-    }
-    // get real download url
-    let url = runtime.1.replace("$", &vernum);
     // download to tmp folder
     let temp_dir = std::env::temp_dir();
     let installer_path = temp_dir
         .as_path()
         .join(format!("Kachina.RuntimePackage.{}.exe", tag));
-    let (mut stream, len) = create_http_stream(&url, 0, 0, true)
-        .await
-        .context("RUNTIME_DOWNLOAD_ERR")?;
     let mut target = create_target_file(installer_path.as_os_str().to_str().unwrap())
         .await
         .context("CREATE_TARGET_FILE_ERR")?;
+    let (mut stream, len) = if offset.is_some() || size.is_some() {
+        // runtime packed, just extract and run
+        let stream = create_local_stream(offset.unwrap(), size.unwrap(), true)
+            .await
+            .context("RUNTIME_EXTRACT_ERR")?;
+        tracing::info!(
+            "Extracted {} installer from local stream, offset: {}, size: {}",
+            tag,
+            offset.unwrap(),
+            size.unwrap()
+        );
+        (stream, size.unwrap())
+    } else {
+        let mut vernum = tag.split('.').skip(3).collect::<Vec<&str>>().join(".");
+        // if vernum is release version, get real version
+        if vernum.len() == 1 || vernum.len() == 2 {
+            let relver = if vernum.len() == 1 {
+                format!("{}.0", vernum)
+            } else {
+                vernum.clone()
+            };
+            let url = runtime.0.replace("$", &relver);
+            let resp = reqwest::get(&url)
+                .await
+                .context("RUNTIME_VERSION_FETCH_ERR")?;
+            if !resp.status().is_success() {
+                return Err(anyhow::anyhow!("RUNTIME_VERSION_API_ERR"));
+            }
+            let text = resp.text().await.context("RUNTIME_VERSION_READ_ERR")?;
+            vernum = text.trim().to_string();
+        }
+        // get real download url
+        let url = runtime.1.replace("$", &vernum);
+        let (stream, len) = create_http_stream(&url, 0, 0, true)
+            .await
+            .context("RUNTIME_DOWNLOAD_ERR")?;
+        (stream, len.try_into().unwrap_or(0))
+    };
     let progress_noti = move |downloaded: usize| {
         notify(serde_json::json!((downloaded, len)));
     };
@@ -133,6 +152,8 @@ pub fn check_vcredist(reg: &str) -> bool {
 
 pub async fn install_vcredist(
     tag: String,
+    offset: Option<usize>,
+    size: Option<usize>,
     notify: impl Fn(serde_json::Value) + std::marker::Send + 'static,
 ) -> Result<String> {
     let x64_prefix = "SOFTWARE\\Microsoft\\VisualStudio\\14.0\\VC\\Runtimes\\";
@@ -159,9 +180,24 @@ pub async fn install_vcredist(
     let installer_path = temp_dir
         .as_path()
         .join(format!("Kachina.RuntimePackage.{}.exe", tag));
-    let (mut stream, len) = create_http_stream(url, 0, 0, true)
-        .await
-        .context("RUNTIME_DOWNLOAD_ERR")?;
+    let (mut stream, len) = if offset.is_some() || size.is_some() {
+        // runtime packed, just extract and run
+        let stream = create_local_stream(offset.unwrap(), size.unwrap(), true)
+            .await
+            .context("RUNTIME_EXTRACT_ERR")?;
+        tracing::info!(
+            "Extracted {} installer from local stream, offset: {}, size: {}",
+            tag,
+            offset.unwrap(),
+            size.unwrap()
+        );
+        (stream, size.unwrap())
+    } else {
+        let (stream, len) = create_http_stream(url, 0, 0, true)
+            .await
+            .context("RUNTIME_DOWNLOAD_ERR")?;
+        (stream, len.try_into().unwrap_or(0))
+    };
     let mut target = create_target_file(installer_path.as_os_str().to_str().unwrap())
         .await
         .context("CREATE_TARGET_FILE_ERR")?;

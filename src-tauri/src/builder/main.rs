@@ -1,6 +1,7 @@
 use clap::Parser;
 use cli::Command;
 
+mod append;
 mod cli;
 mod gen;
 mod local;
@@ -28,6 +29,7 @@ async fn async_main() {
     match command {
         Command::Pack(args) => pack::pack_cli(args).await,
         Command::Gen(args) => gen::gen_cli(args).await,
+        Command::Append(args) => append::append_cli(args).await,
     }
     let duration = now.elapsed();
     println!("Finished in {:?}", duration);
