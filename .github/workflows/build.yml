@@ -44,7 +44,7 @@ jobs:
       - name: Artifact
         uses: actions/upload-artifact@v4.6.0
         with:
-          path: src-tauri/target/release/*.exe
+          path: src-tauri/target/release/*.{exe,pdb}
       - name: Sentry upload
         if: startsWith(github.ref, 'refs/tags/')
         env:
