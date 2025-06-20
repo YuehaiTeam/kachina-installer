@@ -128,7 +128,7 @@ pub async fn pack_cli(args: PackArgs) {
                         eprintln!("No hash found for patch: {:?}", patch.file_name);
                         return;
                     };
-                    let patch_fn = format!("{}_{}", from_hash, to_hash);
+                    let patch_fn = format!("{from_hash}_{to_hash}");
                     if files.iter().any(|x: &PackFile| x.name == *patch_fn) {
                         continue;
                     }
@@ -310,7 +310,7 @@ pub async fn pack(
     // check if pe_str is really 'This program cannot be run in DOS mode'
     let pe_string = std::str::from_utf8_mut(pe_str).unwrap();
     if pe_string != "This program cannot be run in DOS mode" {
-        eprintln!("Failed to find pe string: {:?}", pe_string);
+        eprintln!("Failed to find pe string: {pe_string:?}");
         return;
     }
     pe_str.copy_from_slice(&index_pre);

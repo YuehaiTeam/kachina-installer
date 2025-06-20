@@ -22,7 +22,7 @@ pub fn check_elevated() -> windows::core::Result<bool> {
         let mut token_info: TOKEN_ELEVATION = zeroed();
 
         if let Err(e) = open_result {
-            println!("OpenProcessToken {:?}", e);
+            println!("OpenProcessToken {e:?}");
             return Err(e);
         }
 
@@ -33,7 +33,7 @@ pub fn check_elevated() -> windows::core::Result<bool> {
             size_of::<TOKEN_ELEVATION>() as u32,
             &mut ret_len,
         ) {
-            println!("GetTokenInformation {:?}", e);
+            println!("GetTokenInformation {e:?}");
 
             return Err(e);
         }

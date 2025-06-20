@@ -175,7 +175,7 @@ impl<S> tracing_subscriber::layer::Filter<S> for InfoFilter {
     }
 }
 
-/** sentry-anyhow without backtrace */
+// sentry-anyhow without backtrace
 
 /// Captures an [`anyhow::Error`].
 ///

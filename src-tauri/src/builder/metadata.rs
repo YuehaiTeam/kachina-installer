@@ -41,7 +41,7 @@ pub async fn deep_generate_metadata(source: &PathBuf) -> Result<Vec<Metadata>, S
                 }
             }
             Some(Err(e)) => {
-                return Err(format!("Failed to read entry: {:?}", e));
+                return Err(format!("Failed to read entry: {e:?}"));
             }
             None => break,
         }
@@ -67,11 +67,11 @@ pub async fn deep_generate_metadata(source: &PathBuf) -> Result<Vec<Metadata>, S
     let mut finished_hashes = Vec::new();
     while let Some(res) = joinset.join_next().await {
         if let Err(e) = res {
-            return Err(format!("Failed to run hashing thread: {:?}", e));
+            return Err(format!("Failed to run hashing thread: {e:?}"));
         }
         let res = res.unwrap();
         if let Err(e) = res {
-            return Err(format!("Failed to finish hashing: {:?}", e));
+            return Err(format!("Failed to finish hashing: {e:?}"));
         }
         let res = res.unwrap();
         finished_hashes.push(res);
@@ -110,7 +110,7 @@ pub async fn deep_get_filelist(source: &PathBuf) -> Result<Vec<String>, String> 
                 }
             }
             Some(Err(e)) => {
-                return Err(format!("Failed to read entry: {:?}", e));
+                return Err(format!("Failed to read entry: {e:?}"));
             }
             None => break,
         }

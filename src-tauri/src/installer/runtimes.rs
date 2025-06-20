@@ -73,7 +73,7 @@ pub async fn install_dotnet(
     let temp_dir = std::env::temp_dir();
     let installer_path = temp_dir
         .as_path()
-        .join(format!("Kachina.RuntimePackage.{}.exe", tag));
+        .join(format!("Kachina.RuntimePackage.{tag}.exe"));
     let mut target = create_target_file(installer_path.as_os_str().to_str().unwrap())
         .await
         .context("CREATE_TARGET_FILE_ERR")?;
@@ -94,7 +94,7 @@ pub async fn install_dotnet(
         // if vernum is release version, get real version
         if vernum.len() == 1 || vernum.len() == 2 {
             let relver = if vernum.len() == 1 {
-                format!("{}.0", vernum)
+                format!("{vernum}.0")
             } else {
                 vernum.clone()
             };
@@ -179,7 +179,7 @@ pub async fn install_vcredist(
     let temp_dir = std::env::temp_dir();
     let installer_path = temp_dir
         .as_path()
-        .join(format!("Kachina.RuntimePackage.{}.exe", tag));
+        .join(format!("Kachina.RuntimePackage.{tag}.exe"));
     let (mut stream, len) = if offset.is_some() || size.is_some() {
         // runtime packed, just extract and run
         let stream = create_local_stream(offset.unwrap(), size.unwrap(), true)

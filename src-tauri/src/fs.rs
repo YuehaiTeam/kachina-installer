@@ -161,9 +161,8 @@ pub async fn create_http_stream(
     let res = res.send().await.context("HTTP_REQUEST_ERR")?;
     let code = res.status();
     if (!has_range && code != 200) || (has_range && code != 206) {
-        return Err(anyhow::Error::new(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            format!("URL {} returned {}", url, code),
+        return Err(anyhow::Error::new(std::io::Error::other(
+            format!("URL {url} returned {code}"),
         ))
         .context("HTTP_STATUS_ERR"));
     }
@@ -344,8 +343,7 @@ where
         tokio::fs::remove_file(new_target)
             .await
             .context("REMOVE_NEW_TARGET_ERR")?;
-        return Err(anyhow::Error::new(std::io::Error::new(
-            std::io::ErrorKind::Other,
+        return Err(anyhow::Error::new(std::io::Error::other(
             "Patch operation failed",
         ))
         .context("PATCH_FAILED_ERR"));
@@ -363,8 +361,7 @@ pub async fn verify_hash(
     } else if xxh.is_some() {
         "xxh"
     } else {
-        return Err(anyhow::Error::new(std::io::Error::new(
-            std::io::ErrorKind::Other,
+        return Err(anyhow::Error::new(std::io::Error::other(
             "No hash algorithm specified",
         ))
         .context("NO_HASH_ALGO_ERR"));
@@ -374,19 +371,16 @@ pub async fn verify_hash(
     } else if let Some(xxh) = xxh {
         xxh
     } else {
-        return Err(anyhow::Error::new(std::io::Error::new(
-            std::io::ErrorKind::Other,
+        return Err(anyhow::Error::new(std::io::Error::other(
             "No hash data provided",
         ))
         .context("NO_HASH_DATA_ERR"));
     };
     let hash = run_hash(alg, target).await.context("HASH_CHECK_ERR")?;
     if hash != expected {
-        return Err(anyhow::Error::new(std::io::Error::new(
-            std::io::ErrorKind::Other,
+        return Err(anyhow::Error::new(std::io::Error::other(
             format!(
-                "File {} hash mismatch: expected {}, got {}",
-                target, expected, hash
+                "File {target} hash mismatch: expected {expected}, got {hash}"
             ),
         ))
         .context("HASH_MISMATCH_ERR"));

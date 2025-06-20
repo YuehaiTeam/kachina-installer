@@ -47,6 +47,6 @@ pub async fn append_cli(args: AppendArgs) {
         )
         .await
         .expect("Failed to write file");
-        println!("Appended file: {} ({} bytes)", name, input_length);
+        println!("Appended file: {name} ({input_length} bytes)");
     }
 }

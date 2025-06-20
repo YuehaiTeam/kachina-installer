@@ -89,8 +89,7 @@ pub async fn select_dir(
             empty = false;
         } else {
             let entries = tokio::fs::read_dir(path).await;
-            if entries.is_ok() {
-                let mut entries = entries.unwrap();
+            if let Ok(mut entries) = entries {
                 if let Ok(Some(_entry)) = entries.next_entry().await {
                     empty = false;
                 }
@@ -275,7 +274,7 @@ pub struct VersionInfo {
 #[tauri::command]
 pub async fn get_exe_version(exe_name: String) -> TAResult<VersionInfo> {
     let info = win32_version_info::VersionInfo::from_file(exe_name).into_ta_result()?;
-    return Ok(VersionInfo {
+    Ok(VersionInfo {
         comments: info.comments,
         company_name: info.company_name,
         file_description: info.file_description,
@@ -288,7 +287,7 @@ pub async fn get_exe_version(exe_name: String) -> TAResult<VersionInfo> {
         product_version: info.product_version,
         private_build: info.private_build,
         special_build: info.special_build,
-    });
+    })
 }
 
 #[tauri::command]

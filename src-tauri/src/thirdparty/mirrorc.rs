@@ -68,7 +68,7 @@ pub fn run_mirrorc_install_sync(
     };
 
     // .metadata.json
-    let metadata: Option<RepoMetadata> = match archive.by_name(&format!("{}.metadata.json", prefix))
+    let metadata: Option<RepoMetadata> = match archive.by_name(&format!("{prefix}.metadata.json"))
     {
         Ok(mut metadata) => {
             let mut metadata_str = String::new();
@@ -101,7 +101,7 @@ pub fn run_mirrorc_install_sync(
             .to_string();
         if file_name == "changes.json"
             || file_name == ".metadata.json"
-            || file_name == format!("{}.metadata.json", prefix)
+            || file_name == format!("{prefix}.metadata.json")
         {
             continue;
         }
@@ -187,12 +187,12 @@ pub async fn get_mirrorc_status(
 ) -> TAResult<serde_json::Value> {
     let mut opts = String::new();
     if let Some(arch) = arch {
-        opts.push_str(&format!("&arch={}", arch));
+        opts.push_str(&format!("&arch={arch}"));
     }
     if let Some(os) = os {
-        opts.push_str(&format!("&os={}", os));
+        opts.push_str(&format!("&os={os}"));
     }
-    let mirrorc_url = format!("https://mirrorchyan.com/api/resources/{}/latest?current_version={}&cdk={}&channel={}{}&user_agent=KachinaInstaller", resource_id, current_version, cdk, channel,opts);
+    let mirrorc_url = format!("https://mirrorchyan.com/api/resources/{resource_id}/latest?current_version={current_version}&cdk={cdk}&channel={channel}{opts}&user_agent=KachinaInstaller");
     let resp = crate::REQUEST_CLIENT
         .get(&mirrorc_url)
         .send()

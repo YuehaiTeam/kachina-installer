@@ -168,10 +168,7 @@ pub async fn get_installer_config(
             return Ok(config.fill(exe_parent_dir, true, "PARENT_DIR"));
         }
     }
-    let key_path = format!(
-        "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\{}",
-        reg_name
-    );
+    let key_path = format!("SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\{reg_name}");
 
     // First try HKLM, if not exist, try HKCU
     let key = windows_registry::LOCAL_MACHINE
@@ -184,8 +181,7 @@ pub async fn get_installer_config(
                 .read()
                 .open(&key_path)
         });
-    if key.is_ok() {
-        let key = key.unwrap();
+    if let Ok(key) = key {
         let path: String = key.get_string("InstallLocation").context("READ_REG_ERR")?;
         let path = Path::new(&path);
         let exe_path = Path::new(&path).join(exe_name);

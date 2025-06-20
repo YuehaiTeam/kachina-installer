@@ -22,9 +22,9 @@ pub async fn get_dfs(
     extras: Option<String>,
 ) -> Result<DownloadResp, String> {
     let url_with_range_in_query = if let Some(range) = range {
-        format!("{}?range={}", url, range)
+        format!("{url}?range={range}")
     } else {
-        format!("{}?", url)
+        format!("{url}?")
     };
     let extras = if let Some(extras) = extras {
         extras
@@ -47,7 +47,7 @@ pub async fn get_dfs(
         // check if body exists
         let body = res.text().await;
         if body.is_err() {
-            return Err(format!("{}", status));
+            return Err(format!("{status}"));
         } else {
             return Err(format!("{}: {}", status, body.unwrap()));
         }
@@ -73,7 +73,7 @@ pub async fn get_dfs(
     // loop 1 to 256
     for i in 0..=255 {
         // suffix i in source as hex 2 digits
-        let new_src = format!("{}{:02x}", source, i);
+        let new_src = format!("{source}{i:02x}");
         let new_hash = chksum_md5::hash(new_src.as_bytes()).to_hex_lowercase();
         if hash == new_hash {
             solve = new_src;
@@ -83,7 +83,7 @@ pub async fn get_dfs(
     if solve.is_empty() {
         return Err("Failed to solve challenge".to_string());
     }
-    let url = format!("{}&sid={}", url_with_range_in_query, solve);
+    let url = format!("{url_with_range_in_query}&sid={solve}");
     let res: Result<reqwest::Response, reqwest::Error> =
         REQUEST_CLIENT.post(&url).body(extras).send().await;
     if res.is_err() {

@@ -27,7 +27,7 @@ pub async fn run_hash(hash_algorithm: &str, path: &str) -> Result<String> {
                 hasher.write(&buffer[..read]);
             }
             let hash = hasher.finish_128();
-            Ok::<String, anyhow::Error>(format!("{:x}", hash))
+            Ok::<String, anyhow::Error>(format!("{hash:x}"))
         })
         .await
         .context("HASH_THREAD_ERR")?

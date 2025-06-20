@@ -19,11 +19,10 @@ pub fn wincred_write(target: &str, token: &str, comment: &str) -> TAResult<()> {
     let token_utf16 = token.encode_utf16().collect::<Vec<u16>>();
     let token_bytes = token_utf16
         .iter()
-        .map(|c| {
+        .flat_map(|c| {
             let bytes = c.to_ne_bytes();
             [bytes[0], bytes[1]]
         })
-        .flatten()
         .collect::<Vec<u8>>();
     target_name.push(0); // Null-terminate the string
     let credential = CREDENTIALW {

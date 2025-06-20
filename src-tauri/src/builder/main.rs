@@ -32,5 +32,5 @@ async fn async_main() {
         Command::Append(args) => append::append_cli(args).await,
     }
     let duration = now.elapsed();
-    println!("Finished in {:?}", duration);
+    println!("Finished in {duration:?}");
 }

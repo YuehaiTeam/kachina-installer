@@ -120,7 +120,7 @@ pub async fn gen_cli(args: GenArgs) {
                     panic!("file has no hash");
                 };
                 let output_path = output.join(hash);
-                pb_task.set_message(format!("     {:?}", display_name));
+                pb_task.set_message(format!("     {display_name:?}"));
                 let task_ = pb_task.clone();
                 let pb_main_ = pb_main_.clone();
                 let reader = tokio::fs::File::open(file_path).await.unwrap();
@@ -138,9 +138,9 @@ pub async fn gen_cli(args: GenArgs) {
                     .await
                     .expect("failed to compress file");
                 if !console::Term::stdout().is_term() {
-                    println!("Compressed {:?}", display_name);
+                    println!("Compressed {display_name:?}");
                 }
-                pb_task.finish_with_message(format!("DONE {:?}", display_name));
+                pb_task.finish_with_message(format!("DONE {display_name:?}"));
             });
         }));
 
@@ -151,12 +151,12 @@ pub async fn gen_cli(args: GenArgs) {
             match set.join_next().await {
                 Some(res) => {
                     if let Err(e) = res {
-                        eprintln!("Zstd Task Error: {:?}", e);
+                        eprintln!("Zstd Task Error: {e:?}");
                         std::process::exit(1);
                     }
                     let res = res.unwrap();
                     if let Err(e) = res {
-                        eprintln!("Zstd Task Error: {:?}", e);
+                        eprintln!("Zstd Task Error: {e:?}");
                         std::process::exit(1);
                     }
                 }
@@ -171,7 +171,7 @@ pub async fn gen_cli(args: GenArgs) {
     // compress and copy installer
     if let Some(installer) = repometa.installer.as_ref() {
         let output_path = args.output_dir.join(installer.xxh.as_ref().unwrap());
-        println!("Compressing installer to {:?}", output_path);
+        println!("Compressing installer to {output_path:?}");
         let reader = tokio::fs::File::open(args.updater.as_ref().unwrap())
             .await
             .expect("failed to open installer");
@@ -226,7 +226,7 @@ pub async fn gen_cli(args: GenArgs) {
                 // create a progress bar to track overall status
                 let pb_main = multi_pg.add(ProgressBar::new(metadata_with_installer.len() as u64));
                 pb_main.set_style(pb_style_total.clone());
-                pb_main.set_message(format!("DIFF TOTAL {}", diff_ver));
+                pb_main.set_message(format!("DIFF TOTAL {diff_ver}"));
 
                 // Make the main progress bar render immediately rather than waiting for the
                 // first task to finish.
@@ -289,7 +289,7 @@ pub async fn gen_cli(args: GenArgs) {
                         ));
                         let compressed_path =
                             output_dir.join(format!("{}_{}", old_hash, file.xxh.as_ref().unwrap()));
-                        println!("Generating diff for {:?} to {:?}", diff_file, output_path);
+                        println!("Generating diff for {diff_file:?} to {output_path:?}");
                         // read old_data and new_data to memory
                         let old_data = tokio::fs::read(&diff_file)
                             .await
@@ -366,7 +366,7 @@ pub async fn gen_cli(args: GenArgs) {
                         match set.join_next().await {
                             Some(res) => {
                                 if let Err(e) = res {
-                                    eprintln!("Diff Task Error: {:?}", e);
+                                    eprintln!("Diff Task Error: {e:?}");
                                     std::process::exit(1);
                                 }
                                 let res = res.unwrap();
@@ -389,8 +389,7 @@ pub async fn gen_cli(args: GenArgs) {
                         if !metadata_with_installer.iter().any(|x| x.file_name == *file) {
                             // file not found in current metadata, add to deletes
                             println!(
-                                "File {:?} not found in current metadata, added to deletes",
-                                file
+                                "File {file:?} not found in current metadata, added to deletes"
                             );
                             deletes.push(file.clone());
                         }

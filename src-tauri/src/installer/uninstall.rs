@@ -177,8 +177,7 @@ pub async fn run_uninstall(
 
     // delete registry
     let _ = windows_registry::LOCAL_MACHINE.remove_tree(format!(
-        "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\{}",
-        reg_name
+        "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\{reg_name}"
     ));
 
     Ok(res)

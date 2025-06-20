@@ -82,7 +82,7 @@ impl ManagedElevate {
             .context("ELEVATE_ERR")?;
             process.replace(command);
             let name = self.pipe_id.clone();
-            let name = format!(r"\\.\pipe\Kachina-Elevate-{}", name);
+            let name = format!(r"\\.\pipe\Kachina-Elevate-{name}");
             let mut server = Self::create_pipe(&name).context("ELEVATE_ERR")?;
             tracing::info!("Pipe listener created at {:?}", name);
             let tx = self.broadcast_tx.clone();
@@ -267,7 +267,7 @@ pub async fn uac_ipc_main(args: crate::cli::arg::UacArgs) {
     if let Err(err) = client {
         rfd::MessageDialog::new()
             .set_title("Elevate Fail")
-            .set_description(format!("Client: Failed to connect to pipe: {:?}", err))
+            .set_description(format!("Client: Failed to connect to pipe: {err:?}"))
             .show();
         return;
     }

@@ -17,6 +17,6 @@ pub fn get_device_id() -> anyhow::Result<String> {
         .open(r#"SOFTWARE\Microsoft\Cryptography"#)?;
 
     let guid: String = key.get_string("MachineGuid")?;
-    let raw_device_id = format!("{}{}", username, guid);
+    let raw_device_id = format!("{username}{guid}");
     Ok(chksum_md5::hash(raw_device_id).to_hex_uppercase())
 }
