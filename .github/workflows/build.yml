@@ -25,6 +25,7 @@ jobs:
       - name: Install NPM Dependencies
         run: pnpm i
       - name: Update Meta
+        id: update_meta
         run: |
           $tag = git describe --tags --abbrev=0 2>$null
           if (-not $tag) { $tag = "0.0.0" }
@@ -35,6 +36,7 @@ jobs:
           $cstTime = [System.TimeZoneInfo]::ConvertTimeFromUtc($utcNow, $cstTimeZone)
           $BUILDMETA = $cstTime.ToString("yyMMddHHmm")
           (Get-Content ./src-tauri/Cargo.toml -Raw) -replace '(?m)^(version = "\d+\.\d+\.\d+)', "version = `"$TAG-$PKGVER+$BUILDMETA" | Set-Content ./src-tauri/Cargo.toml -Encoding utf8
+          echo "version=$TAG-$PKGVER+$BUILDMETA" >> $GITHUB_OUTPUT
       - name: Build
         run: pnpm build
       - name: Copy Binary
@@ -51,10 +53,11 @@ jobs:
           SENTRY_PROJECT: kachina-installer
           SENTRY_URL: ${{ secrets.SENTRY_URL }}
         run: |
-          pnpm exec sentry-cli releases new "${{ github.ref_name }}" 
-          pnpm exec sentry-cli releases set-commits --auto "${{ github.ref_name }}"
+          echo "Creating Sentry release for version ${{ steps.update_meta.outputs.version }}"
+          pnpm exec sentry-cli releases new "${{ steps.update_meta.outputs.version }}"
+          pnpm exec sentry-cli releases set-commits --auto "${{ steps.update_meta.outputs.version }}"
           pnpm exec sentry-cli debug-files upload ./src-tauri/target/release/kachina_installer.pdb
-          pnpm exec sentry-cli releases finalize "${{ github.ref_name }}"
+          pnpm exec sentry-cli releases finalize "${{ steps.update_meta.outputs.version }}"
       - name: Release
         uses: softprops/action-gh-release@v2
         if: startsWith(github.ref, 'refs/tags/')
