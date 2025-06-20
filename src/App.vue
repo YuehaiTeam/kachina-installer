@@ -36,13 +36,14 @@
                 "
               >
                 <span>从 </span>
-                <a @click="dialog = 'source'">
+                <a @click="dialog = 'source'" title="点击切换安装源">
                   {{
                     PROJECT_CONFIG.source.find((e) => e.uri === selectedSource)
                       ?.name
-                  }}<template v-if="installMode === 'mirrorc'">
-                    ({{ mirrorcKey ? markedKey : '无CDK' }})
-                  </template>
+                  }}<template v-if="installMode === 'mirrorc'"
+                    >({{ mirrorcKey ? markedKey : '无CDK' }})</template
+                  >
+                  <IconEdit />
                 </a>
               </template>
               <span v-if="!isUpdate && !INSTALLER_CONFIG.is_uninstall">
@@ -53,7 +54,13 @@
               </span>
               <span v-if="INSTALLER_CONFIG.is_uninstall"> 卸载自 </span>
             </span>
-            <a @click="changeSource">{{ source }}</a>
+            <a
+              v-if="!INSTALLER_CONFIG.is_uninstall"
+              @click="changeSource"
+              title="点击修改安装路径"
+              >{{ source }}<IconEdit
+            /></a>
+            <a v-else>{{ source }}</a>
           </div>
           <button
             v-if="!INSTALLER_CONFIG.is_uninstall"
@@ -151,7 +158,7 @@
         <div class="title">选择安装源</div>
       </template>
       <template #desc>
-        <div class="desc">当前软件支持多种在线安装方式。</div>
+        <div class="desc">{{ PROJECT_CONFIG.title }}支持多种在线安装方式。</div>
       </template>
       <template #body v-if="Array.isArray(PROJECT_CONFIG.source)">
         <div class="card-container">
@@ -322,6 +329,13 @@
   font-size: 13px;
   display: flex;
   flex-direction: column;
+  svg {
+    width: 12px;
+    position: relative;
+    top: 2px;
+    padding-left: 2px;
+    opacity: 0.8;
+  }
 
   span {
     span {
@@ -527,6 +541,7 @@ import { computed, onMounted, reactive, ref, watch } from 'vue';
 import { mapLimit } from 'async';
 import Checkbox from './Checkbox.vue';
 import CircleSuccess from './CircleSuccess.vue';
+import IconEdit from './IconEdit.vue';
 import { getCurrentWindow, invoke, sep } from './tauri';
 import { getDfsMetadata, runDfsDownload } from './dfs';
 import {
