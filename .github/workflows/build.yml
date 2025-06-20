@@ -43,6 +43,26 @@ jobs:
         uses: actions/upload-artifact@v4.6.0
         with:
           path: src-tauri/target/release/*.exe
+      - name: Sentry Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: getsentry/action-release@v3.1.2
+        env:
+          SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
+          SENTRY_ORG: yuehaiteam
+          SENTRY_PROJECT: kachina-installer
+          SENTRY_URL: ${{ secrets.SENTRY_URL }}
+        with:
+          environment: production
+          release: ${{ github.ref }}
+          set_commits: true
+      - name: Sentry upload
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
+          SENTRY_ORG: yuehaiteam
+          SENTRY_PROJECT: kachina-installer
+          SENTRY_URL: ${{ secrets.SENTRY_URL }}
+        run: pnpm exec sentry-cli debug-files upload --include-sources ./src-tauri/target/release/kachina_installer.pdb
       - name: Release
         uses: softprops/action-gh-release@v2
         if: startsWith(github.ref, 'refs/tags/')
