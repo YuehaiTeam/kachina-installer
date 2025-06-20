@@ -182,8 +182,17 @@ pub async fn get_mirrorc_status(
     current_version: &str,
     cdk: &str,
     channel: &str,
+    arch: Option<&str>,
+    os: Option<&str>,
 ) -> TAResult<serde_json::Value> {
-    let mirrorc_url = format!("https://mirrorchyan.com/api/resources/{}/latest?current_version={}&cdk={}&channel={}&user_agent=KachinaInstaller", resource_id, current_version, cdk, channel);
+    let mut opts = String::new();
+    if let Some(arch) = arch {
+        opts.push_str(&format!("&arch={}", arch));
+    }
+    if let Some(os) = os {
+        opts.push_str(&format!("&os={}", os));
+    }
+    let mirrorc_url = format!("https://mirrorchyan.com/api/resources/{}/latest?current_version={}&cdk={}&channel={}{}&user_agent=KachinaInstaller", resource_id, current_version, cdk, channel,opts);
     let resp = crate::REQUEST_CLIENT
         .get(&mirrorc_url)
         .send()

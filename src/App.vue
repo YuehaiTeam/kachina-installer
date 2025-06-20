@@ -1034,7 +1034,7 @@ async function runInstall(): Promise<void> {
 
 async function runMirrorcInstall() {
   if (!mirrorcKey.value) {
-    changeSelectedSource(source.value);
+    changeSelectedSource(selectedSource.value);
     return;
   }
   step.value = 2;
