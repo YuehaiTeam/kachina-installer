@@ -53,7 +53,7 @@ jobs:
         run: |
           pnpm exec sentry-cli releases new "${{ github.ref_name }}" 
           pnpm exec sentry-cli releases set-commits --auto "${{ github.ref_name }}"
-          pnpm exec sentry-cli debug-files upload --include-sources ./src-tauri/target/release/kachina_installer.pdb
+          pnpm exec sentry-cli debug-files upload ./src-tauri/target/release/kachina_installer.pdb
           pnpm exec sentry-cli releases finalize "${{ github.ref_name }}"
       - name: Release
         uses: softprops/action-gh-release@v2
