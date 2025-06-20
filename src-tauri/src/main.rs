@@ -66,6 +66,7 @@ fn main() {
     utils::sentry::sentry_set_info();
     let sentry_layer = sentry_tracing::layer().event_filter(|md| match *md.level() {
         tracing::Level::TRACE => EventFilter::Ignore,
+        tracing::Level::DEBUG => EventFilter::Ignore,
         _ => EventFilter::Breadcrumb,
     });
     let info_filter = utils::sentry::InfoFilter {};
