@@ -68,8 +68,7 @@ pub fn run_mirrorc_install_sync(
     };
 
     // .metadata.json
-    let metadata: Option<RepoMetadata> = match archive.by_name(&format!("{prefix}.metadata.json"))
-    {
+    let metadata: Option<RepoMetadata> = match archive.by_name(&format!("{prefix}.metadata.json")) {
         Ok(mut metadata) => {
             let mut metadata_str = String::new();
             metadata
@@ -91,8 +90,7 @@ pub fn run_mirrorc_install_sync(
 
     let current_exe = std::env::current_exe().context("GET_EXE_PATH_ERR")?;
 
-    let len = total_len - 1;
-    for i in 0..len {
+    for i in 0..total_len {
         let mut file = archive.by_index(i).into_ta_result()?;
         let file_name = file
             .name()
@@ -141,7 +139,9 @@ pub fn run_mirrorc_install_sync(
         std::io::copy(&mut file, &mut out_file)
             .into_ta_result()
             .context(format!("WRITE_FILE_ERR: {}", out_path.display()))?;
-        notify(serde_json::json!({"type": "extract", "file": file_name, "count": i, "total": len}));
+        notify(
+            serde_json::json!({"type": "extract", "file": file_name, "count": i, "total": total_len}),
+        );
     }
 
     // delete files in target_path that are not in the changeset
