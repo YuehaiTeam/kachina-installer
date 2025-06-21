@@ -53,10 +53,21 @@ pub struct AppendArgs {
     pub name: Vec<String>,
 }
 
+#[derive(Debug, Clone, clap::Args)]
+pub struct ExtractArgs {
+    #[clap(long, short = 'i', default_value = "output.exe")]
+    pub input: PathBuf,
+    #[clap(long, short = 'f')]
+    pub file: Vec<PathBuf>,
+    #[clap(long, short = 'n')]
+    pub name: Vec<String>,
+}
+
 #[derive(Subcommand, Clone, Debug)]
 pub enum Command {
     Pack(PackArgs),
     Append(AppendArgs),
+    Extract(ExtractArgs),
     Gen(GenArgs),
 }
 

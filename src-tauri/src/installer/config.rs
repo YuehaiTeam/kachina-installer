@@ -1,6 +1,6 @@
 use crate::{
     cli::arg::InstallArgs,
-    local::{get_config_from_embedded, get_embedded, Embedded},
+    local::{get_config_from_embedded, get_embedded, mmap, Embedded},
     utils::{
         error::{return_ta_result, TAResult},
         uac::check_elevated,
@@ -38,7 +38,8 @@ pub async fn get_config_pre(
     let mut enbedded_metadata = None;
     let mut embedded_index = None;
     if scan_exe {
-        if let Ok(embedded_files_res) = get_embedded().await {
+        let file = mmap().await;
+        if let Ok(embedded_files_res) = get_embedded(file).await {
             if let Ok(res) = get_config_from_embedded(&embedded_files_res).await {
                 embedded_config = res.0;
                 enbedded_metadata = res.1;

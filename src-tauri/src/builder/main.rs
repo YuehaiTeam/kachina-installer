@@ -3,6 +3,7 @@ use cli::Command;
 
 mod append;
 mod cli;
+mod extract;
 mod gen;
 mod local;
 mod metadata;
@@ -30,6 +31,7 @@ async fn async_main() {
         Command::Pack(args) => pack::pack_cli(args).await,
         Command::Gen(args) => gen::gen_cli(args).await,
         Command::Append(args) => append::append_cli(args).await,
+        Command::Extract(args) => extract::extract_cli(args).await,
     }
     let duration = now.elapsed();
     println!("Finished in {duration:?}");

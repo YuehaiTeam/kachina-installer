@@ -29,10 +29,9 @@ pub async fn mmap() -> &'static AsyncMmapFile {
         .await
 }
 
-async fn search_pattern() -> anyhow::Result<Vec<usize>> {
+async fn search_pattern(file: &'static AsyncMmapFile) -> anyhow::Result<Vec<usize>> {
     let pattern = "!in\0".to_ascii_uppercase();
     let pattern: &[u8; 4] = pattern.as_bytes().try_into().unwrap();
-    let file = mmap().await;
     let mut reader = file.reader(0).context("MMAP_ERR")?;
     let mut buffer = [0u8; 4096];
     let mut offset: usize = 0;
@@ -76,10 +75,9 @@ pub struct Embedded {
     pub raw_offset: usize,
     pub size: usize,
 }
-pub async fn get_embedded() -> anyhow::Result<Vec<Embedded>> {
-    let offsets = search_pattern().await?;
+pub async fn get_embedded(file: &'static AsyncMmapFile) -> anyhow::Result<Vec<Embedded>> {
+    let offsets = search_pattern(file).await?;
     let mut entries = Vec::new();
-    let file = mmap().await;
     let mut last_offset: usize = 0;
     for offset in offsets.iter() {
         if *offset < last_offset {
@@ -168,7 +166,8 @@ pub fn get_header_size(name: &str) -> usize {
 }
 
 pub async fn get_base_with_config() -> anyhow::Result<AsyncMmapFileReader<'static>> {
-    let embedded = get_embedded().await?;
+    let file = mmap().await;
+    let embedded = get_embedded(file).await?;
     let config_index = embedded.iter().position(|x| x.name == "\0CONFIG");
     let image_index = embedded.iter().position(|x| x.name == "\0IMAGE");
     if config_index.is_none() {
