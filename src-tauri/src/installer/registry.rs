@@ -77,9 +77,7 @@ pub async fn write_registry_raw(
         windows_registry::CURRENT_USER
     };
 
-    let key_path = format!(
-        "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\{reg_name}"
-    );
+    let key_path = format!("SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\{reg_name}");
 
     let key = hive.create(&key_path).context("OPEN_REG_ERR")?;
     {
@@ -100,9 +98,7 @@ pub async fn write_registry_raw(
 
 #[tauri::command]
 pub async fn read_uninstall_metadata(reg_name: String) -> TAResult<Value> {
-    let key_path = format!(
-        "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\{reg_name}"
-    );
+    let key_path = format!("SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\{reg_name}");
 
     // First try HKLM, if not exist, try HKCU
     let key = windows_registry::LOCAL_MACHINE

@@ -161,9 +161,9 @@ pub async fn create_http_stream(
     let res = res.send().await.context("HTTP_REQUEST_ERR")?;
     let code = res.status();
     if (!has_range && code != 200) || (has_range && code != 206) {
-        return Err(anyhow::Error::new(std::io::Error::other(
-            format!("URL {url} returned {code}"),
-        ))
+        return Err(anyhow::Error::new(std::io::Error::other(format!(
+            "URL {url} returned {code}"
+        )))
         .context("HTTP_STATUS_ERR"));
     }
     let content_length = res.content_length().unwrap_or(0);
@@ -343,10 +343,10 @@ where
         tokio::fs::remove_file(new_target)
             .await
             .context("REMOVE_NEW_TARGET_ERR")?;
-        return Err(anyhow::Error::new(std::io::Error::other(
-            "Patch operation failed",
-        ))
-        .context("PATCH_FAILED_ERR"));
+        return Err(
+            anyhow::Error::new(std::io::Error::other("Patch operation failed"))
+                .context("PATCH_FAILED_ERR"),
+        );
     }
     Ok(diff_size)
 }
@@ -361,28 +361,26 @@ pub async fn verify_hash(
     } else if xxh.is_some() {
         "xxh"
     } else {
-        return Err(anyhow::Error::new(std::io::Error::other(
-            "No hash algorithm specified",
-        ))
-        .context("NO_HASH_ALGO_ERR"));
+        return Err(
+            anyhow::Error::new(std::io::Error::other("No hash algorithm specified"))
+                .context("NO_HASH_ALGO_ERR"),
+        );
     };
     let expected = if let Some(md5) = md5 {
         md5
     } else if let Some(xxh) = xxh {
         xxh
     } else {
-        return Err(anyhow::Error::new(std::io::Error::other(
-            "No hash data provided",
-        ))
-        .context("NO_HASH_DATA_ERR"));
+        return Err(
+            anyhow::Error::new(std::io::Error::other("No hash data provided"))
+                .context("NO_HASH_DATA_ERR"),
+        );
     };
     let hash = run_hash(alg, target).await.context("HASH_CHECK_ERR")?;
     if hash != expected {
-        return Err(anyhow::Error::new(std::io::Error::other(
-            format!(
-                "File {target} hash mismatch: expected {expected}, got {hash}"
-            ),
-        ))
+        return Err(anyhow::Error::new(std::io::Error::other(format!(
+            "File {target} hash mismatch: expected {expected}, got {hash}"
+        )))
         .context("HASH_MISMATCH_ERR"));
     }
     Ok(())
