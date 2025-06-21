@@ -35,7 +35,7 @@ pub async fn mmap() -> &'static AsyncMmapFile {
         .await
 }
 
-async fn search_pattern(file: &AsyncMmapFile) -> anyhow::Result<Vec<usize>> {
+async fn search_pattern_for_extract(file: &AsyncMmapFile) -> anyhow::Result<Vec<usize>> {
     let pattern = "!in\0".to_ascii_uppercase();
     let pattern: &[u8; 4] = pattern.as_bytes().try_into().unwrap();
     let mut reader = file.reader(0).context("MMAP_ERR")?;
@@ -82,7 +82,7 @@ pub struct Embedded {
     pub size: usize,
 }
 pub async fn get_embedded(file: &AsyncMmapFile) -> anyhow::Result<Vec<Embedded>> {
-    let offsets = search_pattern(file).await?;
+    let offsets = search_pattern_for_extract(file).await?;
     let mut entries = Vec::new();
     let mut last_offset: usize = 0;
     for offset in offsets.iter() {
@@ -116,6 +116,56 @@ pub async fn get_embedded(file: &AsyncMmapFile) -> anyhow::Result<Vec<Embedded>>
     }
     Ok(entries)
 }
+
+async fn search_pattern(file: &AsyncMmapFile) -> Result<Vec<usize>, String> {
+    let pattern: [u8; 4] = [0x4D, 0x5A, 0x90, 0x00]; // exe header
+    let mut reader = file.reader(0).map_err(|e| e.to_string())?;
+    let mut buffer = [0u8; 4096];
+    let mut offset: usize = 0;
+    let mut previous_bytes = Vec::new();
+    let mut founds = Vec::new();
+
+    loop {
+        let bytes_read = reader.read(&mut buffer).await.map_err(|e| e.to_string())?;
+        if bytes_read == 0 {
+            break;
+        }
+
+        // Step 1: Check across previous_bytes and buffer
+        if !previous_bytes.is_empty() {
+            let pb_len = previous_bytes.len();
+            let needed = 4 - pb_len;
+            if bytes_read >= needed {
+                let combined: Vec<u8> = previous_bytes
+                    .iter()
+                    .cloned()
+                    .chain(buffer[..needed].iter().cloned())
+                    .collect();
+                if combined == pattern[..] {
+                    founds.push(offset - (pb_len));
+                }
+            }
+        }
+
+        // Step 2: Check within the buffer
+        for i in 0..bytes_read - 3 {
+            if buffer[i..i + 4] == pattern {
+                founds.push(offset + i);
+            }
+        }
+
+        // Step 3: Update previous_bytes
+        if bytes_read > 0 {
+            let start = bytes_read - std::cmp::min(3, bytes_read);
+            previous_bytes = buffer[start..bytes_read].to_vec();
+        }
+
+        offset += bytes_read as usize;
+    }
+
+    Ok(founds)
+}
+
 
 pub async fn get_reader_for_bundle() -> Result<AsyncMmapFileReader<'static>, String> {
     let file = mmap().await;
