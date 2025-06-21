@@ -93,6 +93,8 @@ interface IpcRmList {
 interface IpcInstallRuntime {
   type: 'InstallRuntime';
   tag: string;
+  offset?: number;
+  size?: number;
 }
 
 interface IpcCheckLocalFiles {
@@ -179,11 +181,13 @@ export async function ipcRmList(list: string[], elevate = false) {
 
 export async function ipcInstallRuntime(
   tag: string,
+  offset?: number,
+  size?: number,
   cb: (p: Event<[number, number]>) => void,
   elevate = false,
 ) {
   return ipc<IpcInstallRuntime, void, [number, number]>(
-    { type: 'InstallRuntime', tag },
+    { type: 'InstallRuntime', tag, offset, size },
     elevate,
     cb,
   );

@@ -751,10 +751,15 @@ async function installRuntimes() {
       log(`Installing runtime: ${tag}`);
       current.value = `安装${getRuntimeName(tag)}……`;
       const tryTimes = 3;
+      const embedRuntime = INSTALLER_CONFIG.embedded_files?.find(
+        (e) => e.name === tag,
+      );
       for (let i = 0; i < tryTimes; i++) {
         try {
           await ipcInstallRuntime(
             tag,
+            embedRuntime?.offset,
+            embedRuntime?.size,
             ({ payload }) => {
               const currentSize = formatSize(payload[0]);
               const targetSize = payload[1] ? formatSize(payload[1]) : '';

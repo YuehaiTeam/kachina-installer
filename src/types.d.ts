@@ -95,7 +95,7 @@ type InvokeSelectDirRes = {
 } | null;
 
 interface Embedded {
-  name: String;
+  name: string;
   offset: number;
   raw_offset: number;
   size: number;
