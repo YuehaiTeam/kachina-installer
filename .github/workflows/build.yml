@@ -55,10 +55,15 @@ jobs:
           SENTRY_PROJECT: kachina-installer
           SENTRY_URL: ${{ secrets.SENTRY_URL }}
         run: |
+          $ErrorActionPreference = "Stop"
+          $env:SENTRY_LOG_LEVEL = "info"
           echo "Creating Sentry release for version ${{ steps.update_meta.outputs.version }}"
           pnpm exec sentry-cli releases new "${{ steps.update_meta.outputs.version }}"
+          echo "Setting release metadata for version ${{ steps.update_meta.outputs.version }}"
           pnpm exec sentry-cli releases set-commits --auto "${{ steps.update_meta.outputs.version }}"
+          echo "Uploading debug files for version ${{ steps.update_meta.outputs.version }}"
           pnpm exec sentry-cli debug-files upload ./src-tauri/target/release/kachina_installer.pdb
+          echo "Finalizing release for version ${{ steps.update_meta.outputs.version }}"
           pnpm exec sentry-cli releases finalize "${{ steps.update_meta.outputs.version }}"
       - name: Release
         uses: softprops/action-gh-release@v2
