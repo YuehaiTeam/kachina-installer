@@ -189,7 +189,7 @@ pub async fn create_multi_http_stream(
 > {
     let res = REQUEST_CLIENT
         .get(url)
-        .header("Range", format!("bytes={}", range))
+        .header("Range", format!("bytes={range}"))
         .send()
         .await
         .context("HTTP_REQUEST_ERR")?;
@@ -208,7 +208,11 @@ pub async fn create_multi_http_stream(
         .unwrap_or("application/octet-stream")
         .to_string();
 
-    Ok((Box::new(Box::pin(res.bytes_stream())), content_length, content_type))
+    Ok((
+        Box::new(Box::pin(res.bytes_stream())),
+        content_length,
+        content_type,
+    ))
 }
 
 pub async fn create_local_stream(

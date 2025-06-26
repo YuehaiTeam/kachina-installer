@@ -166,7 +166,6 @@ async fn search_pattern(file: &AsyncMmapFile) -> Result<Vec<usize>, String> {
     Ok(founds)
 }
 
-
 pub async fn get_reader_for_bundle() -> Result<AsyncMmapFileReader<'static>, String> {
     let file = mmap().await;
     let headers = search_pattern(file).await.map_err(|e| e.to_string())?;

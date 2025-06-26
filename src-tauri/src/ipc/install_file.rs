@@ -264,7 +264,7 @@ pub async fn ipc_install_multipart_stream(
                 })?;
 
             // Create enhanced notification callback with chunk info
-            let chunk_range = format!("{}-{}", start, end);
+            let chunk_range = format!("{start}-{end}");
             let current_chunk_index = chunk_index;
             let chunk_notify = {
                 let notify = notify.clone();
@@ -280,7 +280,7 @@ pub async fn ipc_install_multipart_stream(
 
             // Map multer::Error to std::io::Error for StreamReader compatibility
             let stream = field.into_stream();
-            let stream = stream.map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e));
+            let stream = stream.map_err(std::io::Error::other);
             let mut reader = tokio_util::io::StreamReader::new(stream);
             // Install the chunk using the reader
             mult_res.push(
@@ -300,8 +300,7 @@ pub async fn ipc_install_multipart_stream(
             let source_pos = get_chunk_position(first_chunk);
             if content_length == source_size as u64 {
                 // proceed with the first chunk
-                let stream =
-                    http_stream.map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e));
+                let stream = http_stream.map_err(std::io::Error::other);
                 let mut reader = tokio_util::io::StreamReader::new(stream);
 
                 // Create enhanced notification callback for the first chunk
@@ -319,8 +318,7 @@ pub async fn ipc_install_multipart_stream(
                 let res = install_file_by_reader(first_chunk.clone(), &mut reader, chunk_notify)
                     .await
                     .into_ta_result();
-                let mut mult_reslut = Vec::new();
-                mult_reslut.push(res);
+                let mult_reslut = vec![res];
                 Ok(serde_json::json!(mult_reslut))
             } else {
                 Err(anyhow::anyhow!(
@@ -401,7 +399,7 @@ pub async fn ipc_install_multichunk_stream(
         create_multi_http_stream(&args.url, &args.range).await?;
 
     // Convert the HTTP stream to AsyncRead
-    let stream = http_stream.map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e));
+    let stream = http_stream.map_err(std::io::Error::other);
     let mut reader = tokio_util::io::StreamReader::new(stream);
 
     for (chunk_index, chunk_info) in chunks_with_positions.iter().enumerate() {
