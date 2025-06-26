@@ -4,6 +4,8 @@ use crate::utils::error::{IntoTAResult, TAResult};
 pub enum IpcOperation {
     Ping,
     InstallFile(super::install_file::InstallFileArgs),
+    InstallMultipartStream(super::install_file::InstallMultiStreamArgs),
+    InstallMultichunkStream(super::install_file::InstallMultiStreamArgs),
     CreateLnk(crate::installer::lnk::CreateLnkArgs),
     WriteRegistry(crate::installer::registry::WriteRegistryParams),
     CreateUninstaller(crate::installer::uninstall::CreateUninstallerArgs),
@@ -42,12 +44,14 @@ pub enum IpcOperation {
 
 pub async fn run_opr(
     op: IpcOperation,
-    notify: impl Fn(serde_json::Value) + std::marker::Send + 'static,
+    notify: impl Fn(serde_json::Value) + std::marker::Send + 'static + Clone,
     context: Vec<(String, String)>,
 ) -> TAResult<serde_json::Value> {
     let op_name = match &op {
         IpcOperation::Ping => "Ping",
         IpcOperation::InstallFile(_) => "InstallFile",
+        IpcOperation::InstallMultipartStream(_) => "InstallMultipartStream",
+        IpcOperation::InstallMultichunkStream(_) => "InstallMultichunkStream",
         IpcOperation::CreateLnk(_) => "CreateLnk",
         IpcOperation::WriteRegistry(_) => "WriteRegistry",
         IpcOperation::CreateUninstaller(_) => "CreateUninstaller",
@@ -73,6 +77,16 @@ pub async fn run_opr(
         IpcOperation::InstallFile(args) => super::install_file::ipc_install_file(args, notify)
             .await
             .into_ta_result(),
+        IpcOperation::InstallMultipartStream(args) => {
+            super::install_file::ipc_install_multipart_stream(args, notify)
+                .await
+                .into_ta_result()
+        }
+        IpcOperation::InstallMultichunkStream(args) => {
+            super::install_file::ipc_install_multichunk_stream(args, notify)
+                .await
+                .into_ta_result()
+        }
         IpcOperation::WriteRegistry(params) => {
             crate::installer::registry::write_registry_with_params(params).await?;
             Ok(serde_json::Value::Null)

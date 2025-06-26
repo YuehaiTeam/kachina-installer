@@ -176,6 +176,41 @@ pub async fn create_http_stream(
     Ok((Box::new(decoder), content_length))
 }
 
+pub async fn create_multi_http_stream(
+    url: &str,
+    range: &str,
+) -> Result<
+    (
+        Box<dyn futures::Stream<Item = reqwest::Result<bytes::Bytes>> + Send + Unpin>,
+        u64,
+        String,
+    ),
+    anyhow::Error,
+> {
+    let res = REQUEST_CLIENT
+        .get(url)
+        .header("Range", format!("bytes={}", range))
+        .send()
+        .await
+        .context("HTTP_REQUEST_ERR")?;
+    let code = res.status();
+    if code != 206 {
+        return Err(anyhow::Error::new(std::io::Error::other(format!(
+            "URL {url} returned {code}"
+        )))
+        .context("HTTP_STATUS_ERR"));
+    }
+    let content_length = res.content_length().unwrap_or(0);
+    let content_type = res
+        .headers()
+        .get("Content-Type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("application/octet-stream")
+        .to_string();
+
+    Ok((Box::new(Box::pin(res.bytes_stream())), content_length, content_type))
+}
+
 pub async fn create_local_stream(
     offset: usize,
     size: usize,

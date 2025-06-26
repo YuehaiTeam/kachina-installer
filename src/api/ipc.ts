@@ -7,8 +7,8 @@ export async function ipc<T extends { type: string }, E, Z>(
   elevate: boolean,
   onProgress?: (payload: Event<Z>) => void,
 ): Promise<E> {
-  let id = uuid();
-  let unlisten = await listen<Z>(id, onProgress || (() => {}));
+  const id = uuid();
+  const unlisten = await listen<Z>(id, onProgress || (() => {}));
   let res: { Ok: E } | { Err: string } | E;
   try {
     res = await invoke('managed_operation', {
