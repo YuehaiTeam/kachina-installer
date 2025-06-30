@@ -185,6 +185,12 @@ pub async fn get_mirrorc_status(
     arch: Option<&str>,
     os: Option<&str>,
 ) -> TAResult<serde_json::Value> {
+    if resource_id.is_empty() || channel.is_empty() {
+        return return_ta_result(
+            "Invalid parameters for get_mirrorc_status: rid or channel is empty".to_string(),
+            "MIRRORC_INVALID_PARAMS",
+        );
+    }
     let mut opts = String::new();
     if let Some(arch) = arch {
         opts.push_str(&format!("&arch={arch}"));

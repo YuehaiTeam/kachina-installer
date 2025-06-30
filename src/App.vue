@@ -572,6 +572,7 @@ import CloudPaid from './CloudPaid.vue';
 import Feedback from './Feedback.vue';
 import FInput from './FInput.vue';
 import { compare } from 'compare-versions';
+import { processMirrorcError } from './mirrorc-errors';
 
 const init = ref(false);
 
@@ -793,17 +794,23 @@ async function runInstall(): Promise<void> {
   step.value = 2;
   let latest_meta = INSTALLER_CONFIG.enbedded_metadata;
   let online_meta: InvokeGetDfsMetadataRes | null = null;
+  let online_meta_err = '';
   try {
     online_meta = await getDfsMetadata(
       selectedSource.value,
       INSTALLER_CONFIG.args.dfs_extras,
     );
   } catch (e) {
-    error(e);
+    online_meta_err = error(e);
   }
   let meta_tag = '';
   if (!latest_meta && !online_meta) {
-    await dialog_error('获取更新信息失败，请检查网络连接');
+    await dialog_error(
+      '获取更新信息失败，请检查网络连接' + online_meta_err
+        ? `\n${online_meta_err}`
+        : '',
+      '出错了',
+    );
     step.value = 1;
     return;
   } else if (!latest_meta) {
@@ -1103,77 +1110,12 @@ async function runMirrorcInstall() {
     arch: source_url.searchParams.get('arch') || undefined,
     os: source_url.searchParams.get('os') || undefined,
   });
-  // 400	1001	INVALID_PARAMS	参数不正确，请参考集成文档
-  // 400	7001	KEY_EXPIRED	CDK 已过期
-  // 403	7002	KEY_INVALID	CDK 错误
-  // 403	7003	RESOURCE_QUOTA_EXHAUSTED	CDK 今日下载次数已达上限
-  // 403	7004	KEY_MISMATCHED	CDK 类型和待下载的资源不匹配
-  // 403	7005	KEY_BLOCKED	CDK 已被封禁
-  // 404	8001	RESOURCE_NOT_FOUND	对应架构和系统下的资源不存在
-  // 400	8002	INVALID_OS	错误的系统参数
-  // 400	8003	INVALID_ARCH	错误的架构参数
-  // 400	8004	INVALID_CHANNEL	错误的更新通道参数
-  // -	1	UNDIVIDED	未区分的业务错误，以响应体 JSON 的 msg 为准
-  switch (mirrorc_status.code) {
-    case 1001:
-      await dialog_error('Mirror酱参数错误，请检查打包配置', '出错了');
-      step.value = 1;
-      return;
-    case 7001:
-      await dialog_error('Mirror酱 CDK 已过期', '出错了');
+  const errorResult = processMirrorcError(mirrorc_status, 'install');
+  if (errorResult) {
+    await dialog_error(errorResult.message, '出错了');
+    if (errorResult.showSourceDialog) {
       dialog.value = 'source';
-      step.value = 1;
-      return;
-    case 7002:
-      await dialog_error(
-        'Mirror酱 CDK 错误，请检查设置的 CDK 是否正确',
-        '出错了',
-      );
-      step.value = 1;
-      dialog.value = 'source';
-      return;
-    case 7003:
-      await dialog_error(
-        'Mirror酱 CDK 今日下载次数已达上限，请更换 CDK 或明天再试',
-        '出错了',
-      );
-      step.value = 1;
-      return;
-    case 7004:
-      await dialog_error(
-        'Mirror酱 CDK 类型和待下载的资源不匹配，请检查设置的 CDK 是否正确',
-        '出错了',
-      );
-      step.value = 1;
-      dialog.value = 'source';
-      return;
-    case 7005:
-      await dialog_error('Mirror酱 CDK 已被封禁，请更换 CDK', '出错了');
-      dialog.value = 'source';
-      step.value = 1;
-      return;
-    case 8001:
-      await dialog_error('从Mirror酱获取更新失败，请检查打包配置', '出错了');
-      step.value = 1;
-      return;
-    case 8002:
-      await dialog_error('Mirror酱参数错误，请检查打包配置', '出错了');
-      step.value = 1;
-      return;
-    case 8003:
-      await dialog_error('Mirror酱参数错误，请检查打包配置', '出错了');
-      step.value = 1;
-      return;
-    case 8004:
-      await dialog_error('Mirror酱参数错误，请检查打包配置', '出错了');
-      step.value = 1;
-      return;
-  }
-  if (mirrorc_status.code !== 0) {
-    await dialog_error(
-      `从Mirror酱获取更新失败: ${mirrorc_status.msg}，请联系Mirror酱客服`,
-      '出错了',
-    );
+    }
     step.value = 1;
     return;
   }
@@ -1576,7 +1518,6 @@ async function changeSelectedSource(url: string) {
       mirrorcKey.value = await invoke('wincred_read', {
         target: `KachinaInstaller_MirrorChyanCDK_${PROJECT_CONFIG.appName}`,
       });
-      console.log('mirrorcKey', mirrorcKey.value);
     } catch (e) {
       console.warn(e);
     }
@@ -1590,12 +1531,12 @@ async function changeSelectedSource(url: string) {
 }
 
 async function changeMirrorcKey() {
-  mirrorcKey.value = mirrorcTempKey.value;
-  if (!mirrorcKey.value) {
+  if (!mirrorcTempKey.value) {
     try {
       await invoke('wincred_delete', {
         target: `KachinaInstaller_MirrorChyanCDK_${PROJECT_CONFIG.appName}`,
       });
+      mirrorcKey.value = '';
     } catch (e) {
       console.warn(e);
     }
@@ -1605,85 +1546,23 @@ async function changeMirrorcKey() {
     const source_url = new URL(mirrorcTempUrl.value);
     const mirrorc_status = await invoke<MirrorcUpdate>('get_mirrorc_status', {
       resourceId: source_url.hostname,
-      cdk: mirrorcKey.value,
+      cdk: mirrorcTempKey.value,
       currentVersion: '',
       channel: source_url.searchParams.get('channel') || 'stable',
       arch: source_url.searchParams.get('arch') || undefined,
       os: source_url.searchParams.get('os') || undefined,
     });
-    // 400	1001	INVALID_PARAMS	参数不正确，请参考集成文档
-    // 400	7001	KEY_EXPIRED	CDK 已过期
-    // 403	7002	KEY_INVALID	CDK 错误
-    // 403	7003	RESOURCE_QUOTA_EXHAUSTED	CDK 今日下载次数已达上限
-    // 403	7004	KEY_MISMATCHED	CDK 类型和待下载的资源不匹配
-    // 403	7005	KEY_BLOCKED	CDK 已被封禁
-    // 404	8001	RESOURCE_NOT_FOUND	对应架构和系统下的资源不存在
-    // 400	8002	INVALID_OS	错误的系统参数
-    // 400	8003	INVALID_ARCH	错误的架构参数
-    // 400	8004	INVALID_CHANNEL	错误的更新通道参数
-    // -	1	UNDIVIDED	未区分的业务错误，以响应体 JSON 的 msg 为准
-    switch (mirrorc_status.code) {
-      case 1001:
-        await dialog_error('Mirror酱参数错误，请检查打包配置', '出错了');
-        mirrorcChecking.value = false;
-        return;
-      case 7001:
-        await dialog_error('Mirror酱 CDK 已过期', '出错了');
-        mirrorcChecking.value = false;
-        return;
-      case 7002:
-        await dialog_error(
-          'Mirror酱 CDK 错误，请检查设置的 CDK 是否正确',
-          '出错了',
-        );
-        mirrorcChecking.value = false;
-        return;
-      case 7003:
-        await dialog_error(
-          'Mirror酱 CDK 今日下载次数已达上限，请更换 CDK 或明天再试',
-          '出错了',
-        );
-        mirrorcChecking.value = false;
-        return;
-      case 7004:
-        await dialog_error(
-          'Mirror酱 CDK 类型和待下载的资源不匹配，请检查设置的 CDK 是否正确',
-          '出错了',
-        );
-        mirrorcChecking.value = false;
-        return;
-      case 7005:
-        await dialog_error('Mirror酱 CDK 已被封禁，请更换 CDK', '出错了');
-        mirrorcChecking.value = false;
-        return;
-      case 8001:
-        await dialog_error('从Mirror酱获取更新失败，请检查打包配置', '出错了');
-        mirrorcChecking.value = false;
-        return;
-      case 8002:
-        await dialog_error('Mirror酱参数错误，请检查打包配置', '出错了');
-        mirrorcChecking.value = false;
-        return;
-      case 8003:
-        await dialog_error('Mirror酱参数错误，请检查打包配置', '出错了');
-        mirrorcChecking.value = false;
-        return;
-      case 8004:
-        await dialog_error('Mirror酱参数错误，请检查打包配置', '出错了');
-        mirrorcChecking.value = false;
-        return;
-    }
-    if (mirrorc_status.code !== 0) {
-      await dialog_error(
-        `从Mirror酱获取CDK状态失败: ${mirrorc_status.msg}，请联系Mirror酱客服`,
-        '出错了',
-      );
+    const errorResult = processMirrorcError(mirrorc_status, 'cdk-validation');
+    if (errorResult) {
+      await dialog_error(errorResult.message, '出错了');
+      mirrorcChecking.value = false;
       return;
     }
+    mirrorcKey.value = mirrorcTempKey.value;
     try {
       await invoke('wincred_write', {
         target: `KachinaInstaller_MirrorChyanCDK_${PROJECT_CONFIG.appName}`,
-        token: mirrorcKey.value,
+        token: mirrorcTempKey.value,
         comment: 'MirrorChyan CDK for BetterGI',
       });
     } catch (e) {
@@ -1792,7 +1671,7 @@ function setUacByState(
 }
 function openMirrorc() {
   invoke('launch', {
-    path: `https://mirrorchyan.com/?source=KachinaInstaller-${PROJECT_CONFIG.appName}`,
+    path: `https://mirrorchyan.com/?source=Kachina${PROJECT_CONFIG.appName}`,
   });
 }
 </script>

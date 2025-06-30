@@ -112,7 +112,7 @@ pub async fn get_http_with_range(url: String, offset: u64, size: u64) -> TAResul
     if offset != 0 || size != 0 {
         res = res.header("Range", format!("bytes={}-{}", offset, offset + size - 1));
     }
-    let res = res.send().await.context("HTTP_REQ_ERR")?;
+    let res = res.send().await.context(format!("HTTP_GET_ERR: {}", url))?;
     let status = res.status();
     let bytes = res
         .bytes()

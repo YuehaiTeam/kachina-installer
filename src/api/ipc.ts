@@ -328,6 +328,7 @@ export function error(...args: any[]) {
     return acc + ' ' + JSON.stringify(arg);
   });
   invoke('error', { data: logstr });
+  return logstr;
 }
 
 export async function sendInsight(url: string, event?: string, data?: unknown) {
