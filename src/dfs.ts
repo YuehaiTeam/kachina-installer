@@ -10,6 +10,7 @@ export const dfsIndexCache = new Map<
     index: Map<string, Embedded>;
     metadata: InvokeGetDfsMetadataRes;
     installer_end: number;
+    resource_version?: string; // DFS2 resource version
   }
 >();
 
@@ -27,18 +28,18 @@ function fetchWithTimeout(
 }
 
 export const dfsSourceReg =
-  /^(?:(dfs)\+)?(?:(hashed|packed|auto)\+)?(http(?:s)?:\/\/(?:.*?))$/;
+  /^(?:(dfs2?)\+)?(?:(hashed|packed|auto)\+)?(http(?:s)?:\/\/(?:.*?))$/;
 
 export const getDfsSourceType = (
   source: string,
 ): {
-  remote: 'dfs' | 'direct';
+  remote: 'dfs' | 'dfs2' | 'direct';
   storage: 'hashed' | 'packed';
   url: string;
 } => {
   const match = source.match(dfsSourceReg);
   if (!match) throw new Error('Invalid dfs source: ' + source);
-  const remote = ['dfs', 'direct'].includes(match[1]) ? match[1] : 'direct';
+  const remote = ['dfs', 'dfs2', 'direct'].includes(match[1]) ? match[1] : 'direct';
   let storage = ['hashed', 'packed', 'auto'].includes(match[2])
     ? match[2]
     : 'auto';
@@ -64,14 +65,54 @@ export const getDfsMetadata = async (
   extras?: string,
 ): Promise<InvokeGetDfsMetadataRes> => {
   const { remote, storage, url } = getDfsSourceType(source);
-  if (storage === 'hashed') {
-  } else {
+  
+  if (remote === 'dfs2') {
+    // DFS2: Use server-parsed metadata
     if (dfsIndexCache.has(source)) {
       return dfsIndexCache.get(source)?.metadata as InvokeGetDfsMetadataRes;
+    }
+    
+    const dfs2Metadata = await invoke<Dfs2Metadata>('get_dfs2_metadata', { 
+      apiUrl: url 
+    });
+    
+    if (!dfs2Metadata.data) {
+      throw new Error('DFS2 requires server-parsed metadata, but server returned null');
+    }
+    
+    // Convert DFS2 format to existing format
+    const convertedIndex = new Map<string, Embedded>();
+    Object.entries(dfs2Metadata.data.index).forEach(([name, info]) => {
+      convertedIndex.set(name, {
+        name: info.name,
+        offset: info.offset,
+        raw_offset: info.raw_offset,
+        size: info.size,
+      });
+    });
+    
+    // Cache the converted data with resource version
+    dfsIndexCache.set(source, {
+      index: convertedIndex,
+      metadata: dfs2Metadata.data.metadata as InvokeGetDfsMetadataRes,
+      installer_end: dfs2Metadata.data.installer_end,
+      resource_version: dfs2Metadata.resource_version, // Store version for session creation
+    });
+    
+    return dfs2Metadata.data.metadata as InvokeGetDfsMetadataRes;
+  } else {
+    // DFS1: Use existing client-side parsing logic
+    if (storage === 'hashed') {
+      // Existing hashed logic would go here
+      throw new Error('Hashed storage not implemented');
     } else {
-      await refreshDfsIndex(source, url, remote, extras);
       if (dfsIndexCache.has(source)) {
         return dfsIndexCache.get(source)?.metadata as InvokeGetDfsMetadataRes;
+      } else {
+        await refreshDfsIndex(source, url, remote, extras);
+        if (dfsIndexCache.has(source)) {
+          return dfsIndexCache.get(source)?.metadata as InvokeGetDfsMetadataRes;
+        }
       }
     }
   }
@@ -80,7 +121,7 @@ export const getDfsMetadata = async (
 export async function refreshDfsIndex(
   source: string,
   apiurl: string,
-  remote: 'direct' | 'dfs',
+  remote: 'direct' | 'dfs' | 'dfs2',
   extras?: string,
 ) {
   const binurl =
@@ -207,7 +248,7 @@ export async function refreshDfsIndex(
 export const getDfsIndexCache = async (
   source: string,
   apiurl: string,
-  remote: 'direct' | 'dfs',
+  remote: 'direct' | 'dfs' | 'dfs2',
 ): Promise<Map<string, Embedded>> => {
   if (dfsIndexCache.has(source)) {
     return dfsIndexCache.get(source)?.index as Map<string, Embedded>;
@@ -233,42 +274,76 @@ export const getDfsUrl = async (
 }> => {
   const { remote, storage, url } = getDfsSourceType(source);
 
-  if (storage === 'hashed') {
-    const full_file_url =
-      remote === 'direct'
-        ? url
-        : await getDfsFileUrl(dfsJsonUrlToHashed(url, hash));
-    return {
-      url: full_file_url,
-      offset: 0,
-      size: 0,
-    };
-  } else {
-    const end = dfsIndexCache.get(source)?.installer_end || 0;
-    const cache = await getDfsIndexCache(source, url, remote);
-    const file = cache.get(hash);
+  if (remote === 'dfs2') {
+    // DFS2: Use session-based download
+    const cache = dfsIndexCache.get(source);
+    if (!cache) {
+      throw new Error('DFS2 metadata not loaded');
+    }
+
+    const file = cache.index.get(hash);
     if (!file) {
       if (installer) {
-        const full_file_url =
-          remote === 'direct' ? url : await getDfsFileUrl(url, extras, end);
+        // For installer, get the installer portion
+        const range = `0-${cache.installer_end - 1}`;
+        const cdnUrl = await getDfs2Url(url, range);
         return {
-          url: full_file_url,
+          url: cdnUrl,
           offset: 0,
-          size: end,
+          size: cache.installer_end,
           skip_decompress: true,
         };
       }
-      throw new Error('No file in remote binary');
+      throw new Error('No file in DFS2 index');
     }
-    const full_file_url =
-      remote === 'direct'
-        ? url
-        : await getDfsFileUrl(url, extras, file.size, file.offset);
+
+    // Get specific file range
+    const range = `${file.offset}-${file.offset + file.size - 1}`;
+    const cdnUrl = await getDfs2Url(url, range);
     return {
-      url: full_file_url,
+      url: cdnUrl,
       offset: file.offset,
       size: file.size,
     };
+  } else {
+    // DFS1: Use existing logic
+    if (storage === 'hashed') {
+      const full_file_url =
+        remote === 'direct'
+          ? url
+          : await getDfsFileUrl(dfsJsonUrlToHashed(url, hash));
+      return {
+        url: full_file_url,
+        offset: 0,
+        size: 0,
+      };
+    } else {
+      const end = dfsIndexCache.get(source)?.installer_end || 0;
+      const cache = await getDfsIndexCache(source, url, remote);
+      const file = cache.get(hash);
+      if (!file) {
+        if (installer) {
+          const full_file_url =
+            remote === 'direct' ? url : await getDfsFileUrl(url, extras, end);
+          return {
+            url: full_file_url,
+            offset: 0,
+            size: end,
+            skip_decompress: true,
+          };
+        }
+        throw new Error('No file in remote binary');
+      }
+      const full_file_url =
+        remote === 'direct'
+          ? url
+          : await getDfsFileUrl(url, extras, file.size, file.offset);
+      return {
+        url: full_file_url,
+        offset: file.offset,
+        size: file.size,
+      };
+    }
   }
 };
 
@@ -325,6 +400,218 @@ export const getDfsFileUrl = async (
   return url;
 };
 
+// DFS2 Session Management
+class Dfs2Session {
+  private sessionId?: string;
+  private baseUrl: string;
+  private resourcePath: string;
+  private sessionBaseUrl?: string;
+
+  constructor(apiUrl: string) {
+    const url = new URL(apiUrl);
+    this.baseUrl = `${url.protocol}//${url.host}`;
+    this.resourcePath = url.pathname;
+  }
+
+  async createSession(chunks?: string[]): Promise<void> {
+    const sessionResponse = await invoke<Dfs2SessionResponse>('create_dfs2_session', {
+      api_url: `${this.baseUrl}${this.resourcePath}`,
+      chunks: chunks || undefined,
+      challenge_response: undefined,
+      session_id: undefined,
+    });
+
+    if (!sessionResponse.sid) {
+      throw new Error('Failed to create DFS2 session: no session ID returned');
+    }
+
+    this.sessionId = sessionResponse.sid;
+    // Extract resource ID from path (e.g., /resource/myapp -> myapp)
+    const resId = this.resourcePath.split('/').pop();
+    this.sessionBaseUrl = `${this.baseUrl}/session/${this.sessionId}/${resId}`;
+  }
+
+  async getChunkUrl(range: string): Promise<string> {
+    if (!this.sessionBaseUrl) {
+      throw new Error('Session not created');
+    }
+
+    const response = await invoke<Dfs2ChunkResponse>('get_dfs2_chunk_url', {
+      session_api_url: this.sessionBaseUrl,
+      range,
+    });
+
+    return response.url;
+  }
+
+  async endSession(insights?: Dfs2SessionInsights): Promise<void> {
+    if (!this.sessionBaseUrl) {
+      return; // Session was never created
+    }
+
+    try {
+      await invoke('end_dfs2_session', {
+        session_api_url: this.sessionBaseUrl,
+        insights: insights || undefined,
+      });
+    } catch (error) {
+      // Log but don't throw - session cleanup should be best effort
+      console.warn('Failed to end DFS2 session:', error);
+    } finally {
+      this.sessionId = undefined;
+      this.sessionBaseUrl = undefined;
+    }
+  }
+
+  isActive(): boolean {
+    return !!this.sessionId;
+  }
+}
+
+// DFS2 session cache - now only stores sessions created in runInstall
+const dfs2Sessions = new Map<string, { sessionId: string; baseUrl: string; resId: string }>();
+
+// Store DFS2 session info after creation in runInstall
+export const storeDfs2Session = (apiUrl: string, sessionId: string): void => {
+  const url = new URL(apiUrl);
+  const baseUrl = `${url.protocol}//${url.host}`;
+  const resId = url.pathname.split('/').pop() || '';
+  
+  dfs2Sessions.set(apiUrl, {
+    sessionId,
+    baseUrl,
+    resId,
+  });
+};
+
+// Clean up specific DFS2 session
+export const cleanupDfs2Session = async (apiUrl: string): Promise<void> => {
+  const sessionInfo = dfs2Sessions.get(apiUrl);
+  if (sessionInfo) {
+    try {
+      log('Ending DFS2 session:', sessionInfo.sessionId);
+      const sessionApiUrl = `${sessionInfo.baseUrl}/session/${sessionInfo.sessionId}/${sessionInfo.resId}`;
+      await invoke('end_dfs2_session', {
+        sessionApiUrl: sessionApiUrl,
+        insights: undefined,
+      });
+      log('DFS2 session ended successfully:', sessionInfo.sessionId);
+    } catch (error) {
+      warn('Failed to end DFS2 session:', sessionInfo.sessionId, error);
+    }
+    dfs2Sessions.delete(apiUrl);
+  }
+};
+
+// Clean up all DFS2 sessions (call at end of installation)
+export const cleanupAllDfs2Sessions = async (): Promise<void> => {
+  const cleanupPromises: Promise<void>[] = [];
+  
+  for (const apiUrl of dfs2Sessions.keys()) {
+    cleanupPromises.push(cleanupDfs2Session(apiUrl));
+  }
+  
+  // Wait for all sessions to be cleaned up
+  await Promise.allSettled(cleanupPromises);
+  
+  // Clear the cache
+  dfs2Sessions.clear();
+};
+
+// DFS2-specific URL getter using pre-created session
+export const getDfs2Url = async (
+  apiUrl: string,
+  range: string,
+): Promise<string> => {
+  const sessionInfo = dfs2Sessions.get(apiUrl);
+  if (!sessionInfo) {
+    throw new Error('DFS2 session not found - session must be created in runInstall');
+  }
+  
+  const sessionApiUrl = `${sessionInfo.baseUrl}/session/${sessionInfo.sessionId}/${sessionInfo.resId}`;
+  const response = await invoke<Dfs2ChunkResponse>('get_dfs2_chunk_url', {
+    sessionApiUrl: sessionApiUrl,
+    range,
+  });
+  
+  return response.url;
+};
+
+// Collect ranges needed for DFS2 session creation
+export const collectDfs2Ranges = (
+  diffFiles: DfsUpdateTask[],
+  localFiles: Embedded[],
+  dfsSource: string,
+  hashKey: DfsMetadataHashType,
+): string[] => {
+  const { remote } = getDfsSourceType(dfsSource);
+  if (remote !== 'dfs2') {
+    return [];
+  }
+
+  const cache = dfsIndexCache.get(dfsSource);
+  if (!cache) {
+    throw new Error('DFS2 metadata not loaded');
+  }
+
+  const ranges = new Set<string>();
+
+  diffFiles.forEach(item => {
+    const hasLocalFile = localFiles.find(l => l.name === item[hashKey]);
+    const hasLpatchFile = item.lpatch && localFiles.find(l => l.name === item.lpatch.from[hashKey]);
+
+    if (hasLocalFile) {
+      // Skip: has local file, no need to download
+      return;
+    }
+
+    if (item.lpatch && hasLpatchFile) {
+      // Lpatch mode: need both lpatch file and original file ranges
+      // 1. Lpatch file range
+      const lpatchHash = `${item.lpatch.from[hashKey]}_${item.lpatch.to[hashKey]}`;
+      const lpatchFile = cache.index.get(lpatchHash);
+      if (lpatchFile) {
+        ranges.add(`${lpatchFile.offset}-${lpatchFile.offset + lpatchFile.size - 1}`);
+      }
+
+      // 2. Original file range (fallback)
+      const originalFile = cache.index.get(item[hashKey] as string);
+      if (originalFile) {
+        ranges.add(`${originalFile.offset}-${originalFile.offset + originalFile.size - 1}`);
+      }
+
+    } else if (item.patch) {
+      // Patch mode: need both patch file and original file ranges
+      // 1. Patch file range
+      const patchHash = `${item.patch.from[hashKey]}_${item.patch.to[hashKey]}`;
+      const patchFile = cache.index.get(patchHash);
+      if (patchFile) {
+        ranges.add(`${patchFile.offset}-${patchFile.offset + patchFile.size - 1}`);
+      }
+
+      // 2. Original file range (fallback)
+      const originalFile = cache.index.get(item[hashKey] as string);
+      if (originalFile) {
+        ranges.add(`${originalFile.offset}-${originalFile.offset + originalFile.size - 1}`);
+      }
+
+    } else {
+      // Normal download: only need the file itself
+      const file = cache.index.get(item[hashKey] as string);
+      if (file) {
+        ranges.add(`${file.offset}-${file.offset + file.size - 1}`);
+      }
+    }
+
+    // Handle installer files
+    if (item.installer && cache.installer_end > 0) {
+      ranges.add(`0-${cache.installer_end - 1}`);
+    }
+  });
+
+  return Array.from(ranges);
+};
+
 export const runDfsDownload = async (
   dfsSource: string,
   extras: string | undefined,
@@ -355,7 +642,7 @@ export const runDfsDownload = async (
         InstallFile(hasLocalFile, source + filename_with_first_slash, {
           md5: item.md5,
           xxh: item.xxh,
-        }),
+        }, undefined, item.installer),
         elevate,
         onProgress,
       );
@@ -391,6 +678,7 @@ export const runDfsDownload = async (
             xxh: item.xxh,
           },
           item.patch.size,
+          item.installer,
         ),
         elevate,
         onProgress,
@@ -403,7 +691,7 @@ export const runDfsDownload = async (
         InstallFile(url, source + filename_with_first_slash, {
           md5: item.md5,
           xxh: item.xxh,
-        }),
+        }, undefined, item.installer),
         elevate,
         onProgress,
       );

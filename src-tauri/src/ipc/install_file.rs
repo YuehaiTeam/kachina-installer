@@ -54,6 +54,7 @@ pub struct InstallFileArgs {
     target: String,
     md5: Option<String>,
     xxh: Option<String>,
+    clear_installer_index_mark: Option<bool>,
 }
 async fn create_stream_by_source(
     source: InstallFileSource,
@@ -92,15 +93,21 @@ pub async fn ipc_install_file(
             )
             .await?;
             if args.md5.is_some() || args.xxh.is_some() {
-                // 如果是自更新，先清理索引标记以确保hash校验通过
-                if override_old_path.is_some() {
-                    crate::installer::uninstall::clear_index_mark(&std::path::PathBuf::from(&target)).await?;
+                // 如果需要清理installer索引标记，先清理再进行hash校验
+                if args.clear_installer_index_mark.unwrap_or(false) || override_old_path.is_some() {
+                    println!("Clearing installer index mark for: {}", target);
+                    if let Err(e) = crate::installer::uninstall::clear_index_mark(&std::path::PathBuf::from(&target)).await {
+                        println!("Failed to clear index mark: {:?}", e);
+                        return Err(e);
+                    }
+                    println!("Index mark cleared successfully");
                 }
                 verify_hash(&target, args.md5, args.xxh).await?;
             }
             Ok(serde_json::json!(res))
         }
         InstallFileMode::Patch { source, diff_size } => {
+            let is_self_update = override_old_path.is_some();
             let res = progressed_hpatch(
                 create_stream_by_source(source).await?,
                 &target,
@@ -110,9 +117,14 @@ pub async fn ipc_install_file(
             )
             .await?;
             if args.md5.is_some() || args.xxh.is_some() {
-                // 如果是自更新，先清理索引标记以确保hash校验通过
-                if override_old_path.is_some() {
-                    crate::installer::uninstall::clear_index_mark(&std::path::PathBuf::from(&target)).await?;
+                // 如果需要清理installer索引标记，先清理再进行hash校验
+                if args.clear_installer_index_mark.unwrap_or(false) || is_self_update {
+                    println!("Clearing installer index mark for: {}", target);
+                    if let Err(e) = crate::installer::uninstall::clear_index_mark(&std::path::PathBuf::from(&target)).await {
+                        println!("Failed to clear index mark: {:?}", e);
+                        return Err(e);
+                    }
+                    println!("Index mark cleared successfully");
                 }
                 verify_hash(&target, args.md5, args.xxh).await?;
             }
@@ -137,9 +149,14 @@ pub async fn ipc_install_file(
             )
             .await?;
             if args.md5.is_some() || args.xxh.is_some() {
-                // 如果是自更新，先清理索引标记以确保hash校验通过
-                if override_old_path.is_some() {
-                    crate::installer::uninstall::clear_index_mark(&std::path::PathBuf::from(&target)).await?;
+                // 如果需要清理installer索引标记，先清理再进行hash校验
+                if args.clear_installer_index_mark.unwrap_or(false) || override_old_path.is_some() {
+                    println!("Clearing installer index mark for: {}", target);
+                    if let Err(e) = crate::installer::uninstall::clear_index_mark(&std::path::PathBuf::from(&target)).await {
+                        println!("Failed to clear index mark: {:?}", e);
+                        return Err(e);
+                    }
+                    println!("Index mark cleared successfully");
                 }
                 verify_hash(&target, args.md5, args.xxh).await?;
             }
@@ -166,9 +183,14 @@ where
             let res =
                 progressed_copy(reader, create_target_file(&target).await?, progress_noti).await?;
             if args.md5.is_some() || args.xxh.is_some() {
-                // 如果是自更新，先清理索引标记以确保hash校验通过
-                if override_old_path.is_some() {
-                    crate::installer::uninstall::clear_index_mark(&std::path::PathBuf::from(&target)).await?;
+                // 如果需要清理installer索引标记，先清理再进行hash校验
+                if args.clear_installer_index_mark.unwrap_or(false) || override_old_path.is_some() {
+                    println!("Clearing installer index mark for: {}", target);
+                    if let Err(e) = crate::installer::uninstall::clear_index_mark(&std::path::PathBuf::from(&target)).await {
+                        println!("Failed to clear index mark: {:?}", e);
+                        return Err(e);
+                    }
+                    println!("Index mark cleared successfully");
                 }
                 verify_hash(&target, args.md5, args.xxh).await?;
             }
@@ -179,12 +201,18 @@ where
             let mut buffer: Vec<u8> = vec![0; diff_size];
             progressed_copy(reader, &mut buffer, progress_noti).await?;
             let reader = std::io::Cursor::new(buffer);
+            let is_self_update = override_old_path.is_some();
             let res =
                 progressed_hpatch(reader, &target, diff_size, |_| {}, override_old_path).await?;
             if args.md5.is_some() || args.xxh.is_some() {
-                // 如果是自更新，先清理索引标记以确保hash校验通过
-                if override_old_path.is_some() {
-                    crate::installer::uninstall::clear_index_mark(&std::path::PathBuf::from(&target)).await?;
+                // 如果需要清理installer索引标记，先清理再进行hash校验
+                if args.clear_installer_index_mark.unwrap_or(false) || is_self_update {
+                    println!("Clearing installer index mark for: {}", target);
+                    if let Err(e) = crate::installer::uninstall::clear_index_mark(&std::path::PathBuf::from(&target)).await {
+                        println!("Failed to clear index mark: {:?}", e);
+                        return Err(e);
+                    }
+                    println!("Index mark cleared successfully");
                 }
                 verify_hash(&target, args.md5, args.xxh).await?;
             }

@@ -15,6 +15,72 @@ pub struct DownloadResp {
     pub challenge: Option<String>,
 }
 
+// DFS2 data structures
+#[derive(Deserialize, Serialize, Debug)]
+pub struct Dfs2Metadata {
+    pub resource_version: String,
+    pub name: String,
+    pub data: Option<Dfs2Data>,
+}
+
+#[derive(Deserialize, Serialize, Debug)]
+pub struct Dfs2Data {
+    pub index: std::collections::HashMap<String, Dfs2FileInfo>,
+    pub metadata: serde_json::Value,
+    pub installer_end: u32,
+}
+
+#[derive(Deserialize, Serialize, Debug)]
+pub struct Dfs2FileInfo {
+    pub name: String,
+    pub offset: u32,
+    pub raw_offset: u32,
+    pub size: u32,
+}
+
+#[derive(Deserialize, Serialize, Debug)]
+pub struct Dfs2SessionRequest {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chunks: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sid: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub challenge: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+}
+
+#[derive(Deserialize, Serialize, Debug)]
+pub struct Dfs2SessionResponse {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tries: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sid: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub challenge: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data: Option<String>,
+}
+
+#[derive(Deserialize, Serialize, Debug)]
+pub struct Dfs2ChunkResponse {
+    pub url: String,
+}
+
+#[derive(Deserialize, Serialize, Debug)]
+pub struct Dfs2SessionInsights {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bandwidth: Option<std::collections::HashMap<String, String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ttfb: Option<std::collections::HashMap<String, String>>,
+}
+
+#[derive(Deserialize, Serialize, Debug)]
+pub struct Dfs2DeleteRequest {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub insights: Option<Dfs2SessionInsights>,
+}
+
 #[tauri::command]
 pub async fn get_dfs(
     url: String,
@@ -104,6 +170,165 @@ pub async fn get_dfs(
         return Err("Challenge not solved".to_string());
     }
     Ok(json)
+}
+
+// DFS2 API commands
+#[tauri::command]
+pub async fn get_dfs2_metadata(api_url: String) -> Result<Dfs2Metadata, String> {
+    let res = REQUEST_CLIENT.get(&api_url).send().await
+        .map_err(|e| format!("Failed to send request: {:?}", e))?;
+    
+    if !res.status().is_success() {
+        let status = res.status();
+        let body = res.text().await.unwrap_or_default();
+        return Err(format!("{}: {}", status, body));
+    }
+    
+    let body_text = res.text().await
+        .map_err(|e| format!("Failed to read response body: {:?}", e))?;
+    
+    let metadata: Dfs2Metadata = serde_json::from_str(&body_text)
+        .map_err(|e| format!("Failed to parse JSON ({}): {}", e, body_text))?;
+    
+    Ok(metadata)
+}
+
+#[tauri::command]
+pub async fn create_dfs2_session(
+    api_url: String,
+    chunks: Option<Vec<String>>,
+    version: Option<String>,
+    challenge_response: Option<String>,
+    session_id: Option<String>,
+) -> Result<Dfs2SessionResponse, String> {
+    let mut current_chunks = chunks;
+    let mut current_version = version;
+    let mut current_challenge = challenge_response;
+    let mut current_session_id = session_id;
+    
+    // Handle challenge loop (avoid recursion)
+    loop {
+        let request_body = Dfs2SessionRequest {
+            chunks: current_chunks.clone(),
+            sid: current_session_id.clone(),
+            challenge: current_challenge.clone(),
+            version: current_version.clone(),
+        };
+        
+        let res = REQUEST_CLIENT.post(&api_url)
+            .json(&request_body)
+            .send().await
+            .map_err(|e| format!("Failed to send request: {:?}", e))?;
+        
+        let status = res.status();
+        let body_text = res.text().await
+            .map_err(|e| format!("Failed to read response body: {:?}", e))?;
+        
+        let response: Dfs2SessionResponse = serde_json::from_str(&body_text)
+            .map_err(|e| format!("Failed to parse JSON ({}): {}", e, body_text))?;
+        
+        // Handle challenge response (402 Payment Required)
+        if status == reqwest::StatusCode::PAYMENT_REQUIRED {
+            if let (Some(challenge), Some(data), Some(sid)) = (&response.challenge, &response.data, &response.sid) {
+                let solved_challenge = solve_dfs2_challenge(challenge, data)?;
+                
+                // Set up for next iteration
+                current_challenge = Some(solved_challenge);
+                current_session_id = Some(sid.clone());
+                continue;
+            } else {
+                return Err("Invalid challenge response format".to_string());
+            }
+        }
+        
+        if !status.is_success() {
+            return Err(format!("Session creation failed: {}", status));
+        }
+        
+        
+        return Ok(response);
+    }
+}
+
+#[tauri::command]
+pub async fn get_dfs2_chunk_url(
+    session_api_url: String,
+    range: String,
+) -> Result<Dfs2ChunkResponse, String> {
+    let url = format!("{}?range={}", session_api_url, range);
+    
+    let res = REQUEST_CLIENT.get(&url).send().await
+        .map_err(|e| format!("Failed to send request: {:?}", e))?;
+    
+    if !res.status().is_success() {
+        let status = res.status();
+        let body = res.text().await.unwrap_or_default();
+        return Err(format!("{}: {}", status, body));
+    }
+    
+    let body_text = res.text().await
+        .map_err(|e| format!("Failed to read response body: {:?}", e))?;
+    
+    let response: Dfs2ChunkResponse = serde_json::from_str(&body_text)
+        .map_err(|e| format!("Failed to parse JSON ({}): {}", e, body_text))?;
+    
+    Ok(response)
+}
+
+#[tauri::command]
+pub async fn end_dfs2_session(
+    session_api_url: String,
+    insights: Option<Dfs2SessionInsights>,
+) -> Result<(), String> {
+    let request_body = Dfs2DeleteRequest { insights };
+    
+    let res = REQUEST_CLIENT.delete(&session_api_url)
+        .json(&request_body)
+        .send().await
+        .map_err(|e| format!("Failed to send request: {:?}", e))?;
+    
+    if !res.status().is_success() {
+        let status = res.status();
+        let body = res.text().await.unwrap_or_default();
+        return Err(format!("{}: {}", status, body));
+    }
+    Ok(())
+}
+
+fn solve_dfs2_challenge(challenge_type: &str, data: &str) -> Result<String, String> {
+    match challenge_type {
+        "md5" => {
+            // Split data into "hash/source"
+            let parts: Vec<&str> = data.split('/').collect();
+            if parts.len() != 2 {
+                return Err("Invalid challenge data format".to_string());
+            }
+            
+            let target_hash = parts[0];
+            let source = parts[1];
+            
+            // Try to find the solution by appending hex values
+            for i in 0..=255 {
+                let candidate = format!("{}{:02x}", source, i);
+                let hash = chksum_md5::hash(candidate.as_bytes()).to_hex_lowercase();
+                if hash == target_hash {
+                    return Ok(candidate);
+                }
+            }
+            
+            Err("Failed to solve MD5 challenge".to_string())
+        }
+        "sha256" => {
+            // TODO: Implement SHA256 challenge solving
+            Err("SHA256 challenge not implemented yet".to_string())
+        }
+        "web" => {
+            // TODO: Web challenges need to be handled by the frontend
+            // as they may require user interaction (captcha, browser popup, etc.)
+            Err("Web challenges must be handled by the frontend".to_string())
+        }
+        _ => Err(format!("Unsupported challenge type: {}", challenge_type))
+    }
 }
 
 #[tauri::command]

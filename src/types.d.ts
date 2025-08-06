@@ -85,6 +85,42 @@ type InvokeGetDfsRes = {
   source: string;
 };
 
+// DFS2 types
+type Dfs2Metadata = {
+  resource_version: string;
+  name: string;
+  data: Dfs2Data | null;
+};
+
+type Dfs2Data = {
+  index: Record<string, Dfs2FileInfo>;
+  metadata: any; // JSON data from META segment
+  installer_end: number;
+};
+
+type Dfs2FileInfo = {
+  name: string;
+  offset: number;
+  raw_offset: number;
+  size: number;
+};
+
+type Dfs2SessionResponse = {
+  tries?: string[];
+  sid?: string;
+  challenge?: string;
+  data?: string;
+};
+
+type Dfs2ChunkResponse = {
+  url: string;
+};
+
+type Dfs2SessionInsights = {
+  bandwidth?: Record<string, string>;
+  ttfb?: Record<string, string>;
+};
+
 type InvokeGetDirsRes = [string, string];
 
 type InvokeSelectDirRes = {

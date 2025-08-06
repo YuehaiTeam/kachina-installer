@@ -16,6 +16,7 @@ interface InstallFileArgs {
   target: string;
   xxh?: string;
   md5?: string;
+  clear_installer_index_mark?: boolean;
   type: 'InstallFile';
 }
 
@@ -32,6 +33,7 @@ export function InstallFile(
     md5?: string;
   },
   diff_size?: number,
+  clearInstallerIndexMark?: boolean,
 ): InstallFileArgs {
   let mode: InstallFileMode;
   if (!diff_size) {
@@ -43,7 +45,13 @@ export function InstallFile(
     delete hash.xxh;
     delete hash.md5;
   }
-  return { mode, target, type: 'InstallFile', ...hash };
+  return { 
+    mode, 
+    target, 
+    type: 'InstallFile', 
+    ...hash,
+    clear_installer_index_mark: clearInstallerIndexMark,
+  };
 }
 
 export function hybridPatch(
