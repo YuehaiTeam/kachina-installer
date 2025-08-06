@@ -92,6 +92,10 @@ pub async fn ipc_install_file(
             )
             .await?;
             if args.md5.is_some() || args.xxh.is_some() {
+                // 如果是自更新，先清理索引标记以确保hash校验通过
+                if override_old_path.is_some() {
+                    crate::installer::uninstall::clear_index_mark(&std::path::PathBuf::from(&target)).await?;
+                }
                 verify_hash(&target, args.md5, args.xxh).await?;
             }
             Ok(serde_json::json!(res))
@@ -106,6 +110,10 @@ pub async fn ipc_install_file(
             )
             .await?;
             if args.md5.is_some() || args.xxh.is_some() {
+                // 如果是自更新，先清理索引标记以确保hash校验通过
+                if override_old_path.is_some() {
+                    crate::installer::uninstall::clear_index_mark(&std::path::PathBuf::from(&target)).await?;
+                }
                 verify_hash(&target, args.md5, args.xxh).await?;
             }
             Ok(serde_json::json!(res))
@@ -129,6 +137,10 @@ pub async fn ipc_install_file(
             )
             .await?;
             if args.md5.is_some() || args.xxh.is_some() {
+                // 如果是自更新，先清理索引标记以确保hash校验通过
+                if override_old_path.is_some() {
+                    crate::installer::uninstall::clear_index_mark(&std::path::PathBuf::from(&target)).await?;
+                }
                 verify_hash(&target, args.md5, args.xxh).await?;
             }
             Ok(serde_json::json!(()))
@@ -154,6 +166,10 @@ where
             let res =
                 progressed_copy(reader, create_target_file(&target).await?, progress_noti).await?;
             if args.md5.is_some() || args.xxh.is_some() {
+                // 如果是自更新，先清理索引标记以确保hash校验通过
+                if override_old_path.is_some() {
+                    crate::installer::uninstall::clear_index_mark(&std::path::PathBuf::from(&target)).await?;
+                }
                 verify_hash(&target, args.md5, args.xxh).await?;
             }
             Ok(serde_json::json!(res))
@@ -166,6 +182,10 @@ where
             let res =
                 progressed_hpatch(reader, &target, diff_size, |_| {}, override_old_path).await?;
             if args.md5.is_some() || args.xxh.is_some() {
+                // 如果是自更新，先清理索引标记以确保hash校验通过
+                if override_old_path.is_some() {
+                    crate::installer::uninstall::clear_index_mark(&std::path::PathBuf::from(&target)).await?;
+                }
                 verify_hash(&target, args.md5, args.xxh).await?;
             }
             Ok(serde_json::json!(res))

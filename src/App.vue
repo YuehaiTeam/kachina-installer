@@ -1014,17 +1014,6 @@ async function runInstall(): Promise<void> {
   await mapLimit(diff_files, 6, async (item: (typeof diff_files)[0]) => {
     for (let i = 0; i < 3; i++) {
       try {
-        if (item.installer) {
-          try {
-            // 自更新前后都清除下载的安装器里的index，尽量保证hash一致性
-            await ipcPatchInstaller(
-              `${source.value}${sep()}${PROJECT_CONFIG.updaterName}`,
-              needElevate.value,
-            );
-          } catch (e) {
-            warn(e);
-          }
-        }
         await runDfsDownload(
           selectedSource.value,
           INSTALLER_CONFIG.args.dfs_extras,
@@ -1036,17 +1025,6 @@ async function runInstall(): Promise<void> {
           item.failed || INSTALLER_CONFIG.args.online,
           needElevate.value,
         );
-        if (item.installer) {
-          try {
-            // 清除下载的安装器里的index
-            await ipcPatchInstaller(
-              `${source.value}${sep()}${PROJECT_CONFIG.updaterName}`,
-              needElevate.value,
-            );
-          } catch (e) {
-            warn(e);
-          }
-        }
         break;
       } catch (e) {
         item.failed = true;

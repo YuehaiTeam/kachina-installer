@@ -256,7 +256,6 @@ export const getDfsUrl = async (
           offset: 0,
           size: end,
           skip_decompress: true,
-          skip_hash: true,
         };
       }
       throw new Error('No file in remote binary');
