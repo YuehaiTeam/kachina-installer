@@ -543,7 +543,14 @@ import Checkbox from './Checkbox.vue';
 import CircleSuccess from './CircleSuccess.vue';
 import IconEdit from './IconEdit.vue';
 import { getCurrentWindow, invoke, sep } from './tauri';
-import { getDfsMetadata, runDfsDownload, cleanupAllDfs2Sessions, collectDfs2Ranges, storeDfs2Session, dfsIndexCache } from './dfs';
+import {
+  getDfsMetadata,
+  runDfsDownload,
+  cleanupAllDfs2Sessions,
+  collectDfs2Ranges,
+  dfsIndexCache,
+  createDfs2Session,
+} from './dfs';
 import {
   error,
   ipcCheckLocalFiles,
@@ -970,7 +977,7 @@ async function runInstall(): Promise<void> {
     }
   }
   console.log('Files to install:', diff_files);
-  
+
   // Create DFS2 session if using DFS2 source
   if (selectedSource.value.startsWith('dfs2+')) {
     current.value = '创建下载会话……';
@@ -981,30 +988,23 @@ async function runInstall(): Promise<void> {
         selectedSource.value,
         hashKey as DfsMetadataHashType,
       );
-      
+
       if (ranges.length > 0) {
         log('Creating DFS2 session with ranges:', ranges);
         const apiUrl = selectedSource.value.replace(/^dfs2\+packed\+/, '');
-        
+
         // Get resource version from cache
         const cache = dfsIndexCache.get(selectedSource.value);
         const resourceVersion = cache?.resource_version;
-        
-        const sessionResponse = await invoke<Dfs2SessionResponse>('create_dfs2_session', {
-          apiUrl: apiUrl,
-          chunks: ranges,
-          version: resourceVersion, // Use specific version from metadata
-          challengeResponse: undefined,
-          sessionId: undefined,
-        });
-        
-        if (!sessionResponse.sid) {
-          throw new Error('Failed to create DFS2 session: no session ID returned');
-        }
-        
-        // Store session info for later use
-        storeDfs2Session(apiUrl, sessionResponse.sid);
-        log('DFS2 session created successfully:', sessionResponse.sid);
+
+        const sessionId = await createDfs2Session(
+          apiUrl,
+          ranges,
+          resourceVersion, // Use specific version from metadata
+          INSTALLER_CONFIG.args.dfs_extras || undefined,
+        );
+
+        log('DFS2 session created successfully:', sessionId);
       }
     } catch (e) {
       error('Failed to create DFS2 session:', e);
@@ -1013,7 +1013,7 @@ async function runInstall(): Promise<void> {
       return;
     }
   }
-  
+
   subStep.value = 2;
   current.value = '准备下载……';
   let stat: InstallStat = {
@@ -1316,7 +1316,7 @@ async function install(): Promise<void> {
     } else {
       await runInstall();
     }
-    
+
     // Clean up DFS2 sessions only for DFS mode (not mirrorc mode)
     if (installMode.value === 'default') {
       await cleanupAllDfs2Sessions();
@@ -1331,12 +1331,12 @@ async function install(): Promise<void> {
           : JSON.stringify(e);
     sendInsight(getInsightBase(), 'error', { error: errstr });
     await dialog_error(errstr);
-    
+
     // Clean up DFS2 sessions on error (only for DFS mode)
     if (installMode.value === 'default') {
       await cleanupAllDfs2Sessions();
     }
-    
+
     step.value = 1;
     subStep.value = 0;
     percent.value = 0;

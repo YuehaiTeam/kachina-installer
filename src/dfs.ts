@@ -400,73 +400,87 @@ export const getDfsFileUrl = async (
   return url;
 };
 
-// DFS2 Session Management
-class Dfs2Session {
-  private sessionId?: string;
-  private baseUrl: string;
-  private resourcePath: string;
-  private sessionBaseUrl?: string;
-
-  constructor(apiUrl: string) {
-    const url = new URL(apiUrl);
-    this.baseUrl = `${url.protocol}//${url.host}`;
-    this.resourcePath = url.pathname;
-  }
-
-  async createSession(chunks?: string[]): Promise<void> {
-    const sessionResponse = await invoke<Dfs2SessionResponse>('create_dfs2_session', {
-      api_url: `${this.baseUrl}${this.resourcePath}`,
-      chunks: chunks || undefined,
-      challenge_response: undefined,
-      session_id: undefined,
-    });
-
-    if (!sessionResponse.sid) {
-      throw new Error('Failed to create DFS2 session: no session ID returned');
-    }
-
-    this.sessionId = sessionResponse.sid;
-    // Extract resource ID from path (e.g., /resource/myapp -> myapp)
-    const resId = this.resourcePath.split('/').pop();
-    this.sessionBaseUrl = `${this.baseUrl}/session/${this.sessionId}/${resId}`;
-  }
-
-  async getChunkUrl(range: string): Promise<string> {
-    if (!this.sessionBaseUrl) {
-      throw new Error('Session not created');
-    }
-
-    const response = await invoke<Dfs2ChunkResponse>('get_dfs2_chunk_url', {
-      session_api_url: this.sessionBaseUrl,
-      range,
-    });
-
-    return response.url;
-  }
-
-  async endSession(insights?: Dfs2SessionInsights): Promise<void> {
-    if (!this.sessionBaseUrl) {
-      return; // Session was never created
-    }
-
+// DFS2 Session Management Functions
+export const createDfs2Session = async (
+  apiUrl: string,
+  chunks?: string[],
+  version?: string,
+  extras?: string
+): Promise<string> => {
+  // Parse extras string to JSON object if provided
+  let extrasObject: any = undefined;
+  if (extras && extras.trim() !== '') {
     try {
-      await invoke('end_dfs2_session', {
-        session_api_url: this.sessionBaseUrl,
-        insights: insights || undefined,
-      });
-    } catch (error) {
-      // Log but don't throw - session cleanup should be best effort
-      console.warn('Failed to end DFS2 session:', error);
-    } finally {
-      this.sessionId = undefined;
-      this.sessionBaseUrl = undefined;
+      extrasObject = JSON.parse(extras);
+    } catch (e) {
+      throw new Error(`Invalid extras JSON format: ${e}`);
     }
   }
 
-  isActive(): boolean {
-    return !!this.sessionId;
+  let challengeResponse: string | undefined = undefined;
+  let sessionId: string | undefined = undefined;
+  
+  // Challenge handling loop
+  for (let attempts = 0; attempts < 3; attempts++) {
+    const sessionResponse = await invoke<Dfs2SessionResponse>('create_dfs2_session', {
+      apiUrl: apiUrl,
+      chunks: chunks || undefined,
+      version: version || undefined,
+      challengeResponse: challengeResponse,
+      sessionId: sessionId,
+      extras: extrasObject,
+    });
+
+    // Success - session created
+    if (sessionResponse.sid && !sessionResponse.challenge) {
+      // Store session for cleanup
+      storeDfs2Session(apiUrl, sessionResponse.sid);
+      return sessionResponse.sid;
+    }
+
+    // Challenge received
+    if (sessionResponse.challenge && sessionResponse.data && sessionResponse.sid) {
+      console.log(`DFS2 challenge received: ${sessionResponse.challenge}`);
+      
+      try {
+        if (sessionResponse.challenge === 'web') {
+          // Handle web challenges
+          challengeResponse = await handleWebChallenge(sessionResponse.data);
+        } else {
+          // Handle computational challenges (MD5, SHA256)
+          challengeResponse = await invoke<string>('solve_dfs2_challenge', {
+            challengeType: sessionResponse.challenge,
+            data: sessionResponse.data,
+          });
+        }
+        
+        sessionId = sessionResponse.sid;
+        console.log('Challenge solved, retrying session creation...');
+        continue;
+      } catch (error) {
+        throw new Error(`Failed to solve ${sessionResponse.challenge} challenge: ${error}`);
+      }
+    }
+
+    // Unexpected response
+    throw new Error('Invalid session response format');
   }
-}
+
+  throw new Error('Failed to create session after 3 challenge attempts');
+};
+
+// Web Challenge Handler
+const handleWebChallenge = async (challengeData: string): Promise<string> => {
+  // TODO: Implement web challenge handling
+  // This could involve:
+  // - Opening a popup window
+  // - Handling captcha
+  // - User authentication
+  // - Redirect flows
+  // 
+  // For now, throw an error to indicate it needs implementation
+  throw new Error('Web challenges not implemented yet. Challenge data: ' + challengeData);
+};
 
 // DFS2 session cache - now only stores sessions created in runInstall
 const dfs2Sessions = new Map<string, { sessionId: string; baseUrl: string; resId: string }>();

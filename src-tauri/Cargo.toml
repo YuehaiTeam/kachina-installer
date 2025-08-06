@@ -30,6 +30,7 @@ tokio = { version = "1", features = [
     "net",
 ] }
 chksum-md5 = { version = "0.1", features = ["async-runtime-tokio"] }
+sha2 = "0.10"
 reqwest = { version = "0.12", default-features = false, features = [
     "http2",
     "json",

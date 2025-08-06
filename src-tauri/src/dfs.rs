@@ -48,6 +48,8 @@ pub struct Dfs2SessionRequest {
     pub challenge: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub extras: Option<serde_json::Value>,
 }
 
 #[derive(Deserialize, Serialize, Debug)]
@@ -175,21 +177,26 @@ pub async fn get_dfs(
 // DFS2 API commands
 #[tauri::command]
 pub async fn get_dfs2_metadata(api_url: String) -> Result<Dfs2Metadata, String> {
-    let res = REQUEST_CLIENT.get(&api_url).send().await
+    let res = REQUEST_CLIENT
+        .get(&api_url)
+        .send()
+        .await
         .map_err(|e| format!("Failed to send request: {:?}", e))?;
-    
+
     if !res.status().is_success() {
         let status = res.status();
         let body = res.text().await.unwrap_or_default();
         return Err(format!("{}: {}", status, body));
     }
-    
-    let body_text = res.text().await
+
+    let body_text = res
+        .text()
+        .await
         .map_err(|e| format!("Failed to read response body: {:?}", e))?;
-    
+
     let metadata: Dfs2Metadata = serde_json::from_str(&body_text)
         .map_err(|e| format!("Failed to parse JSON ({}): {}", e, body_text))?;
-    
+
     Ok(metadata)
 }
 
@@ -200,54 +207,38 @@ pub async fn create_dfs2_session(
     version: Option<String>,
     challenge_response: Option<String>,
     session_id: Option<String>,
+    extras: Option<serde_json::Value>,
 ) -> Result<Dfs2SessionResponse, String> {
-    let mut current_chunks = chunks;
-    let mut current_version = version;
-    let mut current_challenge = challenge_response;
-    let mut current_session_id = session_id;
-    
-    // Handle challenge loop (avoid recursion)
-    loop {
-        let request_body = Dfs2SessionRequest {
-            chunks: current_chunks.clone(),
-            sid: current_session_id.clone(),
-            challenge: current_challenge.clone(),
-            version: current_version.clone(),
-        };
-        
-        let res = REQUEST_CLIENT.post(&api_url)
-            .json(&request_body)
-            .send().await
-            .map_err(|e| format!("Failed to send request: {:?}", e))?;
-        
-        let status = res.status();
-        let body_text = res.text().await
-            .map_err(|e| format!("Failed to read response body: {:?}", e))?;
-        
-        let response: Dfs2SessionResponse = serde_json::from_str(&body_text)
-            .map_err(|e| format!("Failed to parse JSON ({}): {}", e, body_text))?;
-        
-        // Handle challenge response (402 Payment Required)
-        if status == reqwest::StatusCode::PAYMENT_REQUIRED {
-            if let (Some(challenge), Some(data), Some(sid)) = (&response.challenge, &response.data, &response.sid) {
-                let solved_challenge = solve_dfs2_challenge(challenge, data)?;
-                
-                // Set up for next iteration
-                current_challenge = Some(solved_challenge);
-                current_session_id = Some(sid.clone());
-                continue;
-            } else {
-                return Err("Invalid challenge response format".to_string());
-            }
-        }
-        
-        if !status.is_success() {
-            return Err(format!("Session creation failed: {}", status));
-        }
-        
-        
-        return Ok(response);
+    let request_body = Dfs2SessionRequest {
+        chunks,
+        sid: session_id,
+        challenge: challenge_response,
+        version,
+        extras,
+    };
+
+    let res = REQUEST_CLIENT
+        .post(&api_url)
+        .json(&request_body)
+        .send()
+        .await
+        .map_err(|e| format!("Failed to send request: {:?}", e))?;
+
+    let status = res.status();
+    let body_text = res
+        .text()
+        .await
+        .map_err(|e| format!("Failed to read response body: {:?}", e))?;
+
+    let response: Dfs2SessionResponse = serde_json::from_str(&body_text)
+        .map_err(|e| format!("Failed to parse JSON ({}): {}", e, body_text))?;
+
+    // Return response directly - let frontend handle challenges
+    if !status.is_success() && status != reqwest::StatusCode::PAYMENT_REQUIRED {
+        return Err(format!("Session creation failed: {}", status));
     }
+
+    Ok(response)
 }
 
 #[tauri::command]
@@ -256,22 +247,27 @@ pub async fn get_dfs2_chunk_url(
     range: String,
 ) -> Result<Dfs2ChunkResponse, String> {
     let url = format!("{}?range={}", session_api_url, range);
-    
-    let res = REQUEST_CLIENT.get(&url).send().await
+
+    let res = REQUEST_CLIENT
+        .get(&url)
+        .send()
+        .await
         .map_err(|e| format!("Failed to send request: {:?}", e))?;
-    
+
     if !res.status().is_success() {
         let status = res.status();
         let body = res.text().await.unwrap_or_default();
         return Err(format!("{}: {}", status, body));
     }
-    
-    let body_text = res.text().await
+
+    let body_text = res
+        .text()
+        .await
         .map_err(|e| format!("Failed to read response body: {:?}", e))?;
-    
+
     let response: Dfs2ChunkResponse = serde_json::from_str(&body_text)
         .map_err(|e| format!("Failed to parse JSON ({}): {}", e, body_text))?;
-    
+
     Ok(response)
 }
 
@@ -281,12 +277,14 @@ pub async fn end_dfs2_session(
     insights: Option<Dfs2SessionInsights>,
 ) -> Result<(), String> {
     let request_body = Dfs2DeleteRequest { insights };
-    
-    let res = REQUEST_CLIENT.delete(&session_api_url)
+
+    let res = REQUEST_CLIENT
+        .delete(&session_api_url)
         .json(&request_body)
-        .send().await
+        .send()
+        .await
         .map_err(|e| format!("Failed to send request: {:?}", e))?;
-    
+
     if !res.status().is_success() {
         let status = res.status();
         let body = res.text().await.unwrap_or_default();
@@ -295,18 +293,22 @@ pub async fn end_dfs2_session(
     Ok(())
 }
 
-fn solve_dfs2_challenge(challenge_type: &str, data: &str) -> Result<String, String> {
-    match challenge_type {
+#[tauri::command]
+pub async fn solve_dfs2_challenge(
+    challenge_type: String,
+    data: String,
+) -> Result<String, String> {
+    match challenge_type.as_str() {
         "md5" => {
             // Split data into "hash/source"
             let parts: Vec<&str> = data.split('/').collect();
             if parts.len() != 2 {
                 return Err("Invalid challenge data format".to_string());
             }
-            
+
             let target_hash = parts[0];
             let source = parts[1];
-            
+
             // Try to find the solution by appending hex values
             for i in 0..=255 {
                 let candidate = format!("{}{:02x}", source, i);
@@ -315,19 +317,52 @@ fn solve_dfs2_challenge(challenge_type: &str, data: &str) -> Result<String, Stri
                     return Ok(candidate);
                 }
             }
-            
+
             Err("Failed to solve MD5 challenge".to_string())
         }
         "sha256" => {
-            // TODO: Implement SHA256 challenge solving
-            Err("SHA256 challenge not implemented yet".to_string())
+            // Split data into "hash/source"
+            let parts: Vec<&str> = data.split('/').collect();
+            if parts.len() != 2 {
+                return Err("Invalid challenge data format".to_string());
+            }
+
+            let target_hash = parts[0].to_string();
+            let source = parts[1].to_string();
+
+            // Use spawn_blocking for CPU-intensive SHA256 computation
+            let result = tokio::task::spawn_blocking(move || -> Result<String, String> {
+                use sha2::{Sha256, Digest};
+                
+                // Try different suffix lengths - start with reasonable range
+                for suffix_len in 1..=8u32 {
+                    let max_val = 16_u64.pow(suffix_len);
+                    
+                    for i in 0..max_val {
+                        let suffix = format!("{:0width$x}", i, width = suffix_len as usize);
+                        let candidate = format!("{}{}", source, suffix);
+                        
+                        let mut hasher = Sha256::new();
+                        hasher.update(candidate.as_bytes());
+                        let hash = format!("{:x}", hasher.finalize());
+                        
+                        if hash == target_hash {
+                            return Ok(candidate);
+                        }
+                    }
+                }
+                
+                Err("Failed to solve SHA256 challenge".to_string())
+            }).await.map_err(|e| format!("SHA256 challenge task failed: {}", e))?;
+            
+            result
         }
         "web" => {
             // TODO: Web challenges need to be handled by the frontend
             // as they may require user interaction (captcha, browser popup, etc.)
             Err("Web challenges must be handled by the frontend".to_string())
         }
-        _ => Err(format!("Unsupported challenge type: {}", challenge_type))
+        _ => Err(format!("Unsupported challenge type: {}", challenge_type)),
     }
 }
 
