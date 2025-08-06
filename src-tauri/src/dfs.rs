@@ -177,8 +177,14 @@ pub async fn get_dfs(
 // DFS2 API commands
 #[tauri::command]
 pub async fn get_dfs2_metadata(api_url: String) -> Result<Dfs2Metadata, String> {
+    let url_with_metadata = if api_url.contains('?') {
+        format!("{}&with_metadata=1", api_url)
+    } else {
+        format!("{}?with_metadata=1", api_url)
+    };
+    
     let res = REQUEST_CLIENT
-        .get(&api_url)
+        .get(&url_with_metadata)
         .send()
         .await
         .map_err(|e| format!("Failed to send request: {:?}", e))?;
