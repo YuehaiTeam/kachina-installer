@@ -120,9 +120,14 @@ pub async fn get_dfs(
             return Err(format!("{}: {}", status, body.unwrap()));
         }
     }
-    let json: Result<DownloadResp, reqwest::Error> = res.json().await;
+    let body_text = res.text().await;
+    if body_text.is_err() {
+        return Err(format!("Failed to read response body: {:?}", body_text.err()));
+    }
+    let body_text = body_text.unwrap();
+    let json: Result<DownloadResp, serde_json::Error> = serde_json::from_str(&body_text);
     if json.is_err() {
-        return Err(format!("Failed to parse json: {:?}", json.err()));
+        return Err(format!("Failed to parse JSON ({}): {}", json.err().unwrap(), body_text));
     }
     let json = json.unwrap();
     // directly return if not challenge
@@ -161,11 +166,22 @@ pub async fn get_dfs(
     // check status code if is not 200 or 401
     if res.status() != reqwest::StatusCode::OK && res.status() != reqwest::StatusCode::UNAUTHORIZED
     {
-        return Err(format!("{}", res.status()));
+        let status = res.status();
+        let body = res.text().await;
+        if body.is_err() {
+            return Err(format!("{status}"));
+        } else {
+            return Err(format!("{}: {}", status, body.unwrap()));
+        }
     }
-    let json: Result<DownloadResp, reqwest::Error> = res.json().await;
+    let body_text = res.text().await;
+    if body_text.is_err() {
+        return Err(format!("Failed to read response body: {:?}", body_text.err()));
+    }
+    let body_text = body_text.unwrap();
+    let json: Result<DownloadResp, serde_json::Error> = serde_json::from_str(&body_text);
     if json.is_err() {
-        return Err(format!("Failed to parse json: {:?}", json.err()));
+        return Err(format!("Failed to parse JSON ({}): {}", json.err().unwrap(), body_text));
     }
     let json = json.unwrap();
     if json.challenge.is_some() {

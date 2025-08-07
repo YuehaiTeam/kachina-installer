@@ -70,10 +70,30 @@ fn main() {
         _ => EventFilter::Breadcrumb,
     });
     let info_filter = utils::sentry::InfoFilter {};
-    tracing_subscriber::registry()
+
+    // Create log file in temp directory, ignore failures
+    let temp_dir = std::env::temp_dir();
+    let log_file = temp_dir.join("KachinaInstaller.log");
+
+    let console_layer = tracing_subscriber::fmt::layer().with_filter(utils::sentry::InfoFilter {});
+
+    let registry = tracing_subscriber::registry()
         .with(sentry_layer)
-        .with(tracing_subscriber::fmt::layer().with_filter(info_filter))
-        .init();
+        .with(console_layer);
+
+    if let Ok(file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_file)
+    {
+        let file_layer = tracing_subscriber::fmt::layer()
+            .with_writer(file)
+            .with_ansi(false)
+            .with_filter(info_filter);
+        registry.with(file_layer).init();
+    } else {
+        registry.init();
+    }
     // command is not  Command::Install, can be anything
     match command {
         Command::Install(install) => {

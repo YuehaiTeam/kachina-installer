@@ -814,7 +814,7 @@ async function runInstall(): Promise<void> {
     await dialog_error(
       '获取更新信息失败，请检查网络连接' + online_meta_err
         ? `\n${online_meta_err}`
-        : '',
+        : '：未知错误，请检查日志',
       '出错了',
     );
     step.value = 1;
@@ -1123,6 +1123,15 @@ async function runMirrorcInstall() {
     );
   } catch (e) {}
   const source_url = new URL(selectedSource.value);
+  if (!source_url.hostname) {
+    await dialog_error(
+      '无法获取Mirror酱数据，安装包可能已经损坏：' + selectedSource.value,
+      '出错了',
+    );
+    error('Invalid Mirrorc source URL:', selectedSource.value);
+    step.value = 1;
+    return;
+  }
   const mirrorc_status = await invoke<MirrorcUpdate>('get_mirrorc_status', {
     resourceId: source_url.hostname,
     cdk: mirrorcKey.value,
@@ -1130,6 +1139,8 @@ async function runMirrorcInstall() {
     channel: source_url.searchParams.get('channel') || 'stable',
     arch: source_url.searchParams.get('arch') || undefined,
     os: source_url.searchParams.get('os') || undefined,
+  }).catch((e) => {
+    return Promise.reject(`从获取Mirror酱获取更新数据失败: ${e}`);
   });
   const errorResult = processMirrorcError(mirrorc_status, 'install');
   if (errorResult) {
@@ -1576,6 +1587,14 @@ async function changeMirrorcKey() {
     if (mirrorcChecking.value) return;
     mirrorcChecking.value = true;
     const source_url = new URL(mirrorcTempUrl.value);
+    if (!source_url.hostname) {
+      await dialog_error(
+        '无法获取Mirror酱数据，安装包可能已经损坏：' + selectedSource.value,
+        '出错了',
+      );
+      mirrorcChecking.value = false;
+      return;
+    }
     const mirrorc_status = await invoke<MirrorcUpdate>('get_mirrorc_status', {
       resourceId: source_url.hostname,
       cdk: mirrorcTempKey.value,
