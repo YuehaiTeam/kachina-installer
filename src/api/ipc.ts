@@ -24,7 +24,7 @@ export async function ipc<T extends { type: string }, E, Z>(
   if (
     !res ||
     typeof res !== 'object' ||
-    (!('Ok' in (res as {})) && !('Err' in (res as {})))
+    (!('Ok' in (res as object)) && !('Err' in (res as object)))
   ) {
     return res as E;
   }
@@ -104,11 +104,6 @@ interface IpcCheckLocalFiles {
   file_list: string[];
 }
 
-interface IpcPatchInstaller {
-  type: 'PatchInstaller';
-  installer: string;
-}
-
 interface RunMirrorcDownload {
   type: 'RunMirrorcDownload';
   url: string;
@@ -181,8 +176,8 @@ export async function ipcRmList(list: string[], elevate = false) {
 
 export async function ipcInstallRuntime(
   tag: string,
-  offset?: number,
-  size?: number,
+  offset: number | undefined,
+  size: number | undefined,
   cb: (p: Event<[number, number]>) => void,
   elevate = false,
 ) {
@@ -203,13 +198,6 @@ export async function ipcCheckLocalFiles(
     InvokeDeepReaddirWithMetadataRes,
     [number, number]
   >({ type: 'CheckLocalFiles', ...args }, elevate, cb);
-}
-
-export async function ipcPatchInstaller(installer: string, elevate = false) {
-  return ipc<IpcPatchInstaller, void, void>(
-    { type: 'PatchInstaller', installer },
-    elevate,
-  );
 }
 
 type MirrorcStatus =
@@ -299,7 +287,7 @@ export async function ipcRunMirrorcInstall(
   >({ type: 'RunMirrorcInstall', zip_path, target_path }, elevate, notify);
 }
 
-export function log(...args: any[]) {
+export function log(...args: unknown[]) {
   console.log(...args);
   const logstr = args.reduce((acc, arg) => {
     if (typeof arg === 'string') {
@@ -309,7 +297,7 @@ export function log(...args: any[]) {
   });
   invoke('log', { data: logstr });
 }
-export function warn(...args: any[]) {
+export function warn(...args: unknown[]) {
   console.warn(...args);
   const logstr = args.reduce((acc, arg) => {
     if (typeof arg === 'string') {
@@ -319,7 +307,7 @@ export function warn(...args: any[]) {
   });
   invoke('warn', { data: logstr });
 }
-export function error(...args: any[]) {
+export function error(...args: unknown[]): string {
   console.error(...args);
   const logstr = args.reduce((acc, arg) => {
     if (typeof arg === 'string') {
@@ -328,7 +316,7 @@ export function error(...args: any[]) {
     return acc + ' ' + JSON.stringify(arg);
   });
   invoke('error', { data: logstr });
-  return logstr;
+  return logstr as string;
 }
 
 export async function sendInsight(url: string, event?: string, data?: unknown) {

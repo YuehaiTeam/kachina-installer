@@ -45,10 +45,10 @@ export function InstallFile(
     delete hash.xxh;
     delete hash.md5;
   }
-  return { 
-    mode, 
-    target, 
-    type: 'InstallFile', 
+  return {
+    mode,
+    target,
+    type: 'InstallFile',
     ...hash,
     clear_installer_index_mark: clearInstallerIndexMark,
   };

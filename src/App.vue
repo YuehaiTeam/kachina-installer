@@ -559,7 +559,6 @@ import {
   ipcFindProcessByName,
   ipcInstallRuntime,
   ipcKillProcess,
-  ipcPatchInstaller,
   ipcRmList,
   ipcRunMirrorcDownload,
   ipcRunMirrorcInstall,
