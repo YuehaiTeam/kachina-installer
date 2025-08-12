@@ -4,7 +4,7 @@ use crate::{
         create_http_stream, create_local_stream, create_multi_http_stream, create_target_file,
         prepare_target, progressed_copy, progressed_hpatch, verify_hash,
     },
-    utils::error::{IntoTAResult, TAResult},
+    utils::{error::{IntoTAResult, TAResult}, download_monitor::DownloadMonitor},
 };
 
 use anyhow::Result;
@@ -124,6 +124,7 @@ pub async fn ipc_install_file(
                 create_target_file(&target).await?,
                 progress_noti,
                 insight,
+                false, // Enable timeout checking for single file downloads
             )
             .await?;
             
@@ -314,10 +315,12 @@ pub async fn ipc_install_multipart_stream(
         // Create multipart reader
         let mut multipart = multer::Multipart::new(http_stream, boundary);
 
-        // Process multipart stream and handle chunks
+        // Process multipart stream and handle chunks with timeout monitoring
         let mut mult_res = Vec::new();
         let mut chunk_index = 0usize;
-        while let Some(field) = multipart
+        let mut monitor = DownloadMonitor::new();
+        let mut total_processed = 0usize;
+        while let Some(mut field) = multipart
             .next_field()
             .await
             .map_err(|e| crate::utils::error::TACommandError::new(anyhow::anyhow!("Multipart parsing error: {}", e)))?
@@ -392,12 +395,33 @@ pub async fn ipc_install_multipart_stream(
             // 获取chunk的skip_decompress参数
             let should_decompress = should_decompress_chunk(chunk);
 
-            // Map multer::Error to std::io::Error for StreamReader compatibility
-            let stream = field.into_stream();
-            let stream = stream.map_err(std::io::Error::other);
-            let reader = tokio_util::io::StreamReader::new(stream);
+            // Read field data with timeout monitoring
+            let mut field_data = Vec::new();
+            while let Some(chunk_bytes) = field.chunk().await.map_err(|e| {
+                insight.error = Some(e.to_string());
+                insight.time = download_start.elapsed().as_millis() as u32 - insight.ttfb;
+                insight.size = total_processed as u32;
+                crate::utils::error::TACommandError::with_insight(
+                    anyhow::anyhow!("Field chunk read error: {}", e), 
+                    insight.clone()
+                )
+            })? {
+                field_data.extend_from_slice(&chunk_bytes);
+                total_processed += chunk_bytes.len();
+                
+                // Check for timeout during multipart field reading
+                if let Err(e) = monitor.check_stall(total_processed) {
+                    insight.error = Some(e.to_string());
+                    insight.time = download_start.elapsed().as_millis() as u32 - insight.ttfb;
+                    insight.size = total_processed as u32;
+                    return Err(crate::utils::error::TACommandError::with_insight(e, insight));
+                }
+            }
 
-            // 根据参数决定是否解压缩并安装chunk
+            // Create reader from collected field data
+            let reader = std::io::Cursor::new(field_data);
+
+            // 根据参数决定是否解压缩并安装chunk (disable timeout in install_file_by_reader)
             let chunk_result = if should_decompress {
                 let mut decompressed_reader = TokioZstdDecoder::new(reader);
                 install_file_by_reader(chunk.clone(), &mut decompressed_reader, chunk_notify)
@@ -583,9 +607,10 @@ pub async fn ipc_install_multichunk_stream(
         }
     };
 
-    // Convert the HTTP stream to AsyncRead
+    // Convert the HTTP stream to AsyncRead with timeout monitoring
     let stream = http_stream.map_err(std::io::Error::other);
     let mut reader = tokio_util::io::StreamReader::new(stream);
+    let mut monitor = DownloadMonitor::new();
 
     for (chunk_index, chunk_info) in chunks_with_positions.iter().enumerate() {
         let chunk_size = get_chunk_size(&chunk_info.args);
@@ -605,7 +630,7 @@ pub async fn ipc_install_multichunk_stream(
             }
         };
 
-        // Skip bytes until we reach the chunk position
+        // Skip bytes until we reach the chunk position with timeout checking
         if stream_position < chunk_info.position {
             let skip_bytes = chunk_info.position - stream_position;
             reader
@@ -613,6 +638,14 @@ pub async fn ipc_install_multichunk_stream(
                 .await
                 .map_err(|e| crate::utils::error::TACommandError::new(anyhow::anyhow!("Failed to skip bytes: {}", e)))?;
             stream_position = chunk_offset;
+            
+            // Check for timeout after skipping data
+            if let Err(e) = monitor.check_stall(stream_position) {
+                insight.error = Some(e.to_string());
+                insight.time = download_start.elapsed().as_millis() as u32 - insight.ttfb;
+                insight.size = stream_position as u32;
+                return Err(crate::utils::error::TACommandError::with_insight(e, insight));
+            }
         }
 
         // 获取chunk的skip_decompress参数
@@ -634,6 +667,14 @@ pub async fn ipc_install_multichunk_stream(
         };
         results.push(chunk_result);
         stream_position += chunk_size;
+        
+        // Check for timeout after processing each chunk
+        if let Err(e) = monitor.check_stall(stream_position) {
+            insight.error = Some(e.to_string());
+            insight.time = download_start.elapsed().as_millis() as u32 - insight.ttfb;
+            insight.size = stream_position as u32;
+            return Err(crate::utils::error::TACommandError::with_insight(e, insight));
+        }
     }
 
     // 更新insight统计信息 - multichunk请求完成  

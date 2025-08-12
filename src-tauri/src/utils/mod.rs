@@ -1,5 +1,6 @@
 pub mod acl;
 pub mod dir;
+pub mod download_monitor;
 pub mod error;
 pub mod gui;
 pub mod hash;

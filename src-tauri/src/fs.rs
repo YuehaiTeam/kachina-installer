@@ -12,7 +12,7 @@ use crate::{
     dfs::InsightItem,
     installer::uninstall::DELETE_SELF_ON_EXIT_PATH,
     local::mmap,
-    utils::{hash::run_hash, progressed_read::ReadWithCallback},
+    utils::{hash::run_hash, progressed_read::ReadWithCallback, download_monitor::DownloadMonitor},
     REQUEST_CLIENT,
 };
 use anyhow::{Context, Result};
@@ -213,7 +213,7 @@ pub async fn create_http_stream(
     let stream = futures::TryStreamExt::map_err(res.bytes_stream(), std::io::Error::other);
     let reader = tokio_util::io::StreamReader::new(stream);
     
-    let mut insight = InsightItem {
+    let insight = InsightItem {
         url: url.to_string(),
         ttfb,
         time: 0, // 将在progressed_copy中更新
@@ -381,11 +381,11 @@ pub async fn create_target_file(target: &str) -> Result<impl AsyncWrite, anyhow:
 }
 
 pub async fn progressed_copy(
-    mut source: impl AsyncRead + std::marker::Unpin,
-    mut target: impl AsyncWrite + std::marker::Unpin,
+    source: impl AsyncRead + std::marker::Unpin,
+    target: impl AsyncWrite + std::marker::Unpin,
     on_progress: impl Fn(usize),
 ) -> Result<usize, anyhow::Error> {
-    progressed_copy_with_insight(source, target, on_progress, None).await.map(|(size, _)| size)
+    progressed_copy_with_insight(source, target, on_progress, None, true).await.map(|(size, _)| size)
 }
 
 pub async fn progressed_copy_with_insight(
@@ -393,12 +393,16 @@ pub async fn progressed_copy_with_insight(
     mut target: impl AsyncWrite + std::marker::Unpin,
     on_progress: impl Fn(usize),
     mut insight: Option<InsightItem>,
+    disable_timeout_check: bool,
 ) -> Result<(usize, Option<InsightItem>), anyhow::Error> {
     let download_start = std::time::Instant::now();
     let mut downloaded = 0;
     let mut boxed = Box::new([0u8; 256 * 1024]);
     let buffer = &mut *boxed;
     let mut now = std::time::Instant::now();
+    
+    // Create monitor only if timeout checking is enabled
+    let mut monitor = if disable_timeout_check { None } else { Some(DownloadMonitor::new()) };
     
     loop {
         let read = source.read(buffer).await.context("DECOMPRESS_ERR")?;
@@ -411,6 +415,20 @@ pub async fn progressed_copy_with_insight(
             break;
         }
         downloaded += read;
+        
+        // Check for timeout if monitor is enabled
+        if let Some(ref mut monitor) = monitor {
+            if let Err(e) = monitor.check_stall(downloaded) {
+                // Update insight with error information
+                if let Some(ref mut insight) = insight {
+                    insight.error = Some(e.to_string());
+                    insight.time = download_start.elapsed().as_millis() as u32;
+                    insight.size = downloaded as u32;
+                }
+                return Err(e);
+            }
+        }
+        
         if now.elapsed().as_millis() >= 20 {
             now = std::time::Instant::now();
             on_progress(downloaded);
