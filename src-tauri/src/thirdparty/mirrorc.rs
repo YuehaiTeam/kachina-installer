@@ -204,7 +204,7 @@ pub async fn get_mirrorc_status(
         .send()
         .await
         .context("MIRRORC_HTTP_ERR")?;
-    
+
     let body_text = resp.text().await.context("Failed to read response body")?;
     let status: serde_json::Value = serde_json::from_str(&body_text)
         .map_err(|e| anyhow::anyhow!("Failed to parse JSON ({}): {}", e, body_text))?;

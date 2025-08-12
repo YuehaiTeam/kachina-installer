@@ -72,9 +72,9 @@ pub struct Dfs2ChunkResponse {
 #[derive(Clone, Deserialize, Serialize, Debug)]
 pub struct InsightItem {
     pub url: String,
-    pub ttfb: u32,        // 首字节时间(ms)
-    pub time: u32,        // 纯下载时间(ms) = 总时间 - TTFB
-    pub size: u32,        // 实际下载字节数
+    pub ttfb: u32,              // 首字节时间(ms)
+    pub time: u32,              // 纯下载时间(ms) = 总时间 - TTFB
+    pub size: u32,              // 实际下载字节数
     pub range: Vec<(u32, u32)>, // HTTP Range请求范围
     pub error: Option<String>,
 }
@@ -129,12 +129,19 @@ pub async fn get_dfs(
     }
     let body_text = res.text().await;
     if body_text.is_err() {
-        return Err(format!("Failed to read response body: {:?}", body_text.err()));
+        return Err(format!(
+            "Failed to read response body: {:?}",
+            body_text.err()
+        ));
     }
     let body_text = body_text.unwrap();
     let json: Result<DownloadResp, serde_json::Error> = serde_json::from_str(&body_text);
     if json.is_err() {
-        return Err(format!("Failed to parse JSON ({}): {}", json.err().unwrap(), body_text));
+        return Err(format!(
+            "Failed to parse JSON ({}): {}",
+            json.err().unwrap(),
+            body_text
+        ));
     }
     let json = json.unwrap();
     // directly return if not challenge
@@ -183,12 +190,19 @@ pub async fn get_dfs(
     }
     let body_text = res.text().await;
     if body_text.is_err() {
-        return Err(format!("Failed to read response body: {:?}", body_text.err()));
+        return Err(format!(
+            "Failed to read response body: {:?}",
+            body_text.err()
+        ));
     }
     let body_text = body_text.unwrap();
     let json: Result<DownloadResp, serde_json::Error> = serde_json::from_str(&body_text);
     if json.is_err() {
-        return Err(format!("Failed to parse JSON ({}): {}", json.err().unwrap(), body_text));
+        return Err(format!(
+            "Failed to parse JSON ({}): {}",
+            json.err().unwrap(),
+            body_text
+        ));
     }
     let json = json.unwrap();
     if json.challenge.is_some() {
@@ -205,7 +219,7 @@ pub async fn get_dfs2_metadata(api_url: String) -> Result<Dfs2Metadata, String> 
     } else {
         format!("{}?with_metadata=1", api_url)
     };
-    
+
     let res = REQUEST_CLIENT
         .get(&url_with_metadata)
         .send()
@@ -323,10 +337,7 @@ pub async fn end_dfs2_session(
 }
 
 #[tauri::command]
-pub async fn solve_dfs2_challenge(
-    challenge_type: String,
-    data: String,
-) -> Result<String, String> {
+pub async fn solve_dfs2_challenge(challenge_type: String, data: String) -> Result<String, String> {
     match challenge_type.as_str() {
         "md5" => {
             // Split data into "hash/source"
@@ -361,29 +372,31 @@ pub async fn solve_dfs2_challenge(
 
             // Use spawn_blocking for CPU-intensive SHA256 computation
             let result = tokio::task::spawn_blocking(move || -> Result<String, String> {
-                use sha2::{Sha256, Digest};
-                
+                use sha2::{Digest, Sha256};
+
                 // Try different suffix lengths - start with reasonable range
                 for suffix_len in 1..=8u32 {
                     let max_val = 16_u64.pow(suffix_len);
-                    
+
                     for i in 0..max_val {
                         let suffix = format!("{:0width$x}", i, width = suffix_len as usize);
                         let candidate = format!("{}{}", source, suffix);
-                        
+
                         let mut hasher = Sha256::new();
                         hasher.update(candidate.as_bytes());
                         let hash = format!("{:x}", hasher.finalize());
-                        
+
                         if hash == target_hash {
                             return Ok(candidate);
                         }
                     }
                 }
-                
+
                 Err("Failed to solve SHA256 challenge".to_string())
-            }).await.map_err(|e| format!("SHA256 challenge task failed: {}", e))?;
-            
+            })
+            .await
+            .map_err(|e| format!("SHA256 challenge task failed: {}", e))?;
+
             result
         }
         "web" => {

@@ -398,12 +398,14 @@ pub async fn gen_cli(args: GenArgs) {
                 }
             }
             // 生成打包优化信息（在移动 diffs 之前）
-            let diff_vers_pathbuf: Vec<std::path::PathBuf> = diff_vers.iter().map(|s| std::path::PathBuf::from(s)).collect();
-            let packing_info = generate_packing_info(&metadata_with_installer, &diffs, &diff_vers_pathbuf).await;
-            
+            let diff_vers_pathbuf: Vec<std::path::PathBuf> =
+                diff_vers.iter().map(std::path::PathBuf::from).collect();
+            let packing_info =
+                generate_packing_info(&metadata_with_installer, &diffs, &diff_vers_pathbuf).await;
+
             repometa.patches = Some(diffs);
             repometa.packing_info = Some(packing_info);
-            
+
             // write metadata again
             let metadata_str =
                 serde_json::to_string(&repometa).expect("failed to serialize metadata");
@@ -429,15 +431,15 @@ pub async fn gen_cli(args: GenArgs) {
                 xxh: installer.xxh.clone(),
             });
         }
-        
+
         let empty_diffs = Vec::new();
         let empty_diff_vers = Vec::new();
-        let packing_info = generate_packing_info(&metadata_with_installer, &empty_diffs, &empty_diff_vers).await;
+        let packing_info =
+            generate_packing_info(&metadata_with_installer, &empty_diffs, &empty_diff_vers).await;
         repometa.packing_info = Some(packing_info);
-        
+
         // write metadata again
-        let metadata_str =
-            serde_json::to_string(&repometa).expect("failed to serialize metadata");
+        let metadata_str = serde_json::to_string(&repometa).expect("failed to serialize metadata");
         tokio::fs::write(&args.output_metadata, metadata_str)
             .await
             .expect("failed to write metadata");

@@ -4,7 +4,10 @@ use crate::{
         create_http_stream, create_local_stream, create_multi_http_stream, create_target_file,
         prepare_target, progressed_copy, progressed_hpatch, verify_hash,
     },
-    utils::{error::{IntoTAResult, TAResult}, download_monitor::DownloadMonitor},
+    utils::{
+        download_monitor::DownloadMonitor,
+        error::{IntoTAResult, TAResult},
+    },
 };
 
 use anyhow::Result;
@@ -21,16 +24,28 @@ fn default_as_false() -> bool {
 fn should_decompress_chunk(args: &InstallFileArgs) -> bool {
     match &args.mode {
         InstallFileMode::Direct { source } => match source {
-            InstallFileSource::Url { skip_decompress, .. } => !skip_decompress,
-            InstallFileSource::Local { skip_decompress, .. } => !skip_decompress,
+            InstallFileSource::Url {
+                skip_decompress, ..
+            } => !skip_decompress,
+            InstallFileSource::Local {
+                skip_decompress, ..
+            } => !skip_decompress,
         },
         InstallFileMode::Patch { source, .. } => match source {
-            InstallFileSource::Url { skip_decompress, .. } => !skip_decompress,
-            InstallFileSource::Local { skip_decompress, .. } => !skip_decompress,
+            InstallFileSource::Url {
+                skip_decompress, ..
+            } => !skip_decompress,
+            InstallFileSource::Local {
+                skip_decompress, ..
+            } => !skip_decompress,
         },
         InstallFileMode::HybridPatch { diff, .. } => match diff {
-            InstallFileSource::Url { skip_decompress, .. } => !skip_decompress,
-            InstallFileSource::Local { skip_decompress, .. } => !skip_decompress,
+            InstallFileSource::Url {
+                skip_decompress, ..
+            } => !skip_decompress,
+            InstallFileSource::Local {
+                skip_decompress, ..
+            } => !skip_decompress,
         },
     }
 }
@@ -96,7 +111,7 @@ async fn create_stream_by_source(
             size,
             skip_decompress,
         } => {
-            let (stream, _content_length, insight) = 
+            let (stream, _content_length, insight) =
                 create_http_stream(&url, offset, size, skip_decompress).await?;
             Ok((stream, insight))
         }
@@ -104,7 +119,10 @@ async fn create_stream_by_source(
             offset,
             size,
             skip_decompress,
-        } => Ok((create_local_stream(offset, size, skip_decompress).await?, None)),
+        } => Ok((
+            create_local_stream(offset, size, skip_decompress).await?,
+            None,
+        )),
     }
 }
 pub async fn ipc_install_file(
@@ -127,12 +145,16 @@ pub async fn ipc_install_file(
                 false, // Enable timeout checking for single file downloads
             )
             .await?;
-            
+
             if args.md5.is_some() || args.xxh.is_some() {
                 // 如果需要清理installer索引标记，先清理再进行hash校验
                 if args.clear_installer_index_mark.unwrap_or(false) || override_old_path.is_some() {
                     println!("Clearing installer index mark for: {}", target);
-                    if let Err(e) = crate::installer::uninstall::clear_index_mark(&std::path::PathBuf::from(&target)).await {
+                    if let Err(e) = crate::installer::uninstall::clear_index_mark(
+                        &std::path::PathBuf::from(&target),
+                    )
+                    .await
+                    {
                         println!("Failed to clear index mark: {:?}", e);
                         return Err(e);
                     }
@@ -140,7 +162,7 @@ pub async fn ipc_install_file(
                 }
                 verify_hash(&target, args.md5, args.xxh).await?;
             }
-            
+
             let result = InstallResult {
                 bytes_transferred,
                 insight: final_insight,
@@ -159,12 +181,16 @@ pub async fn ipc_install_file(
                 insight,
             )
             .await?;
-            
+
             if args.md5.is_some() || args.xxh.is_some() {
                 // 如果需要清理installer索引标记，先清理再进行hash校验
                 if args.clear_installer_index_mark.unwrap_or(false) || is_self_update {
                     println!("Clearing installer index mark for: {}", target);
-                    if let Err(e) = crate::installer::uninstall::clear_index_mark(&std::path::PathBuf::from(&target)).await {
+                    if let Err(e) = crate::installer::uninstall::clear_index_mark(
+                        &std::path::PathBuf::from(&target),
+                    )
+                    .await
+                    {
                         println!("Failed to clear index mark: {:?}", e);
                         return Err(e);
                     }
@@ -172,7 +198,7 @@ pub async fn ipc_install_file(
                 }
                 verify_hash(&target, args.md5, args.xxh).await?;
             }
-            
+
             let result = InstallResult {
                 bytes_transferred,
                 insight: final_insight,
@@ -184,28 +210,25 @@ pub async fn ipc_install_file(
             let (source_stream, _) = create_stream_by_source(source).await?;
             let target_fs = create_target_file(&target).await?;
             let _source_bytes = progressed_copy(source_stream, target_fs, progress_noti).await?;
-            
+
             // then apply patch (only consider diff as URL)
             let size: usize = match diff {
                 InstallFileSource::Url { size, .. } => size,
                 InstallFileSource::Local { size, .. } => size,
             };
             let (diff_stream, diff_insight) = create_stream_by_source(diff).await?;
-            let (diff_bytes, final_insight) = progressed_hpatch(
-                diff_stream,
-                &target,
-                size,
-                |_| {},
-                None,
-                diff_insight,
-            )
-            .await?;
-            
+            let (diff_bytes, final_insight) =
+                progressed_hpatch(diff_stream, &target, size, |_| {}, None, diff_insight).await?;
+
             if args.md5.is_some() || args.xxh.is_some() {
                 // 如果需要清理installer索引标记，先清理再进行hash校验
                 if args.clear_installer_index_mark.unwrap_or(false) || override_old_path.is_some() {
                     println!("Clearing installer index mark for: {}", target);
-                    if let Err(e) = crate::installer::uninstall::clear_index_mark(&std::path::PathBuf::from(&target)).await {
+                    if let Err(e) = crate::installer::uninstall::clear_index_mark(
+                        &std::path::PathBuf::from(&target),
+                    )
+                    .await
+                    {
                         println!("Failed to clear index mark: {:?}", e);
                         return Err(e);
                     }
@@ -213,10 +236,10 @@ pub async fn ipc_install_file(
                 }
                 verify_hash(&target, args.md5, args.xxh).await?;
             }
-            
+
             let result = InstallResult {
                 bytes_transferred: diff_bytes, // 只统计diff文件的网络传输
-                insight: final_insight, // 只统计diff文件的网络统计
+                insight: final_insight,        // 只统计diff文件的网络统计
             };
             Ok(serde_json::to_value(result)?)
         }
@@ -244,7 +267,11 @@ where
                 // 如果需要清理installer索引标记，先清理再进行hash校验
                 if args.clear_installer_index_mark.unwrap_or(false) || override_old_path.is_some() {
                     println!("Clearing installer index mark for: {}", target);
-                    if let Err(e) = crate::installer::uninstall::clear_index_mark(&std::path::PathBuf::from(&target)).await {
+                    if let Err(e) = crate::installer::uninstall::clear_index_mark(
+                        &std::path::PathBuf::from(&target),
+                    )
+                    .await
+                    {
                         println!("Failed to clear index mark: {:?}", e);
                         return Err(e);
                     }
@@ -261,12 +288,18 @@ where
             let reader = std::io::Cursor::new(buffer);
             let is_self_update = override_old_path.is_some();
             let res =
-                progressed_hpatch(reader, &target, diff_size, |_| {}, override_old_path, None).await?.0;
+                progressed_hpatch(reader, &target, diff_size, |_| {}, override_old_path, None)
+                    .await?
+                    .0;
             if args.md5.is_some() || args.xxh.is_some() {
                 // 如果需要清理installer索引标记，先清理再进行hash校验
                 if args.clear_installer_index_mark.unwrap_or(false) || is_self_update {
                     println!("Clearing installer index mark for: {}", target);
-                    if let Err(e) = crate::installer::uninstall::clear_index_mark(&std::path::PathBuf::from(&target)).await {
+                    if let Err(e) = crate::installer::uninstall::clear_index_mark(
+                        &std::path::PathBuf::from(&target),
+                    )
+                    .await
+                    {
                         println!("Failed to clear index mark: {:?}", e);
                         return Err(e);
                     }
@@ -296,20 +329,25 @@ pub async fn ipc_install_multipart_stream(
     notify: impl Fn(serde_json::Value) + std::marker::Send + 'static + Clone,
 ) -> TAResult<serde_json::Value> {
     let download_start = std::time::Instant::now();
-    let (http_stream, content_length, content_type, mut insight) = match create_multi_http_stream(&args.url, &args.range).await {
-        Ok(result) => result,
-        Err(e) => {
-            let error_insight = create_error_insight(&args.url, &args.range, download_start);
-            return Err(crate::utils::error::TACommandError::with_insight(e, error_insight));
-        }
-    };
+    let (http_stream, content_length, content_type, mut insight) =
+        match create_multi_http_stream(&args.url, &args.range).await {
+            Ok(result) => result,
+            Err(e) => {
+                let error_insight = create_error_insight(&args.url, &args.range, download_start);
+                return Err(crate::utils::error::TACommandError::with_insight(
+                    e,
+                    error_insight,
+                ));
+            }
+        };
     // check if content-type is multipart
     if content_type.starts_with("multipart/") {
         // get boundary from content-type: multipart/byteranges; boundary=
-        let boundary = content_type
-            .split("boundary=")
-            .nth(1)
-            .ok_or_else(|| crate::utils::error::TACommandError::new(anyhow::anyhow!("Content-Type does not contain boundary")))?;
+        let boundary = content_type.split("boundary=").nth(1).ok_or_else(|| {
+            crate::utils::error::TACommandError::new(anyhow::anyhow!(
+                "Content-Type does not contain boundary"
+            ))
+        })?;
         let boundary = boundary.split(';').next().unwrap_or(boundary).trim();
 
         // Create multipart reader
@@ -320,17 +358,22 @@ pub async fn ipc_install_multipart_stream(
         let mut chunk_index = 0usize;
         let mut monitor = DownloadMonitor::new();
         let mut total_processed = 0usize;
-        while let Some(mut field) = multipart
-            .next_field()
-            .await
-            .map_err(|e| crate::utils::error::TACommandError::new(anyhow::anyhow!("Multipart parsing error: {}", e)))?
-        {
+        while let Some(mut field) = multipart.next_field().await.map_err(|e| {
+            crate::utils::error::TACommandError::new(anyhow::anyhow!(
+                "Multipart parsing error: {}",
+                e
+            ))
+        })? {
             // field should has Content-Range
             let content_range = field
                 .headers()
                 .get("Content-Range")
                 .and_then(|v| v.to_str().ok())
-                .ok_or_else(|| crate::utils::error::TACommandError::new(anyhow::anyhow!("Field does not contain Content-Range")))?;
+                .ok_or_else(|| {
+                    crate::utils::error::TACommandError::new(anyhow::anyhow!(
+                        "Field does not contain Content-Range"
+                    ))
+                })?;
 
             // Parse content_range and match with corresponding chunk
             // content_range format: bytes start-end/total
@@ -346,7 +389,10 @@ pub async fn ipc_install_multipart_stream(
                 .split("bytes ")
                 .nth(1)
                 .ok_or_else(|| {
-                    crate::utils::error::TACommandError::new(anyhow::anyhow!("Content-Range does not contain range: {}", content_range))
+                    crate::utils::error::TACommandError::new(anyhow::anyhow!(
+                        "Content-Range does not contain range: {}",
+                        content_range
+                    ))
                 })?
                 .trim();
             let range_parts: Vec<&str> = range.split('-').collect();
@@ -356,12 +402,18 @@ pub async fn ipc_install_multipart_stream(
                     content_range
                 )));
             }
-            let start: usize = range_parts[0]
-                .parse()
-                .map_err(|_| crate::utils::error::TACommandError::new(anyhow::anyhow!("Invalid start range: {}", content_range)))?;
-            let end: usize = range_parts[1]
-                .parse()
-                .map_err(|_| crate::utils::error::TACommandError::new(anyhow::anyhow!("Invalid end range: {}", content_range)))?;
+            let start: usize = range_parts[0].parse().map_err(|_| {
+                crate::utils::error::TACommandError::new(anyhow::anyhow!(
+                    "Invalid start range: {}",
+                    content_range
+                ))
+            })?;
+            let end: usize = range_parts[1].parse().map_err(|_| {
+                crate::utils::error::TACommandError::new(anyhow::anyhow!(
+                    "Invalid end range: {}",
+                    content_range
+                ))
+            })?;
 
             // Match the chunk with the corresponding range
             let chunk = args
@@ -374,7 +426,10 @@ pub async fn ipc_install_multipart_stream(
                     start == source_pos && end == source_target
                 })
                 .ok_or_else(|| {
-                    crate::utils::error::TACommandError::new(anyhow::anyhow!("No matching chunk found for range: {}", content_range))
+                    crate::utils::error::TACommandError::new(anyhow::anyhow!(
+                        "No matching chunk found for range: {}",
+                        content_range
+                    ))
                 })?;
 
             // Create enhanced notification callback with chunk info
@@ -402,19 +457,21 @@ pub async fn ipc_install_multipart_stream(
                 insight.time = download_start.elapsed().as_millis() as u32 - insight.ttfb;
                 insight.size = total_processed as u32;
                 crate::utils::error::TACommandError::with_insight(
-                    anyhow::anyhow!("Field chunk read error: {}", e), 
-                    insight.clone()
+                    anyhow::anyhow!("Field chunk read error: {}", e),
+                    insight.clone(),
                 )
             })? {
                 field_data.extend_from_slice(&chunk_bytes);
                 total_processed += chunk_bytes.len();
-                
+
                 // Check for timeout during multipart field reading
                 if let Err(e) = monitor.check_stall(total_processed) {
                     insight.error = Some(e.to_string());
                     insight.time = download_start.elapsed().as_millis() as u32 - insight.ttfb;
                     insight.size = total_processed as u32;
-                    return Err(crate::utils::error::TACommandError::with_insight(e, insight));
+                    return Err(crate::utils::error::TACommandError::with_insight(
+                        e, insight,
+                    ));
                 }
             }
 
@@ -433,7 +490,7 @@ pub async fn ipc_install_multipart_stream(
                     .await
                     .into_ta_result()
             };
-            
+
             mult_res.push(chunk_result);
 
             chunk_index += 1;
@@ -441,7 +498,7 @@ pub async fn ipc_install_multipart_stream(
         // 更新insight统计信息 - multipart请求完成
         insight.time = download_start.elapsed().as_millis() as u32 - insight.ttfb;
         insight.size = content_length as u32;
-        
+
         let response = serde_json::json!({
             "results": mult_res,
             "insight": insight
@@ -476,20 +533,24 @@ pub async fn ipc_install_multipart_stream(
                 // 根据参数决定是否解压缩
                 let res = if should_decompress {
                     let mut decompressed_reader = TokioZstdDecoder::new(reader);
-                    install_file_by_reader(first_chunk.clone(), &mut decompressed_reader, chunk_notify)
-                        .await
-                        .into_ta_result()
+                    install_file_by_reader(
+                        first_chunk.clone(),
+                        &mut decompressed_reader,
+                        chunk_notify,
+                    )
+                    .await
+                    .into_ta_result()
                 } else {
                     let mut raw_reader = reader;
                     install_file_by_reader(first_chunk.clone(), &mut raw_reader, chunk_notify)
                         .await
                         .into_ta_result()
                 };
-                
+
                 // 更新insight统计信息 - 单chunk请求完成
                 insight.time = download_start.elapsed().as_millis() as u32 - insight.ttfb;
                 insight.size = content_length as u32;
-                
+
                 let response = serde_json::json!({
                     "results": vec![res],
                     "insight": insight
@@ -552,7 +613,8 @@ struct ChunkWithPosition {
 
 // Helper function to parse range strings like "100-200,300-400" into Vec<(u32, u32)>
 fn parse_range_string(range: &str) -> Vec<(u32, u32)> {
-    range.split(',')
+    range
+        .split(',')
         .filter_map(|r| {
             let parts: Vec<&str> = r.trim().split('-').collect();
             if parts.len() == 2 {
@@ -599,13 +661,17 @@ pub async fn ipc_install_multichunk_stream(
 
     let mut results: Vec<TAResult<serde_json::Value>> = Vec::new();
     let mut stream_position = 0usize;
-    let (http_stream, _content_length, _content_type, mut insight) = match create_multi_http_stream(&args.url, &args.range).await {
-        Ok(result) => result,
-        Err(e) => {
-            let error_insight = create_error_insight(&args.url, &args.range, download_start);
-            return Err(crate::utils::error::TACommandError::with_insight(e, error_insight));
-        }
-    };
+    let (http_stream, _content_length, _content_type, mut insight) =
+        match create_multi_http_stream(&args.url, &args.range).await {
+            Ok(result) => result,
+            Err(e) => {
+                let error_insight = create_error_insight(&args.url, &args.range, download_start);
+                return Err(crate::utils::error::TACommandError::with_insight(
+                    e,
+                    error_insight,
+                ));
+            }
+        };
 
     // Convert the HTTP stream to AsyncRead with timeout monitoring
     let stream = http_stream.map_err(std::io::Error::other);
@@ -636,15 +702,22 @@ pub async fn ipc_install_multichunk_stream(
             reader
                 .read_exact(&mut vec![0; skip_bytes])
                 .await
-                .map_err(|e| crate::utils::error::TACommandError::new(anyhow::anyhow!("Failed to skip bytes: {}", e)))?;
+                .map_err(|e| {
+                    crate::utils::error::TACommandError::new(anyhow::anyhow!(
+                        "Failed to skip bytes: {}",
+                        e
+                    ))
+                })?;
             stream_position = chunk_offset;
-            
+
             // Check for timeout after skipping data
             if let Err(e) = monitor.check_stall(stream_position) {
                 insight.error = Some(e.to_string());
                 insight.time = download_start.elapsed().as_millis() as u32 - insight.ttfb;
                 insight.size = stream_position as u32;
-                return Err(crate::utils::error::TACommandError::with_insight(e, insight));
+                return Err(crate::utils::error::TACommandError::with_insight(
+                    e, insight,
+                ));
             }
         }
 
@@ -656,9 +729,13 @@ pub async fn ipc_install_multichunk_stream(
         // 根据参数决定是否解压缩
         let chunk_result = if should_decompress {
             let mut decompressed_reader = TokioZstdDecoder::new(chunk_reader);
-            install_file_by_reader(chunk_info.args.clone(), &mut decompressed_reader, chunk_notify)
-                .await
-                .into_ta_result()
+            install_file_by_reader(
+                chunk_info.args.clone(),
+                &mut decompressed_reader,
+                chunk_notify,
+            )
+            .await
+            .into_ta_result()
         } else {
             let mut raw_reader = chunk_reader;
             install_file_by_reader(chunk_info.args.clone(), &mut raw_reader, chunk_notify)
@@ -667,20 +744,22 @@ pub async fn ipc_install_multichunk_stream(
         };
         results.push(chunk_result);
         stream_position += chunk_size;
-        
+
         // Check for timeout after processing each chunk
         if let Err(e) = monitor.check_stall(stream_position) {
             insight.error = Some(e.to_string());
             insight.time = download_start.elapsed().as_millis() as u32 - insight.ttfb;
             insight.size = stream_position as u32;
-            return Err(crate::utils::error::TACommandError::with_insight(e, insight));
+            return Err(crate::utils::error::TACommandError::with_insight(
+                e, insight,
+            ));
         }
     }
 
-    // 更新insight统计信息 - multichunk请求完成  
+    // 更新insight统计信息 - multichunk请求完成
     insight.time = download_start.elapsed().as_millis() as u32 - insight.ttfb;
     insight.size = stream_position as u32;
-    
+
     let response = serde_json::json!({
         "results": results,
         "insight": insight

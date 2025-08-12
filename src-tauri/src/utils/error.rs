@@ -1,7 +1,7 @@
 // This file is part of the `anyhow-tauri` library.
 
-use serde::Serialize;
 use crate::dfs::InsightItem;
+use serde::Serialize;
 
 // Just extending the `anyhow::Error`
 #[derive(Debug)]
@@ -28,12 +28,12 @@ impl Serialize for TACommandError {
             message: String,
             insight: Option<InsightItem>,
         }
-        
+
         let response = ErrorWithInsight {
             message: format!("{:#}", self.error),
             insight: self.insight.clone(),
         };
-        
+
         super::sentry::capture_anyhow(&self.error);
         response.serialize(serializer)
     }
@@ -42,7 +42,10 @@ impl Serialize for TACommandError {
 // Ability to convert between `anyhow::Error` and `TACommandError`
 impl From<anyhow::Error> for TACommandError {
     fn from(error: anyhow::Error) -> Self {
-        Self { error, insight: None }
+        Self {
+            error,
+            insight: None,
+        }
     }
 }
 
@@ -80,7 +83,10 @@ where
     /// }
     /// ```
     fn into_ta_result(self) -> TAResult<T> {
-        self.map_err(|e| TACommandError { error: e.into(), insight: None })
+        self.map_err(|e| TACommandError {
+            error: e.into(),
+            insight: None,
+        })
     }
 }
 impl<T> IntoTAResult<T> for anyhow::Error {
@@ -97,7 +103,10 @@ impl<T> IntoTAResult<T> for anyhow::Error {
     /// }
     /// ```
     fn into_ta_result(self) -> TAResult<T> {
-        Err(TACommandError { error: self, insight: None })
+        Err(TACommandError {
+            error: self,
+            insight: None,
+        })
     }
 }
 
@@ -115,7 +124,10 @@ pub trait IntoEmptyTAResult<T> {
 }
 impl IntoEmptyTAResult<()> for anyhow::Error {
     fn into_ta_empty_result(self) -> TAResult<()> {
-        Err(TACommandError { error: self, insight: None })
+        Err(TACommandError {
+            error: self,
+            insight: None,
+        })
     }
 }
 
@@ -142,10 +154,16 @@ pub fn return_anyhow_result<T>(msg: String, ctx: &str) -> anyhow::Result<T> {
 
 impl TACommandError {
     pub fn new(error: anyhow::Error) -> Self {
-        Self { error, insight: None }
+        Self {
+            error,
+            insight: None,
+        }
     }
-    
+
     pub fn with_insight(error: anyhow::Error, insight: InsightItem) -> Self {
-        Self { error, insight: Some(insight) }
+        Self {
+            error,
+            insight: Some(insight),
+        }
     }
 }
