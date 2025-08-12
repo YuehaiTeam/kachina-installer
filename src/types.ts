@@ -1,11 +1,11 @@
 // ^(?:(dfs)\+)?(?:(hashed|packed|auto)\+)?(http(?:s)?:\/\/(?:.*?))$
-interface SourceItem {
+export interface SourceItem {
   uri: string;
   id: string;
   name: string;
   hidden: boolean;
 }
-type ProjectConfig = {
+export type ProjectConfig = {
   source: string | SourceItem[];
   appName: string;
   publisher: string;
@@ -27,15 +27,15 @@ type ProjectConfig = {
   runtimes?: string[];
 };
 
-type InstallStat = {
+export type InstallStat = {
   speedLastSize: number;
   lastTime: DOMHighResTimeStamp;
   speed: number;
 };
 
-type DfsMetadataHashType = 'md5' | 'xxh';
+export type DfsMetadataHashType = 'md5' | 'xxh';
 
-type DfsMetadataHashInfo = {
+export type DfsMetadataHashInfo = {
   file_name: string;
   size: number;
   md5?: string;
@@ -43,14 +43,14 @@ type DfsMetadataHashInfo = {
   installer?: true;
 };
 
-type DfsMetadataPatchInfo = {
+export type DfsMetadataPatchInfo = {
   file_name: string;
   size: number;
   from: Omit<DfsMetadataHashInfo, 'file_name'>;
   to: Omit<DfsMetadataHashInfo, 'file_name'>;
 };
 
-interface DfsUpdateTask extends DfsMetadataHashInfo {
+export interface DfsUpdateTask extends DfsMetadataHashInfo {
   patch?: DfsMetadataPatchInfo;
   lpatch?: DfsMetadataPatchInfo;
   downloaded: number;
@@ -58,9 +58,31 @@ interface DfsUpdateTask extends DfsMetadataHashInfo {
   old_hash?: string;
   unwritable: boolean;
   failed?: true;
+  errorMessage?: string; // 用于存储合并下载中的单个文件错误信息
 }
 
-type InvokeGetDfsMetadataRes = {
+// 合并下载相关类型定义
+export interface FileWithPosition extends DfsUpdateTask {
+  dfsOffset: number;
+  dfsSize: number;
+}
+
+export interface MergedGroupInfo {
+  files: DfsUpdateTask[];
+  mergedRange: string;
+  totalDownloadSize: number;
+  totalEffectiveSize: number;
+  wasteRatio: number;
+  gaps: Array<{start: number, end: number}>;
+}
+
+export interface VirtualMergedFile extends DfsUpdateTask {
+  _isMergedGroup: true;
+  _mergedInfo: MergedGroupInfo;
+  _fallbackFiles: DfsUpdateTask[];
+}
+
+export type InvokeGetDfsMetadataRes = {
   tag_name: string;
   hashed: Array<DfsMetadataHashInfo>;
   patches?: Array<DfsMetadataPatchInfo>;
@@ -72,72 +94,107 @@ type InvokeGetDfsMetadataRes = {
   deletes?: string[];
 };
 
-type InvokeDeepReaddirWithMetadataRes = Array<{
+export type InvokeDeepReaddirWithMetadataRes = Array<{
   file_name: string;
   size: number;
   hash: string;
   unwritable: boolean;
 }>;
 
-type InvokeGetDfsRes = {
+export type InvokeGetDfsRes = {
   url?: string;
   tests?: Array<[string, string]>;
   source: string;
 };
 
 // DFS2 types
-type Dfs2Metadata = {
+export type Dfs2Metadata = {
   resource_version: string;
   name: string;
   data: Dfs2Data | null;
 };
 
-type Dfs2Data = {
+export type Dfs2Data = {
   index: Record<string, Dfs2FileInfo>;
-  metadata: any; // JSON data from META segment
+  metadata: InvokeGetDfsMetadataRes;
   installer_end: number;
 };
 
-type Dfs2FileInfo = {
+export type Dfs2FileInfo = {
   name: string;
   offset: number;
   raw_offset: number;
   size: number;
 };
 
-type Dfs2SessionResponse = {
+export type Dfs2SessionResponse = {
   tries?: string[];
   sid?: string;
   challenge?: string;
   data?: string;
 };
 
-type Dfs2ChunkResponse = {
+export type Dfs2ChunkResponse = {
   url: string;
 };
 
-type Dfs2SessionInsights = {
-  bandwidth?: Record<string, string>;
-  ttfb?: Record<string, string>;
+export interface InsightItem {
+  url: string;
+  ttfb: number; // 首字节时间(ms)
+  time: number; // 纯下载时间(ms) = 总时间 - TTFB
+  size: number; // 实际下载字节数
+  range: [number, number][]; // HTTP Range请求范围
+  error?: string;
+}
+
+export interface InstallResult {
+  bytes_transferred: number;
+  insight?: InsightItem;
+}
+
+export type Dfs2SessionInsights = {
+  servers: InsightItem[];
 };
 
-type InvokeGetDirsRes = [string, string];
+export interface TAErrorData {
+  message: string;
+  insight?: InsightItem;
+}
 
-type InvokeSelectDirRes = {
+export class TAError extends Error {
+  public readonly insight?: InsightItem;
+
+  constructor(data: TAErrorData | string) {
+    if (typeof data === 'string') {
+      super(data);
+    } else {
+      super(data.message);
+      this.insight = data.insight;
+    }
+  }
+
+  static fromErrorData(data: TAErrorData): TAError {
+    return new TAError(data);
+  }
+}
+
+export type InvokeGetDirsRes = [string, string];
+
+export type InvokeSelectDirRes = {
   path: string;
   state: 'Unwritable' | 'Writable' | 'Private';
   empty: boolean;
   upgrade: boolean;
 } | null;
 
-interface Embedded {
+export interface Embedded {
   name: string;
   offset: number;
   raw_offset: number;
   size: number;
 }
 
-interface InstallerConfig {
+export interface InstallerConfig {
   install_path: string;
   install_path_exists: boolean;
   install_path_source:

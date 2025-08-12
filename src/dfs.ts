@@ -1,6 +1,21 @@
 import { hybridPatch, InstallFile } from './api/installFile';
-import { ipc, log, warn } from './api/ipc';
+import { error, ipc, log, warn } from './api/ipc';
 import { invoke } from './tauri';
+import { networkInsights, clearNetworkInsights } from './networkInsights';
+import {
+  Dfs2ChunkResponse,
+  Dfs2Metadata,
+  Dfs2SessionResponse,
+  DfsMetadataHashType,
+  DfsUpdateTask,
+  Embedded,
+  FileWithPosition,
+  InvokeGetDfsMetadataRes,
+  InvokeGetDfsRes,
+  MergedGroupInfo,
+  ProjectConfig,
+  VirtualMergedFile,
+} from './types';
 
 const connectableOrigins = new Set();
 
@@ -522,9 +537,11 @@ export const cleanupDfs2Session = async (apiUrl: string): Promise<void> => {
     try {
       log('Ending DFS2 session:', sessionInfo.sessionId);
       const sessionApiUrl = `${sessionInfo.baseUrl}/session/${sessionInfo.sessionId}/${sessionInfo.resId}`;
+
+      // 只负责上报数据，不打印不清空
       await invoke('end_dfs2_session', {
         sessionApiUrl: sessionApiUrl,
-        insights: undefined,
+        insights: { servers: networkInsights },
       });
       log('DFS2 session ended successfully:', sessionInfo.sessionId);
     } catch (error) {
@@ -542,10 +559,13 @@ export const cleanupAllDfs2Sessions = async (): Promise<void> => {
     cleanupPromises.push(cleanupDfs2Session(apiUrl));
   }
 
-  // Wait for all sessions to be cleaned up
+  // 等待所有session清理完成
   await Promise.allSettled(cleanupPromises);
 
-  // Clear the cache
+  // 清空统计数据
+  clearNetworkInsights();
+
+  // 清理session缓存
   dfs2Sessions.clear();
 };
 
@@ -587,67 +607,148 @@ export const collectDfs2Ranges = (
     throw new Error('DFS2 metadata not loaded');
   }
 
+  // 先预处理文件，获取合并信息
+  const { processedFiles } = preprocessFiles(
+    diffFiles,
+    dfsSource,
+    hashKey,
+    localFiles,
+  );
+
   const ranges = new Set<string>();
 
-  diffFiles.forEach((item) => {
-    const hasLocalFile = localFiles.find((l) => l.name === item[hashKey]);
-    const hasLpatchFile =
-      item.lpatch &&
-      localFiles.find((l) => l.name === item.lpatch?.from[hashKey]);
+  processedFiles.forEach((item) => {
+    if ((item as VirtualMergedFile)._isMergedGroup) {
+      // 合并组：添加合并后的range
+      const virtualFile = item as VirtualMergedFile;
+      ranges.add(virtualFile._mergedInfo.mergedRange);
 
-    if (hasLocalFile) {
-      // Skip: has local file, no need to download
-      return;
-    }
+      // 同时添加原始文件的ranges作为fallback
+      virtualFile._mergedInfo.files.forEach((originalFile) => {
+        const hasLocalFile = localFiles.find(
+          (l) => l.name === originalFile[hashKey],
+        );
+        const hasLpatchFile =
+          originalFile.lpatch &&
+          localFiles.find((l) => l.name === originalFile.lpatch?.from[hashKey]);
 
-    if (item.lpatch && hasLpatchFile) {
-      // Lpatch mode: need both lpatch file and original file ranges
-      // 1. Lpatch file range
-      const lpatchHash = `${item.lpatch.from[hashKey]}_${item.lpatch.to[hashKey]}`;
-      const lpatchFile = cache.index.get(lpatchHash);
-      if (lpatchFile) {
-        ranges.add(
-          `${lpatchFile.offset}-${lpatchFile.offset + lpatchFile.size - 1}`,
-        );
-      }
+        if (hasLocalFile) {
+          // Skip: has local file, no need to download
+          return;
+        }
 
-      // 2. Original file range (fallback)
-      const originalFile = cache.index.get(item[hashKey] as string);
-      if (originalFile) {
-        ranges.add(
-          `${originalFile.offset}-${originalFile.offset + originalFile.size - 1}`,
-        );
-      }
-    } else if (item.patch) {
-      // Patch mode: need both patch file and original file ranges
-      // 1. Patch file range
-      const patchHash = `${item.patch.from[hashKey]}_${item.patch.to[hashKey]}`;
-      const patchFile = cache.index.get(patchHash);
-      if (patchFile) {
-        ranges.add(
-          `${patchFile.offset}-${patchFile.offset + patchFile.size - 1}`,
-        );
-      }
+        if (originalFile.lpatch && hasLpatchFile) {
+          // Lpatch mode: need both lpatch file and original file ranges
+          const lpatchHash = `${originalFile.lpatch.from[hashKey]}_${originalFile.lpatch.to[hashKey]}`;
+          const lpatchFile = cache.index.get(lpatchHash);
+          if (lpatchFile) {
+            ranges.add(
+              `${lpatchFile.offset}-${lpatchFile.offset + lpatchFile.size - 1}`,
+            );
+          }
+          const originalDfsFile = cache.index.get(
+            originalFile[hashKey] as string,
+          );
+          if (originalDfsFile) {
+            ranges.add(
+              `${originalDfsFile.offset}-${originalDfsFile.offset + originalDfsFile.size - 1}`,
+            );
+          }
+        } else if (originalFile.patch) {
+          // Patch mode: need both patch file and original file ranges
+          const patchHash = `${originalFile.patch.from[hashKey]}_${originalFile.patch.to[hashKey]}`;
+          const patchFile = cache.index.get(patchHash);
+          if (patchFile) {
+            ranges.add(
+              `${patchFile.offset}-${patchFile.offset + patchFile.size - 1}`,
+            );
+          }
+          const originalDfsFile = cache.index.get(
+            originalFile[hashKey] as string,
+          );
+          if (originalDfsFile) {
+            ranges.add(
+              `${originalDfsFile.offset}-${originalDfsFile.offset + originalDfsFile.size - 1}`,
+            );
+          }
+        } else {
+          // Normal download: only need the file itself
+          const file = cache.index.get(originalFile[hashKey] as string);
+          if (file) {
+            ranges.add(`${file.offset}-${file.offset + file.size - 1}`);
+          }
+        }
 
-      // 2. Original file range (fallback)
-      const originalFile = cache.index.get(item[hashKey] as string);
-      if (originalFile) {
-        ranges.add(
-          `${originalFile.offset}-${originalFile.offset + originalFile.size - 1}`,
-        );
-      }
+        // Handle installer files
+        if (originalFile.installer && cache.installer_end > 0) {
+          ranges.add(`0-${cache.installer_end - 1}`);
+        }
+      });
     } else {
-      // Normal download: only need the file itself
-      const file = cache.index.get(item[hashKey] as string);
-      if (file) {
-        ranges.add(`${file.offset}-${file.offset + file.size - 1}`);
+      // 普通文件：按原有逻辑处理
+      const dfsFile = item as DfsUpdateTask;
+      const hasLocalFile = localFiles.find((l) => l.name === dfsFile[hashKey]);
+      const hasLpatchFile =
+        dfsFile.lpatch &&
+        localFiles.find((l) => l.name === dfsFile.lpatch?.from[hashKey]);
+
+      if (hasLocalFile) {
+        // Skip: has local file, no need to download
+        return;
+      }
+
+      if (dfsFile.lpatch && hasLpatchFile) {
+        // Lpatch mode: need both lpatch file and original file ranges
+        const lpatchHash = `${dfsFile.lpatch.from[hashKey]}_${dfsFile.lpatch.to[hashKey]}`;
+        const lpatchFile = cache.index.get(lpatchHash);
+        if (lpatchFile) {
+          ranges.add(
+            `${lpatchFile.offset}-${lpatchFile.offset + lpatchFile.size - 1}`,
+          );
+        }
+        const originalFile = cache.index.get(dfsFile[hashKey] as string);
+        if (originalFile) {
+          ranges.add(
+            `${originalFile.offset}-${originalFile.offset + originalFile.size - 1}`,
+          );
+        }
+      } else if (dfsFile.patch) {
+        // Patch mode: need both patch file and original file ranges
+        const patchHash = `${dfsFile.patch.from[hashKey]}_${dfsFile.patch.to[hashKey]}`;
+        const patchFile = cache.index.get(patchHash);
+        if (patchFile) {
+          ranges.add(
+            `${patchFile.offset}-${patchFile.offset + patchFile.size - 1}`,
+          );
+        }
+        const originalFile = cache.index.get(dfsFile[hashKey] as string);
+        if (originalFile) {
+          ranges.add(
+            `${originalFile.offset}-${originalFile.offset + originalFile.size - 1}`,
+          );
+        }
+      } else {
+        // Normal download: only need the file itself
+        const file = cache.index.get(dfsFile[hashKey] as string);
+        if (file) {
+          ranges.add(`${file.offset}-${file.offset + file.size - 1}`);
+        }
+      }
+
+      // Handle installer files
+      if (dfsFile.installer && cache.installer_end > 0) {
+        ranges.add(`0-${cache.installer_end - 1}`);
       }
     }
+  });
 
-    // Handle installer files
-    if (item.installer && cache.installer_end > 0) {
-      ranges.add(`0-${cache.installer_end - 1}`);
-    }
+  const rangeArray = Array.from(ranges);
+  log('DFS2 ranges collected:', {
+    totalRanges: rangeArray.length,
+    mergedGroups: processedFiles.filter(
+      (f) => (f as VirtualMergedFile)._isMergedGroup,
+    ).length,
+    ranges: rangeArray,
   });
 
   return Array.from(ranges);
@@ -693,7 +794,6 @@ export const runDfsDownload = async (
         elevate,
         onProgress,
       );
-      log('>LOCAL', filename_with_first_slash);
     } else if (
       hasLpatchFile &&
       item.lpatch &&
@@ -703,7 +803,6 @@ export const runDfsDownload = async (
       const hash = `${item.lpatch.from[hashKey]}_${item.lpatch.to[hashKey]}`;
       const url = await getDfsUrl(dfsSource, hash);
       url.size = url.size || (item.lpatch?.size as number);
-      log('>LPATCH', filename_with_first_slash, item.lpatch, url);
       await ipc(
         hybridPatch(hasLpatchFile, url, source + filename_with_first_slash, {
           md5: item.md5,
@@ -715,7 +814,6 @@ export const runDfsDownload = async (
     } else if (item.patch && !disable_patch) {
       const hash = `${item.patch.from[hashKey]}_${item.patch.to[hashKey]}`;
       const url = await getDfsUrl(dfsSource, hash);
-      log('>PATCH', filename_with_first_slash, item.patch, url);
       await ipc(
         InstallFile(
           url,
@@ -733,7 +831,6 @@ export const runDfsDownload = async (
     } else {
       const hash = item[hashKey] as string;
       const url = await getDfsUrl(dfsSource, hash, extras, item.installer);
-      log('>DOWNLOAD', filename_with_first_slash, url, item.installer);
       await ipc(
         InstallFile(
           url,
@@ -757,4 +854,486 @@ export const runDfsDownload = async (
     item.running = false;
   }
   item.downloaded = item.patch ? item.patch.size : item.size;
+};
+
+// 小文件合并下载相关函数
+
+const createSingleFileGroup = (file: FileWithPosition): MergedGroupInfo => {
+  return {
+    files: [file],
+    mergedRange: `${file.dfsOffset}-${file.dfsOffset + file.dfsSize - 1}`,
+    totalDownloadSize: file.dfsSize,
+    totalEffectiveSize: file.dfsSize,
+    wasteRatio: 0,
+    gaps: [],
+  };
+};
+
+const createMergedGroup = (files: FileWithPosition[]): MergedGroupInfo => {
+  if (files.length === 0) {
+    throw new Error('Cannot create merged group from empty file list');
+  }
+
+  files.sort((a, b) => a.dfsOffset - b.dfsOffset);
+
+  const firstFile = files[0];
+  const lastFile = files[files.length - 1];
+  const groupStart = firstFile.dfsOffset;
+  const groupEnd = lastFile.dfsOffset + lastFile.dfsSize;
+
+  const totalDownloadSize = groupEnd - groupStart;
+  const totalEffectiveSize = files.reduce((sum, f) => sum + f.dfsSize, 0);
+  const wasteRatio =
+    (totalDownloadSize - totalEffectiveSize) / totalDownloadSize;
+
+  // 计算gaps
+  const gaps: Array<{ start: number; end: number }> = [];
+  for (let i = 0; i < files.length - 1; i++) {
+    const currentEnd = files[i].dfsOffset + files[i].dfsSize;
+    const nextStart = files[i + 1].dfsOffset;
+    if (nextStart > currentEnd) {
+      gaps.push({ start: currentEnd, end: nextStart });
+    }
+  }
+
+  return {
+    files,
+    mergedRange: `${groupStart}-${groupEnd - 1}`,
+    totalDownloadSize,
+    totalEffectiveSize,
+    wasteRatio,
+    gaps,
+  };
+};
+
+const canMergeToGroup = (
+  group: FileWithPosition[],
+  newFile: FileWithPosition,
+): boolean => {
+  if (group.length === 0) return true;
+
+  const lastFile = group[group.length - 1];
+  const groupStart = group[0].dfsOffset;
+  const groupEnd = lastFile.dfsOffset + lastFile.dfsSize;
+  const newEnd = newFile.dfsOffset + newFile.dfsSize;
+
+  // 检查是否有重叠
+  if (newFile.dfsOffset < groupEnd) return false;
+
+  // 计算合并后的总大小和有效大小
+  const totalSize = newEnd - groupStart;
+  const effectiveSize =
+    group.reduce((sum, f) => sum + f.dfsSize, 0) + newFile.dfsSize;
+  const wasteRatio = (totalSize - effectiveSize) / totalSize;
+
+  // 检查约束条件
+  return (
+    totalSize <= 10 * 1024 * 1024 && // 不超过10MB
+    wasteRatio <= 0.2
+  ); // 浪费率不超过20%
+};
+
+export const mergeSmallFilesIntoGroups = (
+  files: DfsUpdateTask[],
+  dfsSource: string,
+  hashKey: DfsMetadataHashType,
+): MergedGroupInfo[] => {
+  // 获取DFS缓存信息
+  const cache = dfsIndexCache.get(dfsSource);
+  if (!cache) {
+    log('No DFS cache found, treating each file as individual group');
+    return files.map((f) =>
+      createSingleFileGroup({
+        ...f,
+        dfsOffset: 0,
+        dfsSize: f.size,
+      }),
+    );
+  }
+
+  // 只处理小文件（≤500KB）
+  const smallFiles = files.filter((f) => f.size <= 500 * 1024);
+  const largeFiles = files.filter((f) => f.size > 500 * 1024);
+
+  // 获取小文件在DFS中的实际位置和大小
+  const filesWithPositions: FileWithPosition[] = smallFiles
+    .map((f) => {
+      const dfsFile = cache.index.get(f[hashKey] as string);
+      return {
+        ...f,
+        dfsOffset: dfsFile?.offset || 0,
+        dfsSize: dfsFile?.size || f.size,
+      };
+    })
+    .sort((a, b) => a.dfsOffset - b.dfsOffset);
+
+  // 贪心合并算法
+  const groups: MergedGroupInfo[] = [];
+  let currentGroup: FileWithPosition[] = [];
+
+  for (const file of filesWithPositions) {
+    if (canMergeToGroup(currentGroup, file)) {
+      currentGroup.push(file);
+    } else {
+      if (currentGroup.length > 1) {
+        // 只有多个文件才值得合并
+        groups.push(createMergedGroup(currentGroup));
+      } else if (currentGroup.length === 1) {
+        // 单文件直接作为独立组
+        groups.push(createSingleFileGroup(currentGroup[0]));
+      }
+      currentGroup = [file];
+    }
+  }
+
+  // 处理最后一组
+  if (currentGroup.length > 1) {
+    groups.push(createMergedGroup(currentGroup));
+  } else if (currentGroup.length === 1) {
+    groups.push(createSingleFileGroup(currentGroup[0]));
+  }
+
+  // 将大文件也作为独立组添加
+  largeFiles.forEach((f) => {
+    const dfsFile = cache.index.get(f[hashKey] as string);
+    groups.push(
+      createSingleFileGroup({
+        ...f,
+        dfsOffset: dfsFile?.offset || 0,
+        dfsSize: dfsFile?.size || f.size,
+      }),
+    );
+  });
+
+  log('File grouping result:', {
+    totalFiles: files.length,
+    smallFiles: smallFiles.length,
+    largeFiles: largeFiles.length,
+    groups: groups.length,
+    mergedGroups: groups.filter((g) => g.files.length > 1).length,
+  });
+
+  return groups;
+};
+
+// Helper function to identify file install mode
+export const getFileInstallMode = (
+  file: DfsUpdateTask,
+  local: Embedded[],
+  hashKey: DfsMetadataHashType,
+): 'local' | 'hybridpatch' | 'patch' | 'direct' => {
+  const hasLocalFile = local.find((l) => l.name === file[hashKey]);
+  const hasLpatchFile = local.find(
+    (l) => l.name === file.lpatch?.from[hashKey],
+  );
+
+  if (hasLocalFile) return 'local';
+  if (hasLpatchFile && file.lpatch) return 'hybridpatch';
+  if (file.patch) return 'patch';
+  return 'direct';
+};
+
+export const preprocessFiles = (
+  files: DfsUpdateTask[],
+  dfsSource: string,
+  hashKey: DfsMetadataHashType,
+  local: Embedded[],
+): {
+  processedFiles: (DfsUpdateTask | VirtualMergedFile)[];
+  mergedGroups: Map<string, MergedGroupInfo>;
+} => {
+  // 按模式分离文件：只有 direct 和 patch 模式可以合并
+  const mergeableFiles: DfsUpdateTask[] = [];
+  const nonMergeableFiles: DfsUpdateTask[] = [];
+
+  files.forEach((file) => {
+    const mode = getFileInstallMode(file, local, hashKey);
+    if (mode === 'direct' || mode === 'patch') {
+      mergeableFiles.push(file);
+    } else {
+      // local 和 hybridpatch 文件不参与合并
+      nonMergeableFiles.push(file);
+    }
+  });
+
+  // 获取合并分组（只处理可合并文件）
+  const groups = mergeSmallFilesIntoGroups(mergeableFiles, dfsSource, hashKey);
+
+  // 分离单文件和合并组
+  const singleFiles: DfsUpdateTask[] = [];
+  const virtualMergedFiles: VirtualMergedFile[] = [];
+  const mergedGroups = new Map<string, MergedGroupInfo>();
+
+  groups.forEach((group, index) => {
+    if (group.files.length === 1) {
+      // 单文件直接添加到单文件列表
+      singleFiles.push(group.files[0]);
+    } else {
+      // 多文件创建虚拟合并文件
+      const virtualFileName = `__merged_group_${index}__`;
+      const virtualFile: VirtualMergedFile = {
+        ...group.files[0], // 继承第一个文件的基础属性
+        file_name: virtualFileName,
+        size: group.totalDownloadSize,
+        _isMergedGroup: true,
+        _mergedInfo: group,
+        _fallbackFiles: [...group.files], // 保存原始文件用于fallback
+        downloaded: 0,
+        running: false,
+        failed: undefined,
+      };
+
+      virtualMergedFiles.push(virtualFile);
+      mergedGroups.set(virtualFileName, group);
+    }
+  });
+
+  // 将不可合并文件按大小排序
+  nonMergeableFiles.sort((a, b) => b.size - a.size); // 大文件优先
+
+  // 按文件大小排序，实现更好的负载均衡
+  singleFiles.sort((a, b) => b.size - a.size); // 大文件优先
+  virtualMergedFiles.sort((a, b) => b.size - a.size); // 大合并组优先
+
+  // 交错分配任务，实现打散效果
+  const processedFiles: (DfsUpdateTask | VirtualMergedFile)[] = [];
+  let singleIndex = 0;
+  let mergedIndex = 0;
+  let nonMergeableIndex = 0;
+
+  // 轮流分配不同类型的文件，确保下载任务分布均匀
+  while (
+    singleIndex < singleFiles.length ||
+    mergedIndex < virtualMergedFiles.length ||
+    nonMergeableIndex < nonMergeableFiles.length
+  ) {
+    // 优先分配不可合并文件（local/hybridpatch）
+    if (nonMergeableIndex < nonMergeableFiles.length) {
+      processedFiles.push(nonMergeableFiles[nonMergeableIndex]);
+      nonMergeableIndex++;
+    }
+
+    // 然后分配大文件
+    if (singleIndex < singleFiles.length) {
+      processedFiles.push(singleFiles[singleIndex]);
+      singleIndex++;
+    }
+
+    // 最后分配合并组
+    if (mergedIndex < virtualMergedFiles.length) {
+      processedFiles.push(virtualMergedFiles[mergedIndex]);
+      mergedIndex++;
+    }
+  }
+
+  log('File preprocessing result:', {
+    originalFiles: files.length,
+    processedFiles: processedFiles.length,
+    nonMergeableFiles: nonMergeableFiles.length, // local/hybridpatch
+    mergeableSingleFiles: singleFiles.length, // direct/patch 单文件
+    virtualMergedFiles: virtualMergedFiles.length, // direct/patch 合并组
+    totalMergedFiles: Array.from(mergedGroups.values()).reduce(
+      (sum, g) => sum + g.files.length,
+      0,
+    ),
+    taskDistribution: processedFiles.slice(0, 12).map((f, i) => {
+      const isMerged = (f as VirtualMergedFile)._isMergedGroup;
+      const fileType = isMerged
+        ? `合并组(${(f as VirtualMergedFile)._mergedInfo.files.length}个文件)`
+        : '单文件';
+      return `${i + 1}. ${fileType} - ${(f.size / 1024 / 1024).toFixed(1)}MB`;
+    }),
+  });
+
+  return {
+    processedFiles,
+    mergedGroups,
+  };
+};
+
+export const runMergedGroupDownload = async (
+  groupInfo: MergedGroupInfo,
+  dfsSource: string,
+  extras: string | undefined,
+  local: Embedded[],
+  source: string,
+  hashKey: DfsMetadataHashType,
+  elevate: boolean,
+) => {
+  // 标记组内所有文件为running
+  groupInfo.files.forEach((f) => {
+    f.running = true;
+    f.downloaded = 0;
+  });
+
+  try {
+    // 从DFS source中提取API URL
+    const { url: apiUrl } = getDfsSourceType(dfsSource);
+    // 获取合并后的CDN URL
+    const cdnUrl = await getDfs2Url(apiUrl, groupInfo.mergedRange);
+
+    // 计算合并范围的起始位置
+    const mergedRangeStart = Math.min(
+      ...groupInfo.files.map((f) => (f as FileWithPosition).dfsOffset),
+    );
+
+    // 构建multichunk参数
+    const chunks = groupInfo.files.map((file) => {
+      const filename_with_first_slash = file.file_name.startsWith('/')
+        ? file.file_name
+        : `/${file.file_name}`;
+
+      const fileWithPosition = file as FileWithPosition;
+      // 计算相对于合并范围起始位置的偏移量
+      const relativeOffset = fileWithPosition.dfsOffset - mergedRangeStart;
+
+      const source_info = {
+        url: cdnUrl,
+        offset: relativeOffset, // 使用相对偏移而不是绝对偏移
+        size: fileWithPosition.dfsSize,
+        skip_decompress: false,
+      };
+
+      return {
+        mode: { type: 'Direct' as const, source: source_info },
+        target: source + filename_with_first_slash,
+        md5: file.md5,
+        xxh: file.xxh,
+        type: 'InstallFile' as const,
+      };
+    });
+
+    // 合并下载开始，不再记录详细的技术信息
+
+    // 创建进度分发函数
+    const progressDistributor = (event: {
+      payload: { chunk_index?: number; progress?: number };
+    }) => {
+      const progressData = event.payload;
+      if (
+        progressData.chunk_index !== undefined &&
+        progressData.progress !== undefined
+      ) {
+        const fileIndex = progressData.chunk_index;
+        if (fileIndex < groupInfo.files.length) {
+          groupInfo.files[fileIndex].downloaded = progressData.progress;
+        }
+      }
+    };
+
+    // 调用现有multichunk接口
+    const result = await ipc(
+      {
+        type: 'InstallMultichunkStream',
+        url: cdnUrl,
+        range: groupInfo.mergedRange,
+        chunks: chunks,
+      },
+      elevate,
+      progressDistributor,
+    );
+
+    // 处理结果并检查每个文件的状态
+    const failedFiles: DfsUpdateTask[] = [];
+    if (result && typeof result === 'object' && 'results' in result) {
+      const results = (result as { results: any[] }).results;
+
+      results.forEach((res, index: number) => {
+        if (index >= groupInfo.files.length) return;
+
+        const file = groupInfo.files[index];
+        let hasError = false;
+
+        if (res && typeof res === 'object') {
+          // 处理TAResult格式：{Ok: value} 或 {Err: error}
+          if ('Err' in res) {
+            hasError = true;
+            // 错误信息暂存，将在后面统一处理日志
+            file.errorMessage = res.Err;
+          } else if ('Ok' in res) {
+            // 文件成功
+            file.failed = undefined;
+            file.downloaded = file.size; // 标记完成
+            // 成功的单个文件日志将在最后统一处理
+          }
+          // 兼容旧格式：直接包含error字段
+          else if (res.error) {
+            hasError = true;
+            file.errorMessage = res.error;
+          }
+        } else {
+          // 如果结果格式不正确，也视为错误
+          hasError = true;
+          file.errorMessage = `Invalid result format: ${JSON.stringify(res)}`;
+        }
+
+        if (hasError) {
+          file.failed = true;
+          file.downloaded = 0; // 重置下载进度
+          failedFiles.push(file);
+        }
+      });
+    }
+
+    // 如果有文件失败，只对失败的文件进行fallback
+    if (failedFiles.length > 0) {
+      // 只下载失败的文件进行fallback
+      await fallbackToIndividualDownload(
+        failedFiles,
+        dfsSource,
+        extras,
+        local,
+        source,
+        hashKey,
+        elevate,
+      );
+    }
+    // 日志将由 MergedGroupTask 统一处理
+  } finally {
+    // 标记组内所有文件为完成
+    groupInfo.files.forEach((f) => {
+      f.running = false;
+      if (!f.failed) {
+        f.downloaded = f.size;
+      }
+    });
+  }
+};
+
+export const fallbackToIndividualDownload = async (
+  files: DfsUpdateTask[],
+  dfsSource: string,
+  extras: string | undefined,
+  local: Embedded[],
+  source: string,
+  hashKey: DfsMetadataHashType,
+  elevate: boolean,
+) => {
+  // 重置文件状态
+  files.forEach((f) => {
+    f.running = false;
+    f.downloaded = 0;
+    f.failed = undefined;
+  });
+
+  // 逐个下载文件
+  for (const file of files) {
+    try {
+      await runDfsDownload(
+        dfsSource,
+        extras,
+        local,
+        source,
+        hashKey,
+        file,
+        false, // disable_patch
+        false, // disable_local
+        elevate,
+      );
+    } catch (e) {
+      file.failed = true;
+      throw e; // 继续向上抛出错误
+    }
+  }
+  // Fallback 文件的日志将由对应的 SingleFileTask 处理
 };

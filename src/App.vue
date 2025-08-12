@@ -550,7 +550,18 @@ import {
   collectDfs2Ranges,
   dfsIndexCache,
   createDfs2Session,
+  preprocessFiles,
+  runMergedGroupDownload,
+  fallbackToIndividualDownload,
+  getFileInstallMode,
 } from './dfs';
+import {
+  DownloadTaskManager,
+  SingleFileTask,
+  LocalFileTask,
+  MergedGroupTask,
+  type DownloadContext
+} from './downloadTaskManager';
 import {
   error,
   ipcCheckLocalFiles,
@@ -579,6 +590,18 @@ import Feedback from './Feedback.vue';
 import FInput from './FInput.vue';
 import { compare } from 'compare-versions';
 import { processMirrorcError } from './mirrorc-errors';
+import {
+  DfsMetadataHashInfo,
+  DfsMetadataHashType,
+  DfsUpdateTask,
+  InstallerConfig,
+  InstallStat,
+  InvokeGetDfsMetadataRes,
+  InvokeGetDirsRes,
+  InvokeSelectDirRes,
+  ProjectConfig,
+  VirtualMergedFile,
+} from './types.ts';
 
 const init = ref(false);
 
@@ -894,7 +917,7 @@ async function runInstall(): Promise<void> {
       },
       needElevate.value,
     )
-  ).map((e) => {
+  ).map((e: { file_name: string }) => {
     return {
       ...e,
       file_name: e.file_name.replace(source.value, ''),
@@ -910,7 +933,7 @@ async function runInstall(): Promise<void> {
   const userDataPath = PROJECT_CONFIG.userDataPath.map(replacePathEnvirables);
   for (const item of latest_meta.hashed) {
     const local = local_meta.find(
-      (e) =>
+      (e: { file_name: string }) =>
         strip_first_slash(e.file_name.toLowerCase()) ===
         strip_first_slash(item.file_name.toLowerCase()),
     );
@@ -989,7 +1012,6 @@ async function runInstall(): Promise<void> {
       );
 
       if (ranges.length > 0) {
-        log('Creating DFS2 session with ranges:', ranges);
         const apiUrl = selectedSource.value.replace(/^dfs2\+packed\+/, '');
 
         // Get resource version from cache
@@ -1015,24 +1037,60 @@ async function runInstall(): Promise<void> {
 
   subStep.value = 2;
   current.value = '准备下载……';
+
+  // 预处理文件，进行合并分组
+  const { processedFiles } = preprocessFiles(
+    diff_files,
+    selectedSource.value,
+    hashKey as DfsMetadataHashType,
+    INSTALLER_CONFIG.embedded_files || [],
+  );
+
   let stat: InstallStat = {
     speedLastSize: 0,
     lastTime: performance.now(),
     speed: 0,
   };
   progressInterval.value = setInterval(() => {
-    const total_size = diff_files.reduce(
-      (acc, cur) =>
-        acc +
-        ((!cur.failed && (cur?.patch?.size || cur?.lpatch?.size)) || cur.size),
-      0,
-    );
+    // 更新虚拟文件的状态
+    processedFiles.forEach((item) => {
+      if ((item as VirtualMergedFile)._isMergedGroup) {
+        const virtualFile = item as VirtualMergedFile;
+        // 计算虚拟文件的总下载量（所有内部文件的下载量之和）
+        virtualFile.downloaded = virtualFile._mergedInfo.files.reduce(
+          (sum, f) => sum + f.downloaded,
+          0,
+        );
+        // 更新虚拟文件的运行状态（任意内部文件运行中则虚拟文件运行中）
+        virtualFile.running = virtualFile._mergedInfo.files.some(f => f.running);
+      }
+      // 单文件无需处理，因为runDfsDownload直接更新了对象
+    });
+
+    // 计算总大小和已下载大小，直接使用processedFiles
+    const total_size = processedFiles.reduce((acc, cur) => {
+      if ((cur as VirtualMergedFile)._isMergedGroup) {
+        const virtualFile = cur as VirtualMergedFile;
+        // 使用实际文件大小总和，不是合并下载大小
+        return acc + virtualFile._mergedInfo.files.reduce((sum, f) => 
+          sum + ((!f.failed && (f?.patch?.size || f?.lpatch?.size)) || f.size), 0
+        );
+      } else {
+        const file = cur as DfsUpdateTask;
+        return acc + ((!file.failed && (file?.patch?.size || file?.lpatch?.size)) || file.size);
+      }
+    }, 0);
+    
     const now = performance.now();
     const time_diff = now - stat.lastTime;
-    const downloadedTotalSize = diff_files.reduce(
-      (acc, cur) => acc + cur.downloaded,
-      0,
-    );
+    const downloadedTotalSize = processedFiles.reduce((acc, cur) => {
+      if ((cur as VirtualMergedFile)._isMergedGroup) {
+        const virtualFile = cur as VirtualMergedFile;
+        return acc + virtualFile._mergedInfo.files.reduce((sum, f) => sum + f.downloaded, 0);
+      } else {
+        return acc + (cur as DfsUpdateTask).downloaded;
+      }
+    }, 0);
     if (time_diff > 100) {
       stat.speed = (downloadedTotalSize - stat.speedLastSize) / time_diff;
       stat.speedLastSize = downloadedTotalSize;
@@ -1041,9 +1099,24 @@ async function runInstall(): Promise<void> {
     const speed = formatSize(stat.speed * 1000);
     const downloaded = formatSize(downloadedTotalSize);
     const total = formatSize(total_size);
-    const runningTasks = diff_files
+
+    // 更新运行中任务显示逻辑
+    const runningTasks = processedFiles
       .filter((e) => e.running)
-      .map((e) => `${basename(e.file_name)} ${formatSize(e.downloaded)}`);
+      .map((e) => {
+        if ((e as VirtualMergedFile)._isMergedGroup) {
+          const virtualFile = e as VirtualMergedFile;
+          const completedFiles = virtualFile._mergedInfo.files.filter(
+            (f) => f.downloaded === f.size,
+          );
+          const totalMergedSize = virtualFile._mergedInfo.files.reduce((sum, f) => sum + f.size, 0);
+          const downloadedMergedSize = virtualFile._mergedInfo.files.reduce((sum, f) => sum + f.downloaded, 0);
+          return `批量下载 ${completedFiles.length}/${virtualFile._mergedInfo.files.length} 个文件 ${formatSize(downloadedMergedSize)}/${formatSize(totalMergedSize)}`;
+        } else {
+          return `${basename(e.file_name)} ${formatSize(e.downloaded)}/${formatSize(e.size)}`;
+        }
+      });
+
     current.value = `
       <span class="d-single-stat">${downloaded} / ${total} (${speed}/s)</span>
       <div class="d-single-list">
@@ -1054,31 +1127,52 @@ async function runInstall(): Promise<void> {
     `;
     percent.value = 20 + (downloadedTotalSize / total_size) * 80;
   }, 30);
-  await mapLimit(diff_files, 6, async (item: (typeof diff_files)[0]) => {
-    for (let i = 0; i < 3; i++) {
-      try {
-        await runDfsDownload(
-          selectedSource.value,
-          INSTALLER_CONFIG.args.dfs_extras,
-          INSTALLER_CONFIG.embedded_files || [],
-          source.value,
-          hashKey as DfsMetadataHashType,
-          item,
-          item.failed,
-          item.failed || INSTALLER_CONFIG.args.online,
-          needElevate.value,
-        );
-        break;
-      } catch (e) {
-        item.failed = true;
-        error(e);
-        if (i === 2) {
-          await dialog_error(`释放文件${item.file_name}失败: ${e}`, '出错了');
-          throw e;
-        }
+
+  // 使用动态任务管理器进行下载
+  const downloadContext: DownloadContext = {
+    dfsSource: selectedSource.value,
+    extras: INSTALLER_CONFIG.args.dfs_extras,
+    local: INSTALLER_CONFIG.embedded_files || [],
+    source: source.value,
+    hashKey: hashKey as DfsMetadataHashType,
+    elevate: needElevate.value,
+  };
+
+  const taskManager = new DownloadTaskManager(processedFiles);
+
+  // 初始化任务
+  processedFiles.forEach(item => {
+    let task;
+    
+    if ((item as VirtualMergedFile)._isMergedGroup) {
+      task = new MergedGroupTask(item as VirtualMergedFile, downloadContext, taskManager);
+    } else {
+      // 根据文件模式选择合适的任务类型
+      const file = item as DfsUpdateTask;
+      const mode = getFileInstallMode(file, INSTALLER_CONFIG.embedded_files || [], hashKey as DfsMetadataHashType);
+      
+      if (mode === 'local') {
+        task = new LocalFileTask(file, downloadContext);
+      } else {
+        // hybridpatch, patch, direct 都使用 SingleFileTask
+        task = new SingleFileTask(file, downloadContext, taskManager);
       }
     }
+    
+    taskManager.addTask(task);
   });
+
+  try {
+    // 等待所有任务完成（任务失败时会自动抛出错误）
+    await taskManager.waitForCompletion();
+    
+    const stats = taskManager.getStats();
+    log('All tasks completed successfully:', stats);
+  } catch (e) {
+    error('Task manager failed:', e);
+    await dialog_error(`${e}`, '出错了');
+    throw e;
+  }
   clearInterval(progressInterval.value);
   if (
     latest_meta.deletes &&
@@ -1320,6 +1414,9 @@ async function finishInstall(
 }
 
 async function install(): Promise<void> {
+  try {
+    void cleanupAllDfs2Sessions();
+  } catch (e) {}
   try {
     if (installMode.value === 'mirrorc') {
       await runMirrorcInstall();

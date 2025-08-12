@@ -48,4 +48,6 @@ pub struct RepoMetadata {
     pub installer: Option<InstallerInfo>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub deletes: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub packing_info: Option<Vec<Vec<String>>>,
 }

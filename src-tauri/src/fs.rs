@@ -9,6 +9,7 @@ use std::{
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use crate::{
+    dfs::InsightItem,
     installer::uninstall::DELETE_SELF_ON_EXIT_PATH,
     local::mmap,
     utils::{hash::run_hash, progressed_read::ReadWithCallback},
@@ -150,30 +151,98 @@ pub async fn create_http_stream(
     (
         Box<dyn tokio::io::AsyncRead + Unpin + std::marker::Send>,
         u64,
+        Option<InsightItem>,
     ),
     anyhow::Error,
 > {
+    let start_time = std::time::Instant::now();
+    
     let mut res = REQUEST_CLIENT.get(url);
     let has_range = offset > 0 || size > 0;
     if has_range {
         res = res.header("Range", format!("bytes={}-{}", offset, offset + size - 1));
     }
-    let res = res.send().await.context("HTTP_REQUEST_ERR")?;
+    
+    let res = res.send().await.context("HTTP_REQUEST_ERR");
+    let res = match res {
+        Ok(r) => r,
+        Err(e) => {
+            let insight = InsightItem {
+                url: url.to_string(),
+                ttfb: start_time.elapsed().as_millis() as u32,
+                time: 0,
+                size: 0,
+                range: if has_range {
+                    vec![(offset as u32, (offset + size - 1) as u32)]
+                } else {
+                    vec![]
+                },
+                error: Some(e.to_string()),
+            };
+            return Err(crate::utils::error::TACommandError::with_insight(
+                e.context("HTTP_REQUEST_ERR"), 
+                insight
+            ).error);
+        }
+    };
+    
+    let ttfb = start_time.elapsed().as_millis() as u32;
     let code = res.status();
+    
     if (!has_range && code != 200) || (has_range && code != 206) {
-        return Err(anyhow::Error::new(std::io::Error::other(format!(
+        let insight = InsightItem {
+            url: url.to_string(),
+            ttfb,
+            time: 0,
+            size: 0,
+            range: if has_range {
+                vec![(offset as u32, (offset + size - 1) as u32)]
+            } else {
+                vec![]
+            },
+            error: Some(format!("HTTP status error: {}", code)),
+        };
+        let error = anyhow::Error::new(std::io::Error::other(format!(
             "URL {url} returned {code}"
         )))
-        .context("HTTP_STATUS_ERR"));
+        .context("HTTP_STATUS_ERR");
+        return Err(crate::utils::error::TACommandError::with_insight(error, insight).error);
     }
+    
     let content_length = res.content_length().unwrap_or(0);
     let stream = futures::TryStreamExt::map_err(res.bytes_stream(), std::io::Error::other);
     let reader = tokio_util::io::StreamReader::new(stream);
+    
+    let mut insight = InsightItem {
+        url: url.to_string(),
+        ttfb,
+        time: 0, // 将在progressed_copy中更新
+        size: 0, // 将在progressed_copy中更新
+        range: if has_range {
+            vec![(offset as u32, (offset + size - 1) as u32)]
+        } else {
+            vec![]
+        },
+        error: None,
+    };
+    
     if skip_decompress {
-        return Ok((Box::new(reader), content_length));
+        return Ok((Box::new(reader), content_length, Some(insight)));
     }
     let decoder = TokioZstdDecoder::new(reader);
-    Ok((Box::new(decoder), content_length))
+    Ok((Box::new(decoder), content_length, Some(insight)))
+}
+
+fn parse_range_string(range: &str) -> Vec<(u32, u32)> {
+    range
+        .split(',')
+        .filter_map(|part| {
+            let mut split = part.trim().split('-');
+            let start = split.next()?.parse::<u32>().ok()?;
+            let end = split.next()?.parse::<u32>().ok()?;
+            Some((start, end))
+        })
+        .collect()
 }
 
 pub async fn create_multi_http_stream(
@@ -184,22 +253,56 @@ pub async fn create_multi_http_stream(
         Box<dyn futures::Stream<Item = reqwest::Result<bytes::Bytes>> + Send + Unpin>,
         u64,
         String,
+        InsightItem,
     ),
     anyhow::Error,
 > {
+    let start_time = std::time::Instant::now();
+    let range_info = parse_range_string(range);
+    
     let res = REQUEST_CLIENT
         .get(url)
         .header("Range", format!("bytes={range}"))
         .send()
-        .await
-        .context("HTTP_REQUEST_ERR")?;
+        .await;
+    
+    let res = match res {
+        Ok(r) => r,
+        Err(e) => {
+            let insight = InsightItem {
+                url: url.to_string(),
+                ttfb: start_time.elapsed().as_millis() as u32,
+                time: 0,
+                size: 0,
+                range: range_info,
+                error: Some(e.to_string()),
+            };
+            return Err(crate::utils::error::TACommandError::with_insight(
+                anyhow::Error::new(e).context("HTTP_REQUEST_ERR"), 
+                insight
+            ).error);
+        }
+    };
+    
+    let ttfb = start_time.elapsed().as_millis() as u32;
     let code = res.status();
+    
     if code != 206 {
-        return Err(anyhow::Error::new(std::io::Error::other(format!(
+        let insight = InsightItem {
+            url: url.to_string(),
+            ttfb,
+            time: 0,
+            size: 0,
+            range: range_info,
+            error: Some(format!("HTTP status error: {}", code)),
+        };
+        let error = anyhow::Error::new(std::io::Error::other(format!(
             "URL {url} returned {code}"
         )))
-        .context("HTTP_STATUS_ERR"));
+        .context("HTTP_STATUS_ERR");
+        return Err(crate::utils::error::TACommandError::with_insight(error, insight).error);
     }
+    
     let content_length = res.content_length().unwrap_or(0);
     let content_type = res
         .headers()
@@ -208,10 +311,20 @@ pub async fn create_multi_http_stream(
         .unwrap_or("application/octet-stream")
         .to_string();
 
+    let insight = InsightItem {
+        url: url.to_string(),
+        ttfb,
+        time: 0, // 将在multipart处理中更新
+        size: 0, // 将在multipart处理中更新
+        range: range_info,
+        error: None,
+    };
+
     Ok((
         Box::new(Box::pin(res.bytes_stream())),
         content_length,
         content_type,
+        insight,
     ))
 }
 
@@ -272,13 +385,29 @@ pub async fn progressed_copy(
     mut target: impl AsyncWrite + std::marker::Unpin,
     on_progress: impl Fn(usize),
 ) -> Result<usize, anyhow::Error> {
+    progressed_copy_with_insight(source, target, on_progress, None).await.map(|(size, _)| size)
+}
+
+pub async fn progressed_copy_with_insight(
+    mut source: impl AsyncRead + std::marker::Unpin,
+    mut target: impl AsyncWrite + std::marker::Unpin,
+    on_progress: impl Fn(usize),
+    mut insight: Option<InsightItem>,
+) -> Result<(usize, Option<InsightItem>), anyhow::Error> {
+    let download_start = std::time::Instant::now();
     let mut downloaded = 0;
     let mut boxed = Box::new([0u8; 256 * 1024]);
     let buffer = &mut *boxed;
     let mut now = std::time::Instant::now();
+    
     loop {
         let read = source.read(buffer).await.context("DECOMPRESS_ERR")?;
         if read == 0 {
+            // 网络流读取完成，更新时间统计
+            if let Some(ref mut insight) = insight {
+                insight.time = download_start.elapsed().as_millis() as u32;
+                insight.size = downloaded as u32;
+            }
             break;
         }
         downloaded += read;
@@ -291,9 +420,12 @@ pub async fn progressed_copy(
             .await
             .context("WRITE_TARGET_ERR")?;
     }
+    
+    // 本地I/O操作（不计入网络时间）
     target.flush().await.context("FLUSH_TARGET_ERR")?;
     on_progress(downloaded);
-    Ok(downloaded)
+    
+    Ok((downloaded, insight))
 }
 
 pub async fn progressed_hpatch<R, F>(
@@ -302,12 +434,15 @@ pub async fn progressed_hpatch<R, F>(
     diff_size: usize,
     on_progress: F,
     override_old_path: Option<PathBuf>,
-) -> Result<usize, anyhow::Error>
+    mut insight: Option<InsightItem>,
+) -> Result<(usize, Option<InsightItem>), anyhow::Error>
 where
     R: AsyncRead + std::marker::Unpin + Send + 'static,
     F: Fn(usize) + Send + 'static,
 {
+    let download_start = std::time::Instant::now();
     let mut downloaded = 0;
+    
     let decoder = ReadWithCallback {
         reader: source,
         callback: move |chunk| {
@@ -387,7 +522,13 @@ where
                 .context("PATCH_FAILED_ERR"),
         );
     }
-    Ok(diff_size)
+    // 更新网络下载统计信息
+    if let Some(ref mut insight) = insight {
+        insight.time = download_start.elapsed().as_millis() as u32;
+        insight.size = diff_size as u32;
+    }
+    
+    Ok((diff_size, insight))
 }
 
 pub async fn verify_hash(

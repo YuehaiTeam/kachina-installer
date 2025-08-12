@@ -216,7 +216,7 @@ pub async fn run_mirrorc_download(
     url: &str,
     notify: impl Fn(serde_json::Value) + std::marker::Send + 'static,
 ) -> TAResult<()> {
-    let (stream, len) = create_http_stream(url, 0, 0, true).await?;
+    let (stream, len, _insight) = create_http_stream(url, 0, 0, true).await?;
     prepare_target(zip_path).await?;
     let target = create_target_file(zip_path).await?;
     progressed_copy(stream, target, |downloaded| {

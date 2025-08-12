@@ -292,7 +292,6 @@ pub async fn uac_ipc_main(args: crate::cli::arg::UacArgs) {
                         let id = res.id.clone();
                         tokio::spawn(async move {
                             let tx2 = tx.clone();
-                            tracing::info!("Client: Operation started: {:?}", id);
                             let res = run_opr(res.op, move |opr| {
                                 let id = res.id.clone();
                                 let tx_clone = tx.clone();
@@ -305,8 +304,6 @@ pub async fn uac_ipc_main(args: crate::cli::arg::UacArgs) {
                             .await;
                             if let Err(err) = res.as_ref() {
                                 tracing::error!("Client: Operation failed: {:?}", err);
-                            }else{
-                                tracing::info!("Client: Operation done: {:?}", id);
                             }
                             let _ = tx2
                                 .send(serde_json::json!({ "id": id, "data": res, "done": true }))

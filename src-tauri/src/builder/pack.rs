@@ -228,8 +228,14 @@ pub async fn pack(
     drop(tmpfile);
     // remove tmp file
     tokio::fs::remove_file(tmppath).await.unwrap();
-    let metadata_bytes = if let Some(metadata) = config.metadata {
+    
+    // 先克隆 packing_info 用于排序
+    let packing_info_clone = config.metadata.as_ref().and_then(|m| m.packing_info.clone());
+    
+    let metadata_bytes = if let Some(mut metadata) = config.metadata {
         println!("Writing metadata...");
+        // 排除 packing_info，这些信息只用于打包阶段
+        metadata.packing_info = None;
         let mut metadata = serde_json::json!(metadata);
         metadata.sort_all_objects();
         let metadata_bytes = serde_json::to_string(&metadata).unwrap();
@@ -267,7 +273,19 @@ pub async fn pack(
         ));
         current_offset = offset + metadata_bytes.len();
     }
-    files.sort_by_key(|x| x.name.clone());
+    // 使用打包优化信息进行智能排序  
+    if let Some(ref packing_info) = packing_info_clone {
+        println!("Packing order optimization enabled:");
+        println!("  Large files: {}", packing_info[0].len());
+        println!("  Unchanged small files: {}", packing_info[1].len());
+        println!("  Changed small files: {}", packing_info[2].len());
+        println!("  Small patches: {}", packing_info[3].len());
+        println!("  Large patches: {}", packing_info[4].len());
+    }
+    
+    files.sort_by_key(|file| {
+        get_file_pack_priority(&file.name, packing_info_clone.as_ref())
+    });
     for file in files.iter_mut() {
         let name = file.name.clone();
         let size = file.size;
@@ -439,4 +457,18 @@ pub async fn write_file(
     write_header(output, &file.name, file.size as u32).await?;
     tokio::io::copy(&mut file.data, output).await?;
     Ok(())
+}
+
+fn get_file_pack_priority(file_name: &str, packing_info: Option<&Vec<Vec<String>>>) -> (u8, String) {
+    if let Some(info) = packing_info {
+        // 检查每个分类
+        for (priority, category) in info.iter().enumerate() {
+            if category.contains(&file_name.to_string()) {
+                return (priority as u8, file_name.to_string());
+            }
+        }
+    }
+    
+    // 未分类的文件放在最后，使用原有的字母排序
+    (5, file_name.to_string())
 }

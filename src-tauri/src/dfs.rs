@@ -69,12 +69,19 @@ pub struct Dfs2ChunkResponse {
     pub url: String,
 }
 
+#[derive(Clone, Deserialize, Serialize, Debug)]
+pub struct InsightItem {
+    pub url: String,
+    pub ttfb: u32,        // 首字节时间(ms)
+    pub time: u32,        // 纯下载时间(ms) = 总时间 - TTFB
+    pub size: u32,        // 实际下载字节数
+    pub range: Vec<(u32, u32)>, // HTTP Range请求范围
+    pub error: Option<String>,
+}
+
 #[derive(Deserialize, Serialize, Debug)]
 pub struct Dfs2SessionInsights {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub bandwidth: Option<std::collections::HashMap<String, String>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub ttfb: Option<std::collections::HashMap<String, String>>,
+    pub servers: Vec<InsightItem>,
 }
 
 #[derive(Deserialize, Serialize, Debug)]

@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::{collections::HashSet, path::Path};
 
 use async_compression::tokio::bufread::ZstdEncoder;
 use hdiff_sys::safe_create_single_patch;
@@ -60,6 +60,7 @@ pub async fn gen_cli(args: GenArgs) {
         patches: None,
         installer,
         deletes: None,
+        packing_info: None,
     };
     let metadata_str = serde_json::to_string(&repometa).expect("failed to serialize metadata");
     tokio::fs::write(&args.output_metadata, metadata_str)
@@ -396,7 +397,13 @@ pub async fn gen_cli(args: GenArgs) {
                     }
                 }
             }
+            // 生成打包优化信息（在移动 diffs 之前）
+            let diff_vers_pathbuf: Vec<std::path::PathBuf> = diff_vers.iter().map(|s| std::path::PathBuf::from(s)).collect();
+            let packing_info = generate_packing_info(&metadata_with_installer, &diffs, &diff_vers_pathbuf).await;
+            
             repometa.patches = Some(diffs);
+            repometa.packing_info = Some(packing_info);
+            
             // write metadata again
             let metadata_str =
                 serde_json::to_string(&repometa).expect("failed to serialize metadata");
@@ -404,6 +411,126 @@ pub async fn gen_cli(args: GenArgs) {
                 .await
                 .expect("failed to write metadata");
         }
+    } else if args.diff_vers.is_some() {
+        // 即使没有diff版本，如果指定了diff_vers参数，也生成基础的packing_info
+        println!("Generating packing info for first release...");
+        let mut metadata_with_installer = metadata.clone();
+        if let Some(installer) = repometa.installer.as_ref() {
+            metadata_with_installer.push(Metadata {
+                file_name: if let Some(name) = args.updater_name.as_ref() {
+                    name.clone()
+                } else if let Some(name) = args.updater.as_ref().unwrap().file_name() {
+                    name.to_string_lossy().to_string()
+                } else {
+                    panic!("failed to get updater name");
+                },
+                size: installer.size,
+                md5: installer.md5.clone(),
+                xxh: installer.xxh.clone(),
+            });
+        }
+        
+        let empty_diffs = Vec::new();
+        let empty_diff_vers = Vec::new();
+        let packing_info = generate_packing_info(&metadata_with_installer, &empty_diffs, &empty_diff_vers).await;
+        repometa.packing_info = Some(packing_info);
+        
+        // write metadata again
+        let metadata_str =
+            serde_json::to_string(&repometa).expect("failed to serialize metadata");
+        tokio::fs::write(&args.output_metadata, metadata_str)
+            .await
+            .expect("failed to write metadata");
     }
     println!("Done");
+}
+
+async fn generate_packing_info(
+    metadata_with_installer: &[Metadata],
+    patches: &[PatchInfo],
+    diff_vers: &[std::path::PathBuf],
+) -> Vec<Vec<String>> {
+    let mut packing_info = vec![
+        Vec::new(), // [0] 大文件
+        Vec::new(), // [1] 没有更新的小文件
+        Vec::new(), // [2] 有变化或新增的小文件
+        Vec::new(), // [3] 小patch
+        Vec::new(), // [4] 大patch
+    ];
+
+    // 收集变化文件的hash集合
+    let mut changed_hashes = HashSet::new();
+    let mut new_hashes = HashSet::new();
+
+    if !diff_vers.is_empty() {
+        // 分析每个文件的变化状态
+        for file in metadata_with_installer {
+            let hash = file.xxh.as_ref().unwrap();
+
+            // 检查文件是否存在于旧版本
+            let mut found_in_old = false;
+            let mut hash_changed = false;
+
+            for diff_ver in diff_vers {
+                let old_file_path = diff_ver.join(&file.file_name);
+                if old_file_path.exists() {
+                    found_in_old = true;
+                    let old_hash_result = run_hash("xxh", old_file_path.to_str().unwrap()).await;
+                    if let Ok(old_hash) = old_hash_result {
+                        if old_hash != *hash {
+                            hash_changed = true;
+                        }
+                    }
+                    break;
+                }
+            }
+
+            if !found_in_old {
+                new_hashes.insert(hash.clone());
+            } else if hash_changed {
+                changed_hashes.insert(hash.clone());
+            }
+        }
+    } else {
+        // 没有diff版本，所有文件都是新增
+        for file in metadata_with_installer {
+            new_hashes.insert(file.xxh.as_ref().unwrap().clone());
+        }
+    }
+
+    // 分类原始文件
+    for file in metadata_with_installer {
+        let hash = file.xxh.as_ref().unwrap();
+
+        if file.size > 1024 * 1024 {
+            packing_info[0].push(hash.clone()); // 大文件
+        } else if new_hashes.contains(hash) || changed_hashes.contains(hash) {
+            packing_info[2].push(hash.clone()); // 有变化的小文件
+        } else {
+            packing_info[1].push(hash.clone()); // 没有更新的小文件
+        }
+    }
+
+    // 分类patch文件
+    for patch in patches {
+        let patch_name = format!(
+            "{}_{}",
+            patch.from.xxh.as_ref().unwrap(),
+            patch.to.xxh.as_ref().unwrap()
+        );
+        if patch.size > 1024 * 1024 {
+            packing_info[4].push(patch_name); // 大patch
+        } else {
+            packing_info[3].push(patch_name); // 小patch
+        }
+    }
+
+    println!("Packing info generated:");
+    println!("  Large files: {}", packing_info[0].len());
+    println!("  Unchanged small files: {}", packing_info[1].len());
+    println!("  Changed small files: {}", packing_info[2].len());
+    println!("  Small patches: {}", packing_info[3].len());
+    println!("  Large patches: {}", packing_info[4].len());
+
+    packing_info
 }
