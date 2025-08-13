@@ -8,6 +8,7 @@ mod gen;
 mod local;
 mod metadata;
 mod pack;
+mod replace_bin;
 mod utils;
 
 pub fn main() {
@@ -32,6 +33,11 @@ async fn async_main() {
         Command::Gen(args) => gen::gen_cli(args).await,
         Command::Append(args) => append::append_cli(args).await,
         Command::Extract(args) => extract::extract_cli(args).await,
+        Command::ReplaceBin(args) => {
+            if let Err(e) = replace_bin::replace_bin_cli(args).await {
+                eprintln!("Replace-bin failed: {}", e);
+            }
+        }
     }
     let duration = now.elapsed();
     println!("Finished in {duration:?}");

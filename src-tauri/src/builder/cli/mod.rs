@@ -57,10 +57,29 @@ pub struct AppendArgs {
 pub struct ExtractArgs {
     #[clap(long, short = 'i', default_value = "output.exe")]
     pub input: PathBuf,
+
+    // 原有参数保持不变
     #[clap(long, short = 'f')]
     pub file: Vec<PathBuf>,
     #[clap(long, short = 'n')]
     pub name: Vec<String>,
+
+    // 新增参数
+    #[clap(long)]
+    pub meta_name: Vec<String>,
+    #[clap(long)]
+    pub all: Option<PathBuf>,
+    #[clap(long)]
+    pub list: bool,
+}
+
+#[derive(Debug, Clone, clap::Args)]
+pub struct ReplaceBinArgs {
+    /// 输入的安装包文件
+    pub input: PathBuf,
+    /// 输出的新安装包文件
+    #[clap(long, short = 'o')]
+    pub output: PathBuf,
 }
 
 #[derive(Subcommand, Clone, Debug)]
@@ -69,6 +88,7 @@ pub enum Command {
     Append(AppendArgs),
     Extract(ExtractArgs),
     Gen(GenArgs),
+    ReplaceBin(ReplaceBinArgs),
 }
 
 #[derive(Parser)]
