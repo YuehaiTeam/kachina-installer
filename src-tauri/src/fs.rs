@@ -12,7 +12,12 @@ use crate::{
     dfs::InsightItem,
     installer::uninstall::DELETE_SELF_ON_EXIT_PATH,
     local::mmap,
-    utils::{download_monitor::DownloadMonitor, hash::run_hash, progressed_read::ReadWithCallback},
+    utils::{
+        download_monitor::DownloadMonitor, 
+        hash::run_hash, 
+        progressed_read::ReadWithCallback,
+        url::HttpContextExt,
+    },
     REQUEST_CLIENT,
 };
 use anyhow::{Context, Result};
@@ -163,7 +168,7 @@ pub async fn create_http_stream(
         res = res.header("Range", format!("bytes={}-{}", offset, offset + size - 1));
     }
 
-    let res = res.send().await.context("HTTP_REQUEST_ERR");
+    let res = res.send().await.with_http_context("create_http_stream", url);
     let res = match res {
         Ok(r) => r,
         Err(e) => {
@@ -180,7 +185,7 @@ pub async fn create_http_stream(
                 error: Some(e.to_string()),
             };
             return Err(crate::utils::error::TACommandError::with_insight(
-                e.context("HTTP_REQUEST_ERR"),
+                e,
                 insight,
             )
             .error);
@@ -203,8 +208,8 @@ pub async fn create_http_stream(
             },
             error: Some(format!("HTTP status error: {}", code)),
         };
-        let error = anyhow::Error::new(std::io::Error::other(format!("URL {url} returned {code}")))
-            .context("HTTP_STATUS_ERR");
+        let error = anyhow::Error::new(std::io::Error::other(format!("URL {} returned {}", crate::utils::url::sanitize_url_for_logging(url), code)))
+            .context(crate::utils::url::create_reqwest_context("create_http_stream", url, "HTTP_STATUS_ERR"));
         return Err(crate::utils::error::TACommandError::with_insight(error, insight).error);
     }
 
@@ -296,8 +301,8 @@ pub async fn create_multi_http_stream(
             range: range_info,
             error: Some(format!("HTTP status error: {}", code)),
         };
-        let error = anyhow::Error::new(std::io::Error::other(format!("URL {url} returned {code}")))
-            .context("HTTP_STATUS_ERR");
+        let error = anyhow::Error::new(std::io::Error::other(format!("URL {} returned {}", crate::utils::url::sanitize_url_for_logging(url), code)))
+            .context(crate::utils::url::create_reqwest_context("create_http_stream", url, "HTTP_STATUS_ERR"));
         return Err(crate::utils::error::TACommandError::with_insight(error, insight).error);
     }
 

@@ -1,7 +1,9 @@
-use anyhow::Context;
 use serde::{Deserialize, Serialize};
 
-use crate::{utils::error::TAResult, REQUEST_CLIENT};
+use crate::{
+    utils::{error::TAResult, url::HttpContextExt},
+    REQUEST_CLIENT,
+};
 
 #[derive(Deserialize, Serialize, Debug)]
 pub struct DownloadResp {
@@ -106,15 +108,13 @@ pub async fn get_dfs(
     } else {
         "".to_string()
     };
-    let res: Result<reqwest::Response, reqwest::Error> = REQUEST_CLIENT
+    let res = REQUEST_CLIENT
         .post(&url_with_range_in_query)
         .body(extras.clone())
         .send()
-        .await;
-    if res.is_err() {
-        return Err(format!("Failed to send http request: {:?}", res.err()));
-    }
-    let res = res.unwrap();
+        .await
+        .with_http_context("get_dfs", &url_with_range_in_query)
+        .map_err(|e| e.to_string())?;
     // check status code if is not 200 or 401
     if res.status() != reqwest::StatusCode::OK && res.status() != reqwest::StatusCode::UNAUTHORIZED
     {
@@ -127,14 +127,11 @@ pub async fn get_dfs(
             return Err(format!("{}: {}", status, body.unwrap()));
         }
     }
-    let body_text = res.text().await;
-    if body_text.is_err() {
-        return Err(format!(
-            "Failed to read response body: {:?}",
-            body_text.err()
-        ));
-    }
-    let body_text = body_text.unwrap();
+    let body_text = res
+        .text()
+        .await
+        .with_http_context("get_dfs", &url)
+        .map_err(|e| format!("Failed to read response body: {}", e))?;
     let json: Result<DownloadResp, serde_json::Error> = serde_json::from_str(&body_text);
     if json.is_err() {
         return Err(format!(
@@ -171,12 +168,13 @@ pub async fn get_dfs(
         return Err("Failed to solve challenge".to_string());
     }
     let url = format!("{url_with_range_in_query}&sid={solve}");
-    let res: Result<reqwest::Response, reqwest::Error> =
-        REQUEST_CLIENT.post(&url).body(extras).send().await;
-    if res.is_err() {
-        return Err(format!("Failed to send http request: {:?}", res.err()));
-    }
-    let res = res.unwrap();
+    let res = REQUEST_CLIENT
+        .post(&url)
+        .body(extras)
+        .send()
+        .await
+        .with_http_context("get_dfs", &url)
+        .map_err(|e| e.to_string())?;
     // check status code if is not 200 or 401
     if res.status() != reqwest::StatusCode::OK && res.status() != reqwest::StatusCode::UNAUTHORIZED
     {
@@ -188,14 +186,11 @@ pub async fn get_dfs(
             return Err(format!("{}: {}", status, body.unwrap()));
         }
     }
-    let body_text = res.text().await;
-    if body_text.is_err() {
-        return Err(format!(
-            "Failed to read response body: {:?}",
-            body_text.err()
-        ));
-    }
-    let body_text = body_text.unwrap();
+    let body_text = res
+        .text()
+        .await
+        .with_http_context("get_dfs", &url)
+        .map_err(|e| format!("Failed to read response body: {}", e))?;
     let json: Result<DownloadResp, serde_json::Error> = serde_json::from_str(&body_text);
     if json.is_err() {
         return Err(format!(
@@ -224,7 +219,8 @@ pub async fn get_dfs2_metadata(api_url: String) -> Result<Dfs2Metadata, String> 
         .get(&url_with_metadata)
         .send()
         .await
-        .map_err(|e| format!("Failed to send request: {:?}", e))?;
+        .with_http_context("get_dfs2_metadata", &url_with_metadata)
+        .map_err(|e| e.to_string())?;
 
     if !res.status().is_success() {
         let status = res.status();
@@ -235,7 +231,8 @@ pub async fn get_dfs2_metadata(api_url: String) -> Result<Dfs2Metadata, String> 
     let body_text = res
         .text()
         .await
-        .map_err(|e| format!("Failed to read response body: {:?}", e))?;
+        .with_http_context("get_dfs2_metadata", &url_with_metadata)
+        .map_err(|e| format!("Failed to read response body: {}", e))?;
 
     let metadata: Dfs2Metadata = serde_json::from_str(&body_text)
         .map_err(|e| format!("Failed to parse JSON ({}): {}", e, body_text))?;
@@ -265,13 +262,17 @@ pub async fn create_dfs2_session(
         .json(&request_body)
         .send()
         .await
-        .map_err(|e| format!("Failed to send request: {:?}", e))?;
+        .with_http_context("create_dfs2_session", &api_url)
+        .map_err(|e| e.to_string())?;
 
     let status = res.status();
     let body_text = res
         .text()
         .await
-        .map_err(|e| format!("Failed to read response body: {:?}", e))?;
+        .with_http_context("create_dfs2_session", &api_url)
+        .map_err(|e| format!("Failed to read response body: {}", e))?;
+
+    tracing::info!("Response body: {}", body_text);
 
     let response: Dfs2SessionResponse = serde_json::from_str(&body_text)
         .map_err(|e| format!("Failed to parse JSON ({}): {}", e, body_text))?;
@@ -295,7 +296,8 @@ pub async fn get_dfs2_chunk_url(
         .get(&url)
         .send()
         .await
-        .map_err(|e| format!("Failed to send request: {:?}", e))?;
+        .with_http_context("get_dfs2_chunk_url", &url)
+        .map_err(|e| e.to_string())?;
 
     if !res.status().is_success() {
         let status = res.status();
@@ -306,7 +308,8 @@ pub async fn get_dfs2_chunk_url(
     let body_text = res
         .text()
         .await
-        .map_err(|e| format!("Failed to read response body: {:?}", e))?;
+        .with_http_context("get_dfs2_chunk_url", &url)
+        .map_err(|e| format!("Failed to read response body: {}", e))?;
 
     let response: Dfs2ChunkResponse = serde_json::from_str(&body_text)
         .map_err(|e| format!("Failed to parse JSON ({}): {}", e, body_text))?;
@@ -326,7 +329,8 @@ pub async fn end_dfs2_session(
         .json(&request_body)
         .send()
         .await
-        .map_err(|e| format!("Failed to send request: {:?}", e))?;
+        .with_http_context("end_dfs2_session", &session_api_url)
+        .map_err(|e| e.to_string())?;
 
     if !res.status().is_success() {
         let status = res.status();
@@ -414,13 +418,16 @@ pub async fn get_http_with_range(url: String, offset: u64, size: u64) -> TAResul
     if offset != 0 || size != 0 {
         res = res.header("Range", format!("bytes={}-{}", offset, offset + size - 1));
     }
-    let res = res.send().await.context(format!("HTTP_GET_ERR: {}", url))?;
+    let res = res
+        .send()
+        .await
+        .with_http_context("get_http_with_range", &url)?;
     let status = res.status();
     let bytes = res
         .bytes()
         .await
         .map(|b| b.to_vec())
-        .context("HTTP_READ_ERR")?;
+        .with_http_context("get_http_with_range", &url)?;
 
     Ok((status.as_u16(), bytes))
 }

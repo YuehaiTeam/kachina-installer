@@ -2305,6 +2305,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "twox-hash",
+ "url",
  "uuid",
  "whoami",
  "win32-version-info",

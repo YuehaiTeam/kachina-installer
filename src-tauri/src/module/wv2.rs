@@ -16,7 +16,7 @@ use windows::{
     },
 };
 
-use crate::REQUEST_CLIENT;
+use crate::{utils::url::HttpContextExt, REQUEST_CLIENT};
 
 pub struct SendableHwnd(pub *mut Option<HWND>);
 unsafe impl Send for SendableHwnd {}
@@ -109,10 +109,12 @@ pub async fn install_webview2() {
             unsafe { windows::Win32::UI::Controls::TaskDialogIndirect(&config, None, None, None) };
     });
     // use reqwest to download the installer
+    let wv2_url = "https://go.microsoft.com/fwlink/p/?LinkId=2124703";
     let res = REQUEST_CLIENT
-        .get("https://go.microsoft.com/fwlink/p/?LinkId=2124703")
+        .get(wv2_url)
         .send()
-        .await;
+        .await
+        .with_http_context("install_webview2", wv2_url);
     if let Err(e) = res {
         let hwnd = dialog_hwnd.take();
         unsafe {
@@ -126,7 +128,7 @@ pub async fn install_webview2() {
         std::process::exit(0);
     }
     let res = res.unwrap();
-    let wv2_installer_blob = res.bytes().await;
+    let wv2_installer_blob = res.bytes().await.with_http_context("install_webview2", wv2_url);
     if let Err(e) = wv2_installer_blob {
         let hwnd = dialog_hwnd.take();
         unsafe {

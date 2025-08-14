@@ -420,6 +420,39 @@ export const getDfsFileUrl = async (
   return url;
 };
 
+// Helper function to check if error is a network error that should be retried
+const isNetworkError = (error: any): boolean => {
+  const errorStr = String(error);
+  
+  // 检查是否为HTTP状态码错误（4xx/5xx），这些不应该重试
+  if (errorStr.includes('Session creation failed:')) {
+    return false; // HTTP状态错误，不重试
+  }
+  
+  // 检查 reqwest/hyper 网络库错误结构（这些需要重试）
+  if (errorStr.includes('Failed to send request:') && 
+     (errorStr.includes('reqwest::Error') || 
+      errorStr.includes('hyper::Error') ||
+      errorStr.includes('hyper_util::client::legacy::Error'))) {
+    return true;
+  }
+  
+  // 检查连接相关的 kind 字段（英文，不会本地化）
+  if (errorStr.includes('kind: ConnectionReset') ||
+      errorStr.includes('kind: Timeout') ||
+      errorStr.includes('kind: ConnectionRefused') ||
+      errorStr.includes('kind: NotFound')) {
+    return true;
+  }
+  
+  // 检查常见的网络相关错误码
+  if (/code: (10054|10060|10061)/.test(errorStr)) {
+    return true;
+  }
+  
+  return false;
+};
+
 // DFS2 Session Management Functions
 export const createDfs2Session = async (
   apiUrl: string,
@@ -437,63 +470,102 @@ export const createDfs2Session = async (
     }
   }
 
-  let challengeResponse: string | undefined = undefined;
-  let sessionId: string | undefined = undefined;
+  // Main retry loop with network error handling (max 3 retries)
+  const retryIntervals = [200, 600, 1000]; // 0.2s, 0.6s, 1s
+  
+  for (let retryAttempt = 0; retryAttempt < 3; retryAttempt++) {
+    let challengeResponse: string | undefined = undefined;
+    let sessionId: string | undefined = undefined;
 
-  // Challenge handling loop
-  for (let attempts = 0; attempts < 3; attempts++) {
-    const sessionResponse: Dfs2SessionResponse =
-      await invoke<Dfs2SessionResponse>('create_dfs2_session', {
-        apiUrl: apiUrl,
-        chunks: chunks || undefined,
-        version: version || undefined,
-        challengeResponse: challengeResponse,
-        sessionId: sessionId,
-        extras: extrasObject,
-      });
-
-    // Success - session created
-    if (sessionResponse.sid && !sessionResponse.challenge) {
-      // Store session for cleanup
-      storeDfs2Session(apiUrl, sessionResponse.sid);
-      return sessionResponse.sid;
-    }
-
-    // Challenge received
-    if (
-      sessionResponse.challenge &&
-      sessionResponse.data &&
-      sessionResponse.sid
-    ) {
-      console.log(`DFS2 challenge received: ${sessionResponse.challenge}`);
-
-      try {
-        if (sessionResponse.challenge === 'web') {
-          // Handle web challenges
-          challengeResponse = await handleWebChallenge(sessionResponse.data);
-        } else {
-          // Handle computational challenges (MD5, SHA256)
-          challengeResponse = await invoke<string>('solve_dfs2_challenge', {
-            challengeType: sessionResponse.challenge,
-            data: sessionResponse.data,
+    try {
+      // Challenge handling loop (max 3 challenge attempts per retry)
+      for (let challengeAttempts = 0; challengeAttempts < 3; challengeAttempts++) {
+        const sessionResponse: Dfs2SessionResponse =
+          await invoke<Dfs2SessionResponse>('create_dfs2_session', {
+            apiUrl: apiUrl,
+            chunks: chunks || undefined,
+            version: version || undefined,
+            challengeResponse: challengeResponse,
+            sessionId: sessionId,
+            extras: extrasObject,
           });
+
+        // Success - session created
+        if (sessionResponse.sid && !sessionResponse.challenge) {
+          // Store session for cleanup
+          storeDfs2Session(apiUrl, sessionResponse.sid);
+          return sessionResponse.sid;
         }
 
-        sessionId = sessionResponse.sid;
-        console.log('Challenge solved, retrying session creation...');
-        continue;
-      } catch (error) {
-        throw new Error(
-          `Failed to solve ${sessionResponse.challenge} challenge: ${error}`,
-        );
-      }
-    }
+        // Challenge received
+        if (
+          sessionResponse.challenge &&
+          sessionResponse.data &&
+          sessionResponse.sid
+        ) {
+          console.log(`DFS2 challenge received: ${sessionResponse.challenge}`);
 
-    // Unexpected response
-    throw new Error('Invalid session response format');
+          try {
+            if (sessionResponse.challenge === 'web') {
+              // Handle web challenges - failure should exit immediately
+              challengeResponse = await handleWebChallenge(sessionResponse.data);
+            } else {
+              // Handle computational challenges (MD5, SHA256)
+              challengeResponse = await invoke<string>('solve_dfs2_challenge', {
+                challengeType: sessionResponse.challenge,
+                data: sessionResponse.data,
+              });
+            }
+
+            sessionId = sessionResponse.sid;
+            console.log('Challenge solved, retrying session creation...');
+            continue; // Continue challenge handling loop
+          } catch (error) {
+            if (sessionResponse.challenge === 'web') {
+              // Web challenge failure should exit immediately
+              throw new Error(`Web challenge failed: ${error}`);
+            } else {
+              // Non-web challenge failure should retry challenge
+              console.warn(`Challenge ${sessionResponse.challenge} failed, retrying...`);
+              // Reset challenge data for retry
+              challengeResponse = undefined;
+              sessionId = undefined;
+              continue; // Continue challenge handling loop for retry
+            }
+          }
+        }
+
+        // Unexpected response
+        throw new Error('Invalid session response format');
+      }
+
+      // If we get here, challenge attempts exceeded
+      throw new Error('Failed to create session after 3 challenge attempts');
+    } catch (error) {
+      // Check if this is a network error and we have retries left
+      if (isNetworkError(error) && retryAttempt < 2) {
+        console.warn(`Network error on attempt ${retryAttempt + 1}, retrying in ${retryIntervals[retryAttempt]}ms...`, error);
+        // Add delay before retry
+        await new Promise(resolve => setTimeout(resolve, retryIntervals[retryAttempt]));
+        continue; // Continue main retry loop
+      }
+
+      // Web challenge failures or non-network errors should not retry
+      if (error instanceof Error && error.message.includes('Web challenge failed')) {
+        throw error;
+      }
+
+      // If not a network error or out of retries, throw the error
+      if (retryAttempt === 2) {
+        throw new Error(`Failed to create DFS2 session after ${retryAttempt + 1} attempts: ${error}`);
+      }
+      
+      throw error;
+    }
   }
 
-  throw new Error('Failed to create session after 3 challenge attempts');
+  // This should never be reached, but just in case
+  throw new Error('Failed to create session: unexpected exit from retry loop');
 };
 
 // Web Challenge Handler

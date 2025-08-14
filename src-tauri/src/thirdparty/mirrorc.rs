@@ -8,6 +8,7 @@ use crate::{
     utils::{
         error::{return_ta_result, IntoTAResult, TAResult},
         metadata::RepoMetadata,
+        url::HttpContextExt,
     },
 };
 
@@ -203,9 +204,12 @@ pub async fn get_mirrorc_status(
         .get(&mirrorc_url)
         .send()
         .await
-        .context("MIRRORC_HTTP_ERR")?;
+        .with_http_context("get_mirrorc_status", &mirrorc_url)?;
 
-    let body_text = resp.text().await.context("Failed to read response body")?;
+    let body_text = resp
+        .text()
+        .await
+        .with_http_context("get_mirrorc_status", &mirrorc_url)?;
     let status: serde_json::Value = serde_json::from_str(&body_text)
         .map_err(|e| anyhow::anyhow!("Failed to parse JSON ({}): {}", e, body_text))?;
     Ok(status)

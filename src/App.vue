@@ -560,7 +560,7 @@ import {
   SingleFileTask,
   LocalFileTask,
   MergedGroupTask,
-  type DownloadContext
+  type DownloadContext,
 } from './downloadTaskManager';
 import {
   error,
@@ -835,9 +835,8 @@ async function runInstall(): Promise<void> {
   let meta_tag = '';
   if (!latest_meta && !online_meta) {
     await dialog_error(
-      '获取更新信息失败，请检查网络连接' + online_meta_err
-        ? `\n${online_meta_err}`
-        : '：未知错误，请检查日志',
+      '获取更新信息失败，请检查网络连接' +
+        (online_meta_err ? `\n${online_meta_err}` : '：未知错误，请检查日志'),
       '出错了',
     );
     step.value = 1;
@@ -1062,7 +1061,9 @@ async function runInstall(): Promise<void> {
           0,
         );
         // 更新虚拟文件的运行状态（任意内部文件运行中则虚拟文件运行中）
-        virtualFile.running = virtualFile._mergedInfo.files.some(f => f.running);
+        virtualFile.running = virtualFile._mergedInfo.files.some(
+          (f) => f.running,
+        );
       }
       // 单文件无需处理，因为runDfsDownload直接更新了对象
     });
@@ -1072,21 +1073,37 @@ async function runInstall(): Promise<void> {
       if ((cur as VirtualMergedFile)._isMergedGroup) {
         const virtualFile = cur as VirtualMergedFile;
         // 使用实际文件大小总和，不是合并下载大小
-        return acc + virtualFile._mergedInfo.files.reduce((sum, f) => 
-          sum + ((!f.failed && (f?.patch?.size || f?.lpatch?.size)) || f.size), 0
+        return (
+          acc +
+          virtualFile._mergedInfo.files.reduce(
+            (sum, f) =>
+              sum +
+              ((!f.failed && (f?.patch?.size || f?.lpatch?.size)) || f.size),
+            0,
+          )
         );
       } else {
         const file = cur as DfsUpdateTask;
-        return acc + ((!file.failed && (file?.patch?.size || file?.lpatch?.size)) || file.size);
+        return (
+          acc +
+          ((!file.failed && (file?.patch?.size || file?.lpatch?.size)) ||
+            file.size)
+        );
       }
     }, 0);
-    
+
     const now = performance.now();
     const time_diff = now - stat.lastTime;
     const downloadedTotalSize = processedFiles.reduce((acc, cur) => {
       if ((cur as VirtualMergedFile)._isMergedGroup) {
         const virtualFile = cur as VirtualMergedFile;
-        return acc + virtualFile._mergedInfo.files.reduce((sum, f) => sum + f.downloaded, 0);
+        return (
+          acc +
+          virtualFile._mergedInfo.files.reduce(
+            (sum, f) => sum + f.downloaded,
+            0,
+          )
+        );
       } else {
         return acc + (cur as DfsUpdateTask).downloaded;
       }
@@ -1109,8 +1126,14 @@ async function runInstall(): Promise<void> {
           const completedFiles = virtualFile._mergedInfo.files.filter(
             (f) => f.downloaded === f.size,
           );
-          const totalMergedSize = virtualFile._mergedInfo.files.reduce((sum, f) => sum + f.size, 0);
-          const downloadedMergedSize = virtualFile._mergedInfo.files.reduce((sum, f) => sum + f.downloaded, 0);
+          const totalMergedSize = virtualFile._mergedInfo.files.reduce(
+            (sum, f) => sum + f.size,
+            0,
+          );
+          const downloadedMergedSize = virtualFile._mergedInfo.files.reduce(
+            (sum, f) => sum + f.downloaded,
+            0,
+          );
           return `批量下载 ${completedFiles.length}/${virtualFile._mergedInfo.files.length} 个文件 ${formatSize(downloadedMergedSize)}/${formatSize(totalMergedSize)}`;
         } else {
           return `${basename(e.file_name)} ${formatSize(e.downloaded)}/${formatSize(e.size)}`;
@@ -1141,16 +1164,24 @@ async function runInstall(): Promise<void> {
   const taskManager = new DownloadTaskManager(processedFiles);
 
   // 初始化任务
-  processedFiles.forEach(item => {
+  processedFiles.forEach((item) => {
     let task;
-    
+
     if ((item as VirtualMergedFile)._isMergedGroup) {
-      task = new MergedGroupTask(item as VirtualMergedFile, downloadContext, taskManager);
+      task = new MergedGroupTask(
+        item as VirtualMergedFile,
+        downloadContext,
+        taskManager,
+      );
     } else {
       // 根据文件模式选择合适的任务类型
       const file = item as DfsUpdateTask;
-      const mode = getFileInstallMode(file, INSTALLER_CONFIG.embedded_files || [], hashKey as DfsMetadataHashType);
-      
+      const mode = getFileInstallMode(
+        file,
+        INSTALLER_CONFIG.embedded_files || [],
+        hashKey as DfsMetadataHashType,
+      );
+
       if (mode === 'local') {
         task = new LocalFileTask(file, downloadContext);
       } else {
@@ -1158,14 +1189,14 @@ async function runInstall(): Promise<void> {
         task = new SingleFileTask(file, downloadContext, taskManager);
       }
     }
-    
+
     taskManager.addTask(task);
   });
 
   try {
     // 等待所有任务完成（任务失败时会自动抛出错误）
     await taskManager.waitForCompletion();
-    
+
     const stats = taskManager.getStats();
     log('All tasks completed successfully:', stats);
   } catch (e) {

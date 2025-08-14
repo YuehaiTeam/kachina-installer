@@ -2,7 +2,7 @@ pub mod arg;
 use arg::{Command, InstallArgs};
 use clap::Parser;
 
-use crate::REQUEST_CLIENT;
+use crate::{utils::url::HttpContextExt, REQUEST_CLIENT};
 
 #[derive(Parser)]
 #[command(args_conflicts_with_subcommands = true)]
@@ -24,15 +24,18 @@ pub async fn install_webview2() {
     println!("安装程序缺少必要的运行环境");
     println!("当前系统未安装 WebView2 运行时，正在下载并安装...");
     // use reqwest to download the installer
+    let wv2_url = "https://go.microsoft.com/fwlink/p/?LinkId=2124703";
     let res = REQUEST_CLIENT
-        .get("https://go.microsoft.com/fwlink/p/?LinkId=2124703")
+        .get(wv2_url)
         .send()
         .await
-        .expect("failed to download WebView2 installer");
+        .with_http_context("install_webview2", wv2_url)
+        .expect("Failed to download WebView2 installer");
     let wv2_installer_blob = res
         .bytes()
         .await
-        .expect("failed to download WebView2 installer");
+        .with_http_context("install_webview2", wv2_url)
+        .expect("Failed to read WebView2 installer data");
     let temp_dir = std::env::temp_dir();
     let installer_path = temp_dir
         .as_path()

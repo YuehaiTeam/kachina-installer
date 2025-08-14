@@ -8,6 +8,7 @@ pub mod metadata;
 pub mod progressed_read;
 pub mod sentry;
 pub mod uac;
+pub mod url;
 pub mod wincred;
 
 pub fn get_device_id() -> anyhow::Result<String> {
