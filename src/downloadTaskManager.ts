@@ -277,7 +277,9 @@ export class DownloadTaskManager {
 
   // 解析任务完成的Promise
   private resolveCompletion?: () => void;
+  private rejectCompletion?: (error: any) => void;  // 新增：错误回调
   private completionPromise?: Promise<void>;
+  private hasError = false;  // 新增：错误标记
 
   constructor(files: (DfsUpdateTask | VirtualMergedFile)[] = []) {
     this.sizeThreshold = this.calculateOptimalThreshold(files);
@@ -328,25 +330,49 @@ export class DownloadTaskManager {
 
   // 尝试启动待处理任务
   private tryStartTasks(): void {
+    // 如果已经有错误，不再启动新任务
+    if (this.hasError) return;
+
     // 启动local文件任务（最高并发度）
     while (this.localTaskRunning < this.LOCAL_CONCURRENT && this.localTaskQueue.length > 0) {
       const task = this.localTaskQueue.shift()!;
       this.localTaskRunning++;
-      this.executeTask(task, 'local');
+      // 添加错误处理，捕获未捕获的 Promise rejection
+      this.executeTask(task, 'local').catch(error => {
+        this.handleTaskError(error);
+      });
     }
 
     // 启动大文件任务
     while (this.largeTaskRunning < this.LARGE_CONCURRENT && this.largeTaskQueue.length > 0) {
       const task = this.largeTaskQueue.shift()!;
       this.largeTaskRunning++;
-      this.executeTask(task, 'large');
+      this.executeTask(task, 'large').catch(error => {
+        this.handleTaskError(error);
+      });
     }
 
     // 启动小文件任务
     while (this.smallTaskRunning < this.SMALL_CONCURRENT && this.smallTaskQueue.length > 0) {
       const task = this.smallTaskQueue.shift()!;
       this.smallTaskRunning++;
-      this.executeTask(task, 'small');
+      this.executeTask(task, 'small').catch(error => {
+        this.handleTaskError(error);
+      });
+    }
+  }
+
+  // 统一错误处理
+  private handleTaskError(error: any): void {
+    if (this.hasError) return; // 避免重复处理
+
+    this.hasError = true;
+    
+    // 立即 reject，终止安装流程
+    if (this.rejectCompletion) {
+      this.rejectCompletion(error);
+      this.rejectCompletion = undefined;
+      this.resolveCompletion = undefined;
     }
   }
 
@@ -384,11 +410,11 @@ export class DownloadTaskManager {
         this.localTaskRunning--;
       }
       
-      // 检查是否所有任务完成
-      this.checkCompletion();
-      
-      // 继续处理队列
-      this.tryStartTasks();
+      // 只有在没有错误时才继续
+      if (!this.hasError) {
+        this.checkCompletion();
+        this.tryStartTasks();
+      }
     }
   }
 
@@ -416,8 +442,9 @@ export class DownloadTaskManager {
     if (this.allTasks.size === 0) return;
 
     if (!this.completionPromise) {
-      this.completionPromise = new Promise<void>((resolve) => {
+      this.completionPromise = new Promise<void>((resolve, reject) => {
         this.resolveCompletion = resolve;
+        this.rejectCompletion = reject;  // 保存 reject 回调
         this.checkCompletion(); // 立即检查一次
       });
     }

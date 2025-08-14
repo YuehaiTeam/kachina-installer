@@ -13,10 +13,8 @@ use crate::{
     installer::uninstall::DELETE_SELF_ON_EXIT_PATH,
     local::mmap,
     utils::{
-        download_monitor::DownloadMonitor, 
-        hash::run_hash, 
-        progressed_read::ReadWithCallback,
-        url::HttpContextExt,
+        download_monitor::DownloadMonitor, error::TAResult, hash::run_hash,
+        progressed_read::ReadWithCallback, url::HttpContextExt,
     },
     REQUEST_CLIENT,
 };
@@ -168,7 +166,10 @@ pub async fn create_http_stream(
         res = res.header("Range", format!("bytes={}-{}", offset, offset + size - 1));
     }
 
-    let res = res.send().await.with_http_context("create_http_stream", url);
+    let res = res
+        .send()
+        .await
+        .with_http_context("create_http_stream", url);
     let res = match res {
         Ok(r) => r,
         Err(e) => {
@@ -184,11 +185,7 @@ pub async fn create_http_stream(
                 },
                 error: Some(e.to_string()),
             };
-            return Err(crate::utils::error::TACommandError::with_insight(
-                e,
-                insight,
-            )
-            .error);
+            return Err(crate::utils::error::TACommandError::with_insight(e, insight).error);
         }
     };
 
@@ -208,8 +205,16 @@ pub async fn create_http_stream(
             },
             error: Some(format!("HTTP status error: {}", code)),
         };
-        let error = anyhow::Error::new(std::io::Error::other(format!("URL {} returned {}", crate::utils::url::sanitize_url_for_logging(url), code)))
-            .context(crate::utils::url::create_reqwest_context("create_http_stream", url, "HTTP_STATUS_ERR"));
+        let error = anyhow::Error::new(std::io::Error::other(format!(
+            "URL {} returned {}",
+            crate::utils::url::sanitize_url_for_logging(url),
+            code
+        )))
+        .context(crate::utils::url::create_reqwest_context(
+            "create_http_stream",
+            url,
+            "HTTP_STATUS_ERR",
+        ));
         return Err(crate::utils::error::TACommandError::with_insight(error, insight).error);
     }
 
@@ -252,15 +257,12 @@ fn parse_range_string(range: &str) -> Vec<(u32, u32)> {
 pub async fn create_multi_http_stream(
     url: &str,
     range: &str,
-) -> Result<
-    (
-        Box<dyn futures::Stream<Item = reqwest::Result<bytes::Bytes>> + Send + Unpin>,
-        u64,
-        String,
-        InsightItem,
-    ),
-    anyhow::Error,
-> {
+) -> TAResult<(
+    Box<dyn futures::Stream<Item = reqwest::Result<bytes::Bytes>> + Send + Unpin>,
+    u64,
+    String,
+    InsightItem,
+)> {
     let start_time = std::time::Instant::now();
     let range_info = parse_range_string(range);
 
@@ -268,7 +270,8 @@ pub async fn create_multi_http_stream(
         .get(url)
         .header("Range", format!("bytes={range}"))
         .send()
-        .await;
+        .await
+        .with_http_context("create_multi_http_stream", url);
 
     let res = match res {
         Ok(r) => r,
@@ -282,10 +285,8 @@ pub async fn create_multi_http_stream(
                 error: Some(e.to_string()),
             };
             return Err(crate::utils::error::TACommandError::with_insight(
-                anyhow::Error::new(e).context("HTTP_REQUEST_ERR"),
-                insight,
-            )
-            .error);
+                e, insight,
+            ));
         }
     };
 
@@ -301,9 +302,19 @@ pub async fn create_multi_http_stream(
             range: range_info,
             error: Some(format!("HTTP status error: {}", code)),
         };
-        let error = anyhow::Error::new(std::io::Error::other(format!("URL {} returned {}", crate::utils::url::sanitize_url_for_logging(url), code)))
-            .context(crate::utils::url::create_reqwest_context("create_http_stream", url, "HTTP_STATUS_ERR"));
-        return Err(crate::utils::error::TACommandError::with_insight(error, insight).error);
+        let error = anyhow::Error::new(std::io::Error::other(format!(
+            "URL {} returned {}",
+            crate::utils::url::sanitize_url_for_logging(url),
+            code
+        )))
+        .context(crate::utils::url::create_reqwest_context(
+            "create_http_stream",
+            url,
+            "HTTP_STATUS_ERR",
+        ));
+        return Err(crate::utils::error::TACommandError::with_insight(
+            error, insight,
+        ));
     }
 
     let content_length = res.content_length().unwrap_or(0);

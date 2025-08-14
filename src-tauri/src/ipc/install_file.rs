@@ -330,16 +330,7 @@ pub async fn ipc_install_multipart_stream(
 ) -> TAResult<serde_json::Value> {
     let download_start = std::time::Instant::now();
     let (http_stream, content_length, content_type, mut insight) =
-        match create_multi_http_stream(&args.url, &args.range).await {
-            Ok(result) => result,
-            Err(e) => {
-                let error_insight = create_error_insight(&args.url, &args.range, download_start);
-                return Err(crate::utils::error::TACommandError::with_insight(
-                    e,
-                    error_insight,
-                ));
-            }
-        };
+        create_multi_http_stream(&args.url, &args.range).await?;
     // check if content-type is multipart
     if content_type.starts_with("multipart/") {
         // get boundary from content-type: multipart/byteranges; boundary=
@@ -662,16 +653,7 @@ pub async fn ipc_install_multichunk_stream(
     let mut results: Vec<TAResult<serde_json::Value>> = Vec::new();
     let mut stream_position = 0usize;
     let (http_stream, _content_length, _content_type, mut insight) =
-        match create_multi_http_stream(&args.url, &args.range).await {
-            Ok(result) => result,
-            Err(e) => {
-                let error_insight = create_error_insight(&args.url, &args.range, download_start);
-                return Err(crate::utils::error::TACommandError::with_insight(
-                    e,
-                    error_insight,
-                ));
-            }
-        };
+        create_multi_http_stream(&args.url, &args.range).await?;
 
     // Convert the HTTP stream to AsyncRead with timeout monitoring
     let stream = http_stream.map_err(std::io::Error::other);

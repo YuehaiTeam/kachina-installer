@@ -1345,7 +1345,7 @@ export const runMergedGroupDownload = async (
       remote === 'dfs2'
         ? await getDfs2Url(apiUrl, groupInfo.mergedRange)
         : await getDfsFileUrl(
-            remote === 'plugin' ? source : apiUrl,
+            remote === 'plugin' ? dfsSource : apiUrl,
             extras,
             rangeEnd - rangeStart + 1,
             rangeStart,
