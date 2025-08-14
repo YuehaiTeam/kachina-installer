@@ -221,3 +221,10 @@ export interface InstallerConfig {
   };
   elevated: boolean;
 }
+
+export interface HttpGetResponse {
+  status_code: number;
+  headers: Record<string, string>;
+  body: string;
+  final_url: string;
+}

@@ -555,6 +555,8 @@ import {
   fallbackToIndividualDownload,
   getFileInstallMode,
 } from './dfs';
+import { pluginManager } from './plugins';
+import { networkInsights } from './networkInsights';
 import {
   DownloadTaskManager,
   SingleFileTask,
@@ -1033,6 +1035,31 @@ async function runInstall(): Promise<void> {
       return;
     }
   }
+  
+  // 插件会话创建
+  const plugin = pluginManager.findPlugin(selectedSource.value);
+  if (plugin?.createSession) {
+    try {
+      const ranges = collectDfs2Ranges(
+        diff_files,
+        INSTALLER_CONFIG.embedded_files || [],
+        selectedSource.value,
+        hashKey as DfsMetadataHashType,
+      );
+      
+      if (ranges.length > 0) {
+        const cleanUrl = pluginManager.getCleanUrl(selectedSource.value);
+        if (!cleanUrl) throw new Error('Invalid plugin URL: ' + selectedSource.value);
+        const sessionId = await plugin.createSession(cleanUrl, ranges);
+        log('Plugin session created:', sessionId);
+      }
+    } catch (e) {
+      error('Failed to create plugin session:', e);
+      await dialog_error(`创建插件会话失败: ${e}`);
+      step.value = 1;
+      return;
+    }
+  }
 
   subStep.value = 2;
   current.value = '准备下载……';
@@ -1458,6 +1485,19 @@ async function install(): Promise<void> {
     // Clean up DFS2 sessions only for DFS mode (not mirrorc mode)
     if (installMode.value === 'default') {
       await cleanupAllDfs2Sessions();
+      
+      // 清理插件会话
+      const plugin = pluginManager.findPlugin(selectedSource.value);
+      if (plugin?.endSession) {
+        try {
+          const cleanUrl = pluginManager.getCleanUrl(selectedSource.value);
+          if (cleanUrl) {
+            await plugin.endSession(cleanUrl, { servers: networkInsights });
+          }
+        } catch (e) {
+          warn('Plugin session cleanup failed:', e);
+        }
+      }
     }
   } catch (e) {
     error(e);
@@ -1473,6 +1513,19 @@ async function install(): Promise<void> {
     // Clean up DFS2 sessions on error (only for DFS mode)
     if (installMode.value === 'default') {
       await cleanupAllDfs2Sessions();
+      
+      // 清理插件会话
+      const plugin = pluginManager.findPlugin(selectedSource.value);
+      if (plugin?.endSession) {
+        try {
+          const cleanUrl = pluginManager.getCleanUrl(selectedSource.value);
+          if (cleanUrl) {
+            await plugin.endSession(cleanUrl, { servers: networkInsights });
+          }
+        } catch (e) {
+          warn('Plugin session cleanup failed:', e);
+        }
+      }
     }
 
     step.value = 1;

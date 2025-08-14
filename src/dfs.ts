@@ -2,6 +2,8 @@ import { hybridPatch, InstallFile } from './api/installFile';
 import { error, ipc, log, warn } from './api/ipc';
 import { invoke } from './tauri';
 import { networkInsights, clearNetworkInsights } from './networkInsights';
+import { KachinaInstallSource, pluginManager } from './plugins';
+import { registerAllPlugins } from './plugins/registry';
 import {
   Dfs2ChunkResponse,
   Dfs2Metadata,
@@ -29,6 +31,9 @@ export const dfsIndexCache = new Map<
   }
 >();
 
+// 初始化插件系统
+registerAllPlugins();
+
 function fetchWithTimeout(
   url: string,
   options: RequestInit,
@@ -43,14 +48,15 @@ function fetchWithTimeout(
 }
 
 export const dfsSourceReg =
-  /^(?:(dfs2?)\+)?(?:(hashed|packed|auto)\+)?(http(?:s)?:\/\/(?:.*?))$/;
+  /^(?:(dfs2?)\+)?(?:(hashed|packed|auto)\+)?(?:plugin-[^+]+\+)?(http(?:s)?:\/\/(?:.*?))$/;
 
 export const getDfsSourceType = (
   source: string,
 ): {
-  remote: 'dfs' | 'dfs2' | 'direct';
+  remote: 'dfs' | 'dfs2' | 'direct' | 'plugin';
   storage: 'hashed' | 'packed';
   url: string;
+  plugin?: KachinaInstallSource;
 } => {
   const match = source.match(dfsSourceReg);
   if (!match) throw new Error('Invalid dfs source: ' + source);
@@ -71,8 +77,20 @@ export const getDfsSourceType = (
   if (storage === 'auto') {
     throw new Error('Invalid dfs source: ' + source);
   }
+
+  // 检查解析出的URL是否匹配插件
+  const plugin = pluginManager.findPlugin(source);
+  if (plugin) {
+    return {
+      remote: 'plugin' as const,
+      storage: storage as 'hashed' | 'packed',
+      url: match[3],
+      plugin,
+    };
+  }
+
   return {
-    remote: remote as 'dfs' | 'direct',
+    remote: remote as 'dfs' | 'dfs2' | 'direct',
     storage: storage as 'hashed' | 'packed',
     url: match[3],
   };
@@ -81,7 +99,47 @@ export const getDfsMetadata = async (
   source: string,
   extras?: string,
 ): Promise<InvokeGetDfsMetadataRes> => {
-  const { remote, storage, url } = getDfsSourceType(source);
+  // 检查插件源
+  const { remote, storage, url, plugin } = getDfsSourceType(source);
+  if (plugin) {
+    if (plugin.getMetadata) {
+      // 插件提供了自定义元数据获取
+      if (dfsIndexCache.has(source)) {
+        return dfsIndexCache.get(source)?.metadata as InvokeGetDfsMetadataRes;
+      }
+
+      const cleanUrl = pluginManager.getCleanUrl(source);
+      if (!cleanUrl) throw new Error('Invalid plugin URL: ' + source);
+      const dfs2Data = await plugin.getMetadata(cleanUrl);
+
+      // 转换为现有格式并缓存
+      const convertedIndex = new Map<string, Embedded>();
+      Object.entries(dfs2Data.index).forEach(([name, info]) => {
+        convertedIndex.set(name, {
+          name: info.name,
+          offset: info.offset,
+          raw_offset: info.raw_offset,
+          size: info.size,
+        });
+      });
+
+      dfsIndexCache.set(source, {
+        index: convertedIndex,
+        metadata: dfs2Data.metadata,
+        installer_end: dfs2Data.installer_end,
+      });
+
+      return dfs2Data.metadata;
+    } else {
+      // 插件没提供元数据获取，使用标准packed逻辑
+      if (dfsIndexCache.has(source)) {
+        return dfsIndexCache.get(source)?.metadata as InvokeGetDfsMetadataRes;
+      } else {
+        await refreshDfsIndex(source, source, remote, extras);
+        return dfsIndexCache.get(source)?.metadata as InvokeGetDfsMetadataRes;
+      }
+    }
+  }
 
   if (remote === 'dfs2') {
     // DFS2: Use server-parsed metadata
@@ -140,7 +198,7 @@ export const getDfsMetadata = async (
 export async function refreshDfsIndex(
   source: string,
   apiurl: string,
-  remote: 'direct' | 'dfs' | 'dfs2',
+  remote: 'direct' | 'dfs' | 'dfs2' | 'plugin',
   extras?: string,
 ) {
   const binurl =
@@ -268,7 +326,7 @@ export async function refreshDfsIndex(
 export const getDfsIndexCache = async (
   source: string,
   apiurl: string,
-  remote: 'direct' | 'dfs' | 'dfs2',
+  remote: 'direct' | 'dfs' | 'dfs2' | 'plugin',
 ): Promise<Map<string, Embedded>> => {
   if (dfsIndexCache.has(source)) {
     return dfsIndexCache.get(source)?.index as Map<string, Embedded>;
@@ -292,7 +350,7 @@ export const getDfsUrl = async (
   skip_decompress?: boolean;
   skip_hash?: boolean;
 }> => {
-  const { remote, storage, url } = getDfsSourceType(source);
+  const { remote, storage, url, plugin } = getDfsSourceType(source);
 
   if (remote === 'dfs2') {
     // DFS2: Use session-based download
@@ -344,7 +402,9 @@ export const getDfsUrl = async (
       if (!file) {
         if (installer) {
           const full_file_url =
-            remote === 'direct' ? url : await getDfsFileUrl(url, extras, end);
+            remote === 'direct'
+              ? url
+              : await getDfsFileUrl(plugin ? source : url, extras, end);
           return {
             url: full_file_url,
             offset: 0,
@@ -357,7 +417,12 @@ export const getDfsUrl = async (
       const full_file_url =
         remote === 'direct'
           ? url
-          : await getDfsFileUrl(url, extras, file.size, file.offset);
+          : await getDfsFileUrl(
+              remote === 'plugin' ? source : url,
+              extras,
+              file.size,
+              file.offset,
+            );
       return {
         url: full_file_url,
         offset: file.offset,
@@ -382,6 +447,17 @@ export const getDfsFileUrl = async (
   length?: number,
   start = 0,
 ): Promise<string> => {
+  // 检查是否为插件源
+  const plugin = pluginManager.findPlugin(apiurl);
+  if (plugin) {
+    const cleanUrl = pluginManager.getCleanUrl(apiurl);
+    if (!cleanUrl) throw new Error('Invalid plugin URL: ' + apiurl);
+
+    const range = length ? `${start}-${start + length - 1}` : '';
+    const result = await plugin.getChunkUrl(cleanUrl, range);
+    return result.url;
+  }
+
   const dfs_result = await invoke<InvokeGetDfsRes>('get_dfs', {
     url: apiurl,
     extras: extras || undefined,
@@ -423,33 +499,37 @@ export const getDfsFileUrl = async (
 // Helper function to check if error is a network error that should be retried
 const isNetworkError = (error: any): boolean => {
   const errorStr = String(error);
-  
+
   // 检查是否为HTTP状态码错误（4xx/5xx），这些不应该重试
   if (errorStr.includes('Session creation failed:')) {
     return false; // HTTP状态错误，不重试
   }
-  
+
   // 检查 reqwest/hyper 网络库错误结构（这些需要重试）
-  if (errorStr.includes('Failed to send request:') && 
-     (errorStr.includes('reqwest::Error') || 
+  if (
+    errorStr.includes('Failed to send request:') &&
+    (errorStr.includes('reqwest::Error') ||
       errorStr.includes('hyper::Error') ||
-      errorStr.includes('hyper_util::client::legacy::Error'))) {
+      errorStr.includes('hyper_util::client::legacy::Error'))
+  ) {
     return true;
   }
-  
+
   // 检查连接相关的 kind 字段（英文，不会本地化）
-  if (errorStr.includes('kind: ConnectionReset') ||
-      errorStr.includes('kind: Timeout') ||
-      errorStr.includes('kind: ConnectionRefused') ||
-      errorStr.includes('kind: NotFound')) {
+  if (
+    errorStr.includes('kind: ConnectionReset') ||
+    errorStr.includes('kind: Timeout') ||
+    errorStr.includes('kind: ConnectionRefused') ||
+    errorStr.includes('kind: NotFound')
+  ) {
     return true;
   }
-  
+
   // 检查常见的网络相关错误码
   if (/code: (10054|10060|10061)/.test(errorStr)) {
     return true;
   }
-  
+
   return false;
 };
 
@@ -472,14 +552,18 @@ export const createDfs2Session = async (
 
   // Main retry loop with network error handling (max 3 retries)
   const retryIntervals = [200, 600, 1000]; // 0.2s, 0.6s, 1s
-  
+
   for (let retryAttempt = 0; retryAttempt < 3; retryAttempt++) {
     let challengeResponse: string | undefined = undefined;
     let sessionId: string | undefined = undefined;
 
     try {
       // Challenge handling loop (max 3 challenge attempts per retry)
-      for (let challengeAttempts = 0; challengeAttempts < 3; challengeAttempts++) {
+      for (
+        let challengeAttempts = 0;
+        challengeAttempts < 3;
+        challengeAttempts++
+      ) {
         const sessionResponse: Dfs2SessionResponse =
           await invoke<Dfs2SessionResponse>('create_dfs2_session', {
             apiUrl: apiUrl,
@@ -508,7 +592,9 @@ export const createDfs2Session = async (
           try {
             if (sessionResponse.challenge === 'web') {
               // Handle web challenges - failure should exit immediately
-              challengeResponse = await handleWebChallenge(sessionResponse.data);
+              challengeResponse = await handleWebChallenge(
+                sessionResponse.data,
+              );
             } else {
               // Handle computational challenges (MD5, SHA256)
               challengeResponse = await invoke<string>('solve_dfs2_challenge', {
@@ -526,7 +612,9 @@ export const createDfs2Session = async (
               throw new Error(`Web challenge failed: ${error}`);
             } else {
               // Non-web challenge failure should retry challenge
-              console.warn(`Challenge ${sessionResponse.challenge} failed, retrying...`);
+              console.warn(
+                `Challenge ${sessionResponse.challenge} failed, retrying...`,
+              );
               // Reset challenge data for retry
               challengeResponse = undefined;
               sessionId = undefined;
@@ -544,22 +632,32 @@ export const createDfs2Session = async (
     } catch (error) {
       // Check if this is a network error and we have retries left
       if (isNetworkError(error) && retryAttempt < 2) {
-        console.warn(`Network error on attempt ${retryAttempt + 1}, retrying in ${retryIntervals[retryAttempt]}ms...`, error);
+        console.warn(
+          `Network error on attempt ${retryAttempt + 1}, retrying in ${retryIntervals[retryAttempt]}ms...`,
+          error,
+        );
         // Add delay before retry
-        await new Promise(resolve => setTimeout(resolve, retryIntervals[retryAttempt]));
+        await new Promise((resolve) =>
+          setTimeout(resolve, retryIntervals[retryAttempt]),
+        );
         continue; // Continue main retry loop
       }
 
       // Web challenge failures or non-network errors should not retry
-      if (error instanceof Error && error.message.includes('Web challenge failed')) {
+      if (
+        error instanceof Error &&
+        error.message.includes('Web challenge failed')
+      ) {
         throw error;
       }
 
       // If not a network error or out of retries, throw the error
       if (retryAttempt === 2) {
-        throw new Error(`Failed to create DFS2 session after ${retryAttempt + 1} attempts: ${error}`);
+        throw new Error(
+          `Failed to create DFS2 session after ${retryAttempt + 1} attempts: ${error}`,
+        );
       }
-      
+
       throw error;
     }
   }
@@ -1240,9 +1338,18 @@ export const runMergedGroupDownload = async (
 
   try {
     // 从DFS source中提取API URL
-    const { url: apiUrl } = getDfsSourceType(dfsSource);
+    const { url: apiUrl, remote } = getDfsSourceType(dfsSource);
     // 获取合并后的CDN URL
-    const cdnUrl = await getDfs2Url(apiUrl, groupInfo.mergedRange);
+    const [rangeStart, rangeEnd] = groupInfo.mergedRange.split('-').map(Number);
+    const cdnUrl =
+      remote === 'dfs2'
+        ? await getDfs2Url(apiUrl, groupInfo.mergedRange)
+        : await getDfsFileUrl(
+            remote === 'plugin' ? source : apiUrl,
+            extras,
+            rangeEnd - rangeStart + 1,
+            rangeStart,
+          );
 
     // 计算合并范围的起始位置
     const mergedRangeStart = Math.min(

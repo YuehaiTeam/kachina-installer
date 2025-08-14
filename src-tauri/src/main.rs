@@ -170,6 +170,7 @@ async fn tauri_main(args: InstallArgs) {
             fs::is_dir_empty,
             dfs::get_dfs,
             dfs::get_http_with_range,
+            dfs::http_get_request,
             // DFS2 commands
             dfs::get_dfs2_metadata,
             dfs::create_dfs2_session,

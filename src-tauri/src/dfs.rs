@@ -1,4 +1,6 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::time::Duration;
 
 use crate::{
     utils::{error::TAResult, url::HttpContextExt},
@@ -15,6 +17,14 @@ pub struct DownloadResp {
     pub tests: Option<Vec<(String, String)>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub challenge: Option<String>,
+}
+
+#[derive(Serialize, Debug)]
+pub struct HttpGetResponse {
+    pub status_code: u16,
+    pub headers: HashMap<String, String>,
+    pub body: String,
+    pub final_url: String,
 }
 
 // DFS2 data structures
@@ -430,4 +440,79 @@ pub async fn get_http_with_range(url: String, offset: u64, size: u64) -> TAResul
         .with_http_context("get_http_with_range", &url)?;
 
     Ok((status.as_u16(), bytes))
+}
+
+#[tauri::command]
+pub async fn http_get_request(
+    url: String,
+    ignore_redirects: Option<bool>,
+    headers: Option<HashMap<String, String>>,
+    timeout_ms: Option<u64>,
+) -> Result<HttpGetResponse, String> {
+    // Use global client by default, create custom client only if needed
+    let client = if ignore_redirects.unwrap_or(false) {
+        // Need custom client for no-redirect policy
+        reqwest::ClientBuilder::new()
+            .user_agent("KachinaInstaller/1.0")
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .map_err(|e| format!("Failed to create HTTP client: {}", e))?
+    } else {
+        // Use global client for better performance
+        REQUEST_CLIENT.clone()
+    };
+    
+    // Build request
+    let mut request_builder = client.get(&url);
+    
+    // Set per-request timeout
+    if let Some(timeout) = timeout_ms {
+        request_builder = request_builder.timeout(Duration::from_millis(timeout));
+    }
+    
+    // Add custom headers if provided
+    if let Some(custom_headers) = headers {
+        for (key, value) in custom_headers {
+            request_builder = request_builder.header(&key, &value);
+        }
+    }
+    
+    // Send request
+    let response = request_builder
+        .send()
+        .await
+        .with_http_context("http_get_request", &url)
+        .map_err(|e| e.to_string())?;
+    
+    // Get final URL (after redirects)
+    let final_url = if let Some(redirected_url) = response.headers().get("Location") {
+        redirected_url.to_str().unwrap_or("").to_string()
+    } else {
+        response.url().to_string()
+    };
+
+    // Get status code
+    let status_code = response.status().as_u16();
+    
+    // Extract headers
+    let mut response_headers = HashMap::new();
+    for (name, value) in response.headers() {
+        if let Ok(value_str) = value.to_str() {
+            response_headers.insert(name.to_string(), value_str.to_string());
+        }
+    }
+    
+    // Get response body
+    let body = response
+        .text()
+        .await
+        .with_http_context("http_get_request", &url)
+        .map_err(|e| format!("Failed to read response body: {}", e))?;
+    
+    Ok(HttpGetResponse {
+        status_code,
+        headers: response_headers,
+        body,
+        final_url,
+    })
 }
