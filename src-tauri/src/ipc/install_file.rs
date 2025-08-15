@@ -14,10 +14,115 @@ use anyhow::Result;
 use async_compression::tokio::bufread::ZstdDecoder as TokioZstdDecoder;
 use futures::TryStreamExt;
 use serde::{Deserialize, Serialize};
-use tokio::io::AsyncReadExt;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+use tokio::io::{AsyncRead, AsyncReadExt, BufReader};
 
 fn default_as_false() -> bool {
     false
+}
+
+// Progress tracker for concurrent chunk monitoring
+struct ChunkProgressTracker {
+    current_bytes_processed: Arc<AtomicUsize>,
+    is_processing: Arc<AtomicBool>,
+}
+
+impl ChunkProgressTracker {
+    fn new() -> Self {
+        Self {
+            current_bytes_processed: Arc::new(AtomicUsize::new(0)),
+            is_processing: Arc::new(AtomicBool::new(false)),
+        }
+    }
+    
+    fn get_progress(&self) -> usize {
+        self.current_bytes_processed.load(Ordering::Relaxed)
+    }
+    
+    fn update_progress(&self, bytes: usize) {
+        self.current_bytes_processed.store(bytes, Ordering::Relaxed);
+    }
+    
+    fn set_processing(&self, processing: bool) {
+        self.is_processing.store(processing, Ordering::Relaxed);
+    }
+    
+    fn is_processing(&self) -> bool {
+        self.is_processing.load(Ordering::Relaxed)
+    }
+}
+
+// Unified timeout monitoring function with 5s interval and 1KB/s threshold
+async fn monitor_chunk_with_unified_timeout(progress_tracker: Arc<ChunkProgressTracker>) {
+    let mut last_check_time = Instant::now();
+    let mut last_bytes = 0usize;
+    
+    // Grace period: wait 10 seconds before starting monitoring
+    tokio::time::sleep(Duration::from_secs(10)).await;
+    
+    loop {
+        tokio::time::sleep(Duration::from_secs(5)).await; // Fixed 5-second check interval
+        
+        let current_bytes = progress_tracker.get_progress();
+        let now = Instant::now();
+        
+        // If processing is complete, exit monitoring
+        if !progress_tracker.is_processing() {
+            return;
+        }
+        
+        // Check transfer speed within 5 seconds
+        let bytes_transferred = current_bytes.saturating_sub(last_bytes);
+        let time_elapsed = now.duration_since(last_check_time).as_secs();
+        
+        if time_elapsed >= 5 {
+            // Unified standard: speed <= 1KB/s (5KB/5s) is considered stall
+            if bytes_transferred <= 5 * 1024 {
+                return; // Trigger stall detection
+            }
+            
+            last_check_time = now;
+            last_bytes = current_bytes;
+        }
+    }
+}
+
+// Skip bytes with progress tracking for concurrent monitoring
+async fn skip_bytes_with_progress<R>(
+    reader: &mut R,
+    skip_bytes: usize,
+    progress_tracker: Arc<ChunkProgressTracker>,
+) -> Result<(), crate::utils::error::TACommandError>
+where
+    R: AsyncReadExt + Unpin,
+{
+    let mut buffer = vec![0u8; 8192]; // 8KB buffer
+    let mut remaining = skip_bytes;
+    let mut total_skipped = 0;
+    
+    while remaining > 0 {
+        let to_read = std::cmp::min(buffer.len(), remaining);
+        let bytes_read = reader.read(&mut buffer[..to_read]).await
+            .map_err(|e| crate::utils::error::TACommandError::new(anyhow::anyhow!(
+                "Failed to skip bytes: {}", e
+            )))?;
+            
+        if bytes_read == 0 {
+            return Err(crate::utils::error::TACommandError::new(anyhow::anyhow!(
+                "Unexpected EOF while skipping bytes"
+            )));
+        }
+        
+        remaining -= bytes_read;
+        total_skipped += bytes_read;
+        
+        // Update progress for monitoring
+        progress_tracker.update_progress(total_skipped);
+    }
+    
+    Ok(())
 }
 
 // Helper function to check if decompression should be performed based on InstallFileArgs
@@ -619,6 +724,42 @@ fn parse_range_string(range: &str) -> Vec<(u32, u32)> {
         .collect()
 }
 
+// Process chunk with progress tracking for concurrent monitoring
+async fn process_chunk_with_progress<R>(
+    args: InstallFileArgs,
+    chunk_reader: R,
+    should_decompress: bool,
+    chunk_notify: impl Fn(serde_json::Value) + Send + 'static,
+    progress_tracker: Arc<ChunkProgressTracker>,
+) -> TAResult<serde_json::Value>
+where
+    R: AsyncRead + Unpin + Send + 'static,
+{
+    // Wrap chunk_notify to also update progress tracking
+    let progress_notify = {
+        let tracker = progress_tracker.clone();
+        move |value: serde_json::Value| {
+            if let Some(bytes) = value.as_u64() {
+                tracker.update_progress(bytes as usize);
+            }
+            chunk_notify(value);
+        }
+    };
+    
+    if should_decompress {
+        let buf_reader = BufReader::new(chunk_reader);
+        let mut decompressed_reader = TokioZstdDecoder::new(buf_reader);
+        install_file_by_reader(args, &mut decompressed_reader, progress_notify)
+            .await
+            .into_ta_result()
+    } else {
+        let mut raw_reader = chunk_reader;
+        install_file_by_reader(args, &mut raw_reader, progress_notify)
+            .await
+            .into_ta_result()
+    }
+}
+
 // Helper function to create error insight for network failures
 fn create_error_insight(url: &str, range: &str, start_time: std::time::Instant) -> InsightItem {
     InsightItem {
@@ -655,10 +796,9 @@ pub async fn ipc_install_multichunk_stream(
     let (http_stream, _content_length, _content_type, mut insight) =
         create_multi_http_stream(&args.url, &args.range).await?;
 
-    // Convert the HTTP stream to AsyncRead with timeout monitoring
+    // Convert the HTTP stream to AsyncRead 
     let stream = http_stream.map_err(std::io::Error::other);
     let mut reader = tokio_util::io::StreamReader::new(stream);
-    let mut monitor = DownloadMonitor::new();
 
     for (chunk_index, chunk_info) in chunks_with_positions.iter().enumerate() {
         let chunk_size = get_chunk_size(&chunk_info.args);
@@ -678,64 +818,89 @@ pub async fn ipc_install_multichunk_stream(
             }
         };
 
-        // Skip bytes until we reach the chunk position with timeout checking
+        // Skip bytes until we reach the chunk position with concurrent timeout monitoring
         if stream_position < chunk_info.position {
             let skip_bytes = chunk_info.position - stream_position;
-            reader
-                .read_exact(&mut vec![0; skip_bytes])
-                .await
-                .map_err(|e| {
-                    crate::utils::error::TACommandError::new(anyhow::anyhow!(
-                        "Failed to skip bytes: {}",
-                        e
-                    ))
-                })?;
-            stream_position = chunk_offset;
-
-            // Check for timeout after skipping data
-            if let Err(e) = monitor.check_stall(stream_position) {
+            let skip_progress = Arc::new(ChunkProgressTracker::new());
+            skip_progress.set_processing(true);
+            
+            let skip_result = tokio::select! {
+                result = skip_bytes_with_progress(
+                    &mut reader, 
+                    skip_bytes, 
+                    skip_progress.clone()
+                ) => {
+                    skip_progress.set_processing(false);
+                    result
+                },
+                
+                _ = monitor_chunk_with_unified_timeout(skip_progress.clone()) => {
+                    skip_progress.set_processing(false);
+                    Err(crate::utils::error::TACommandError::new(anyhow::anyhow!(
+                        "Skip operation stalled: speed <= 1KB/s for 5+ seconds"
+                    )))
+                }
+            };
+            
+            skip_result.map_err(|e| {
                 insight.error = Some(e.to_string());
                 insight.time = download_start.elapsed().as_millis() as u32 - insight.ttfb;
                 insight.size = stream_position as u32;
-                return Err(crate::utils::error::TACommandError::with_insight(
-                    e, insight,
-                ));
-            }
+                e
+            })?;
+            
+            stream_position = chunk_offset;
         }
 
-        // 获取chunk的skip_decompress参数
+        // Process chunk with concurrent timeout monitoring
         let should_decompress = should_decompress_chunk(&chunk_info.args);
-
-        let chunk_reader = (&mut reader).take(chunk_size as u64);
-
-        // 根据参数决定是否解压缩
-        let chunk_result = if should_decompress {
-            let mut decompressed_reader = TokioZstdDecoder::new(chunk_reader);
-            install_file_by_reader(
-                chunk_info.args.clone(),
-                &mut decompressed_reader,
-                chunk_notify,
-            )
-            .await
-            .into_ta_result()
-        } else {
-            let mut raw_reader = chunk_reader;
-            install_file_by_reader(chunk_info.args.clone(), &mut raw_reader, chunk_notify)
-                .await
-                .into_ta_result()
-        };
-        results.push(chunk_result);
-        stream_position += chunk_size;
-
-        // Check for timeout after processing each chunk
-        if let Err(e) = monitor.check_stall(stream_position) {
+        
+        // Read chunk data into memory buffer first
+        let mut chunk_buffer = vec![0u8; chunk_size];
+        reader.read_exact(&mut chunk_buffer).await.map_err(|e| {
             insight.error = Some(e.to_string());
             insight.time = download_start.elapsed().as_millis() as u32 - insight.ttfb;
             insight.size = stream_position as u32;
-            return Err(crate::utils::error::TACommandError::with_insight(
-                e, insight,
-            ));
-        }
+            crate::utils::error::TACommandError::new(anyhow::anyhow!(
+                "Failed to read chunk data: {}", e
+            ))
+        })?;
+        
+        let chunk_reader = std::io::Cursor::new(chunk_buffer);
+        let chunk_progress = Arc::new(ChunkProgressTracker::new());
+        chunk_progress.set_processing(true);
+        
+        let chunk_result = tokio::select! {
+            result = process_chunk_with_progress(
+                chunk_info.args.clone(),
+                chunk_reader,
+                should_decompress,
+                chunk_notify,
+                chunk_progress.clone()
+            ) => {
+                chunk_progress.set_processing(false);
+                result
+            },
+            
+            _ = monitor_chunk_with_unified_timeout(chunk_progress.clone()) => {
+                chunk_progress.set_processing(false);
+                Err(crate::utils::error::TACommandError::new(anyhow::anyhow!(
+                    "Chunk {} processing stalled: speed <= 1KB/s for 5+ seconds", 
+                    chunk_index
+                )))
+            }
+        };
+
+        // Handle chunk result and update insight if there's an error
+        let final_result = chunk_result.map_err(|e| {
+            insight.error = Some(e.to_string());
+            insight.time = download_start.elapsed().as_millis() as u32 - insight.ttfb;
+            insight.size = stream_position as u32;
+            e
+        });
+        
+        results.push(final_result);
+        stream_position += chunk_size;
     }
 
     // 更新insight统计信息 - multichunk请求完成
