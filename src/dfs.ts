@@ -1017,7 +1017,6 @@ export const runDfsDownload = async (
       );
     }
   } catch (e) {
-    warn(e);
     item.downloaded = 0;
     throw e;
   } finally {

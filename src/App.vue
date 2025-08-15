@@ -1043,7 +1043,7 @@ async function runInstall(): Promise<void> {
       return;
     }
   }
-  
+
   // 插件会话创建
   const plugin = pluginManager.findPlugin(selectedSource.value);
   if (plugin?.createSession) {
@@ -1054,10 +1054,11 @@ async function runInstall(): Promise<void> {
         selectedSource.value,
         hashKey as DfsMetadataHashType,
       );
-      
+
       if (ranges.length > 0) {
         const cleanUrl = pluginManager.getCleanUrl(selectedSource.value);
-        if (!cleanUrl) throw new Error('Invalid plugin URL: ' + selectedSource.value);
+        if (!cleanUrl)
+          throw new Error('Invalid plugin URL: ' + selectedSource.value);
         const sessionId = await plugin.createSession(cleanUrl, ranges);
         log('Plugin session created:', sessionId);
       }
@@ -1154,7 +1155,7 @@ async function runInstall(): Promise<void> {
 
     // 更新运行中任务显示逻辑
     const runningTasks: string[] = [];
-    
+
     processedFiles
       .filter((e) => e.running)
       .forEach((e) => {
@@ -1162,11 +1163,15 @@ async function runInstall(): Promise<void> {
           // 对于合并组，显示组内每个文件的独立进度
           const virtualFile = e as VirtualMergedFile;
           virtualFile._mergedInfo.files.forEach((f) => {
-            runningTasks.push(`${basename(f.file_name)} ${formatSize(f.downloaded)}/${formatSize(f.size)}`);
+            runningTasks.push(
+              `${basename(f.file_name)} ${formatSize(f.downloaded)}/${formatSize(f.size)}`,
+            );
           });
         } else {
           // 单文件正常显示
-          runningTasks.push(`${basename(e.file_name)} ${formatSize(e.downloaded)}/${formatSize(e.size)}`);
+          runningTasks.push(
+            `${basename(e.file_name)} ${formatSize(e.downloaded)}/${formatSize(e.size)}`,
+          );
         }
       });
 
@@ -1223,17 +1228,10 @@ async function runInstall(): Promise<void> {
     taskManager.addTask(task);
   });
 
-  try {
-    // 等待所有任务完成（任务失败时会自动抛出错误）
-    await taskManager.waitForCompletion();
+  await taskManager.waitForCompletion();
 
-    const stats = taskManager.getStats();
-    log('All tasks completed successfully:', stats);
-  } catch (e) {
-    error('Task manager failed:', e);
-    await dialog_error(`${e}`, '出错了');
-    throw e;
-  }
+  const stats = taskManager.getStats();
+  log('All tasks completed successfully:', stats);
   clearInterval(progressInterval.value);
   if (
     latest_meta.deletes &&
@@ -1488,7 +1486,7 @@ async function install(): Promise<void> {
     // Clean up DFS2 sessions only for DFS mode (not mirrorc mode)
     if (installMode.value === 'default') {
       await cleanupAllDfs2Sessions();
-      
+
       // 清理插件会话
       const plugin = pluginManager.findPlugin(selectedSource.value);
       if (plugin?.endSession) {
@@ -1506,17 +1504,21 @@ async function install(): Promise<void> {
     error(e);
     const errstr =
       e instanceof Error
-        ? e.stack || e.toString()
+        ? e.message || e.toString() // 使用 message 而不是 stack，更用户友好
         : typeof e === 'string'
           ? e
           : JSON.stringify(e);
-    sendInsight(getInsightBase(), 'error', { error: errstr });
+    const logErrStr =
+      e instanceof Error
+        ? e.stack || e.toString() // 日志中保留完整的 stack
+        : errstr;
+    sendInsight(getInsightBase(), 'error', { error: logErrStr });
     await dialog_error(errstr);
 
     // Clean up DFS2 sessions on error (only for DFS mode)
     if (installMode.value === 'default') {
       await cleanupAllDfs2Sessions();
-      
+
       // 清理插件会话
       const plugin = pluginManager.findPlugin(selectedSource.value);
       if (plugin?.endSession) {

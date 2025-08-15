@@ -448,16 +448,23 @@ export class DownloadTaskManager {
         this.localTaskRunning--;
       }
       
-      // 只有在没有错误时才继续
-      if (!this.hasError) {
-        this.checkCompletion();
-        this.tryStartTasks();
-      }
+      // 延迟执行检查，让 .catch() 有机会先处理错误
+      setTimeout(() => {
+        if (!this.hasError) {
+          this.checkCompletion();
+          this.tryStartTasks();
+        }
+      }, 0);
     }
   }
 
   // 检查是否所有任务完成
   private checkCompletion(): void {
+    // 如果已经有错误，不要调用 resolveCompletion
+    if (this.hasError) {
+      return;
+    }
+
     const totalProcessed = this.completedTasks.size + this.failedTasks.size;
     const allQueuesEmpty = this.largeTaskQueue.length === 0 && 
                            this.smallTaskQueue.length === 0 && 

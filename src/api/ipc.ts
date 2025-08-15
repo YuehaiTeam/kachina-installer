@@ -2,7 +2,14 @@ import type { Event } from '@tauri-apps/api/event';
 import { invoke, listen } from '../tauri';
 import { v4 as uuid } from 'uuid';
 import { addNetworkInsight } from '../networkInsights';
-import { InsightItem, InstallResult, InvokeDeepReaddirWithMetadataRes, InvokeGetDfsMetadataRes, TAError, TAErrorData } from '../types';
+import {
+  InsightItem,
+  InstallResult,
+  InvokeDeepReaddirWithMetadataRes,
+  InvokeGetDfsMetadataRes,
+  TAError,
+  TAErrorData,
+} from '../types';
 
 export async function ipc<T extends { type: string }, E, Z>(
   arg: T,
@@ -43,15 +50,18 @@ export async function ipc<T extends { type: string }, E, Z>(
       throw new TAError(errorData as string);
     }
   }
-  
+
   const result = (res as { Ok: E }).Ok;
-  
+
   // 始终收集成功场景的网络统计
   if (result && typeof result === 'object' && 'insight' in result) {
     // Handle both single InstallResult and multi-install {results, insight} format
     if ('results' in result) {
       // Multi-install format: {results: TAResult[], insight: InsightItem}
-      const multiResult = result as { results: unknown[]; insight: InsightItem };
+      const multiResult = result as {
+        results: unknown[];
+        insight: InsightItem;
+      };
       if (multiResult.insight) {
         addNetworkInsight(multiResult.insight);
       }
@@ -63,7 +73,7 @@ export async function ipc<T extends { type: string }, E, Z>(
       }
     }
   }
-  
+
   return result;
 }
 
@@ -326,8 +336,14 @@ export function log(...args: unknown[]) {
     if (typeof arg === 'string') {
       return acc + ' ' + arg;
     }
-    return acc + ' ' + JSON.stringify(arg);
-  });
+    return (
+      acc +
+      ' ' +
+      (arg instanceof Error || arg instanceof TAError
+        ? arg.toString()
+        : JSON.stringify(arg))
+    );
+  }, '');
   invoke('log', { data: logstr });
 }
 export function warn(...args: unknown[]) {
@@ -336,8 +352,14 @@ export function warn(...args: unknown[]) {
     if (typeof arg === 'string') {
       return acc + ' ' + arg;
     }
-    return acc + ' ' + JSON.stringify(arg);
-  });
+    return (
+      acc +
+      ' ' +
+      (arg instanceof Error || arg instanceof TAError
+        ? arg.toString()
+        : JSON.stringify(arg))
+    );
+  }, '');
   invoke('warn', { data: logstr });
 }
 export function error(...args: unknown[]): string {
@@ -346,8 +368,14 @@ export function error(...args: unknown[]): string {
     if (typeof arg === 'string') {
       return acc + ' ' + arg;
     }
-    return acc + ' ' + JSON.stringify(arg);
-  });
+    return (
+      acc +
+      ' ' +
+      (arg instanceof Error || arg instanceof TAError
+        ? arg.toString()
+        : JSON.stringify(arg))
+    );
+  }, '');
   invoke('error', { data: logstr });
   return logstr as string;
 }
