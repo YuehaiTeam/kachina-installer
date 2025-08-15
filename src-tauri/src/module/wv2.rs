@@ -128,7 +128,10 @@ pub async fn install_webview2() {
         std::process::exit(0);
     }
     let res = res.unwrap();
-    let wv2_installer_blob = res.bytes().await.with_http_context("install_webview2", wv2_url);
+    let wv2_installer_blob = res
+        .bytes()
+        .await
+        .with_http_context("install_webview2", wv2_url);
     if let Err(e) = wv2_installer_blob {
         let hwnd = dialog_hwnd.take();
         unsafe {

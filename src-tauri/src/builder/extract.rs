@@ -15,7 +15,6 @@ struct FileInfo {
     hash_name: String,
     metadata_name: Option<String>,
     size: usize,
-    offset: usize,
 }
 
 #[derive(Debug)]
@@ -165,7 +164,6 @@ async fn collect_file_info(file: &AsyncMmapFile) -> Result<Vec<FileInfo>, String
             hash_name: emb.name,
             metadata_name,
             size: emb.size,
-            offset: emb.offset,
         });
     }
 

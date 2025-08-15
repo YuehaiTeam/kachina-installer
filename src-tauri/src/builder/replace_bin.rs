@@ -144,7 +144,7 @@ async fn parse_file_index(
 // 更新偏移量
 fn update_offsets(
     old_index: &InstallerIndex,
-    file_entries: &mut Vec<FileIndexEntry>,
+    file_entries: &mut [FileIndexEntry],
     size_diff: i64,
 ) -> InstallerIndex {
     // 更新 PE 头索引

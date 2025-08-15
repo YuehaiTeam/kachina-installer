@@ -461,29 +461,29 @@ pub async fn http_get_request(
         // Use global client for better performance
         REQUEST_CLIENT.clone()
     };
-    
+
     // Build request
     let mut request_builder = client.get(&url);
-    
+
     // Set per-request timeout
     if let Some(timeout) = timeout_ms {
         request_builder = request_builder.timeout(Duration::from_millis(timeout));
     }
-    
+
     // Add custom headers if provided
     if let Some(custom_headers) = headers {
         for (key, value) in custom_headers {
             request_builder = request_builder.header(&key, &value);
         }
     }
-    
+
     // Send request
     let response = request_builder
         .send()
         .await
         .with_http_context("http_get_request", &url)
         .map_err(|e| e.to_string())?;
-    
+
     // Get final URL (after redirects)
     let final_url = if let Some(redirected_url) = response.headers().get("Location") {
         redirected_url.to_str().unwrap_or("").to_string()
@@ -493,7 +493,7 @@ pub async fn http_get_request(
 
     // Get status code
     let status_code = response.status().as_u16();
-    
+
     // Extract headers
     let mut response_headers = HashMap::new();
     for (name, value) in response.headers() {
@@ -501,14 +501,14 @@ pub async fn http_get_request(
             response_headers.insert(name.to_string(), value_str.to_string());
         }
     }
-    
+
     // Get response body
     let body = response
         .text()
         .await
         .with_http_context("http_get_request", &url)
         .map_err(|e| format!("Failed to read response body: {}", e))?;
-    
+
     Ok(HttpGetResponse {
         status_code,
         headers: response_headers,

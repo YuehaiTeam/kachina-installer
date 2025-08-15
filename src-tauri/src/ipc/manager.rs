@@ -19,8 +19,8 @@ use tokio::net::windows::named_pipe::ServerOptions;
 use tokio::time;
 use windows::Win32::Foundation::ERROR_PIPE_BUSY;
 
-// 4m buffer size
-static PIPE_BUFFER_SIZE: usize = 1 * 1024 * 1024;
+// 1m buffer size
+static PIPE_BUFFER_SIZE: usize = 1024 * 1024;
 
 #[derive(serde::Deserialize, serde::Serialize, Clone, Debug)]
 pub struct IpcInner {
@@ -275,10 +275,10 @@ pub async fn uac_ipc_main(args: crate::cli::arg::UacArgs) {
     let (tx, mut rx) = tokio::sync::mpsc::channel(500);
     let mut sentry_rx = AUTO_TRANSPORT.mpsc_rx.write().await;
     let mut buf = String::new();
-    
+
     // 创建一个取消通知器
     let (cancel_tx, cancel_rx) = tokio::sync::broadcast::channel(1);
-    
+
     // 第一个线程：处理客户端读取
     let read_handle = {
         let tx = tx.clone();
@@ -339,7 +339,7 @@ pub async fn uac_ipc_main(args: crate::cli::arg::UacArgs) {
             }
         })
     };
-    
+
     // 第二个线程：处理发送和sentry消息
     let write_handle = {
         let cancel_tx = cancel_tx.clone();
@@ -390,7 +390,7 @@ pub async fn uac_ipc_main(args: crate::cli::arg::UacArgs) {
             }
         })
     };
-    
+
     // 等待任一线程结束
     tokio::select! {
         _ = read_handle => {

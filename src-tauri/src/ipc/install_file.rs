@@ -36,19 +36,19 @@ impl ChunkProgressTracker {
             is_processing: Arc::new(AtomicBool::new(false)),
         }
     }
-    
+
     fn get_progress(&self) -> usize {
         self.current_bytes_processed.load(Ordering::Relaxed)
     }
-    
+
     fn update_progress(&self, bytes: usize) {
         self.current_bytes_processed.store(bytes, Ordering::Relaxed);
     }
-    
+
     fn set_processing(&self, processing: bool) {
         self.is_processing.store(processing, Ordering::Relaxed);
     }
-    
+
     fn is_processing(&self) -> bool {
         self.is_processing.load(Ordering::Relaxed)
     }
@@ -58,31 +58,31 @@ impl ChunkProgressTracker {
 async fn monitor_chunk_with_unified_timeout(progress_tracker: Arc<ChunkProgressTracker>) {
     let mut last_check_time = Instant::now();
     let mut last_bytes = 0usize;
-    
+
     // Grace period: wait 10 seconds before starting monitoring
     tokio::time::sleep(Duration::from_secs(10)).await;
-    
+
     loop {
         tokio::time::sleep(Duration::from_secs(5)).await; // Fixed 5-second check interval
-        
+
         let current_bytes = progress_tracker.get_progress();
         let now = Instant::now();
-        
+
         // If processing is complete, exit monitoring
         if !progress_tracker.is_processing() {
             return;
         }
-        
+
         // Check transfer speed within 5 seconds
         let bytes_transferred = current_bytes.saturating_sub(last_bytes);
         let time_elapsed = now.duration_since(last_check_time).as_secs();
-        
+
         if time_elapsed >= 5 {
             // Unified standard: speed <= 1KB/s (5KB/5s) is considered stall
             if bytes_transferred <= 5 * 1024 {
                 return; // Trigger stall detection
             }
-            
+
             last_check_time = now;
             last_bytes = current_bytes;
         }
@@ -101,27 +101,26 @@ where
     let mut buffer = vec![0u8; 8192]; // 8KB buffer
     let mut remaining = skip_bytes;
     let mut total_skipped = 0;
-    
+
     while remaining > 0 {
         let to_read = std::cmp::min(buffer.len(), remaining);
-        let bytes_read = reader.read(&mut buffer[..to_read]).await
-            .map_err(|e| crate::utils::error::TACommandError::new(anyhow::anyhow!(
-                "Failed to skip bytes: {}", e
-            )))?;
-            
+        let bytes_read = reader.read(&mut buffer[..to_read]).await.map_err(|e| {
+            crate::utils::error::TACommandError::new(anyhow::anyhow!("Failed to skip bytes: {}", e))
+        })?;
+
         if bytes_read == 0 {
             return Err(crate::utils::error::TACommandError::new(anyhow::anyhow!(
                 "Unexpected EOF while skipping bytes"
             )));
         }
-        
+
         remaining -= bytes_read;
         total_skipped += bytes_read;
-        
+
         // Update progress for monitoring
         progress_tracker.update_progress(total_skipped);
     }
-    
+
     Ok(())
 }
 
@@ -233,7 +232,7 @@ async fn create_stream_by_source(
 pub async fn ipc_install_file(
     args: InstallFileArgs,
     notify: impl Fn(serde_json::Value) + std::marker::Send + 'static,
-) -> Result<serde_json::Value> {
+) -> TAResult<serde_json::Value> {
     let target = args.target;
     let override_old_path = prepare_target(&target).await?;
     let progress_noti = move |downloaded: usize| {
@@ -259,6 +258,7 @@ pub async fn ipc_install_file(
                         &std::path::PathBuf::from(&target),
                     )
                     .await
+                    .into_ta_result()
                     {
                         println!("Failed to clear index mark: {:?}", e);
                         return Err(e);
@@ -272,7 +272,7 @@ pub async fn ipc_install_file(
                 bytes_transferred,
                 insight: final_insight,
             };
-            Ok(serde_json::to_value(result)?)
+            serde_json::to_value(result).into_ta_result()
         }
         InstallFileMode::Patch { source, diff_size } => {
             let is_self_update = override_old_path.is_some();
@@ -295,6 +295,7 @@ pub async fn ipc_install_file(
                         &std::path::PathBuf::from(&target),
                     )
                     .await
+                    .into_ta_result()
                     {
                         println!("Failed to clear index mark: {:?}", e);
                         return Err(e);
@@ -308,7 +309,7 @@ pub async fn ipc_install_file(
                 bytes_transferred,
                 insight: final_insight,
             };
-            Ok(serde_json::to_value(result)?)
+            serde_json::to_value(result).into_ta_result()
         }
         InstallFileMode::HybridPatch { diff, source } => {
             // first extract source (local file, no insight needed)
@@ -333,6 +334,7 @@ pub async fn ipc_install_file(
                         &std::path::PathBuf::from(&target),
                     )
                     .await
+                    .into_ta_result()
                     {
                         println!("Failed to clear index mark: {:?}", e);
                         return Err(e);
@@ -346,7 +348,7 @@ pub async fn ipc_install_file(
                 bytes_transferred: diff_bytes, // 只统计diff文件的网络传输
                 insight: final_insight,        // 只统计diff文件的网络统计
             };
-            Ok(serde_json::to_value(result)?)
+            serde_json::to_value(result).into_ta_result()
         }
     }
 }
@@ -707,23 +709,6 @@ struct ChunkWithPosition {
     args: InstallFileArgs,
 }
 
-// Helper function to parse range strings like "100-200,300-400" into Vec<(u32, u32)>
-fn parse_range_string(range: &str) -> Vec<(u32, u32)> {
-    range
-        .split(',')
-        .filter_map(|r| {
-            let parts: Vec<&str> = r.trim().split('-').collect();
-            if parts.len() == 2 {
-                let start = parts[0].parse().ok()?;
-                let end = parts[1].parse().ok()?;
-                Some((start, end))
-            } else {
-                None
-            }
-        })
-        .collect()
-}
-
 // Process chunk with progress tracking for concurrent monitoring
 async fn process_chunk_with_progress<R>(
     args: InstallFileArgs,
@@ -745,7 +730,7 @@ where
             chunk_notify(value);
         }
     };
-    
+
     if should_decompress {
         let buf_reader = BufReader::new(chunk_reader);
         let mut decompressed_reader = TokioZstdDecoder::new(buf_reader);
@@ -757,18 +742,6 @@ where
         install_file_by_reader(args, &mut raw_reader, progress_notify)
             .await
             .into_ta_result()
-    }
-}
-
-// Helper function to create error insight for network failures
-fn create_error_insight(url: &str, range: &str, start_time: std::time::Instant) -> InsightItem {
-    InsightItem {
-        url: url.to_string(),
-        ttfb: start_time.elapsed().as_millis() as u32,
-        time: 0,
-        size: 0,
-        range: parse_range_string(range),
-        error: Some("Network request failed".to_string()),
     }
 }
 
@@ -796,7 +769,7 @@ pub async fn ipc_install_multichunk_stream(
     let (http_stream, _content_length, _content_type, mut insight) =
         create_multi_http_stream(&args.url, &args.range).await?;
 
-    // Convert the HTTP stream to AsyncRead 
+    // Convert the HTTP stream to AsyncRead
     let stream = http_stream.map_err(std::io::Error::other);
     let mut reader = tokio_util::io::StreamReader::new(stream);
 
@@ -823,17 +796,17 @@ pub async fn ipc_install_multichunk_stream(
             let skip_bytes = chunk_info.position - stream_position;
             let skip_progress = Arc::new(ChunkProgressTracker::new());
             skip_progress.set_processing(true);
-            
+
             let skip_result = tokio::select! {
                 result = skip_bytes_with_progress(
-                    &mut reader, 
-                    skip_bytes, 
+                    &mut reader,
+                    skip_bytes,
                     skip_progress.clone()
                 ) => {
                     skip_progress.set_processing(false);
                     result
                 },
-                
+
                 _ = monitor_chunk_with_unified_timeout(skip_progress.clone()) => {
                     skip_progress.set_processing(false);
                     Err(crate::utils::error::TACommandError::new(anyhow::anyhow!(
@@ -841,20 +814,19 @@ pub async fn ipc_install_multichunk_stream(
                     )))
                 }
             };
-            
-            skip_result.map_err(|e| {
+
+            skip_result.inspect_err(|e| {
                 insight.error = Some(e.to_string());
                 insight.time = download_start.elapsed().as_millis() as u32 - insight.ttfb;
                 insight.size = stream_position as u32;
-                e
             })?;
-            
+
             stream_position = chunk_offset;
         }
 
         // Process chunk with concurrent timeout monitoring
         let should_decompress = should_decompress_chunk(&chunk_info.args);
-        
+
         // Read chunk data into memory buffer first
         let mut chunk_buffer = vec![0u8; chunk_size];
         reader.read_exact(&mut chunk_buffer).await.map_err(|e| {
@@ -862,14 +834,15 @@ pub async fn ipc_install_multichunk_stream(
             insight.time = download_start.elapsed().as_millis() as u32 - insight.ttfb;
             insight.size = stream_position as u32;
             crate::utils::error::TACommandError::new(anyhow::anyhow!(
-                "Failed to read chunk data: {}", e
+                "Failed to read chunk data: {}",
+                e
             ))
         })?;
-        
+
         let chunk_reader = std::io::Cursor::new(chunk_buffer);
         let chunk_progress = Arc::new(ChunkProgressTracker::new());
         chunk_progress.set_processing(true);
-        
+
         let chunk_result = tokio::select! {
             result = process_chunk_with_progress(
                 chunk_info.args.clone(),
@@ -881,24 +854,23 @@ pub async fn ipc_install_multichunk_stream(
                 chunk_progress.set_processing(false);
                 result
             },
-            
+
             _ = monitor_chunk_with_unified_timeout(chunk_progress.clone()) => {
                 chunk_progress.set_processing(false);
                 Err(crate::utils::error::TACommandError::new(anyhow::anyhow!(
-                    "Chunk {} processing stalled: speed <= 1KB/s for 5+ seconds", 
+                    "Chunk {} processing stalled: speed <= 1KB/s for 5+ seconds",
                     chunk_index
                 )))
             }
         };
 
         // Handle chunk result and update insight if there's an error
-        let final_result = chunk_result.map_err(|e| {
+        let final_result = chunk_result.inspect_err(|e| {
             insight.error = Some(e.to_string());
             insight.time = download_start.elapsed().as_millis() as u32 - insight.ttfb;
             insight.size = stream_position as u32;
-            e
         });
-        
+
         results.push(final_result);
         stream_position += chunk_size;
     }

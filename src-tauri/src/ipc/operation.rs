@@ -70,18 +70,14 @@ pub async fn run_opr(
     let transaction = sentry::start_transaction(tx_ctx);
     let ret = match op {
         IpcOperation::Ping => Ok(serde_json::value::Value::Null),
-        IpcOperation::InstallFile(args) => super::install_file::ipc_install_file(args, notify)
-            .await
-            .into_ta_result(),
+        IpcOperation::InstallFile(args) => {
+            super::install_file::ipc_install_file(args, notify).await
+        }
         IpcOperation::InstallMultipartStream(args) => {
-            super::install_file::ipc_install_multipart_stream(args, notify)
-                .await
-                .into_ta_result()
+            super::install_file::ipc_install_multipart_stream(args, notify).await
         }
         IpcOperation::InstallMultichunkStream(args) => {
-            super::install_file::ipc_install_multichunk_stream(args, notify)
-                .await
-                .into_ta_result()
+            super::install_file::ipc_install_multichunk_stream(args, notify).await
         }
         IpcOperation::WriteRegistry(params) => {
             crate::installer::registry::write_registry_with_params(params).await?;
