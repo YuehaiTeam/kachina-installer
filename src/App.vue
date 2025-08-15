@@ -1153,25 +1153,20 @@ async function runInstall(): Promise<void> {
     const total = formatSize(total_size);
 
     // 更新运行中任务显示逻辑
-    const runningTasks = processedFiles
+    const runningTasks: string[] = [];
+    
+    processedFiles
       .filter((e) => e.running)
-      .map((e) => {
+      .forEach((e) => {
         if ((e as VirtualMergedFile)._isMergedGroup) {
+          // 对于合并组，显示组内每个文件的独立进度
           const virtualFile = e as VirtualMergedFile;
-          const completedFiles = virtualFile._mergedInfo.files.filter(
-            (f) => f.downloaded === f.size,
-          );
-          const totalMergedSize = virtualFile._mergedInfo.files.reduce(
-            (sum, f) => sum + f.size,
-            0,
-          );
-          const downloadedMergedSize = virtualFile._mergedInfo.files.reduce(
-            (sum, f) => sum + f.downloaded,
-            0,
-          );
-          return `批量下载 ${completedFiles.length}/${virtualFile._mergedInfo.files.length} 个文件 ${formatSize(downloadedMergedSize)}/${formatSize(totalMergedSize)}`;
+          virtualFile._mergedInfo.files.forEach((f) => {
+            runningTasks.push(`${basename(f.file_name)} ${formatSize(f.downloaded)}/${formatSize(f.size)}`);
+          });
         } else {
-          return `${basename(e.file_name)} ${formatSize(e.downloaded)}/${formatSize(e.size)}`;
+          // 单文件正常显示
+          runningTasks.push(`${basename(e.file_name)} ${formatSize(e.downloaded)}/${formatSize(e.size)}`);
         }
       });
 
@@ -1179,7 +1174,7 @@ async function runInstall(): Promise<void> {
       <span class="d-single-stat">${downloaded} / ${total} (${speed}/s)</span>
       <div class="d-single-list">
         <div class="d-single">
-          ${Object.values(runningTasks).join('</div><div class="d-single">')}
+          ${runningTasks.join('</div><div class="d-single">')}
         </div>
       </div>
     `;

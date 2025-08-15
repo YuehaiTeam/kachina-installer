@@ -1,6 +1,6 @@
 import { DfsUpdateTask, VirtualMergedFile, DfsMetadataHashType, Embedded } from './types';
 import { runDfsDownload, runMergedGroupDownload, getFileInstallMode } from './dfs';
-import { log, warn, error } from './api/ipc';
+import { log, error } from './api/ipc';
 import { networkInsights } from './networkInsights';
 
 // 格式化文件大小
@@ -173,6 +173,8 @@ export class LocalFileTask implements DownloadTask {
 
 // 合并组释放任务
 export class MergedGroupTask implements DownloadTask {
+  private hasRetriedMerged = false;
+  
   constructor(
     private virtualFile: VirtualMergedFile,
     private context: DownloadContext,
@@ -189,6 +191,9 @@ export class MergedGroupTask implements DownloadTask {
 
   async execute(): Promise<void> {
     try {
+      // 重置文件状态
+      this.resetFilesState();
+      
       await runMergedGroupDownload(
         this.virtualFile._mergedInfo,
         this.context.dfsSource,
@@ -206,27 +211,46 @@ export class MergedGroupTask implements DownloadTask {
       // 整个合并失败：输出汇总错误日志
       this.logMergedResults(false, String(error));
       
-      // Fallback: 将内部文件动态添加到队列
-      if (this.taskManager) {
-        // 重置fallback文件状态
-        this.virtualFile._fallbackFiles.forEach(f => {
-          f.running = false;
-          f.downloaded = 0;
-          f.failed = undefined;
-        });
-        
-        const fallbackTasks = this.virtualFile._fallbackFiles.map(
-          file => new SingleFileTask(file, this.context, this.taskManager)
-        );
-        
-        fallbackTasks.forEach(task => this.taskManager!.addTask(task));
-        
-        // 不抛出错误，让 TaskManager 处理 fallback 任务
-        // 如果 fallback 任务失败，会在它们的 execute 中抛出错误
-      } else {
-        // 如果没有taskManager，抛出错误让外层处理
-        throw error;
+      // 如果还没重试过，重试一次合并下载
+      if (!this.hasRetriedMerged) {
+        this.hasRetriedMerged = true;
+        return this.execute(); // 递归重试
       }
+      
+      // 已经重试过了，fallback到单文件
+      this.fallbackToSingleFiles();
+    }
+  }
+  
+  private resetFilesState(): void {
+    this.virtualFile._mergedInfo.files.forEach(f => {
+      f.running = false;
+      f.downloaded = 0;
+      f.failed = undefined;
+      delete (f as any).errorMessage;
+    });
+  }
+  
+  private fallbackToSingleFiles(): void {
+    if (this.taskManager) {
+      // 重置fallback文件状态
+      this.virtualFile._fallbackFiles.forEach(f => {
+        f.running = false;
+        f.downloaded = 0;
+        f.failed = undefined;
+      });
+      
+      const fallbackTasks = this.virtualFile._fallbackFiles.map(
+        file => new SingleFileTask(file, this.context, this.taskManager)
+      );
+      
+      fallbackTasks.forEach(task => this.taskManager!.addTask(task));
+      
+      // 不抛出错误，让 TaskManager 处理 fallback 任务
+      // 如果 fallback 任务失败，会在它们的 execute 中抛出错误
+    } else {
+      // 如果没有taskManager，抛出错误让外层处理
+      throw new Error('Merged download failed and no task manager for fallback');
     }
   }
   
@@ -270,8 +294,8 @@ export class DownloadTaskManager {
   private completedTasks = new Set<DownloadTask>();
   private failedTasks = new Set<DownloadTask>();
 
-  private readonly LARGE_CONCURRENT = 4;
-  private readonly SMALL_CONCURRENT = 6;
+  private readonly LARGE_CONCURRENT = 7;
+  private readonly SMALL_CONCURRENT = 9;
   private readonly LOCAL_CONCURRENT = 16;  // 新增：local文件并发数
   private sizeThreshold: number;
 
@@ -378,10 +402,18 @@ export class DownloadTaskManager {
 
   // 执行任务（带重试机制）
   private async executeTask(task: DownloadTask, type: 'large' | 'small' | 'local'): Promise<void> {
-    const maxRetries = 3;
-    let lastError: any = null;
-
     try {
+      // 对于MergedGroupTask，不使用外层重试，因为它有内部重试+fallback机制
+      if (task instanceof MergedGroupTask) {
+        await task.execute();
+        this.completedTasks.add(task);
+        return;
+      }
+      
+      // 对于其他任务，保持原有的3次重试机制
+      const maxRetries = 3;
+      let lastError: any = null;
+
       for (let attempt = 1; attempt <= maxRetries; attempt++) {
         try {
           await task.execute();
@@ -400,6 +432,12 @@ export class DownloadTaskManager {
           }
         }
       }
+    } catch (error) {
+      // 处理任务执行异常
+      if (!(task instanceof MergedGroupTask)) {
+        this.failedTasks.add(task);
+      }
+      throw error;
     } finally {
       // 减少对应类型的运行计数
       if (type === 'large') {

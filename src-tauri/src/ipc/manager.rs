@@ -15,15 +15,12 @@ use tokio::io::AsyncBufReadExt;
 use tokio::io::AsyncWriteExt;
 use tokio::net::windows::named_pipe::ClientOptions;
 use tokio::net::windows::named_pipe::NamedPipeServer;
-use tokio::net::windows::named_pipe::PipeMode;
 use tokio::net::windows::named_pipe::ServerOptions;
 use tokio::time;
 use windows::Win32::Foundation::ERROR_PIPE_BUSY;
 
-// 100k buffer size
-static PIPE_BUFFER_SIZE: usize = 1024 * 100;
-// 4k chunk size due to https://github.com/tokio-rs/mio/pull/1778
-static PIPE_CHUNK_SIZE: usize = 1024 * 4;
+// 4m buffer size
+static PIPE_BUFFER_SIZE: usize = 1 * 1024 * 1024;
 
 #[derive(serde::Deserialize, serde::Serialize, Clone, Debug)]
 pub struct IpcInner {
@@ -68,7 +65,6 @@ impl ManagedElevate {
             ServerOptions::new()
                 .first_pipe_instance(true)
                 .reject_remote_clients(true)
-                .pipe_mode(PipeMode::Message)
                 .create_with_security_attributes_raw(name, &mut attr as *mut _ as *mut c_void)
         }?)
     }
@@ -114,11 +110,15 @@ pub async fn handle_pipe(
         let (serverrx, mut servertx) = tokio::io::split(server);
         let mut serverrx = tokio::io::BufReader::with_capacity(PIPE_BUFFER_SIZE, serverrx);
         let mut fail_times = 0;
+        let mut buf = String::new();
         loop {
-            let mut buf = String::new();
             tokio::select! {
                 v = serverrx.read_line(&mut buf) => {
                     if v.is_ok() {
+                        if buf.trim().is_empty() {
+                            buf.clear();
+                            continue;
+                        }
                         let res = serde_json::from_str::<serde_json::Value>(&buf);
                         if let Ok(res) = res {
                             // sentry envelope
@@ -149,6 +149,7 @@ pub async fn handle_pipe(
                                 break;
                             }
                         }
+                        buf.clear();
                     }else{
                         tracing::error!("Failed to read from pipe: {:?}", v.err());
                         break;
@@ -158,14 +159,10 @@ pub async fn handle_pipe(
                     if let Some(v) = v {
                         let b = serde_json::to_vec(&v);
                         if let Ok(mut b) = b {
-                            b.push(b'\n');
-                            // split into 4k chunks
-                            let chunks = b.chunks(PIPE_CHUNK_SIZE);
-                            for b in chunks{
-                                let res = servertx.write(b).await;
-                                if let Err(err) = res{
-                                    tracing::warn!("Failed to write to pipe: {:?}", err);
-                                }
+                            b.extend_from_slice(b"\n \n \n");
+                            let res = servertx.write_all(&b).await;
+                            if let Err(err) = res {
+                                tracing::warn!("Failed to write to pipe: {:?}", err);
                             }
                         }else{
                             tracing::warn!("Failed to serialize message: {:?}", b.err());
@@ -277,83 +274,130 @@ pub async fn uac_ipc_main(args: crate::cli::arg::UacArgs) {
 
     let (tx, mut rx) = tokio::sync::mpsc::channel(500);
     let mut sentry_rx = AUTO_TRANSPORT.mpsc_rx.write().await;
-    loop {
-        let mut buf = String::new();
-        tokio::select! {
-            v = clientrx.read_line(&mut buf) => {
-                if let Ok(v) = v {
-                    if v == 0 {
-                        tracing::warn!("Client: disconnected");
+    let mut buf = String::new();
+    
+    // 创建一个取消通知器
+    let (cancel_tx, cancel_rx) = tokio::sync::broadcast::channel(1);
+    
+    // 第一个线程：处理客户端读取
+    let read_handle = {
+        let tx = tx.clone();
+        let cancel_tx = cancel_tx.clone();
+        let mut cancel_rx = cancel_rx.resubscribe();
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = cancel_rx.recv() => {
+                        tracing::info!("Read thread cancelled");
                         break;
                     }
-                    let res = serde_json::from_str::<IpcInner>(&buf);
-                    if let Ok(res) = res {
-                        let tx = tx.clone();
-                        let id = res.id.clone();
-                        tokio::spawn(async move {
-                            let tx2 = tx.clone();
-                            let res = run_opr(res.op, move |opr| {
-                                let id = res.id.clone();
-                                let tx_clone = tx.clone();
-                                tokio::spawn(async move {
-                                    let _ = tx_clone
-                                        .send(serde_json::json!({ "id": id, "data": opr }))
-                                        .await;
-                                });
-                            },res.context)
-                            .await;
-                            if let Err(err) = res.as_ref() {
-                                tracing::error!("Client: Operation failed: {:?}", err);
-                            }
-                            let _ = tx2
-                                .send(serde_json::json!({ "id": id, "data": res, "done": true }))
-                                .await;
-                        });
-                    } else {
-                        tracing::warn!("Client: Failed to parse message: {:?} {:?}", res.err(), buf);
-                    }
-                } else {
-                    tracing::warn!("Client: Failed to read from pipe: {:?}", v.err());
-                    break;
-                }
-            },
-            v = rx.recv() =>{
-                if let Some(v) = v {
-                    let b = serde_json::to_vec(&v);
-                    if let Ok(mut b) = b {
-                        b.push(b'\n');
-                        // split into chunks
-                        let chunks = b.chunks(PIPE_CHUNK_SIZE);
-                        for b in chunks {
-                            let res = clienttx.write(b).await;
-                            if let Err(err) = res {
-                                tracing::warn!("Client: Failed to write to pipe: {:?}", err);
+                    v = clientrx.read_line(&mut buf) => {
+                        if let Ok(v) = v {
+                            if v == 0 {
+                                tracing::warn!("Client: disconnected");
+                                let _ = cancel_tx.send(());
                                 break;
                             }
-                        }
-                    } else {
-                        tracing::warn!("Client: Failed to serialize message: {:?}", b.err());
-                    }
-                } else {
-                    tracing::warn!("Client: Failed to receive message from channel");
-                    break;
-                }
-            },
-            v = sentry_rx.recv() => {
-                if let Some(v) = v {
-                    match v {
-                        crate::utils::sentry::SentryData::Breadcrumb(b) => {
-                            let _ = tx.send(serde_json::json!({ "breadcrumb": b })).await;
-                        },
-                        crate::utils::sentry::SentryData::Envelope(v) => {
-                            let mut vec = Vec::new();
-                            v.to_writer(&mut vec).unwrap();
-                            let str = String::from_utf8_lossy(&vec).to_string();
-                            let _ = tx.send(serde_json::json!({ "envelope": str })).await;
+                            if buf.trim().is_empty() {
+                                buf.clear();
+                                continue;
+                            }
+                            let res = serde_json::from_str::<IpcInner>(&buf);
+                            if let Ok(res) = res {
+                                let tx = tx.clone();
+                                let id = res.id.clone();
+                                tokio::spawn(async move {
+                                    let tx2 = tx.clone();
+                                    let res = run_opr(res.op, move |opr| {
+                                        let id = res.id.clone();
+                                        let tx_clone = tx.clone();
+                                        tokio::spawn(async move {
+                                            let _ = tx_clone
+                                                .send(serde_json::json!({ "id": id, "data": opr }))
+                                                .await;
+                                        });
+                                    },res.context)
+                                    .await;
+                                    if let Err(err) = res.as_ref() {
+                                        tracing::error!("Client: Operation failed: {:?}", err);
+                                    }
+                                    let _ = tx2
+                                        .send(serde_json::json!({ "id": id, "data": res, "done": true }))
+                                        .await;
+                                });
+                            } else {
+                                tracing::warn!("Client: Failed to parse message: {:?} {:?}", res.err(), buf);
+                            }
+                            buf.clear();
+                        } else {
+                            tracing::warn!("Client: Failed to read from pipe: {:?}", v.err());
+                            let _ = cancel_tx.send(());
+                            break;
                         }
                     }
                 }
             }
+        })
+    };
+    
+    // 第二个线程：处理发送和sentry消息
+    let write_handle = {
+        let cancel_tx = cancel_tx.clone();
+        let mut cancel_rx = cancel_rx.resubscribe();
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = cancel_rx.recv() => {
+                        tracing::info!("Write thread cancelled");
+                        break;
+                    }
+                    v = rx.recv() => {
+                        if let Some(v) = v {
+                            let b = serde_json::to_vec(&v);
+                            if let Ok(mut b) = b {
+                                b.extend_from_slice(b"\n \n \n");
+                                let res = clienttx.write_all(&b).await;
+                                if let Err(err) = res {
+                                    tracing::warn!("Client: Failed to write to pipe: {:?}", err);
+                                    let _ = cancel_tx.send(());
+                                    break;
+                                }
+                            } else {
+                                tracing::warn!("Client: Failed to serialize message: {:?}", b.err());
+                            }
+                        } else {
+                            tracing::warn!("Client: Failed to receive message from channel");
+                            let _ = cancel_tx.send(());
+                            break;
+                        }
+                    }
+                    v = sentry_rx.recv() => {
+                        if let Some(v) = v {
+                            match v {
+                                crate::utils::sentry::SentryData::Breadcrumb(b) => {
+                                    let _ = tx.send(serde_json::json!({ "breadcrumb": b })).await;
+                                },
+                                crate::utils::sentry::SentryData::Envelope(v) => {
+                                    let mut vec = Vec::new();
+                                    v.to_writer(&mut vec).unwrap();
+                                    let str = String::from_utf8_lossy(&vec).to_string();
+                                    let _ = tx.send(serde_json::json!({ "envelope": str })).await;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        })
+    };
+    
+    // 等待任一线程结束
+    tokio::select! {
+        _ = read_handle => {
+            tracing::info!("Read thread finished");
+        }
+        _ = write_handle => {
+            tracing::info!("Write thread finished");
         }
     }
 }
