@@ -4,6 +4,7 @@ export interface SourceItem {
   id: string;
   name: string;
   hidden: boolean;
+  icon?: string; // 可选的SVG图标字符串
 }
 export type ProjectConfig = {
   source: string | SourceItem[];

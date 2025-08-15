@@ -170,9 +170,10 @@
               :class="{ active: i.uri === selectedSource }"
               @click="changeSelectedSource(i.uri)"
             >
-              <Feedback v-if="i.uri.includes('=beta')" />
-              <CloudPaid v-else-if="i.uri.startsWith('mirrorc://')" />
-              <Cloud v-else />
+              <SafeIcon
+                :svg-content="i.icon"
+                :fallback-component="getDefaultIconComponent(i.uri)"
+              />
               <span>{{ i.name }}</span>
             </div>
           </template>
@@ -589,6 +590,7 @@ import Dialog from './Dialog.vue';
 import Cloud from './Cloud.vue';
 import CloudPaid from './CloudPaid.vue';
 import Feedback from './Feedback.vue';
+import SafeIcon from './components/SafeIcon.vue';
 import FInput from './FInput.vue';
 import { compare } from 'compare-versions';
 import { processMirrorcError } from './mirrorc-errors';
@@ -651,6 +653,12 @@ const markedKey = computed(() => {
     mirrorcKey.value.substring(mirrorcKey.value.length - 4)
   );
 });
+
+const getDefaultIconComponent = (uri: string) => {
+  if (uri.includes('=beta')) return Feedback;
+  if (uri.startsWith('mirrorc://')) return CloudPaid;
+  return Cloud;
+};
 watch(
   () => installMode.value,
   async (newValue) => {
