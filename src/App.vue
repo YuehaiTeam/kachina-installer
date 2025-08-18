@@ -731,12 +731,41 @@ async function getSource(scan: boolean): Promise<InstallerConfig> {
   });
 }
 
-async function installPrepare(version: string): Promise<boolean> {
+function getSourceId(): string {
+  if (Array.isArray(PROJECT_CONFIG.source)) {
+    const sourceItem = PROJECT_CONFIG.source.find(
+      (s) => s.uri === selectedSource.value,
+    );
+    return sourceItem?.id || 'unknown';
+  } else {
+    return 'default';
+  }
+}
+
+function buildEventString(
+  version: string,
+  useOnlineSource: boolean = false,
+): string {
+  const action = isUpdate.value ? 'update' : 'install';
+  const isPackedMode = (INSTALLER_CONFIG.embedded_index?.length || 0) > 0;
+
+  if (isPackedMode) {
+    if (useOnlineSource) {
+      return `${action}/packed+${getSourceId()}/${version}`;
+    } else {
+      return `${action}/packed/${version}`;
+    }
+  } else {
+    return `${action}/${getSourceId()}/${version}`;
+  }
+}
+
+async function installPrepare(
+  version: string,
+  useOnlineSource: boolean = false,
+): Promise<boolean> {
   await ipPrepare(needElevate.value);
-  sendInsight(
-    getInsightBase(),
-    `${isUpdate.value ? 'update' : 'install'}/${INSTALLER_CONFIG.embedded_index?.length ? 'packed/' : ''}${version}`,
-  );
+  sendInsight(getInsightBase(), buildEventString(version, useOnlineSource));
   const target_exe_path = `${source.value}${sep()}${PROJECT_CONFIG.exeName}`;
   const runningExes =
     (await ipcFindProcessByName(PROJECT_CONFIG.exeName).catch(log)) || [];
@@ -892,11 +921,8 @@ async function runInstall(): Promise<void> {
       latest_meta.hashed.push(installerMeta);
     }
   }
-  if (
-    await installPrepare(
-      meta_tag ? `${meta_tag}-update` : latest_meta?.tag_name,
-    )
-  )
+  const useOnlineSource = latest_meta !== INSTALLER_CONFIG.enbedded_metadata;
+  if (await installPrepare(latest_meta?.tag_name, useOnlineSource))
     return runInstall();
   let hashKey = '';
   if (latest_meta.hashed.every((e) => e.md5)) {
@@ -1308,7 +1334,8 @@ async function runMirrorcInstall() {
   }
   if (
     await installPrepare(
-      `${mirrorc_status.data?.version_name || 'unknown'}-mirrorc`,
+      `${mirrorc_status.data?.version_name || 'unknown'}`,
+      true,
     )
   )
     return runMirrorcInstall();
