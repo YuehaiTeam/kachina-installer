@@ -1,21 +1,23 @@
 import { hybridPatch, InstallFile } from './api/installFile';
-import { error, ipc, log, warn } from './api/ipc';
+import { ipc, log, warn, addInsightWithMode } from './api/ipc';
 import { invoke } from './tauri';
 import { networkInsights, clearNetworkInsights } from './networkInsights';
 import { KachinaInstallSource, pluginManager } from './plugins';
 import { registerAllPlugins } from './plugins/registry';
 import {
-  Dfs2ChunkResponse,
+  Dfs2BatchChunkResponse,
   Dfs2Metadata,
   Dfs2SessionResponse,
   DfsMetadataHashType,
   DfsUpdateTask,
   Embedded,
   FileWithPosition,
+  InsightItem,
   InvokeGetDfsMetadataRes,
   InvokeGetDfsRes,
   MergedGroupInfo,
   ProjectConfig,
+  TAError,
   VirtualMergedFile,
 } from './types';
 
@@ -497,7 +499,7 @@ export const getDfsFileUrl = async (
 };
 
 // Helper function to check if error is a network error that should be retried
-const isNetworkError = (error: any): boolean => {
+const isNetworkError = (error: unknown): boolean => {
   const errorStr = String(error);
 
   // 检查是否为HTTP状态码错误（4xx/5xx），这些不应该重试
@@ -739,6 +741,100 @@ export const cleanupAllDfs2Sessions = async (): Promise<void> => {
   dfs2Sessions.clear();
 };
 
+// Chunk URL request aggregator for batch processing
+interface PendingRequest {
+  resolve: (url: string) => void;
+  reject: (error: Error) => void;
+}
+
+class ChunkUrlAggregator {
+  private static instance: ChunkUrlAggregator;
+  private pendingRequests = new Map<string, PendingRequest[]>(); // range -> requests[]
+  private aggregationTimer: ReturnType<typeof setTimeout> | null = null;
+  private currentSessionUrl: string | null = null;
+  private readonly AGGREGATION_WINDOW_MS = 50;
+
+  static getInstance(): ChunkUrlAggregator {
+    if (!this.instance) {
+      this.instance = new ChunkUrlAggregator();
+    }
+    return this.instance;
+  }
+
+  async requestChunkUrl(sessionUrl: string, range: string): Promise<string> {
+    return new Promise((resolve, reject) => {
+      // 添加到pending requests
+      if (!this.pendingRequests.has(range)) {
+        this.pendingRequests.set(range, []);
+      }
+      this.pendingRequests.get(range)!.push({ resolve, reject });
+
+      // 设置或重置聚合定时器
+      this.currentSessionUrl = sessionUrl;
+      this.scheduleAggregation();
+    });
+  }
+
+  private scheduleAggregation(): void {
+    if (this.aggregationTimer) {
+      clearTimeout(this.aggregationTimer);
+    }
+
+    this.aggregationTimer = setTimeout(() => {
+      this.flushPendingRequests();
+    }, this.AGGREGATION_WINDOW_MS);
+  }
+
+  private async flushPendingRequests(): Promise<void> {
+    if (this.pendingRequests.size === 0 || !this.currentSessionUrl) {
+      return;
+    }
+
+    const sessionUrl = this.currentSessionUrl;
+    const requestsToProcess = new Map(this.pendingRequests);
+
+    // 清空待处理队列
+    this.pendingRequests.clear();
+    this.aggregationTimer = null;
+    this.currentSessionUrl = null;
+
+    try {
+      // 批量请求
+      const chunks = Array.from(requestsToProcess.keys());
+      log(
+        `[ChunkAggregator] Batching ${chunks.length} chunks: ${chunks.join(',')}`,
+      );
+
+      const response = await invoke<Dfs2BatchChunkResponse>(
+        'get_dfs2_batch_chunk_urls',
+        {
+          sessionApiUrl: sessionUrl,
+          chunks: chunks,
+        },
+      );
+
+      // 分发结果
+      for (const [range, pendingRequests] of requestsToProcess) {
+        const result = response.urls[range];
+
+        if (result?.url) {
+          // 成功：通知所有等待该range的请求
+          pendingRequests.forEach((req) => req.resolve(result.url!));
+        } else {
+          // 失败：通知错误
+          const error = new Error(result?.error || 'Unknown error');
+          pendingRequests.forEach((req) => req.reject(error));
+        }
+      }
+    } catch (error) {
+      // 批量请求失败：通知所有pending requests
+      for (const pendingRequests of requestsToProcess.values()) {
+        pendingRequests.forEach((req) => req.reject(error as Error));
+      }
+    }
+  }
+}
+
 // DFS2-specific URL getter using pre-created session
 export const getDfs2Url = async (
   apiUrl: string,
@@ -752,12 +848,10 @@ export const getDfs2Url = async (
   }
 
   const sessionApiUrl = `${sessionInfo.baseUrl}/session/${sessionInfo.sessionId}/${sessionInfo.resId}`;
-  const response = await invoke<Dfs2ChunkResponse>('get_dfs2_chunk_url', {
-    sessionApiUrl: sessionApiUrl,
-    range,
-  });
 
-  return response.url;
+  // 使用聚合器获取URL
+  const aggregator = ChunkUrlAggregator.getInstance();
+  return await aggregator.requestChunkUrl(sessionApiUrl, range);
 };
 
 // Collect ranges needed for DFS2 session creation
@@ -944,12 +1038,13 @@ export const runDfsDownload = async (
     item.downloaded = payload;
   };
   item.running = true;
+  const hasLocalFile = local.find((l) => l.name === item[hashKey]);
+  const hasLpatchFile = local.find(
+    (l) => l.name === item.lpatch?.from[hashKey],
+  );
   try {
-    const hasLocalFile = local.find((l) => l.name === item[hashKey]);
-    const hasLpatchFile = local.find(
-      (l) => l.name === item.lpatch?.from[hashKey],
-    );
     if (hasLocalFile && !disable_local) {
+      // Local files don't involve network downloads, so no insight collection
       await ipc(
         InstallFile(
           hasLocalFile,
@@ -970,10 +1065,13 @@ export const runDfsDownload = async (
       !disable_patch &&
       !disable_local
     ) {
+      // HybridPatch: collect insights with 'hybridpatch' mode
       const hash = `${item.lpatch.from[hashKey]}_${item.lpatch.to[hashKey]}`;
       const url = await getDfsUrl(dfsSource, hash);
       url.size = url.size || (item.lpatch?.size as number);
-      await ipc(
+      const result: {
+        insight?: InsightItem;
+      } = await ipc(
         hybridPatch(hasLpatchFile, url, source + filename_with_first_slash, {
           md5: item.md5,
           xxh: item.xxh,
@@ -981,10 +1079,16 @@ export const runDfsDownload = async (
         elevate,
         onProgress,
       );
+      if (result.insight) {
+        addInsightWithMode(result.insight, 'hybridpatch');
+      }
     } else if (item.patch && !disable_patch) {
+      // Patch: collect insights with 'patch' mode
       const hash = `${item.patch.from[hashKey]}_${item.patch.to[hashKey]}`;
       const url = await getDfsUrl(dfsSource, hash);
-      await ipc(
+      const result: {
+        insight?: InsightItem;
+      } = await ipc(
         InstallFile(
           url,
           source + filename_with_first_slash,
@@ -998,10 +1102,16 @@ export const runDfsDownload = async (
         elevate,
         onProgress,
       );
+      if (result.insight) {
+        addInsightWithMode(result.insight, 'patch');
+      }
     } else {
+      // Direct: collect insights with 'direct' mode
       const hash = item[hashKey] as string;
       const url = await getDfsUrl(dfsSource, hash, extras, item.installer);
-      await ipc(
+      const result: {
+        insight?: InsightItem;
+      } = await ipc(
         InstallFile(
           url,
           source + filename_with_first_slash,
@@ -1015,9 +1125,37 @@ export const runDfsDownload = async (
         elevate,
         onProgress,
       );
+      if (result.insight) {
+        addInsightWithMode(result.insight, 'direct');
+      }
     }
   } catch (e) {
     item.downloaded = 0;
+
+    // Handle error insights for network operations
+    if (e instanceof TAError && e.insight) {
+      let mode: string | undefined;
+      if (hasLocalFile && !disable_local) {
+        // Local files don't collect insights
+        mode = undefined;
+      } else if (
+        hasLpatchFile &&
+        item.lpatch &&
+        !disable_patch &&
+        !disable_local
+      ) {
+        mode = 'hybridpatch';
+      } else if (item.patch && !disable_patch) {
+        mode = 'patch';
+      } else {
+        mode = 'direct';
+      }
+
+      if (mode) {
+        addInsightWithMode(e.insight, mode);
+      }
+    }
+
     throw e;
   } finally {
     item.running = false;
@@ -1200,6 +1338,35 @@ export const getFileInstallMode = (
   if (hasLpatchFile && file.lpatch) return 'hybridpatch';
   if (file.patch) return 'patch';
   return 'direct';
+};
+
+// Helper function to determine merged group mode
+export const getMergedGroupMode = (
+  files: DfsUpdateTask[],
+  local: Embedded[],
+  hashKey: DfsMetadataHashType,
+): 'merged-direct' | 'merged-patch' | 'merged-direct-patch' => {
+  let hasDirectFiles = false;
+  let hasPatchFiles = false;
+
+  for (const file of files) {
+    const mode = getFileInstallMode(file, local, hashKey);
+    if (mode === 'direct') {
+      hasDirectFiles = true;
+    } else if (mode === 'patch') {
+      hasPatchFiles = true;
+    }
+    // Note: merged groups should not contain 'local' or 'hybridpatch' files
+    // as they are filtered out during preprocessing
+  }
+
+  if (hasDirectFiles && hasPatchFiles) {
+    return 'merged-direct-patch';
+  } else if (hasPatchFiles) {
+    return 'merged-patch';
+  } else {
+    return 'merged-direct';
+  }
 };
 
 export const preprocessFiles = (
@@ -1399,8 +1566,14 @@ export const runMergedGroupDownload = async (
       }
     };
 
+    // 确定合并组模式
+    const mode = getMergedGroupMode(groupInfo.files, local, hashKey);
+
     // 调用现有multichunk接口
-    const result = await ipc(
+    const result: {
+      insight?: InsightItem;
+      results?: Record<string, string>[];
+    } = await ipc(
       {
         type: 'InstallMultichunkStream',
         url: cdnUrl,
@@ -1411,47 +1584,48 @@ export const runMergedGroupDownload = async (
       progressDistributor,
     );
 
+    // 收集合并组的网络统计
+    if (result.insight) {
+      addInsightWithMode(result.insight, mode);
+    }
+
     // 处理结果并检查每个文件的状态
     const failedFiles: DfsUpdateTask[] = [];
-    if (result && typeof result === 'object' && 'results' in result) {
-      const results = (result as { results: any[] }).results;
+    result.results?.forEach((res, index: number) => {
+      if (index >= groupInfo.files.length) return;
 
-      results.forEach((res, index: number) => {
-        if (index >= groupInfo.files.length) return;
+      const file = groupInfo.files[index];
+      let hasError = false;
 
-        const file = groupInfo.files[index];
-        let hasError = false;
-
-        if (res && typeof res === 'object') {
-          // 处理TAResult格式：{Ok: value} 或 {Err: error}
-          if ('Err' in res) {
-            hasError = true;
-            // 错误信息暂存，将在后面统一处理日志
-            file.errorMessage = res.Err;
-          } else if ('Ok' in res) {
-            // 文件成功
-            file.failed = undefined;
-            file.downloaded = file.size; // 标记完成
-            // 成功的单个文件日志将在最后统一处理
-          }
-          // 兼容旧格式：直接包含error字段
-          else if (res.error) {
-            hasError = true;
-            file.errorMessage = res.error;
-          }
-        } else {
-          // 如果结果格式不正确，也视为错误
+      if (res && typeof res === 'object') {
+        // 处理TAResult格式：{Ok: value} 或 {Err: error}
+        if ('Err' in res) {
           hasError = true;
-          file.errorMessage = `Invalid result format: ${JSON.stringify(res)}`;
+          // 错误信息暂存，将在后面统一处理日志
+          file.errorMessage = res.Err;
+        } else if ('Ok' in res) {
+          // 文件成功
+          file.failed = undefined;
+          file.downloaded = file.size; // 标记完成
+          // 成功的单个文件日志将在最后统一处理
         }
+        // 兼容旧格式：直接包含error字段
+        else if (res.error) {
+          hasError = true;
+          file.errorMessage = res.error;
+        }
+      } else {
+        // 如果结果格式不正确，也视为错误
+        hasError = true;
+        file.errorMessage = `Invalid result format: ${JSON.stringify(res)}`;
+      }
 
-        if (hasError) {
-          file.failed = true;
-          file.downloaded = 0; // 重置下载进度
-          failedFiles.push(file);
-        }
-      });
-    }
+      if (hasError) {
+        file.failed = true;
+        file.downloaded = 0; // 重置下载进度
+        failedFiles.push(file);
+      }
+    });
 
     // 如果有文件失败，只对失败的文件进行fallback
     if (failedFiles.length > 0) {
@@ -1467,6 +1641,13 @@ export const runMergedGroupDownload = async (
       );
     }
     // 日志将由 MergedGroupTask 统一处理
+  } catch (e) {
+    // 处理错误情况下的网络统计
+    if (e instanceof TAError && e.insight) {
+      const mode = getMergedGroupMode(groupInfo.files, local, hashKey);
+      addInsightWithMode(e.insight, mode);
+    }
+    throw e;
   } finally {
     // 标记组内所有文件为完成
     groupInfo.files.forEach((f) => {

@@ -139,13 +139,27 @@ export type Dfs2ChunkResponse = {
   url: string;
 };
 
+export type Dfs2BatchChunkRequest = {
+  chunks: string[];
+};
+
+export type Dfs2ChunkUrlResult = {
+  url?: string;
+  error?: string;
+};
+
+export type Dfs2BatchChunkResponse = {
+  urls: Record<string, Dfs2ChunkUrlResult>;
+};
+
 export interface InsightItem {
   url: string;
   ttfb: number; // 首字节时间(ms)
   time: number; // 纯下载时间(ms) = 总时间 - TTFB
   size: number; // 实际下载字节数
-  range: [number, number][]; // HTTP Range请求范围
   error?: string;
+  range?: [number, number][]; // HTTP Range请求范围
+  mode?: string; // 安装模式
 }
 
 export interface InstallResult {

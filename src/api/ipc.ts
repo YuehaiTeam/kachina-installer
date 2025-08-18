@@ -4,12 +4,19 @@ import { v4 as uuid } from 'uuid';
 import { addNetworkInsight } from '../networkInsights';
 import {
   InsightItem,
-  InstallResult,
   InvokeDeepReaddirWithMetadataRes,
   InvokeGetDfsMetadataRes,
   TAError,
   TAErrorData,
 } from '../types';
+
+// Helper function to add mode to insight and report it
+export function addInsightWithMode(insight: InsightItem, mode?: string) {
+  if (mode) {
+    insight.mode = mode;
+  }
+  addNetworkInsight(insight);
+}
 
 export async function ipc<T extends { type: string }, E, Z>(
   arg: T,
@@ -41,10 +48,6 @@ export async function ipc<T extends { type: string }, E, Z>(
     const errorData = res.Err;
     if (typeof errorData === 'object' && 'message' in errorData) {
       const taError = TAError.fromErrorData(errorData as TAErrorData);
-      // 始终收集错误场景的网络统计
-      if (taError.insight) {
-        addNetworkInsight(taError.insight);
-      }
       throw taError;
     } else {
       throw new TAError(errorData as string);
@@ -52,27 +55,6 @@ export async function ipc<T extends { type: string }, E, Z>(
   }
 
   const result = (res as { Ok: E }).Ok;
-
-  // 始终收集成功场景的网络统计
-  if (result && typeof result === 'object' && 'insight' in result) {
-    // Handle both single InstallResult and multi-install {results, insight} format
-    if ('results' in result) {
-      // Multi-install format: {results: TAResult[], insight: InsightItem}
-      const multiResult = result as {
-        results: unknown[];
-        insight: InsightItem;
-      };
-      if (multiResult.insight) {
-        addNetworkInsight(multiResult.insight);
-      }
-    } else {
-      // Single InstallResult format
-      const installResult = result as InstallResult;
-      if (installResult.insight) {
-        addNetworkInsight(installResult.insight);
-      }
-    }
-  }
 
   return result;
 }

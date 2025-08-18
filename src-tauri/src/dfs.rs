@@ -81,14 +81,35 @@ pub struct Dfs2ChunkResponse {
     pub url: String,
 }
 
+#[derive(Deserialize, Serialize, Debug)]
+pub struct Dfs2BatchChunkRequest {
+    pub chunks: Vec<String>,
+}
+
+#[derive(Deserialize, Serialize, Debug)]
+pub struct Dfs2ChunkUrlResult {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+#[derive(Deserialize, Serialize, Debug)]
+pub struct Dfs2BatchChunkResponse {
+    pub urls: HashMap<String, Dfs2ChunkUrlResult>,
+}
+
 #[derive(Clone, Deserialize, Serialize, Debug)]
 pub struct InsightItem {
     pub url: String,
-    pub ttfb: u32,              // 首字节时间(ms)
-    pub time: u32,              // 纯下载时间(ms) = 总时间 - TTFB
-    pub size: u32,              // 实际下载字节数
-    pub range: Vec<(u32, u32)>, // HTTP Range请求范围
+    pub ttfb: u32, // 首字节时间(ms)
+    pub time: u32, // 纯下载时间(ms) = 总时间 - TTFB
+    pub size: u32, // 实际下载字节数
     pub error: Option<String>,
+    #[serde(default)]
+    pub range: Vec<(u32, u32)>, // HTTP Range请求范围
+    #[serde(default)]
+    pub mode: Option<String>, // 安装模式
 }
 
 #[derive(Deserialize, Serialize, Debug)]
@@ -322,6 +343,39 @@ pub async fn get_dfs2_chunk_url(
         .map_err(|e| format!("Failed to read response body: {}", e))?;
 
     let response: Dfs2ChunkResponse = serde_json::from_str(&body_text)
+        .map_err(|e| format!("Failed to parse JSON ({}): {}", e, body_text))?;
+
+    Ok(response)
+}
+
+#[tauri::command]
+pub async fn get_dfs2_batch_chunk_urls(
+    session_api_url: String,
+    chunks: Vec<String>,
+) -> Result<Dfs2BatchChunkResponse, String> {
+    let request_body = Dfs2BatchChunkRequest { chunks };
+
+    let res = REQUEST_CLIENT
+        .post(&session_api_url)
+        .json(&request_body)
+        .send()
+        .await
+        .with_http_context("get_dfs2_batch_chunk_urls", &session_api_url)
+        .map_err(|e| e.to_string())?;
+
+    if !res.status().is_success() {
+        let status = res.status();
+        let body = res.text().await.unwrap_or_default();
+        return Err(format!("{}: {}", status, body));
+    }
+
+    let body_text = res
+        .text()
+        .await
+        .with_http_context("get_dfs2_batch_chunk_urls", &session_api_url)
+        .map_err(|e| format!("Failed to read response body: {}", e))?;
+
+    let response: Dfs2BatchChunkResponse = serde_json::from_str(&body_text)
         .map_err(|e| format!("Failed to parse JSON ({}): {}", e, body_text))?;
 
     Ok(response)

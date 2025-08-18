@@ -175,6 +175,7 @@ async fn tauri_main(args: InstallArgs) {
             dfs::get_dfs2_metadata,
             dfs::create_dfs2_session,
             dfs::get_dfs2_chunk_url,
+            dfs::get_dfs2_batch_chunk_urls,
             dfs::end_dfs2_session,
             dfs::solve_dfs2_challenge,
             installer::log,

@@ -1,5 +1,14 @@
-import { DfsUpdateTask, VirtualMergedFile, DfsMetadataHashType, Embedded } from './types';
-import { runDfsDownload, runMergedGroupDownload, getFileInstallMode } from './dfs';
+import {
+  DfsUpdateTask,
+  VirtualMergedFile,
+  DfsMetadataHashType,
+  Embedded,
+} from './types';
+import {
+  runDfsDownload,
+  runMergedGroupDownload,
+  getFileInstallMode,
+} from './dfs';
 import { log, error } from './api/ipc';
 import { networkInsights } from './networkInsights';
 
@@ -13,18 +22,19 @@ const formatFileSize = (size: number): string => {
 
 // 输出统一格式的任务日志
 const logTaskResult = (
-  file: DfsUpdateTask, 
-  mode: string, 
-  isSuccess: boolean, 
-  errorMsg?: string
+  file: DfsUpdateTask,
+  mode: string,
+  isSuccess: boolean,
+  errorMsg?: string,
 ) => {
   const size = formatFileSize(file.size);
   const filename = file.file_name;
-  
+
   // 获取最新的网络洞察数据（过滤出与当前文件相关的）
   const recentInsights = networkInsights.slice(-1); // 获取最近的一条
-  const insightsJson = recentInsights.length > 0 ? JSON.stringify(recentInsights[0]) : '{}';
-  
+  const insightsJson =
+    recentInsights.length > 0 ? JSON.stringify(recentInsights[0]) : '{}';
+
   if (isSuccess) {
     log(`[${mode}] ${size} ${filename} ${insightsJson}`);
   } else {
@@ -37,11 +47,11 @@ const logMergedFileResult = (
   file: DfsUpdateTask,
   mode: string,
   isSuccess: boolean,
-  errorMsg?: string
+  errorMsg?: string,
 ) => {
   const size = formatFileSize(file.size);
   const filename = file.file_name;
-  
+
   if (isSuccess) {
     log(`[${mode}-MERGED] ${filename} ${size}`);
   } else {
@@ -53,14 +63,15 @@ const logMergedFileResult = (
 const logMergedGroupResult = (
   files: DfsUpdateTask[],
   isSuccess: boolean,
-  errorMsg?: string
+  errorMsg?: string,
 ) => {
-  const fileNames = files.map(f => f.file_name).join(',');
-  
+  const fileNames = files.map((f) => f.file_name).join(',');
+
   // 获取最新的网络洞察数据
   const recentInsights = networkInsights.slice(-1);
-  const insightsJson = recentInsights.length > 0 ? JSON.stringify(recentInsights[0]) : '{}';
-  
+  const insightsJson =
+    recentInsights.length > 0 ? JSON.stringify(recentInsights[0]) : '{}';
+
   if (isSuccess) {
     log(`[MERGED] ${fileNames} ${insightsJson}`);
   } else {
@@ -83,6 +94,7 @@ export interface DownloadTask {
   getSize(): number;
   getDisplayName(): string;
   execute(): Promise<void>;
+  isLocalTask: () => boolean;
 }
 
 // 单文件释放任务
@@ -90,7 +102,8 @@ export class SingleFileTask implements DownloadTask {
   constructor(
     private file: DfsUpdateTask,
     private context: DownloadContext,
-    private taskManager?: DownloadTaskManager
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    _taskManager?: DownloadTaskManager,
   ) {}
 
   getSize(): number {
@@ -114,16 +127,27 @@ export class SingleFileTask implements DownloadTask {
         this.file.failed || false,
         this.context.elevate,
       );
-      
+
       // 成功：确定文件模式并记录
-      const mode = getFileInstallMode(this.file, this.context.local, this.context.hashKey);
+      const mode = getFileInstallMode(
+        this.file,
+        this.context.local,
+        this.context.hashKey,
+      );
       logTaskResult(this.file, mode.toUpperCase(), true);
     } catch (error) {
       // 失败：确定文件模式并记录错误
-      const mode = getFileInstallMode(this.file, this.context.local, this.context.hashKey);
+      const mode = getFileInstallMode(
+        this.file,
+        this.context.local,
+        this.context.hashKey,
+      );
       logTaskResult(this.file, mode.toUpperCase(), false, String(error));
       throw error;
     }
+  }
+  isLocalTask() {
+    return false;
   }
 }
 
@@ -131,7 +155,7 @@ export class SingleFileTask implements DownloadTask {
 export class LocalFileTask implements DownloadTask {
   constructor(
     private file: DfsUpdateTask,
-    private context: DownloadContext
+    private context: DownloadContext,
   ) {}
 
   getSize(): number {
@@ -160,7 +184,7 @@ export class LocalFileTask implements DownloadTask {
         this.file.failed || false,
         this.context.elevate,
       );
-      
+
       // 成功：Local文件总是LOCAL模式
       logTaskResult(this.file, 'LOCAL', true);
     } catch (error) {
@@ -174,11 +198,11 @@ export class LocalFileTask implements DownloadTask {
 // 合并组释放任务
 export class MergedGroupTask implements DownloadTask {
   private hasRetriedMerged = false;
-  
+
   constructor(
     private virtualFile: VirtualMergedFile,
     private context: DownloadContext,
-    private taskManager?: DownloadTaskManager
+    private taskManager?: DownloadTaskManager,
   ) {}
 
   getSize(): number {
@@ -193,7 +217,7 @@ export class MergedGroupTask implements DownloadTask {
     try {
       // 重置文件状态
       this.resetFilesState();
-      
+
       await runMergedGroupDownload(
         this.virtualFile._mergedInfo,
         this.context.dfsSource,
@@ -203,76 +227,84 @@ export class MergedGroupTask implements DownloadTask {
         this.context.hashKey,
         this.context.elevate,
       );
-      
+
       // 成功：为每个文件输出日志，并输出汇总日志
       this.logMergedResults(true);
-      
     } catch (error) {
       // 整个合并失败：输出汇总错误日志
       this.logMergedResults(false, String(error));
-      
+
       // 如果还没重试过，重试一次合并下载
       if (!this.hasRetriedMerged) {
         this.hasRetriedMerged = true;
         return this.execute(); // 递归重试
       }
-      
+
       // 已经重试过了，fallback到单文件
       this.fallbackToSingleFiles();
     }
   }
-  
+
   private resetFilesState(): void {
-    this.virtualFile._mergedInfo.files.forEach(f => {
+    this.virtualFile._mergedInfo.files.forEach((f) => {
       f.running = false;
       f.downloaded = 0;
       f.failed = undefined;
-      delete (f as any).errorMessage;
+      delete (f as VirtualMergedFile).errorMessage;
     });
   }
-  
+
   private fallbackToSingleFiles(): void {
     if (this.taskManager) {
       // 重置fallback文件状态
-      this.virtualFile._fallbackFiles.forEach(f => {
+      this.virtualFile._fallbackFiles.forEach((f) => {
         f.running = false;
         f.downloaded = 0;
         f.failed = undefined;
       });
-      
+
       const fallbackTasks = this.virtualFile._fallbackFiles.map(
-        file => new SingleFileTask(file, this.context, this.taskManager)
+        (file) => new SingleFileTask(file, this.context, this.taskManager),
       );
-      
-      fallbackTasks.forEach(task => this.taskManager!.addTask(task));
-      
+
+      fallbackTasks.forEach((task) => this.taskManager!.addTask(task));
+
       // 不抛出错误，让 TaskManager 处理 fallback 任务
       // 如果 fallback 任务失败，会在它们的 execute 中抛出错误
     } else {
       // 如果没有taskManager，抛出错误让外层处理
-      throw new Error('Merged download failed and no task manager for fallback');
+      throw new Error(
+        'Merged download failed and no task manager for fallback',
+      );
     }
   }
-  
+
   // 处理合并下载的日志输出
   private logMergedResults(isSuccess: boolean, errorMsg?: string) {
     if (isSuccess) {
       // 检查每个文件的状态
-      let hasAnyFailure = false;
-      
-      this.virtualFile._mergedInfo.files.forEach(file => {
-        const mode = getFileInstallMode(file, this.context.local, this.context.hashKey);
-        
-        if (file.failed && (file as any).errorMessage) {
+
+      this.virtualFile._mergedInfo.files.forEach((file) => {
+        const mode = getFileInstallMode(
+          file,
+          this.context.local,
+          this.context.hashKey,
+        );
+
+        if (file.failed && (file as VirtualMergedFile).errorMessage) {
           // 单个文件失败
-          logMergedFileResult(file, mode.toUpperCase(), false, (file as any).errorMessage);
-          hasAnyFailure = true;
+          logMergedFileResult(
+            file,
+            mode.toUpperCase(),
+            false,
+            (file as VirtualMergedFile).errorMessage,
+          );
         } else {
           // 单个文件成功
           logMergedFileResult(file, mode.toUpperCase(), true);
         }
       });
-      
+
       // 输出汇总日志
       logMergedGroupResult(this.virtualFile._mergedInfo.files, true);
     } else {
@@ -280,30 +312,34 @@ export class MergedGroupTask implements DownloadTask {
       logMergedGroupResult(this.virtualFile._mergedInfo.files, false, errorMsg);
     }
   }
+
+  isLocalTask(): boolean {
+    return false;
+  }
 }
 
 // 释放任务管理器
 export class DownloadTaskManager {
   private largeTaskQueue: Array<DownloadTask> = [];
   private smallTaskQueue: Array<DownloadTask> = [];
-  private localTaskQueue: Array<DownloadTask> = [];  // 新增：local文件独立队列
+  private localTaskQueue: Array<DownloadTask> = []; // 新增：local文件独立队列
   private largeTaskRunning = 0;
   private smallTaskRunning = 0;
-  private localTaskRunning = 0;  // 新增：local任务运行计数
+  private localTaskRunning = 0; // 新增：local任务运行计数
   private allTasks = new Set<DownloadTask>();
   private completedTasks = new Set<DownloadTask>();
   private failedTasks = new Set<DownloadTask>();
 
-  private readonly LARGE_CONCURRENT = 7;
-  private readonly SMALL_CONCURRENT = 9;
-  private readonly LOCAL_CONCURRENT = 16;  // 新增：local文件并发数
+  private readonly LARGE_CONCURRENT = 5;
+  private readonly SMALL_CONCURRENT = 11;
+  private readonly LOCAL_CONCURRENT = 16; // 新增：local文件并发数
   private sizeThreshold: number;
 
   // 解析任务完成的Promise
   private resolveCompletion?: () => void;
-  private rejectCompletion?: (error: any) => void;  // 新增：错误回调
+  private rejectCompletion?: (error: unknown) => void; // 新增：错误回调
   private completionPromise?: Promise<void>;
-  private hasError = false;  // 新增：错误标记
+  private hasError = false; // 新增：错误标记
 
   constructor(files: (DfsUpdateTask | VirtualMergedFile)[] = []) {
     this.sizeThreshold = this.calculateOptimalThreshold(files);
@@ -312,43 +348,50 @@ export class DownloadTaskManager {
       largeSlots: this.LARGE_CONCURRENT,
       smallSlots: this.SMALL_CONCURRENT,
       localSlots: this.LOCAL_CONCURRENT,
-      totalFiles: files.length
+      totalFiles: files.length,
     });
   }
 
   // 计算最优阈值
-  private calculateOptimalThreshold(files: (DfsUpdateTask | VirtualMergedFile)[]): number {
+  private calculateOptimalThreshold(
+    files: (DfsUpdateTask | VirtualMergedFile)[],
+  ): number {
     if (files.length === 0) return 1024 * 1024; // 默认1MB
 
-    const sizes = files.map(f => {
-      if ((f as VirtualMergedFile)._isMergedGroup) {
-        return (f as VirtualMergedFile)._mergedInfo.totalEffectiveSize;
-      }
-      return f.size;
-    }).sort((a, b) => b - a);
+    const sizes = files
+      .map((f) => {
+        if ((f as VirtualMergedFile)._isMergedGroup) {
+          return (f as VirtualMergedFile)._mergedInfo.totalEffectiveSize;
+        }
+        return f.size;
+      })
+      .sort((a, b) => b - a);
 
     if (sizes.length <= 3) return 0;
 
     // 目标：让大文件数量在2-4个之间
-    const targetLargeFiles = Math.min(4, Math.max(2, Math.floor(sizes.length * 0.3)));
+    const targetLargeFiles = Math.min(
+      5,
+      Math.max(2, Math.floor(sizes.length * 0.3)),
+    );
     const thresholdIndex = Math.min(targetLargeFiles, sizes.length - 1);
-    
+
     return sizes[thresholdIndex] * 0.8; // 稍微降低阈值确保分类合理
   }
 
   // 添加任务到相应队列
   addTask(task: DownloadTask): void {
     this.allTasks.add(task);
-    
+
     // 检查是否为local任务
-    if ((task as any).isLocalTask && (task as any).isLocalTask()) {
+    if (task.isLocalTask()) {
       this.localTaskQueue.push(task);
     } else if (task.getSize() >= this.sizeThreshold) {
       this.largeTaskQueue.push(task);
     } else {
       this.smallTaskQueue.push(task);
     }
-    
+
     this.tryStartTasks();
   }
 
@@ -358,40 +401,49 @@ export class DownloadTaskManager {
     if (this.hasError) return;
 
     // 启动local文件任务（最高并发度）
-    while (this.localTaskRunning < this.LOCAL_CONCURRENT && this.localTaskQueue.length > 0) {
+    while (
+      this.localTaskRunning < this.LOCAL_CONCURRENT &&
+      this.localTaskQueue.length > 0
+    ) {
       const task = this.localTaskQueue.shift()!;
       this.localTaskRunning++;
       // 添加错误处理，捕获未捕获的 Promise rejection
-      this.executeTask(task, 'local').catch(error => {
+      this.executeTask(task, 'local').catch((error) => {
         this.handleTaskError(error);
       });
     }
 
     // 启动大文件任务
-    while (this.largeTaskRunning < this.LARGE_CONCURRENT && this.largeTaskQueue.length > 0) {
+    while (
+      this.largeTaskRunning < this.LARGE_CONCURRENT &&
+      this.largeTaskQueue.length > 0
+    ) {
       const task = this.largeTaskQueue.shift()!;
       this.largeTaskRunning++;
-      this.executeTask(task, 'large').catch(error => {
+      this.executeTask(task, 'large').catch((error) => {
         this.handleTaskError(error);
       });
     }
 
     // 启动小文件任务
-    while (this.smallTaskRunning < this.SMALL_CONCURRENT && this.smallTaskQueue.length > 0) {
+    while (
+      this.smallTaskRunning < this.SMALL_CONCURRENT &&
+      this.smallTaskQueue.length > 0
+    ) {
       const task = this.smallTaskQueue.shift()!;
       this.smallTaskRunning++;
-      this.executeTask(task, 'small').catch(error => {
+      this.executeTask(task, 'small').catch((error) => {
         this.handleTaskError(error);
       });
     }
   }
 
   // 统一错误处理
-  private handleTaskError(error: any): void {
+  private handleTaskError(error: unknown): void {
     if (this.hasError) return; // 避免重复处理
 
     this.hasError = true;
-    
+
     // 立即 reject，终止安装流程
     if (this.rejectCompletion) {
       this.rejectCompletion(error);
@@ -401,7 +453,10 @@ export class DownloadTaskManager {
   }
 
   // 执行任务（带重试机制）
-  private async executeTask(task: DownloadTask, type: 'large' | 'small' | 'local'): Promise<void> {
+  private async executeTask(
+    task: DownloadTask,
+    type: 'large' | 'small' | 'local',
+  ): Promise<void> {
     try {
       // 对于MergedGroupTask，不使用外层重试，因为它有内部重试+fallback机制
       if (task instanceof MergedGroupTask) {
@@ -409,10 +464,10 @@ export class DownloadTaskManager {
         this.completedTasks.add(task);
         return;
       }
-      
+
       // 对于其他任务，保持原有的3次重试机制
       const maxRetries = 3;
-      let lastError: any = null;
+      let lastError: unknown = null;
 
       for (let attempt = 1; attempt <= maxRetries; attempt++) {
         try {
@@ -422,13 +477,15 @@ export class DownloadTaskManager {
           return; // 成功，退出重试循环
         } catch (error) {
           lastError = error;
-          
+
           if (attempt === maxRetries) {
             // 所有重试都失败了
             this.failedTasks.add(task);
             // 失败：统一日志格式将在task.execute()内部处理
             // 停止安装流程，使用用户友好的错误格式
-            throw new Error(`释放文件 ${task.getDisplayName()} 失败：\n${lastError}`);
+            throw new Error(
+              `释放文件 ${task.getDisplayName()} 失败：\n${lastError}`,
+            );
           }
         }
       }
@@ -447,7 +504,7 @@ export class DownloadTaskManager {
       } else if (type === 'local') {
         this.localTaskRunning--;
       }
-      
+
       // 延迟执行检查，让 .catch() 有机会先处理错误
       setTimeout(() => {
         if (!this.hasError) {
@@ -466,14 +523,20 @@ export class DownloadTaskManager {
     }
 
     const totalProcessed = this.completedTasks.size + this.failedTasks.size;
-    const allQueuesEmpty = this.largeTaskQueue.length === 0 && 
-                           this.smallTaskQueue.length === 0 && 
-                           this.localTaskQueue.length === 0;
-    const noRunningTasks = this.largeTaskRunning === 0 && 
-                          this.smallTaskRunning === 0 && 
-                          this.localTaskRunning === 0;
+    const allQueuesEmpty =
+      this.largeTaskQueue.length === 0 &&
+      this.smallTaskQueue.length === 0 &&
+      this.localTaskQueue.length === 0;
+    const noRunningTasks =
+      this.largeTaskRunning === 0 &&
+      this.smallTaskRunning === 0 &&
+      this.localTaskRunning === 0;
 
-    if (totalProcessed === this.allTasks.size && allQueuesEmpty && noRunningTasks) {
+    if (
+      totalProcessed === this.allTasks.size &&
+      allQueuesEmpty &&
+      noRunningTasks
+    ) {
       log('All tasks completed');
       if (this.resolveCompletion) {
         this.resolveCompletion();
@@ -489,7 +552,7 @@ export class DownloadTaskManager {
     if (!this.completionPromise) {
       this.completionPromise = new Promise<void>((resolve, reject) => {
         this.resolveCompletion = resolve;
-        this.rejectCompletion = reject;  // 保存 reject 回调
+        this.rejectCompletion = reject; // 保存 reject 回调
         this.checkCompletion(); // 立即检查一次
       });
     }
@@ -509,7 +572,7 @@ export class DownloadTaskManager {
       largeQueued: this.largeTaskQueue.length,
       smallQueued: this.smallTaskQueue.length,
       localQueued: this.localTaskQueue.length,
-      threshold: this.sizeThreshold
+      threshold: this.sizeThreshold,
     };
   }
 }

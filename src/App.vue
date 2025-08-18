@@ -539,21 +539,17 @@
 </style>
 <script lang="ts" setup>
 import { computed, onMounted, reactive, ref, watch } from 'vue';
-import { mapLimit } from 'async';
 import Checkbox from './Checkbox.vue';
 import CircleSuccess from './CircleSuccess.vue';
 import IconEdit from './IconEdit.vue';
 import { getCurrentWindow, invoke, sep } from './tauri';
 import {
   getDfsMetadata,
-  runDfsDownload,
   cleanupAllDfs2Sessions,
   collectDfs2Ranges,
   dfsIndexCache,
   createDfs2Session,
   preprocessFiles,
-  runMergedGroupDownload,
-  fallbackToIndividualDownload,
   getFileInstallMode,
 } from './dfs';
 import { pluginManager } from './plugins';
@@ -926,7 +922,7 @@ async function runInstall(): Promise<void> {
       },
       needElevate.value,
     )
-  ).map((e: { file_name: string }) => {
+  ).map((e) => {
     return {
       ...e,
       file_name: e.file_name.replace(source.value, ''),

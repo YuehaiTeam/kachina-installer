@@ -2,6 +2,7 @@
 
 use crate::dfs::InsightItem;
 use serde::Serialize;
+use std::sync::{Arc, Mutex};
 
 // Just extending the `anyhow::Error`
 #[derive(Debug)]
@@ -165,5 +166,18 @@ impl TACommandError {
             error,
             insight: Some(insight),
         }
+    }
+
+    pub fn with_insight_handle(
+        error: anyhow::Error,
+        insight_handle: Arc<Mutex<InsightItem>>,
+    ) -> Self {
+        let insight = if let Ok(insight) = insight_handle.lock() {
+            Some(insight.clone())
+        } else {
+            None
+        };
+
+        Self { error, insight }
     }
 }

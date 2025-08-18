@@ -1,24 +1,179 @@
 use async_compression::tokio::bufread::ZstdDecoder as TokioZstdDecoder;
+use bytes::Bytes;
 use fmmap::tokio::AsyncMmapFileExt;
-use futures::StreamExt;
+use futures::Stream;
+use futures::{StreamExt, TryStreamExt};
 use serde::Serialize;
 use std::{
     os::windows::fs::MetadataExt,
     path::{Path, PathBuf},
+    pin::Pin,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc, Mutex,
+    },
+    task::{Context as TaskContext, Poll},
+    time::Instant,
 };
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader, ReadBuf};
 
 use crate::{
     dfs::InsightItem,
     installer::uninstall::DELETE_SELF_ON_EXIT_PATH,
     local::mmap,
     utils::{
-        download_monitor::DownloadMonitor, error::TAResult, hash::run_hash,
-        progressed_read::ReadWithCallback, url::HttpContextExt,
+        error::TAResult, hash::run_hash, progressed_read::ReadWithCallback, url::HttpContextExt,
     },
     REQUEST_CLIENT,
 };
 use anyhow::{Context, Result};
+
+pub struct NetworkInsightStream<S> {
+    inner: S,
+    insight: Arc<Mutex<InsightItem>>,
+    network_bytes: Arc<AtomicU64>,
+    response_received_time: Instant,
+}
+
+// 为AsyncRead实现
+impl<S: AsyncRead + Unpin> AsyncRead for NetworkInsightStream<S> {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut TaskContext<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        let before_len = buf.filled().len();
+        let result = Pin::new(&mut self.inner).poll_read(cx, buf);
+
+        match &result {
+            Poll::Ready(Ok(())) => {
+                let bytes_read = buf.filled().len() - before_len;
+                if bytes_read > 0 {
+                    // 原子更新网络字节数（高频操作，避免锁）
+                    let total_bytes = self
+                        .network_bytes
+                        .fetch_add(bytes_read as u64, Ordering::Relaxed)
+                        + bytes_read as u64;
+
+                    // 更新insight（使用try_lock避免阻塞）
+                    if let Ok(mut insight) = self.insight.try_lock() {
+                        insight.size = total_bytes as u32;
+                        insight.time = self.response_received_time.elapsed().as_millis() as u32;
+                    }
+                }
+            }
+            Poll::Ready(Err(e)) => {
+                // 错误情况统一处理
+                if let Ok(mut insight) = self.insight.try_lock() {
+                    insight.error = Some(e.to_string());
+                    insight.time = self.response_received_time.elapsed().as_millis() as u32;
+                    insight.size = self.network_bytes.load(Ordering::Relaxed) as u32;
+                }
+            }
+            _ => {}
+        }
+        result
+    }
+}
+
+// 为Stream实现
+impl<S, E> Stream for NetworkInsightStream<S>
+where
+    S: Stream<Item = Result<Bytes, E>> + Unpin,
+    E: std::fmt::Display,
+{
+    type Item = Result<Bytes, E>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<Option<Self::Item>> {
+        let result = Pin::new(&mut self.inner).poll_next(cx);
+
+        match &result {
+            Poll::Ready(Some(Ok(bytes))) => {
+                // 原子更新网络字节数
+                let total_bytes = self
+                    .network_bytes
+                    .fetch_add(bytes.len() as u64, Ordering::Relaxed)
+                    + bytes.len() as u64;
+
+                // 更新insight
+                if let Ok(mut insight) = self.insight.try_lock() {
+                    insight.size = total_bytes as u32;
+                    insight.time = self.response_received_time.elapsed().as_millis() as u32;
+                }
+            }
+            Poll::Ready(Some(Err(e))) => {
+                // 错误情况统一处理
+                if let Ok(mut insight) = self.insight.try_lock() {
+                    insight.error = Some(e.to_string());
+                    insight.time = self.response_received_time.elapsed().as_millis() as u32;
+                    insight.size = self.network_bytes.load(Ordering::Relaxed) as u32;
+                }
+            }
+            Poll::Ready(None) => {
+                // 流结束，最终更新时间
+                if let Ok(mut insight) = self.insight.try_lock() {
+                    insight.time = self.response_received_time.elapsed().as_millis() as u32;
+                    insight.size = self.network_bytes.load(Ordering::Relaxed) as u32;
+                }
+            }
+            _ => {}
+        }
+        result
+    }
+}
+
+impl<S> NetworkInsightStream<S> {
+    pub fn new(
+        stream: S,
+        url: String,
+        range: Vec<(u32, u32)>,
+        request_start_time: Instant,
+        response_received_time: Instant,
+    ) -> Self {
+        let ttfb = request_start_time.elapsed().as_millis() as u32;
+
+        let insight = Arc::new(Mutex::new(InsightItem {
+            url,
+            ttfb,
+            time: 0,
+            size: 0,
+            error: None,
+            range,
+            mode: None,
+        }));
+
+        Self {
+            inner: stream,
+            insight,
+            network_bytes: Arc::new(AtomicU64::new(0)),
+            response_received_time,
+        }
+    }
+
+    /// 获取insight的共享引用，外部可以通过这个引用访问最新数据
+    /// 🔑 关键方法：解决解压缩包装问题
+    pub fn get_insight_handle(&self) -> Arc<Mutex<InsightItem>> {
+        self.insight.clone()
+    }
+
+    /// 获取当前insight的快照
+    pub fn get_insight_snapshot(&self) -> InsightItem {
+        if let Ok(insight) = self.insight.lock() {
+            insight.clone()
+        } else {
+            // fallback
+            InsightItem {
+                url: "unknown".to_string(),
+                ttfb: 0,
+                time: 0,
+                size: self.network_bytes.load(Ordering::Relaxed) as u32,
+                error: Some("Failed to lock insight".to_string()),
+                range: vec![],
+                mode: None,
+            }
+        }
+    }
+}
 
 #[derive(Serialize, Debug, Clone)]
 pub struct Metadata {
@@ -152,59 +307,65 @@ pub async fn create_http_stream(
     skip_decompress: bool,
 ) -> Result<
     (
-        Box<dyn tokio::io::AsyncRead + Unpin + std::marker::Send>,
+        Box<dyn AsyncRead + Unpin + Send>,
         u64,
-        Option<InsightItem>,
+        Arc<Mutex<InsightItem>>,
     ),
     anyhow::Error,
 > {
-    let start_time = std::time::Instant::now();
+    let request_start_time = Instant::now();
+    let has_range = size > 0;
 
-    let mut res = REQUEST_CLIENT.get(url);
-    let has_range = offset > 0 || size > 0;
+    // 构建HTTP请求
+    let mut builder = REQUEST_CLIENT.get(url);
     if has_range {
-        res = res.header("Range", format!("bytes={}-{}", offset, offset + size - 1));
+        builder = builder.header("Range", format!("bytes={}-{}", offset, offset + size - 1));
     }
 
-    let res = res
+    // 发送请求
+    let res = builder
         .send()
         .await
         .with_http_context("create_http_stream", url);
+    let response_received_time = Instant::now();
+
     let res = match res {
         Ok(r) => r,
         Err(e) => {
-            let insight = InsightItem {
+            // 创建错误insight并立即返回
+            let insight = Arc::new(Mutex::new(InsightItem {
                 url: url.to_string(),
-                ttfb: start_time.elapsed().as_millis() as u32,
+                ttfb: request_start_time.elapsed().as_millis() as u32,
                 time: 0,
                 size: 0,
+                error: Some(e.to_string()),
                 range: if has_range {
                     vec![(offset as u32, (offset + size - 1) as u32)]
                 } else {
                     vec![]
                 },
-                error: Some(e.to_string()),
-            };
-            return Err(crate::utils::error::TACommandError::with_insight(e, insight).error);
+                mode: None,
+            }));
+            return Err(crate::utils::error::TACommandError::with_insight_handle(e, insight).error);
         }
     };
 
-    let ttfb = start_time.elapsed().as_millis() as u32;
+    // HTTP状态码检查
     let code = res.status();
-
     if (!has_range && code != 200) || (has_range && code != 206) {
-        let insight = InsightItem {
+        let insight = Arc::new(Mutex::new(InsightItem {
             url: url.to_string(),
-            ttfb,
+            ttfb: request_start_time.elapsed().as_millis() as u32,
             time: 0,
             size: 0,
+            error: Some(format!("HTTP status error: {}", code)),
             range: if has_range {
                 vec![(offset as u32, (offset + size - 1) as u32)]
             } else {
                 vec![]
             },
-            error: Some(format!("HTTP status error: {}", code)),
-        };
+            mode: None,
+        }));
         let error = anyhow::Error::new(std::io::Error::other(format!(
             "URL {} returned {}",
             crate::utils::url::sanitize_url_for_logging(url),
@@ -215,31 +376,37 @@ pub async fn create_http_stream(
             url,
             "HTTP_STATUS_ERR",
         ));
-        return Err(crate::utils::error::TACommandError::with_insight(error, insight).error);
+        return Err(crate::utils::error::TACommandError::with_insight_handle(error, insight).error);
     }
 
     let content_length = res.content_length().unwrap_or(0);
-    let stream = futures::TryStreamExt::map_err(res.bytes_stream(), std::io::Error::other);
-    let reader = tokio_util::io::StreamReader::new(stream);
+    let stream = res.bytes_stream();
+    let reader = tokio_util::io::StreamReader::new(stream.map_err(std::io::Error::other));
 
-    let insight = InsightItem {
-        url: url.to_string(),
-        ttfb,
-        time: 0, // 将在progressed_copy中更新
-        size: 0, // 将在progressed_copy中更新
-        range: if has_range {
+    // 创建NetworkInsightStream包装
+    let insight_stream = NetworkInsightStream::new(
+        reader,
+        url.to_string(),
+        if has_range {
             vec![(offset as u32, (offset + size - 1) as u32)]
         } else {
             vec![]
         },
-        error: None,
-    };
+        request_start_time,
+        response_received_time,
+    );
+
+    let insight_handle = insight_stream.get_insight_handle();
 
     if skip_decompress {
-        return Ok((Box::new(reader), content_length, Some(insight)));
+        Ok((Box::new(insight_stream), content_length, insight_handle))
+    } else {
+        // 在NetworkInsightStream外层套一个BufReader，然后再解压缩
+        let buf_reader = BufReader::new(insight_stream);
+        let decompressed = TokioZstdDecoder::new(buf_reader);
+        // ✅ 关键：即使被解压缩包装，insight_handle仍然可用！
+        Ok((Box::new(decompressed), content_length, insight_handle))
     }
-    let decoder = TokioZstdDecoder::new(reader);
-    Ok((Box::new(decoder), content_length, Some(insight)))
 }
 
 fn parse_range_string(range: &str) -> Vec<(u32, u32)> {
@@ -258,12 +425,12 @@ pub async fn create_multi_http_stream(
     url: &str,
     range: &str,
 ) -> TAResult<(
-    Box<dyn futures::Stream<Item = reqwest::Result<bytes::Bytes>> + Send + Unpin>,
+    Box<dyn Stream<Item = reqwest::Result<Bytes>> + Send + Unpin>,
     u64,
     String,
-    InsightItem,
+    Arc<Mutex<InsightItem>>,
 )> {
-    let start_time = std::time::Instant::now();
+    let request_start_time = Instant::now();
     let range_info = parse_range_string(range);
 
     let res = REQUEST_CLIENT
@@ -272,47 +439,49 @@ pub async fn create_multi_http_stream(
         .send()
         .await
         .with_http_context("create_multi_http_stream", url);
+    let response_received_time = Instant::now();
 
     let res = match res {
         Ok(r) => r,
         Err(e) => {
-            let insight = InsightItem {
+            let insight = Arc::new(Mutex::new(InsightItem {
                 url: url.to_string(),
-                ttfb: start_time.elapsed().as_millis() as u32,
+                ttfb: request_start_time.elapsed().as_millis() as u32,
                 time: 0,
                 size: 0,
-                range: range_info,
                 error: Some(e.to_string()),
-            };
-            return Err(crate::utils::error::TACommandError::with_insight(
+                range: range_info,
+                mode: None,
+            }));
+            return Err(crate::utils::error::TACommandError::with_insight_handle(
                 e, insight,
             ));
         }
     };
 
-    let ttfb = start_time.elapsed().as_millis() as u32;
+    // HTTP状态码检查
     let code = res.status();
-
     if code != 206 {
-        let insight = InsightItem {
+        let insight = Arc::new(Mutex::new(InsightItem {
             url: url.to_string(),
-            ttfb,
+            ttfb: request_start_time.elapsed().as_millis() as u32,
             time: 0,
             size: 0,
-            range: range_info,
             error: Some(format!("HTTP status error: {}", code)),
-        };
+            range: range_info,
+            mode: None,
+        }));
         let error = anyhow::Error::new(std::io::Error::other(format!(
             "URL {} returned {}",
             crate::utils::url::sanitize_url_for_logging(url),
             code
         )))
         .context(crate::utils::url::create_reqwest_context(
-            "create_http_stream",
+            "create_multi_http_stream",
             url,
             "HTTP_STATUS_ERR",
         ));
-        return Err(crate::utils::error::TACommandError::with_insight(
+        return Err(crate::utils::error::TACommandError::with_insight_handle(
             error, insight,
         ));
     }
@@ -325,20 +494,22 @@ pub async fn create_multi_http_stream(
         .unwrap_or("application/octet-stream")
         .to_string();
 
-    let insight = InsightItem {
-        url: url.to_string(),
-        ttfb,
-        time: 0, // 将在multipart处理中更新
-        size: 0, // 将在multipart处理中更新
-        range: range_info,
-        error: None,
-    };
+    // 创建NetworkInsightStream包装HTTP响应流
+    let insight_stream = NetworkInsightStream::new(
+        res.bytes_stream(),
+        url.to_string(),
+        range_info,
+        request_start_time,
+        response_received_time,
+    );
+
+    let insight_handle = insight_stream.get_insight_handle();
 
     Ok((
-        Box::new(Box::pin(res.bytes_stream())),
+        Box::new(Box::pin(insight_stream)),
         content_length,
         content_type,
-        insight,
+        insight_handle,
     ))
 }
 
@@ -395,59 +566,21 @@ pub async fn create_target_file(target: &str) -> Result<impl AsyncWrite, anyhow:
 }
 
 pub async fn progressed_copy(
-    source: impl AsyncRead + std::marker::Unpin,
-    target: impl AsyncWrite + std::marker::Unpin,
-    on_progress: impl Fn(usize),
-) -> Result<usize, anyhow::Error> {
-    progressed_copy_with_insight(source, target, on_progress, None, true)
-        .await
-        .map(|(size, _)| size)
-}
-
-pub async fn progressed_copy_with_insight(
     mut source: impl AsyncRead + std::marker::Unpin,
     mut target: impl AsyncWrite + std::marker::Unpin,
     on_progress: impl Fn(usize),
-    mut insight: Option<InsightItem>,
-    disable_timeout_check: bool,
-) -> Result<(usize, Option<InsightItem>), anyhow::Error> {
-    let download_start = std::time::Instant::now();
+) -> Result<usize, anyhow::Error> {
     let mut downloaded = 0;
     let mut boxed = Box::new([0u8; 256 * 1024]);
     let buffer = &mut *boxed;
     let mut now = std::time::Instant::now();
 
-    // Create monitor only if timeout checking is enabled
-    let mut monitor = if disable_timeout_check {
-        None
-    } else {
-        Some(DownloadMonitor::new())
-    };
-
     loop {
         let read = source.read(buffer).await.context("DECOMPRESS_ERR")?;
         if read == 0 {
-            // 网络流读取完成，更新时间统计
-            if let Some(ref mut insight) = insight {
-                insight.time = download_start.elapsed().as_millis() as u32;
-                insight.size = downloaded as u32;
-            }
             break;
         }
         downloaded += read;
-
-        // Check for timeout if monitor is enabled
-        if let Some(ref mut monitor) = monitor {
-            if let Err(e) = monitor.check_stall(downloaded) {
-                // Update insight with error information
-                if let Some(ref mut insight) = insight {
-                    insight.error = Some(e.to_string());
-                    insight.time = download_start.elapsed().as_millis() as u32;
-                    insight.size = downloaded as u32;
-                }
-                return Err(e);
-            }
-        }
 
         if now.elapsed().as_millis() >= 20 {
             now = std::time::Instant::now();
@@ -459,11 +592,10 @@ pub async fn progressed_copy_with_insight(
             .context("WRITE_TARGET_ERR")?;
     }
 
-    // 本地I/O操作（不计入网络时间）
     target.flush().await.context("FLUSH_TARGET_ERR")?;
     on_progress(downloaded);
 
-    Ok((downloaded, insight))
+    Ok(downloaded)
 }
 
 pub async fn progressed_hpatch<R, F>(

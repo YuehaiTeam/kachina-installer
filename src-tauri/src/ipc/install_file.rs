@@ -15,7 +15,7 @@ use async_compression::tokio::bufread::ZstdDecoder as TokioZstdDecoder;
 use futures::TryStreamExt;
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncRead, AsyncReadExt, BufReader};
 
@@ -206,7 +206,7 @@ async fn create_stream_by_source(
     source: InstallFileSource,
 ) -> Result<(
     Box<dyn tokio::io::AsyncRead + Unpin + std::marker::Send>,
-    Option<InsightItem>,
+    Option<Arc<Mutex<InsightItem>>>,
 )> {
     match source {
         InstallFileSource::Url {
@@ -215,9 +215,9 @@ async fn create_stream_by_source(
             size,
             skip_decompress,
         } => {
-            let (stream, _content_length, insight) =
+            let (stream, _content_length, insight_handle) =
                 create_http_stream(&url, offset, size, skip_decompress).await?;
-            Ok((stream, insight))
+            Ok((stream, Some(insight_handle)))
         }
         InstallFileSource::Local {
             offset,
@@ -240,15 +240,40 @@ pub async fn ipc_install_file(
     };
     match args.mode {
         InstallFileMode::Direct { source } => {
-            let (stream, insight) = create_stream_by_source(source).await?;
-            let (bytes_transferred, final_insight) = crate::fs::progressed_copy_with_insight(
+            let (stream, insight_handle) = create_stream_by_source(source).await?;
+            let bytes_transferred = match crate::fs::progressed_copy(
                 stream,
                 create_target_file(&target).await?,
                 progress_noti,
-                insight,
-                false, // Enable timeout checking for single file downloads
             )
-            .await?;
+            .await
+            {
+                Ok(bytes) => bytes,
+                Err(e) => {
+                    if let Some(handle) = &insight_handle {
+                        if let Ok(mut insight) = handle.lock() {
+                            insight.error = Some(e.to_string());
+                        }
+                        return Err(crate::utils::error::TACommandError::with_insight_handle(
+                            e,
+                            handle.clone(),
+                        ));
+                    } else {
+                        return Err(crate::utils::error::TACommandError::new(e));
+                    }
+                }
+            };
+
+            // 获取最终的insight
+            let final_insight = if let Some(handle) = insight_handle {
+                if let Ok(insight) = handle.lock() {
+                    Some(insight.clone())
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
 
             if args.md5.is_some() || args.xxh.is_some() {
                 // 如果需要清理installer索引标记，先清理再进行hash校验
@@ -276,16 +301,27 @@ pub async fn ipc_install_file(
         }
         InstallFileMode::Patch { source, diff_size } => {
             let is_self_update = override_old_path.is_some();
-            let (stream, insight) = create_stream_by_source(source).await?;
-            let (bytes_transferred, final_insight) = progressed_hpatch(
+            let (stream, insight_handle) = create_stream_by_source(source).await?;
+            let (bytes_transferred, _) = progressed_hpatch(
                 stream,
                 &target,
                 diff_size,
                 progress_noti,
                 override_old_path,
-                insight,
+                None, // 传入None，因为现在insight由handle管理
             )
             .await?;
+
+            // 获取最终的insight
+            let final_insight = if let Some(handle) = insight_handle {
+                if let Ok(insight) = handle.lock() {
+                    Some(insight.clone())
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
 
             if args.md5.is_some() || args.xxh.is_some() {
                 // 如果需要清理installer索引标记，先清理再进行hash校验
@@ -322,9 +358,20 @@ pub async fn ipc_install_file(
                 InstallFileSource::Url { size, .. } => size,
                 InstallFileSource::Local { size, .. } => size,
             };
-            let (diff_stream, diff_insight) = create_stream_by_source(diff).await?;
-            let (diff_bytes, final_insight) =
-                progressed_hpatch(diff_stream, &target, size, |_| {}, None, diff_insight).await?;
+            let (diff_stream, insight_handle) = create_stream_by_source(diff).await?;
+            let (diff_bytes, _) =
+                progressed_hpatch(diff_stream, &target, size, |_| {}, None, None).await?;
+
+            // 获取最终的insight
+            let final_insight = if let Some(handle) = insight_handle {
+                if let Ok(insight) = handle.lock() {
+                    Some(insight.clone())
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
 
             if args.md5.is_some() || args.xxh.is_some() {
                 // 如果需要清理installer索引标记，先清理再进行hash校验
@@ -435,8 +482,7 @@ pub async fn ipc_install_multipart_stream(
     args: InstallMultiStreamArgs,
     notify: impl Fn(serde_json::Value) + std::marker::Send + 'static + Clone,
 ) -> TAResult<serde_json::Value> {
-    let download_start = std::time::Instant::now();
-    let (http_stream, content_length, content_type, mut insight) =
+    let (http_stream, content_length, content_type, insight_handle) =
         create_multi_http_stream(&args.url, &args.range).await?;
     // check if content-type is multipart
     if content_type.starts_with("multipart/") {
@@ -551,12 +597,12 @@ pub async fn ipc_install_multipart_stream(
             // Read field data with timeout monitoring
             let mut field_data = Vec::new();
             while let Some(chunk_bytes) = field.chunk().await.map_err(|e| {
-                insight.error = Some(e.to_string());
-                insight.time = download_start.elapsed().as_millis() as u32 - insight.ttfb;
-                insight.size = total_processed as u32;
-                crate::utils::error::TACommandError::with_insight(
+                if let Ok(mut insight) = insight_handle.lock() {
+                    insight.error = Some(e.to_string());
+                }
+                crate::utils::error::TACommandError::with_insight_handle(
                     anyhow::anyhow!("Field chunk read error: {}", e),
-                    insight.clone(),
+                    insight_handle.clone(),
                 )
             })? {
                 field_data.extend_from_slice(&chunk_bytes);
@@ -564,11 +610,12 @@ pub async fn ipc_install_multipart_stream(
 
                 // Check for timeout during multipart field reading
                 if let Err(e) = monitor.check_stall(total_processed) {
-                    insight.error = Some(e.to_string());
-                    insight.time = download_start.elapsed().as_millis() as u32 - insight.ttfb;
-                    insight.size = total_processed as u32;
-                    return Err(crate::utils::error::TACommandError::with_insight(
-                        e, insight,
+                    if let Ok(mut insight) = insight_handle.lock() {
+                        insight.error = Some(e.to_string());
+                    }
+                    return Err(crate::utils::error::TACommandError::with_insight_handle(
+                        e,
+                        insight_handle,
                     ));
                 }
             }
@@ -593,13 +640,24 @@ pub async fn ipc_install_multipart_stream(
 
             chunk_index += 1;
         }
-        // 更新insight统计信息 - multipart请求完成
-        insight.time = download_start.elapsed().as_millis() as u32 - insight.ttfb;
-        insight.size = content_length as u32;
+        // 获取最终的insight统计
+        let final_insight = if let Ok(insight) = insight_handle.lock() {
+            insight.clone()
+        } else {
+            InsightItem {
+                url: args.url.clone(),
+                ttfb: 0,
+                time: 0,
+                size: content_length as u32,
+                error: Some("Failed to get insight".to_string()),
+                range: vec![],
+                mode: None,
+            }
+        };
 
         let response = serde_json::json!({
             "results": mult_res,
-            "insight": insight
+            "insight": final_insight
         });
         Ok(response)
     } else {
@@ -645,13 +703,24 @@ pub async fn ipc_install_multipart_stream(
                         .into_ta_result()
                 };
 
-                // 更新insight统计信息 - 单chunk请求完成
-                insight.time = download_start.elapsed().as_millis() as u32 - insight.ttfb;
-                insight.size = content_length as u32;
+                // 获取最终的insight统计
+                let final_insight = if let Ok(insight) = insight_handle.lock() {
+                    insight.clone()
+                } else {
+                    InsightItem {
+                        url: args.url.clone(),
+                        ttfb: 0,
+                        time: 0,
+                        size: content_length as u32,
+                        error: Some("Failed to get insight".to_string()),
+                        range: vec![],
+                        mode: None,
+                    }
+                };
 
                 let response = serde_json::json!({
                     "results": vec![res],
-                    "insight": insight
+                    "insight": final_insight
                 });
                 Ok(response)
             } else {
@@ -749,7 +818,6 @@ pub async fn ipc_install_multichunk_stream(
     args: InstallMultiStreamArgs,
     notify: impl Fn(serde_json::Value) + std::marker::Send + 'static + Clone,
 ) -> TAResult<serde_json::Value> {
-    let download_start = std::time::Instant::now();
     // Extract chunk positions from InstallFileArgs
     let mut chunks_with_positions: Vec<ChunkWithPosition> = Vec::new();
 
@@ -766,11 +834,11 @@ pub async fn ipc_install_multichunk_stream(
 
     let mut results: Vec<TAResult<serde_json::Value>> = Vec::new();
     let mut stream_position = 0usize;
-    let (http_stream, _content_length, _content_type, mut insight) =
+    let (insight_stream, _content_length, _content_type, insight_handle) =
         create_multi_http_stream(&args.url, &args.range).await?;
 
     // Convert the HTTP stream to AsyncRead
-    let stream = http_stream.map_err(std::io::Error::other);
+    let stream = insight_stream.map_err(std::io::Error::other);
     let mut reader = tokio_util::io::StreamReader::new(stream);
 
     for (chunk_index, chunk_info) in chunks_with_positions.iter().enumerate() {
@@ -809,16 +877,16 @@ pub async fn ipc_install_multichunk_stream(
 
                 _ = monitor_chunk_with_unified_timeout(skip_progress.clone()) => {
                     skip_progress.set_processing(false);
-                    Err(crate::utils::error::TACommandError::new(anyhow::anyhow!(
+                    Err(crate::utils::error::TACommandError::with_insight_handle(anyhow::anyhow!(
                         "Skip operation stalled: speed <= 1KB/s for 5+ seconds"
-                    )))
+                    ), insight_handle.clone()))
                 }
             };
 
             skip_result.inspect_err(|e| {
-                insight.error = Some(e.to_string());
-                insight.time = download_start.elapsed().as_millis() as u32 - insight.ttfb;
-                insight.size = stream_position as u32;
+                if let Ok(mut insight) = insight_handle.lock() {
+                    insight.error = Some(e.to_string());
+                }
             })?;
 
             stream_position = chunk_offset;
@@ -830,13 +898,13 @@ pub async fn ipc_install_multichunk_stream(
         // Read chunk data into memory buffer first
         let mut chunk_buffer = vec![0u8; chunk_size];
         reader.read_exact(&mut chunk_buffer).await.map_err(|e| {
-            insight.error = Some(e.to_string());
-            insight.time = download_start.elapsed().as_millis() as u32 - insight.ttfb;
-            insight.size = stream_position as u32;
-            crate::utils::error::TACommandError::new(anyhow::anyhow!(
-                "Failed to read chunk data: {}",
-                e
-            ))
+            if let Ok(mut insight) = insight_handle.lock() {
+                insight.error = Some(e.to_string());
+            }
+            crate::utils::error::TACommandError::with_insight_handle(
+                anyhow::anyhow!("Failed to read chunk data: {}", e),
+                insight_handle.clone(),
+            )
         })?;
 
         let chunk_reader = std::io::Cursor::new(chunk_buffer);
@@ -857,31 +925,42 @@ pub async fn ipc_install_multichunk_stream(
 
             _ = monitor_chunk_with_unified_timeout(chunk_progress.clone()) => {
                 chunk_progress.set_processing(false);
-                Err(crate::utils::error::TACommandError::new(anyhow::anyhow!(
+                Err(crate::utils::error::TACommandError::with_insight_handle(anyhow::anyhow!(
                     "Chunk {} processing stalled: speed <= 1KB/s for 5+ seconds",
                     chunk_index
-                )))
+                ), insight_handle.clone()))
             }
         };
 
         // Handle chunk result and update insight if there's an error
         let final_result = chunk_result.inspect_err(|e| {
-            insight.error = Some(e.to_string());
-            insight.time = download_start.elapsed().as_millis() as u32 - insight.ttfb;
-            insight.size = stream_position as u32;
+            if let Ok(mut insight) = insight_handle.lock() {
+                insight.error = Some(e.to_string());
+            }
         });
 
         results.push(final_result);
         stream_position += chunk_size;
     }
 
-    // 更新insight统计信息 - multichunk请求完成
-    insight.time = download_start.elapsed().as_millis() as u32 - insight.ttfb;
-    insight.size = stream_position as u32;
+    // 获取最终的insight统计
+    let final_insight = if let Ok(insight) = insight_handle.lock() {
+        insight.clone()
+    } else {
+        InsightItem {
+            url: args.url.clone(),
+            ttfb: 0,
+            time: 0,
+            size: 0,
+            error: Some("Failed to get insight".to_string()),
+            range: vec![],
+            mode: None,
+        }
+    };
 
     let response = serde_json::json!({
         "results": results,
-        "insight": insight
+        "insight": final_insight
     });
     Ok(response)
 }
