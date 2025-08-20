@@ -4,6 +4,7 @@ on:
   pull_request:
 env:
   CARGO_TERM_COLOR: always
+  RUST_NIGHTLY_VERSION: nightly-2025-08-15
 jobs:
   build:
     runs-on: windows-latest
@@ -12,7 +13,10 @@ jobs:
         with:
           fetch-depth: 0
           fetch-tags: true
-      - run: rustup toolchain install nightly --profile minimal && rustup component add rust-src --toolchain nightly
+      - name: Override rust-toolchain for CI
+        run: |
+          (Get-Content src-tauri/rust-toolchain.toml) -replace 'channel = "nightly"', 'channel = "${{ env.RUST_NIGHTLY_VERSION }}"' | Set-Content src-tauri/rust-toolchain.toml
+      - run: rustup toolchain install ${{ env.RUST_NIGHTLY_VERSION }} --profile minimal && rustup component add rust-src --toolchain ${{ env.RUST_NIGHTLY_VERSION }}
       - uses: Swatinem/rust-cache@v2
         with:
           cache-targets: false
