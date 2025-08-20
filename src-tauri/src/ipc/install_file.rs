@@ -4,124 +4,18 @@ use crate::{
         create_http_stream, create_local_stream, create_multi_http_stream, create_target_file,
         prepare_target, progressed_copy, progressed_hpatch, verify_hash,
     },
-    utils::{
-        download_monitor::DownloadMonitor,
-        error::{IntoTAResult, TAResult},
-    },
+    utils::error::{IntoTAResult, TAResult},
 };
 
 use anyhow::Result;
 use async_compression::tokio::bufread::ZstdDecoder as TokioZstdDecoder;
 use futures::TryStreamExt;
 use serde::{Deserialize, Serialize};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
-use tokio::io::{AsyncRead, AsyncReadExt, BufReader};
+use tokio::io::{AsyncReadExt, BufReader};
 
 fn default_as_false() -> bool {
     false
-}
-
-// Progress tracker for concurrent chunk monitoring
-struct ChunkProgressTracker {
-    current_bytes_processed: Arc<AtomicUsize>,
-    is_processing: Arc<AtomicBool>,
-}
-
-impl ChunkProgressTracker {
-    fn new() -> Self {
-        Self {
-            current_bytes_processed: Arc::new(AtomicUsize::new(0)),
-            is_processing: Arc::new(AtomicBool::new(false)),
-        }
-    }
-
-    fn get_progress(&self) -> usize {
-        self.current_bytes_processed.load(Ordering::Relaxed)
-    }
-
-    fn update_progress(&self, bytes: usize) {
-        self.current_bytes_processed.store(bytes, Ordering::Relaxed);
-    }
-
-    fn set_processing(&self, processing: bool) {
-        self.is_processing.store(processing, Ordering::Relaxed);
-    }
-
-    fn is_processing(&self) -> bool {
-        self.is_processing.load(Ordering::Relaxed)
-    }
-}
-
-// Unified timeout monitoring function with 5s interval and 1KB/s threshold
-async fn monitor_chunk_with_unified_timeout(progress_tracker: Arc<ChunkProgressTracker>) {
-    let mut last_check_time = Instant::now();
-    let mut last_bytes = 0usize;
-
-    // Grace period: wait 10 seconds before starting monitoring
-    tokio::time::sleep(Duration::from_secs(10)).await;
-
-    loop {
-        tokio::time::sleep(Duration::from_secs(5)).await; // Fixed 5-second check interval
-
-        let current_bytes = progress_tracker.get_progress();
-        let now = Instant::now();
-
-        // If processing is complete, exit monitoring
-        if !progress_tracker.is_processing() {
-            return;
-        }
-
-        // Check transfer speed within 5 seconds
-        let bytes_transferred = current_bytes.saturating_sub(last_bytes);
-        let time_elapsed = now.duration_since(last_check_time).as_secs();
-
-        if time_elapsed >= 5 {
-            // Unified standard: speed <= 1KB/s (5KB/5s) is considered stall
-            if bytes_transferred <= 5 * 1024 {
-                return; // Trigger stall detection
-            }
-
-            last_check_time = now;
-            last_bytes = current_bytes;
-        }
-    }
-}
-
-// Skip bytes with progress tracking for concurrent monitoring
-async fn skip_bytes_with_progress<R>(
-    reader: &mut R,
-    skip_bytes: usize,
-    progress_tracker: Arc<ChunkProgressTracker>,
-) -> Result<(), crate::utils::error::TACommandError>
-where
-    R: AsyncReadExt + Unpin,
-{
-    let mut buffer = vec![0u8; 8192]; // 8KB buffer
-    let mut remaining = skip_bytes;
-    let mut total_skipped = 0;
-
-    while remaining > 0 {
-        let to_read = std::cmp::min(buffer.len(), remaining);
-        let bytes_read = reader.read(&mut buffer[..to_read]).await.map_err(|e| {
-            crate::utils::error::TACommandError::new(anyhow::anyhow!("Failed to skip bytes: {}", e))
-        })?;
-
-        if bytes_read == 0 {
-            return Err(crate::utils::error::TACommandError::new(anyhow::anyhow!(
-                "Unexpected EOF while skipping bytes"
-            )));
-        }
-
-        remaining -= bytes_read;
-        total_skipped += bytes_read;
-
-        // Update progress for monitoring
-        progress_tracker.update_progress(total_skipped);
-    }
-
-    Ok(())
 }
 
 // Helper function to check if decompression should be performed based on InstallFileArgs
@@ -497,11 +391,9 @@ pub async fn ipc_install_multipart_stream(
         // Create multipart reader
         let mut multipart = multer::Multipart::new(http_stream, boundary);
 
-        // Process multipart stream and handle chunks with timeout monitoring
+        // Process multipart stream
         let mut mult_res = Vec::new();
         let mut chunk_index = 0usize;
-        let mut monitor = DownloadMonitor::new();
-        let mut total_processed = 0usize;
         while let Some(mut field) = multipart.next_field().await.map_err(|e| {
             crate::utils::error::TACommandError::new(anyhow::anyhow!(
                 "Multipart parsing error: {}",
@@ -594,7 +486,7 @@ pub async fn ipc_install_multipart_stream(
             // 获取chunk的skip_decompress参数
             let should_decompress = should_decompress_chunk(chunk);
 
-            // Read field data with timeout monitoring
+            // Read field data
             let mut field_data = Vec::new();
             while let Some(chunk_bytes) = field.chunk().await.map_err(|e| {
                 if let Ok(mut insight) = insight_handle.lock() {
@@ -606,18 +498,6 @@ pub async fn ipc_install_multipart_stream(
                 )
             })? {
                 field_data.extend_from_slice(&chunk_bytes);
-                total_processed += chunk_bytes.len();
-
-                // Check for timeout during multipart field reading
-                if let Err(e) = monitor.check_stall(total_processed) {
-                    if let Ok(mut insight) = insight_handle.lock() {
-                        insight.error = Some(e.to_string());
-                    }
-                    return Err(crate::utils::error::TACommandError::with_insight_handle(
-                        e,
-                        insight_handle,
-                    ));
-                }
             }
 
             // Create reader from collected field data
@@ -778,42 +658,6 @@ struct ChunkWithPosition {
     args: InstallFileArgs,
 }
 
-// Process chunk with progress tracking for concurrent monitoring
-async fn process_chunk_with_progress<R>(
-    args: InstallFileArgs,
-    chunk_reader: R,
-    should_decompress: bool,
-    chunk_notify: impl Fn(serde_json::Value) + Send + 'static,
-    progress_tracker: Arc<ChunkProgressTracker>,
-) -> TAResult<serde_json::Value>
-where
-    R: AsyncRead + Unpin + Send + 'static,
-{
-    // Wrap chunk_notify to also update progress tracking
-    let progress_notify = {
-        let tracker = progress_tracker.clone();
-        move |value: serde_json::Value| {
-            if let Some(bytes) = value.as_u64() {
-                tracker.update_progress(bytes as usize);
-            }
-            chunk_notify(value);
-        }
-    };
-
-    if should_decompress {
-        let buf_reader = BufReader::new(chunk_reader);
-        let mut decompressed_reader = TokioZstdDecoder::new(buf_reader);
-        install_file_by_reader(args, &mut decompressed_reader, progress_notify)
-            .await
-            .into_ta_result()
-    } else {
-        let mut raw_reader = chunk_reader;
-        install_file_by_reader(args, &mut raw_reader, progress_notify)
-            .await
-            .into_ta_result()
-    }
-}
-
 pub async fn ipc_install_multichunk_stream(
     args: InstallMultiStreamArgs,
     notify: impl Fn(serde_json::Value) + std::marker::Send + 'static + Clone,
@@ -859,40 +703,38 @@ pub async fn ipc_install_multichunk_stream(
             }
         };
 
-        // Skip bytes until we reach the chunk position with concurrent timeout monitoring
+        // Skip bytes until we reach the chunk position
         if stream_position < chunk_info.position {
             let skip_bytes = chunk_info.position - stream_position;
-            let skip_progress = Arc::new(ChunkProgressTracker::new());
-            skip_progress.set_processing(true);
+            let mut buffer = vec![0u8; 8192]; // 8KB buffer
+            let mut remaining = skip_bytes;
 
-            let skip_result = tokio::select! {
-                result = skip_bytes_with_progress(
-                    &mut reader,
-                    skip_bytes,
-                    skip_progress.clone()
-                ) => {
-                    skip_progress.set_processing(false);
-                    result
-                },
+            while remaining > 0 {
+                let to_read = std::cmp::min(buffer.len(), remaining);
+                let bytes_read = reader.read(&mut buffer[..to_read]).await.map_err(|e| {
+                    if let Ok(mut insight) = insight_handle.lock() {
+                        insight.error = Some(e.to_string());
+                    }
+                    crate::utils::error::TACommandError::with_insight_handle(
+                        anyhow::anyhow!("Failed to skip bytes: {}", e),
+                        insight_handle.clone(),
+                    )
+                })?;
 
-                _ = monitor_chunk_with_unified_timeout(skip_progress.clone()) => {
-                    skip_progress.set_processing(false);
-                    Err(crate::utils::error::TACommandError::with_insight_handle(anyhow::anyhow!(
-                        "Skip operation stalled: speed <= 1KB/s for 5+ seconds"
-                    ), insight_handle.clone()))
+                if bytes_read == 0 {
+                    return Err(crate::utils::error::TACommandError::with_insight_handle(
+                        anyhow::anyhow!("Unexpected EOF while skipping bytes"),
+                        insight_handle.clone(),
+                    ));
                 }
-            };
 
-            skip_result.inspect_err(|e| {
-                if let Ok(mut insight) = insight_handle.lock() {
-                    insight.error = Some(e.to_string());
-                }
-            })?;
+                remaining -= bytes_read;
+            }
 
             stream_position = chunk_offset;
         }
 
-        // Process chunk with concurrent timeout monitoring
+        // Process chunk
         let should_decompress = should_decompress_chunk(&chunk_info.args);
 
         // Read chunk data into memory buffer first
@@ -908,28 +750,23 @@ pub async fn ipc_install_multichunk_stream(
         })?;
 
         let chunk_reader = std::io::Cursor::new(chunk_buffer);
-        let chunk_progress = Arc::new(ChunkProgressTracker::new());
-        chunk_progress.set_processing(true);
 
-        let chunk_result = tokio::select! {
-            result = process_chunk_with_progress(
+        // Process chunk directly without timeout monitoring (NetworkInsightStream handles it)
+        let chunk_result = if should_decompress {
+            let buf_reader = BufReader::new(chunk_reader);
+            let mut decompressed_reader = TokioZstdDecoder::new(buf_reader);
+            install_file_by_reader(
                 chunk_info.args.clone(),
-                chunk_reader,
-                should_decompress,
+                &mut decompressed_reader,
                 chunk_notify,
-                chunk_progress.clone()
-            ) => {
-                chunk_progress.set_processing(false);
-                result
-            },
-
-            _ = monitor_chunk_with_unified_timeout(chunk_progress.clone()) => {
-                chunk_progress.set_processing(false);
-                Err(crate::utils::error::TACommandError::with_insight_handle(anyhow::anyhow!(
-                    "Chunk {} processing stalled: speed <= 1KB/s for 5+ seconds",
-                    chunk_index
-                ), insight_handle.clone()))
-            }
+            )
+            .await
+            .into_ta_result()
+        } else {
+            let mut raw_reader = chunk_reader;
+            install_file_by_reader(chunk_info.args.clone(), &mut raw_reader, chunk_notify)
+                .await
+                .into_ta_result()
         };
 
         // Handle chunk result and update insight if there's an error

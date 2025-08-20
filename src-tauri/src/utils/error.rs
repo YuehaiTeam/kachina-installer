@@ -4,6 +4,10 @@ use crate::dfs::InsightItem;
 use serde::Serialize;
 use std::sync::{Arc, Mutex};
 
+// Download error constants
+pub const DOWNLOAD_STALLED: &str = "DOWNLOAD_STALLED";
+pub const DOWNLOAD_TOO_SLOW: &str = "DOWNLOAD_TOO_SLOW";
+
 // Just extending the `anyhow::Error`
 #[derive(Debug)]
 pub struct TACommandError {

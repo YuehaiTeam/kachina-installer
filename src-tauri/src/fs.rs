@@ -13,7 +13,7 @@ use std::{
         Arc, Mutex,
     },
     task::{Context as TaskContext, Poll},
-    time::Instant,
+    time::{Duration, Instant},
 };
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader, ReadBuf};
 
@@ -22,7 +22,10 @@ use crate::{
     installer::uninstall::DELETE_SELF_ON_EXIT_PATH,
     local::mmap,
     utils::{
-        error::TAResult, hash::run_hash, progressed_read::ReadWithCallback, url::HttpContextExt,
+        error::{TAResult, DOWNLOAD_STALLED, DOWNLOAD_TOO_SLOW},
+        hash::run_hash,
+        progressed_read::ReadWithCallback,
+        url::HttpContextExt,
     },
     REQUEST_CLIENT,
 };
@@ -33,6 +36,13 @@ pub struct NetworkInsightStream<S> {
     insight: Arc<Mutex<InsightItem>>,
     network_bytes: Arc<AtomicU64>,
     response_received_time: Instant,
+
+    // Download stall detection fields
+    content_length: Option<u64>,           // Total file size
+    last_stall_check: Instant,             // Last 5-second stall check time
+    last_stall_check_bytes: u64,           // Bytes at last 5-second check
+    slow_detection_start: Option<Instant>, // Start time for 30-second slow detection
+    slow_window_start_bytes: u64,          // Bytes at start of 30-second window
 }
 
 // 为AsyncRead实现
@@ -59,6 +69,17 @@ impl<S: AsyncRead + Unpin> AsyncRead for NetworkInsightStream<S> {
                     if let Ok(mut insight) = self.insight.try_lock() {
                         insight.size = total_bytes as u32;
                         insight.time = self.response_received_time.elapsed().as_millis() as u32;
+                    }
+
+                    // Check download health
+                    if let Err(e) = self.check_download_health() {
+                        // Update insight with error
+                        if let Ok(mut insight) = self.insight.try_lock() {
+                            insight.error = Some(e.to_string());
+                            insight.time = self.response_received_time.elapsed().as_millis() as u32;
+                            insight.size = self.network_bytes.load(Ordering::Relaxed) as u32;
+                        }
+                        return Poll::Ready(Err(e));
                     }
                 }
             }
@@ -100,6 +121,9 @@ where
                     insight.size = total_bytes as u32;
                     insight.time = self.response_received_time.elapsed().as_millis() as u32;
                 }
+
+                // Note: Download health check is mainly handled in AsyncRead implementation
+                // For streams, the check will happen when data is actually read
             }
             Poll::Ready(Some(Err(e))) => {
                 // 错误情况统一处理
@@ -130,7 +154,26 @@ impl<S> NetworkInsightStream<S> {
         request_start_time: Instant,
         response_received_time: Instant,
     ) -> Self {
+        Self::new_with_detection(
+            stream,
+            url,
+            range,
+            request_start_time,
+            response_received_time,
+            None,
+        )
+    }
+
+    pub fn new_with_detection(
+        stream: S,
+        url: String,
+        range: Vec<(u32, u32)>,
+        request_start_time: Instant,
+        response_received_time: Instant,
+        content_length: Option<u64>,
+    ) -> Self {
         let ttfb = request_start_time.elapsed().as_millis() as u32;
+        let now = Instant::now();
 
         let insight = Arc::new(Mutex::new(InsightItem {
             url,
@@ -147,7 +190,72 @@ impl<S> NetworkInsightStream<S> {
             insight,
             network_bytes: Arc::new(AtomicU64::new(0)),
             response_received_time,
+            content_length,
+            last_stall_check: now,
+            last_stall_check_bytes: 0,
+            slow_detection_start: None,
+            slow_window_start_bytes: 0,
         }
+    }
+
+    /// Check for download health issues
+    /// Returns error if download is stalled or too slow
+    fn check_download_health(&mut self) -> std::io::Result<()> {
+        let current_bytes = self.network_bytes.load(Ordering::Relaxed);
+        let now = Instant::now();
+
+        // 1. DOWNLOAD_STALLED detection (almost no progress in 5 seconds)
+        if now.duration_since(self.last_stall_check) >= Duration::from_secs(5) {
+            let progress = current_bytes - self.last_stall_check_bytes;
+            if progress < 5 * 1024 {
+                // <5KB in 5 seconds
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    DOWNLOAD_STALLED,
+                ));
+            }
+            self.last_stall_check = now;
+            self.last_stall_check_bytes = current_bytes;
+        }
+
+        // 2. DOWNLOAD_TOO_SLOW detection (large file slow download)
+        if let Some(total_size) = self.content_length {
+            if total_size > 10 * 1024 * 1024 {
+                // >10MB
+                let progress_ratio = current_bytes as f64 / total_size as f64;
+
+                if progress_ratio < 0.5 {
+                    // Progress < 50%
+                    if self.slow_detection_start.is_none() {
+                        // Start slow detection
+                        self.slow_detection_start = Some(now);
+                        self.slow_window_start_bytes = current_bytes;
+                    } else if let Some(start_time) = self.slow_detection_start {
+                        if now.duration_since(start_time) >= Duration::from_secs(30) {
+                            let window_progress = current_bytes - self.slow_window_start_bytes;
+                            let avg_speed = window_progress / 30; // bytes per second
+
+                            if avg_speed < 100 * 1024 {
+                                // <100KB/s
+                                return Err(std::io::Error::new(
+                                    std::io::ErrorKind::Other,
+                                    DOWNLOAD_TOO_SLOW,
+                                ));
+                            }
+
+                            // Reset 30-second window
+                            self.slow_detection_start = Some(now);
+                            self.slow_window_start_bytes = current_bytes;
+                        }
+                    }
+                } else {
+                    // Progress > 50%, stop slow detection
+                    self.slow_detection_start = None;
+                }
+            }
+        }
+
+        Ok(())
     }
 
     /// 获取insight的共享引用，外部可以通过这个引用访问最新数据
@@ -338,7 +446,7 @@ pub async fn create_http_stream(
                 ttfb: request_start_time.elapsed().as_millis() as u32,
                 time: 0,
                 size: 0,
-                error: Some(e.to_string()),
+                error: Some(format!("{:#}", e)),
                 range: if has_range {
                     vec![(offset as u32, (offset + size - 1) as u32)]
                 } else {
@@ -384,7 +492,7 @@ pub async fn create_http_stream(
     let reader = tokio_util::io::StreamReader::new(stream.map_err(std::io::Error::other));
 
     // 创建NetworkInsightStream包装
-    let insight_stream = NetworkInsightStream::new(
+    let insight_stream = NetworkInsightStream::new_with_detection(
         reader,
         url.to_string(),
         if has_range {
@@ -394,6 +502,7 @@ pub async fn create_http_stream(
         },
         request_start_time,
         response_received_time,
+        Some(content_length),
     );
 
     let insight_handle = insight_stream.get_insight_handle();
@@ -449,7 +558,7 @@ pub async fn create_multi_http_stream(
                 ttfb: request_start_time.elapsed().as_millis() as u32,
                 time: 0,
                 size: 0,
-                error: Some(e.to_string()),
+                error: Some(format!("{:#}", e)),
                 range: range_info,
                 mode: None,
             }));
@@ -495,12 +604,13 @@ pub async fn create_multi_http_stream(
         .to_string();
 
     // 创建NetworkInsightStream包装HTTP响应流
-    let insight_stream = NetworkInsightStream::new(
+    let insight_stream = NetworkInsightStream::new_with_detection(
         res.bytes_stream(),
         url.to_string(),
         range_info,
         request_start_time,
         response_received_time,
+        Some(content_length),
     );
 
     let insight_handle = insight_stream.get_insight_handle();
