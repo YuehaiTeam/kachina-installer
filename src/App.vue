@@ -153,7 +153,7 @@
         </div>
       </div>
     </div>
-    <Dialog v-show="dialog === 'source'">
+    <Dialog v-show="dialog === 'source'" @keydown="handleKeyDown">
       <template #title>
         <div class="title">选择安装源</div>
       </template>
@@ -165,7 +165,11 @@
           <template v-for="i in PROJECT_CONFIG.source">
             <div
               class="card"
-              v-if="!i.hidden || INSTALLER_CONFIG.args.source === i.id"
+              v-if="
+                !i.hidden ||
+                showHiddenSources ||
+                INSTALLER_CONFIG.args.source === i.id
+              "
               :key="i.id"
               :class="{ active: i.uri === selectedSource }"
               @click="changeSelectedSource(i.uri)"
@@ -538,7 +542,7 @@
 }
 </style>
 <script lang="ts" setup>
-import { computed, onMounted, reactive, ref, watch } from 'vue';
+import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue';
 import Checkbox from './Checkbox.vue';
 import CircleSuccess from './CircleSuccess.vue';
 import IconEdit from './IconEdit.vue';
@@ -633,6 +637,11 @@ const progressInterval = ref<number>(0);
 
 const dialog = ref<'' | 'mirrorc' | 'source'>('');
 
+// Hidden sources easter egg state
+const commaCount = ref<number>(0);
+const showHiddenSources = ref<boolean>(false);
+const commaTimeout = ref<number>(0);
+
 const selectedSource = ref<string>('');
 const installMode = computed<'default' | 'mirrorc'>(() => {
   if (selectedSource.value.startsWith('mirrorc://')) {
@@ -664,6 +673,17 @@ watch(
           target: `KachinaInstaller_MirrorChyanCDK_${PROJECT_CONFIG.appName}`,
         });
       } catch (e) {}
+    }
+  },
+);
+
+// Watch dialog state changes to reset hidden sources state
+watch(
+  () => dialog.value,
+  (newValue, oldValue) => {
+    // Reset hidden sources state when leaving the source dialog
+    if (oldValue === 'source' && newValue !== 'source') {
+      resetHiddenSourcesState();
     }
   },
 );
@@ -1182,13 +1202,15 @@ async function runInstall(): Promise<void> {
       .filter((e) => e.running)
       .forEach((e) => {
         if ((e as VirtualMergedFile)._isMergedGroup) {
-          // 对于合并组，显示组内每个文件的独立进度
+          // 对于合并组，只显示未完成的文件进度
           const virtualFile = e as VirtualMergedFile;
-          virtualFile._mergedInfo.files.forEach((f) => {
-            runningTasks.push(
-              `${basename(f.file_name)} ${formatSize(f.downloaded)}/${formatSize(f.size)}`,
-            );
-          });
+          virtualFile._mergedInfo.files
+            .filter((f) => f.downloaded < f.size) // 只显示未完成的文件
+            .forEach((f) => {
+              runningTasks.push(
+                `${basename(f.file_name)} ${formatSize(f.downloaded)}/${formatSize(f.size)}`,
+              );
+            });
         } else {
           // 单文件正常显示
           runningTasks.push(
@@ -1255,6 +1277,22 @@ async function runInstall(): Promise<void> {
   const stats = taskManager.getStats();
   log('All tasks completed successfully:', stats);
   clearInterval(progressInterval.value);
+
+  // Clean up DFS2 sessions immediately after download completion, before post-processing
+  await cleanupAllDfs2Sessions();
+
+  // Clean up plugin sessions
+  if (plugin?.endSession) {
+    try {
+      const cleanUrl = pluginManager.getCleanUrl(selectedSource.value);
+      if (cleanUrl) {
+        await plugin.endSession(cleanUrl, { servers: networkInsights });
+      }
+    } catch (e) {
+      warn('Plugin session cleanup failed:', e);
+    }
+  }
+
   if (
     latest_meta.deletes &&
     Array.isArray(latest_meta.deletes) &&
@@ -1505,24 +1543,6 @@ async function install(): Promise<void> {
     } else {
       await runInstall();
     }
-
-    // Clean up DFS2 sessions only for DFS mode (not mirrorc mode)
-    if (installMode.value === 'default') {
-      await cleanupAllDfs2Sessions();
-
-      // 清理插件会话
-      const plugin = pluginManager.findPlugin(selectedSource.value);
-      if (plugin?.endSession) {
-        try {
-          const cleanUrl = pluginManager.getCleanUrl(selectedSource.value);
-          if (cleanUrl) {
-            await plugin.endSession(cleanUrl, { servers: networkInsights });
-          }
-        } catch (e) {
-          warn('Plugin session cleanup failed:', e);
-        }
-      }
-    }
   } catch (e) {
     error(e);
     const errstr =
@@ -1695,6 +1715,11 @@ onMounted(async () => {
       win.close();
     }
   }
+});
+
+// Cleanup on component unmount
+onUnmounted(() => {
+  resetHiddenSourcesState();
 });
 
 function formatSize(size: number): string {
@@ -1933,5 +1958,48 @@ function openMirrorc() {
   invoke('launch', {
     path: `https://mirrorchyan.com/?source=Kachina${PROJECT_CONFIG.appName}`,
   });
+}
+
+// Hidden sources easter egg functionality
+function handleKeyDown(event: KeyboardEvent) {
+  // Only handle comma key when source dialog is open
+  if (
+    dialog.value !== 'source' ||
+    (event.key !== ',' && event.code !== 'Comma')
+  ) {
+    return;
+  }
+
+  event.preventDefault();
+
+  // Clear existing timeout
+  if (commaTimeout.value) {
+    clearTimeout(commaTimeout.value);
+  }
+
+  // Increment comma count
+  commaCount.value++;
+
+  // Check if we've reached 5 consecutive comma presses
+  if (commaCount.value >= 5) {
+    showHiddenSources.value = true;
+    commaCount.value = 0; // Reset counter
+    return;
+  }
+
+  // Set timeout to reset counter after 2 seconds
+  commaTimeout.value = setTimeout(() => {
+    commaCount.value = 0;
+    commaTimeout.value = 0;
+  }, 2000);
+}
+
+function resetHiddenSourcesState() {
+  commaCount.value = 0;
+  showHiddenSources.value = false;
+  if (commaTimeout.value) {
+    clearTimeout(commaTimeout.value);
+    commaTimeout.value = 0;
+  }
 }
 </script>
