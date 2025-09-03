@@ -16,7 +16,7 @@ use cli::arg::{Command, InstallArgs};
 use installer::uninstall::delete_self_on_exit;
 use sentry_tracing::EventFilter;
 use std::time::Duration;
-use tauri::{window::Color, WindowEvent};
+use tauri::{window::Color, Manager, WindowEvent};
 use tauri_utils::{config::WindowEffectsConfig, WindowEffect};
 use tracing_subscriber::prelude::*;
 use utils::sentry::sentry_init;
@@ -202,6 +202,27 @@ async fn tauri_main(args: InstallArgs) {
         .manage(args)
         .manage(ipc::manager::ManagedElevate::new())
         .setup(move |app| {
+            // sleep 5s to check if window is alive
+            tokio::spawn({
+                let app_handle = app.app_handle().clone();
+                async move {
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                    let window = app_handle.get_webview_window("main");
+                    // if window is not visible, there may be a js error or a webview2 fault
+                    // throw a dialog and exit
+                    if window.is_none() || window.unwrap().is_visible().unwrap_or(false) {
+                        rfd::MessageDialog::new()
+                            .set_title("Kachina Installer")
+                            .set_description("Initialization failed due to webview2 fault")
+                            .set_level(rfd::MessageLevel::Error)
+                            .show();
+                        tracing::error!("Webview2 fault detected");
+                        std::process::exit(1);
+                    } else {
+                        tracing::info!("Webview2 is alive");
+                    }
+                }
+            });
             let temp_dir_for_data = temp_dir.join("KachinaInstaller");
             let mut main_window = tauri::WebviewWindowBuilder::new(
                 app,
