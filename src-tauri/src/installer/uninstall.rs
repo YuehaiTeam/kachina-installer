@@ -265,7 +265,7 @@ pub async fn clear_index_mark(path: &PathBuf) -> anyhow::Result<()> {
     // read first 256 bytes to buffer
     let mut buffer = [0u8; 256];
     output_file
-        .read(&mut buffer)
+        .read_exact(&mut buffer)
         .await
         .context("SELF_UPDATE_ERR")?;
 
@@ -284,10 +284,15 @@ pub async fn clear_index_mark(path: &PathBuf) -> anyhow::Result<()> {
                 .await
                 .context("SELF_UPDATE_ERR")?;
             let zero = [0u8; 5 * 4];
-            output_file.write(&zero).await.context("SELF_UPDATE_ERR")?;
+            output_file
+                .write_all(&zero)
+                .await
+                .context("SELF_UPDATE_ERR")?;
         }
     }
     // close file
+    output_file.flush().await.context("SELF_UPDATE_ERR")?;
+    output_file.sync_all().await.context("SELF_UPDATE_ERR")?;
     drop(output_file);
     Ok(())
 }
