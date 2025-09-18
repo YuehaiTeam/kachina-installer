@@ -1603,6 +1603,12 @@ onMounted(async () => {
     Object.assign(INSTALLER_CONFIG, rsrc);
     log('INSTALLER_CONFIG: ', {
       ...rsrc,
+      embedded_config: {
+        ...rsrc.embedded_config,
+        source: Array.isArray(rsrc.embedded_config?.source)
+          ? rsrc.embedded_config?.source.map((e) => ({ id: e.id, uri: e.uri }))
+          : rsrc.embedded_config?.source,
+      },
       embedded_index: undefined,
       embedded_files: undefined,
       enbedded_metadata: undefined,

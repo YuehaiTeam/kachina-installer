@@ -210,7 +210,19 @@ async fn tauri_main(args: InstallArgs) {
                     let window = app_handle.get_webview_window("main");
                     // if window is not visible, there may be a js error or a webview2 fault
                     // throw a dialog and exit
-                    if window.is_none() || window.unwrap().is_visible().unwrap_or(false) {
+                    let mut fault = false;
+                    if let Some(window) = &window {
+                        if let Ok(visible) = window.is_visible() {
+                            if !visible {
+                                fault = true;
+                            }
+                        } else {
+                            fault = true;
+                        }
+                    } else {
+                        fault = true;
+                    }
+                    if fault {
                         rfd::MessageDialog::new()
                             .set_title("Kachina Installer")
                             .set_description("Initialization failed due to webview2 fault")
