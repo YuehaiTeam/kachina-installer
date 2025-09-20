@@ -137,6 +137,9 @@ export class SingleFileTask implements DownloadTask {
       );
       logTaskResult(this.file, mode.toUpperCase(), true);
     } catch (error) {
+      // 第一次失败后标记文件为失败状态，禁用patch模式
+      this.file.failed = true;
+
       // 失败：确定文件模式并记录错误
       const mode = getFileInstallMode(
         this.file,
@@ -189,6 +192,9 @@ export class LocalFileTask implements DownloadTask {
       // 成功：Local文件总是LOCAL模式
       logTaskResult(this.file, 'LOCAL', true);
     } catch (error) {
+      // 第一次失败后标记文件为失败状态，禁用patch模式
+      this.file.failed = true;
+
       // 失败：Local文件记录错误
       logTaskResult(this.file, 'LOCAL', false, String(error));
       throw error;
