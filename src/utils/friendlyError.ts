@@ -1,5 +1,12 @@
-export const friendlyError = (error: string | { message: string }): string => {
-  const errStr = typeof error === 'string' ? error : error.message;
+export const friendlyError = (
+  error: string | { message: string } | unknown,
+): string => {
+  const errStr =
+    typeof error === 'string'
+      ? error
+      : error && typeof error === 'object' && 'message' in error
+        ? (error as { message: string }).message
+        : JSON.stringify(error);
   // 空格，换行符，制表符，右括号，逗号都是url结束
   const firstUrlInstr = errStr.match(/https?:\/\/[^\s),]+/);
   // 替换url时保留url结束标志字符，避免把右括号等也替换掉

@@ -956,6 +956,7 @@ where
     } else {
         Path::new(&target)
     };
+    let target_ori = target.clone();
     let old_target_old = target_cl.with_extension("patchold");
     // try remove old_target_old, do not throw error if failed
     let _ = tokio::fs::remove_file(old_target_old).await;
@@ -986,8 +987,11 @@ where
         // move target to target.old
         let old_target = target_cl.with_extension("old");
         let exe_path = std::env::current_exe().context("GET_EXE_PATH_ERR")?;
+        let target_path_ori = PathBuf::from(target_ori);
         // if old file is not self
-        if exe_path != target_cl {
+        if exe_path != target_cl
+            && exe_path != target_path_ori
+        {
             // rename to .old
             tokio::fs::rename(target_cl, old_target.clone())
                 .await
@@ -1008,7 +1012,7 @@ where
                     .context("RENAME_TARGET_ERR")?;
             }
             // self is already renamed and cannot be deleted, just replace the new file
-            tokio::fs::rename(new_target, target_cl)
+            tokio::fs::rename(new_target, target_path_ori)
                 .await
                 .context("RENAME_NEW_TARGET_ERR")?;
         }

@@ -116,6 +116,11 @@ export class SingleFileTask implements DownloadTask {
   }
 
   async execute(): Promise<void> {
+    const mode = getFileInstallMode(
+      this.file,
+      this.context.local,
+      this.context.hashKey,
+    );
     try {
       await runDfsDownload(
         this.context.dfsSource,
@@ -128,25 +133,16 @@ export class SingleFileTask implements DownloadTask {
         this.file.failed || false,
         this.context.elevate,
       );
-
-      // 成功：确定文件模式并记录
-      const mode = getFileInstallMode(
-        this.file,
-        this.context.local,
-        this.context.hashKey,
-      );
       logTaskResult(this.file, mode.toUpperCase(), true);
     } catch (error) {
       // 第一次失败后标记文件为失败状态，禁用patch模式
       this.file.failed = true;
-
-      // 失败：确定文件模式并记录错误
-      const mode = getFileInstallMode(
+      logTaskResult(
         this.file,
-        this.context.local,
-        this.context.hashKey,
+        mode.toUpperCase(),
+        false,
+        JSON.stringify(error),
       );
-      logTaskResult(this.file, mode.toUpperCase(), false, String(error));
       throw error;
     }
   }
@@ -196,7 +192,7 @@ export class LocalFileTask implements DownloadTask {
       this.file.failed = true;
 
       // 失败：Local文件记录错误
-      logTaskResult(this.file, 'LOCAL', false, String(error));
+      logTaskResult(this.file, 'LOCAL', false, JSON.stringify(error));
       throw error;
     }
   }
@@ -239,7 +235,7 @@ export class MergedGroupTask implements DownloadTask {
       this.logMergedResults(true);
     } catch (error) {
       // 整个合并失败：输出汇总错误日志
-      this.logMergedResults(false, String(error));
+      this.logMergedResults(false, JSON.stringify(error));
 
       // 如果还没重试过，重试一次合并下载
       if (!this.hasRetriedMerged) {

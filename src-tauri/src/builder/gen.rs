@@ -381,22 +381,21 @@ pub async fn gen_cli(args: GenArgs) {
                         };
                         pb_main.inc(1);
                     }
-
-                    let diff_filelist = deep_get_filelist(&diff_ver2.into())
-                        .await
-                        .expect("failed to get diff_ver file list");
-                    for file in diff_filelist.iter() {
-                        // check if file exists in current metadata
-                        if !metadata_with_installer.iter().any(|x| x.file_name == *file) {
-                            // file not found in current metadata, add to deletes
-                            println!(
-                                "File {file:?} not found in current metadata, added to deletes"
-                            );
-                            deletes.push(file.clone());
-                        }
+                }
+                let diff_filelist = deep_get_filelist(&diff_ver.into())
+                    .await
+                    .expect("failed to get diff_ver file list");
+                println!("Checking for deleted files in {diff_ver}...");
+                for file in diff_filelist.iter() {
+                    // check if file exists in current metadata
+                    if !metadata_with_installer.iter().any(|x| x.file_name == *file) {
+                        // file not found in current metadata, add to deletes
+                        println!("File {file:?} not found in current metadata, added to deletes");
+                        deletes.push(file.clone());
                     }
                 }
             }
+            repometa.deletes = Some(deletes);
             // 生成打包优化信息（在移动 diffs 之前）
             let diff_vers_pathbuf: Vec<std::path::PathBuf> =
                 diff_vers.iter().map(std::path::PathBuf::from).collect();
@@ -413,7 +412,7 @@ pub async fn gen_cli(args: GenArgs) {
                 .await
                 .expect("failed to write metadata");
         }
-    } else if args.diff_vers.is_some() {
+    } else {
         // 即使没有diff版本，如果指定了diff_vers参数，也生成基础的packing_info
         println!("Generating packing info for first release...");
         let mut metadata_with_installer = metadata.clone();

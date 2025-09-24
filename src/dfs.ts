@@ -500,7 +500,7 @@ export const getDfsFileUrl = async (
 
 // Helper function to check if error is a network error that should be retried
 const isNetworkError = (error: unknown): boolean => {
-  const errorStr = String(error);
+  const errorStr = JSON.stringify(error);
 
   // 检查是否为HTTP状态码错误（4xx/5xx），这些不应该重试
   if (errorStr.includes('Session creation failed:')) {
@@ -1329,6 +1329,9 @@ export const getFileInstallMode = (
   local: Embedded[],
   hashKey: DfsMetadataHashType,
 ): 'local' | 'hybridpatch' | 'patch' | 'direct' => {
+  if (file.failed) {
+    return 'direct'; // Failed files should always be retried as direct downloads
+  }
   const hasLocalFile = local.find((l) => l.name === file[hashKey]);
   const hasLpatchFile = local.find(
     (l) => l.name === file.lpatch?.from[hashKey],
@@ -1507,15 +1510,17 @@ export const runMergedGroupDownload = async (
     const { url: apiUrl, remote } = getDfsSourceType(dfsSource);
     // 获取合并后的CDN URL
     const [rangeStart, rangeEnd] = groupInfo.mergedRange.split('-').map(Number);
-    const cdnUrl =
-      remote === 'dfs2'
-        ? await getDfs2Url(apiUrl, groupInfo.mergedRange)
-        : await getDfsFileUrl(
-            remote === 'plugin' ? dfsSource : apiUrl,
-            extras,
-            rangeEnd - rangeStart + 1,
-            rangeStart,
-          );
+    let cdnUrl = apiUrl;
+    if (remote === 'dfs2') {
+      cdnUrl = await getDfs2Url(apiUrl, groupInfo.mergedRange);
+    } else if (remote !== 'direct') {
+      cdnUrl = await getDfsFileUrl(
+        remote === 'plugin' ? dfsSource : apiUrl,
+        extras,
+        rangeEnd - rangeStart + 1,
+        rangeStart,
+      );
+    }
 
     // 计算合并范围的起始位置
     const mergedRangeStart = Math.min(

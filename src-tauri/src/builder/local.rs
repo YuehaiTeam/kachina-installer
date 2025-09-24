@@ -23,7 +23,23 @@ pub async fn mmap() -> &'static AsyncMmapFile {
                         .unwrap()
                         .join("release")
                         .join("kachina-builder-bundle.exe");
-                    exe_path
+                    let debug_path = exe_path
+                        .parent()
+                        .ok_or("Failed to get parent dir".to_string())
+                        .unwrap()
+                        .parent()
+                        .ok_or("Failed to get parent dir".to_string())
+                        .unwrap()
+                        .join("debug")
+                        .join("kachina-builder-bundle.exe");
+                    if exe_path.exists() {
+                        exe_path
+                    } else if debug_path.exists() {
+                        debug_path
+                    } else {
+                        // fallback to current exe
+                        std::env::current_exe().unwrap()
+                    }
                 }
                 #[cfg(not(debug_assertions))]
                 {
@@ -169,10 +185,11 @@ async fn search_pattern(file: &AsyncMmapFile) -> Result<Vec<usize>, String> {
 pub async fn get_reader_for_bundle() -> Result<AsyncMmapFileReader<'static>, String> {
     let file = mmap().await;
     let headers = search_pattern(file).await.map_err(|e| e.to_string())?;
-    if headers.len() < 3 {
-        return Err("Failed to find packed exe".to_string());
+    if headers.len() < 2 {
+        println!("Found headers: {:?}", headers);
+        return Err("Failed to find packed exe: ".to_string());
     }
-    let exe_offset = headers[2];
+    let exe_offset = headers[headers.len() - 1];
     let reader = file.reader(exe_offset).map_err(|e| e.to_string())?;
     Ok(reader)
 }

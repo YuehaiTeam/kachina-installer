@@ -27,7 +27,7 @@ pub async fn deep_generate_metadata(source: &PathBuf) -> Result<Vec<Metadata>, S
                     }
                     let path = path.unwrap();
                     let fin_path = path.replace("\\", "/").replacen(
-                        format!("{}/", source.to_str().unwrap()).as_str(),
+                        format!("{}/", source.to_str().unwrap().replace("\\", "/")).as_str(),
                         "",
                         1,
                     );
@@ -102,7 +102,7 @@ pub async fn deep_get_filelist(source: &PathBuf) -> Result<Vec<String>, String> 
                     }
                     let path = path.unwrap();
                     let fin_path = path.replace("\\", "/").replacen(
-                        format!("{}/", source.to_str().unwrap()).as_str(),
+                        format!("{}/", source.to_str().unwrap().replace("\\", "/")).as_str(),
                         "",
                         1,
                     );
