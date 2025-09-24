@@ -8,7 +8,13 @@
     "build": "cross-env STATIC_VCRUNTIME=false tauri build -- -Z build-std=std,panic_abort -Z build-std-features=\"optimize_for_size\" && cd src-tauri/target/release && ren kachina-builder.exe kachina-builder-standalone.exe && del kachina-builder.exe && copy /b kachina-builder-standalone.exe+kachina-installer.exe kachina-builder.exe",
     "debug": "tauri build --debug && pnpm dev:uac",
     "preview": "rsbuild preview",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "test:prepare": "cd tests && node prepare.mjs",
+    "test:offline-install": "cd tests && node offline-install.mjs",
+    "test:online-install": "cd tests && node online-install.mjs",
+    "test:offline-update": "cd tests && node offline-update.mjs",
+    "test:online-update": "cd tests && node online-update.mjs",
+    "test:all": "npm run test:prepare && npm run test:offline-install && npm run test:online-install && npm run test:offline-update && npm run test:online-update"
   },
   "dependencies": {
     "@sentry/cli": "^2.46.0",
@@ -22,18 +28,21 @@
   "devDependencies": {
     "@eslint/js": "^9.29.0",
     "@fullhuman/postcss-purgecss": "^7.0.2",
-    "@rsbuild/core": "^1.3.22",
-    "@rsbuild/plugin-vue": "^1.0.7",
+    "@rsbuild/core": "^1.5.10",
+    "@rsbuild/plugin-vue": "^1.1.2",
     "@tauri-apps/cli": "^2.5.0",
     "@types/async": "^3.2.24",
     "@types/uuid": "^10.0.0",
     "compression-webpack-plugin": "^11.1.0",
     "cross-env": "^7.0.3",
     "eslint": "^9.29.0",
+    "express": "^4.18.2",
+    "fs-extra": "^11.2.0",
     "globals": "^15.15.0",
     "prettier": "^3.5.3",
     "typescript": "^5.8.3",
-    "typescript-eslint": "^8.34.0"
+    "typescript-eslint": "^8.34.0",
+    "zx": "^8.8.2"
   },
-  "packageManager": "pnpm@10.14.0"
+  "packageManager": "pnpm@10.17.0"
 }
