@@ -25,13 +25,29 @@ async function test() {
     // 等待服务器启动
     await waitForServer('http://localhost:8080/test-app-v1.exe');
 
+    // 删除日志文件 %temp%/KachinaInstaller.log
+    const logFile = os.tmpdir() + '/KachinaInstaller.log';
+    if (await fs.pathExists(logFile)) {
+      await fs.remove(logFile);
+    }
+
     // 执行在线安装
     console.log('Running online installation...');
     const result =
-      await $`${installerPath} ${FLAGS} -O -D ${testDir} -${FLAGS}ource local-v1`.quiet();
+      await $`${installerPath} ${FLAGS} -O -D ${testDir} --source local-v1`.quiet();
 
     if (result.exitCode !== 0) {
       throw new Error(`Installation failed with exit code ${result.exitCode}`);
+    }
+    
+    // check if fail in logs
+    if (await fs.pathExists(logFile)) {
+      const logs = await fs.readFile(logFile, 'utf-8');
+      console.log(logs);
+      // 验证日志文件是否有错误
+      if (logs.includes('ERROR kachina_installer::installer')) {
+        throw new Error('Updater log contains errors');
+      }
     }
 
     // 验证安装的文件
