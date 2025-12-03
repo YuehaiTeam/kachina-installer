@@ -247,7 +247,6 @@ pub async fn gen_cli(args: GenArgs) {
                     let input_dir = args.input_dir.clone();
                     let output_dir = args.output_dir.clone();
                     let diff_ver = diff_ver.clone();
-                    let diff_ver2 = diff_ver.clone();
 
                     // spawns a background task immediatly no matter if the future is awaited
                     // https://docs.rs/tokio/latest/tokio/task/struct.JoinSet.html#method.spawn

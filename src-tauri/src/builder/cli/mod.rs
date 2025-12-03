@@ -17,6 +17,8 @@ pub struct PackArgs {
     pub metadata: Option<PathBuf>,
     #[clap(long, short = 'd')]
     pub data_dir: Option<PathBuf>,
+    #[clap(long)]
+    pub icon: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, clap::Args)]

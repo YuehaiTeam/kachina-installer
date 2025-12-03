@@ -96,19 +96,6 @@ fn main() {
     }
     // command is not  Command::Install, can be anything
     match command {
-        Command::Install(install) => {
-            sentry::add_breadcrumb(sentry::Breadcrumb {
-                category: Some("app".into()),
-                message: Some("KachinaInstaller started".into()),
-                level: sentry::Level::Info,
-                ..Default::default()
-            });
-            tokio::runtime::Builder::new_multi_thread()
-                .enable_all()
-                .build()
-                .unwrap()
-                .block_on(tauri_main(install));
-        }
         Command::HeadlessUac(args) => {
             sentry::add_breadcrumb(sentry::Breadcrumb {
                 category: Some("app".into()),
@@ -135,6 +122,41 @@ fn main() {
                 .unwrap()
                 .block_on(module::wv2::install_webview2());
         }
+        Command::Install(install) => {
+            sentry::add_breadcrumb(sentry::Breadcrumb {
+                category: Some("app".into()),
+                message: Some("KachinaInstaller started".into()),
+                level: sentry::Level::Info,
+                ..Default::default()
+            });
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(tauri_main(install));
+        }
+        Command::Other(str) => {
+            sentry::add_breadcrumb(sentry::Breadcrumb {
+                category: Some("app".into()),
+                message: Some("KachinaInstaller started".into()),
+                level: sentry::Level::Info,
+                ..Default::default()
+            });
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(tauri_main(InstallArgs {
+                    target: None,
+                    non_interactive: false,
+                    silent: false,
+                    online: false,
+                    uninstall: false,
+                    source: None,
+                    dfs_extras: None,
+                    mirrorc_cdk: None,
+                }));
+        }
     }
 }
 
@@ -142,14 +164,6 @@ async fn tauri_main(args: InstallArgs) {
     tauri::async_runtime::set(tokio::runtime::Handle::current());
     let (major, minor, build) = nt_version::get();
     let build = (build & 0xffff) as u16;
-    let is_lower_than_win10 = major < 10;
-    if is_lower_than_win10 {
-        rfd::MessageDialog::new()
-            .set_title("错误")
-            .set_description("不支持的操作系统版本")
-            .show();
-        return;
-    }
     // use 22000 as the build number of Windows 11
     let is_win11 = major == 10 && minor == 0 && build >= 22000;
     let is_win11_ = is_win11;
@@ -236,17 +250,34 @@ async fn tauri_main(args: InstallArgs) {
                 }
             });
             let temp_dir_for_data = temp_dir.join("KachinaInstaller");
-            let mut main_window = tauri::WebviewWindowBuilder::new(
-                app,
-                "main",
-                tauri::WebviewUrl::App("index.html".into()),
-            )
-            .title(" ")
-            .resizable(false)
-            .maximizable(false)
-            .transparent(true)
-            .inner_size(520.0, 250.0)
-            .center();
+
+            // Helper function to create base window builder
+            let create_window_builder = || {
+                tauri::WebviewWindowBuilder::new(
+                    app,
+                    "main",
+                    tauri::WebviewUrl::App("index.html".into()),
+                )
+                .title(" ")
+                .resizable(false)
+                .maximizable(false)
+                .transparent(true)
+                .inner_size(520.0, 250.0)
+                .center()
+            };
+
+            // Extract icon from current exe
+            let window_icon = utils::icon::get_exe_icon_for_tauri();
+
+            // Create builder and optionally apply icon
+            let mut main_window = create_window_builder();
+            if let Some(icon) = window_icon {
+                main_window = main_window.icon(icon).unwrap_or_else(|e| {
+                    tracing::warn!("Failed to set window icon: {:?}", e);
+                    create_window_builder()
+                });
+            }
+
             if !cfg!(debug_assertions) {
                 main_window = main_window.data_directory(temp_dir_for_data).visible(false);
             }

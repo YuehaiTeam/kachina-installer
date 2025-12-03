@@ -3,6 +3,7 @@ pub mod dir;
 pub mod error;
 pub mod gui;
 pub mod hash;
+pub mod icon;
 pub mod metadata;
 pub mod progressed_read;
 pub mod sentry;

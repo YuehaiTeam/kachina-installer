@@ -2256,6 +2256,7 @@ dependencies = [
  "anyhow",
  "async-compression",
  "async-walkdir",
+ "base64 0.22.1",
  "bytes",
  "chksum-md5",
  "chrono",

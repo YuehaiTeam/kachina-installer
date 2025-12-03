@@ -38,4 +38,6 @@ pub enum Command {
     InstallWebview2,
     #[clap(hide = true)]
     HeadlessUac(UacArgs),
+    #[clap(external_subcommand)]
+    Other(Vec<String>),
 }

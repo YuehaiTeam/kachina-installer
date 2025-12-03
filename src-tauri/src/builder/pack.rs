@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 
 use crate::{cli::PackArgs, local::get_reader_for_bundle, utils::metadata::RepoMetadata};
@@ -13,6 +14,7 @@ pub struct PackConfig {
     pub metadata: Option<RepoMetadata>,
     pub image: Option<PackFile>,
     pub files: Vec<PackFile>,
+    pub icon_path: Option<PathBuf>,
 }
 
 pub async fn pack_cli(args: PackArgs) {
@@ -178,6 +180,7 @@ pub async fn pack_cli(args: PackArgs) {
         metadata,
         image,
         files,
+        icon_path: args.icon,
     };
     let output = tokio::fs::File::create(args.output).await.unwrap();
     println!(
@@ -216,6 +219,20 @@ pub async fn pack(
         .set_version_string("FileDescription", title)
         .unwrap();
     updater.set_version_string("ProductName", product).unwrap();
+
+    // Set icon if provided
+    if let Some(icon_path) = &config.icon_path {
+        if icon_path.exists() {
+            if let Err(e) = updater.set_icon(icon_path) {
+                eprintln!("Warning: Failed to set icon: {:?}", e);
+            } else {
+                println!("Icon set successfully: {:?}", icon_path);
+            }
+        } else {
+            eprintln!("Warning: Icon file not found: {:?}", icon_path);
+        }
+    }
+
     updater.commit().unwrap();
     drop(updater);
     println!("Reading base...");
