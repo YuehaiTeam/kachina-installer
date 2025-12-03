@@ -386,3 +386,10 @@ export async function sendInsight(url: string, event?: string, data?: unknown) {
   const text = await res.text();
   return (localStorage.evCache = text || '');
 }
+
+export async function ipcIsFolderEmpty(
+  path: string,
+  file = '',
+): Promise<[boolean, boolean]> {
+  return invoke('is_dir_empty', { path, exeName: file });
+}

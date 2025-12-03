@@ -16,6 +16,7 @@ export type ProjectConfig = {
   updaterName: string;
   programFilesPath: string;
   userDataPath: string[];
+  ignoreFolderPath?: string[];
   extraUninstallPath: string[];
   title: string;
   description: string;
@@ -223,6 +224,7 @@ export interface InstallerConfig {
   embedded_index: Embedded[] | null;
   embedded_config: ProjectConfig | null;
   enbedded_metadata: InvokeGetDfsMetadataRes | null;
+  embedded_image: string | null;
   exe_path: string;
   args: {
     target: string | null;

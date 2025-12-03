@@ -22,6 +22,7 @@ pub struct InstallerConfig {
     pub embedded_index: Option<Vec<Embedded>>,
     pub embedded_config: Option<Value>,
     pub enbedded_metadata: Option<Value>,
+    pub embedded_image: Option<String>,
     pub exe_path: String,
     pub args: crate::cli::arg::InstallArgs,
     pub elevated: bool,
@@ -37,6 +38,7 @@ pub async fn get_config_pre(
     let mut embedded_config = None;
     let mut enbedded_metadata = None;
     let mut embedded_index = None;
+    let mut embedded_image = None;
     if scan_exe {
         let file = mmap().await;
         if let Ok(embedded_files_res) = get_embedded(file).await {
@@ -44,6 +46,7 @@ pub async fn get_config_pre(
                 embedded_config = res.0;
                 enbedded_metadata = res.1;
                 embedded_index = res.2;
+                embedded_image = res.3;
             }
             embedded_files = Some(embedded_files_res);
         }
@@ -111,6 +114,7 @@ pub async fn get_config_pre(
         embedded_index,
         embedded_config,
         enbedded_metadata,
+        embedded_image,
         exe_path,
         args,
         elevated: check_elevated().unwrap_or(false),

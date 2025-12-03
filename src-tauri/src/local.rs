@@ -1,4 +1,5 @@
 use anyhow::Context;
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use fmmap::tokio::{AsyncMmapFile, AsyncMmapFileExt, AsyncMmapFileReader};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -113,7 +114,7 @@ pub async fn get_embedded(file: &'static AsyncMmapFile) -> anyhow::Result<Vec<Em
 
 pub async fn get_config_from_embedded(
     embedded: &[Embedded],
-) -> anyhow::Result<(Option<Value>, Option<Value>, Option<Vec<Embedded>>)> {
+) -> anyhow::Result<(Option<Value>, Option<Value>, Option<Vec<Embedded>>, Option<String>)> {
     let file = mmap().await;
     let mut config = None;
     let mut metadata = None;
@@ -158,7 +159,18 @@ pub async fn get_config_from_embedded(
             index = Some(index_entries);
         }
     }
-    Ok((config, metadata, index))
+
+    // Process \0IMAGE if it exists
+    let mut image_base64 = None;
+    for entry in embedded.iter() {
+        if entry.name == "\0IMAGE" {
+            let content: &[u8] = file.slice(entry.offset, entry.size);
+            image_base64 = Some(BASE64.encode(content));
+            break;
+        }
+    }
+
+    Ok((config, metadata, index, image_base64))
 }
 
 pub fn get_header_size(name: &str) -> usize {

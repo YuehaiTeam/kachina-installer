@@ -586,8 +586,8 @@ pub async fn is_dir_empty(path: String, exe_name: String) -> (bool, bool) {
         return (true, false);
     }
     // check if exe exists
-    let exe_path = path.join(exe_name);
-    if exe_path.exists() {
+    let exe_path = path.join(exe_name.clone());
+    if !exe_name.is_empty() && exe_path.exists() {
         return (false, true);
     }
     let mut entries = entries.unwrap();
@@ -989,9 +989,7 @@ where
         let exe_path = std::env::current_exe().context("GET_EXE_PATH_ERR")?;
         let target_path_ori = PathBuf::from(target_ori);
         // if old file is not self
-        if exe_path != target_cl
-            && exe_path != target_path_ori
-        {
+        if exe_path != target_cl && exe_path != target_path_ori {
             // rename to .old
             tokio::fs::rename(target_cl, old_target.clone())
                 .await

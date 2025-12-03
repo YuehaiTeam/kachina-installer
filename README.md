@@ -49,8 +49,11 @@
     "windowTitle": "Kachina Installer 安装程序",
     // 卸载时需要删除的用户数据目录或文件
     "userDataPath": ["${INSTALL_PATH}/User"],
+    // 更新时如果文件夹已存在且非空则跳过的目录
+    "ignoreFolderPath": ["${INSTALL_PATH}/cache"],
     // 卸载时需要额外删除的其他目录或文件
-    "extraUninstallPath": ["${INSTALL_PATH}/log"],// UAC 策略
+    "extraUninstallPath": ["${INSTALL_PATH}/log"],
+    // UAC 策略
     // prefer-admin: 除非用户安装在%User%、%AppData%、%Documents%、%Desktop%、%Downloads%目录，都请求UAC
     // prefer-user: 只在用户没有权限写入的目录请求UAC
     // force: 强制请求UAC

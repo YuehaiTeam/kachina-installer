@@ -7,7 +7,11 @@
     </div>
     <div v-show="init && !dialog" class="content">
       <div class="image">
-        <img src="./left.webp" :alt="PROJECT_CONFIG.title" />
+        <img
+          v-if="!useDynamicCss"
+          :src="imageSource"
+          :alt="PROJECT_CONFIG.title"
+        />
       </div>
       <div class="right">
         <div class="title">{{ PROJECT_CONFIG.title }}</div>
@@ -226,6 +230,7 @@
         </button>
       </template>
     </Dialog>
+    <component :is="'style'" v-if="useDynamicCss">{{ dynamicCss }}</component>
   </div>
 </template>
 
@@ -572,6 +577,7 @@ import {
   ipcCreateUninstaller,
   ipcFindProcessByName,
   ipcInstallRuntime,
+  ipcIsFolderEmpty,
   ipcKillProcess,
   ipcRmList,
   ipcRunMirrorcDownload,
@@ -637,6 +643,11 @@ const progressInterval = ref<number>(0);
 
 const dialog = ref<'' | 'mirrorc' | 'source'>('');
 
+// Dynamic image/CSS state
+const imageSource = ref<string>('');
+const dynamicCss = ref<string>('');
+const useDynamicCss = ref<boolean>(false);
+
 // Hidden sources easter egg state
 const commaCount = ref<number>(0);
 const showHiddenSources = ref<boolean>(false);
@@ -698,6 +709,7 @@ const PROJECT_CONFIG: ProjectConfig = reactive({
   updaterName: 'update.exe',
   programFilesPath: 'Kachina',
   userDataPath: [],
+  ignoreFolderPath: [],
   extraUninstallPath: [],
   title: 'Title',
   description: 'description',
@@ -982,6 +994,19 @@ async function runInstall(): Promise<void> {
     return ss;
   };
   const userDataPath = PROJECT_CONFIG.userDataPath.map(replacePathEnvirables);
+  const ignoreFolderPath = PROJECT_CONFIG.ignoreFolderPath || [];
+
+  // 预先检查所有 ignoreFolderPath 是否非空（仅在更新场景下检查）
+  const ignoreMap: string[] = [];
+  if (isUpdate.value && ignoreFolderPath.length > 0) {
+    for (const folder of ignoreFolderPath) {
+      const fullPath = replacePathEnvirables(folder).replace(/[\\\/]+/g, sep());
+      const [isEmpty] = await ipcIsFolderEmpty(fullPath);
+      if (!isEmpty) {
+        ignoreMap.push(fullPath.toLowerCase().replace(/[\\\/]+/g, sep()));
+      }
+    }
+  }
   for (const item of latest_meta.hashed) {
     const local = local_meta.find(
       (e: { file_name: string }) =>
@@ -997,6 +1022,21 @@ async function runInstall(): Promise<void> {
       )
     ) {
       continue;
+    }
+
+    // 新增的 ignoreFolderPath 检查
+    // 关键：必须是更新场景 + 文件夹非空才跳过
+    if (isUpdate.value && ignoreFolderPath.length > 0) {
+      const itemCheckFullPath = `${source.value}${sep()}${item.file_name}`
+        .toLowerCase()
+        .replace(/[\\\/]+/g, sep());
+      if (
+        ignoreMap.some((ignoreFolder) => {
+          return itemCheckFullPath.startsWith(ignoreFolder);
+        })
+      ) {
+        continue;
+      }
     }
     if (!local || local.hash !== item[hashKey as DfsMetadataHashType]) {
       let patch = latest_meta.patches?.find(
@@ -1585,6 +1625,44 @@ async function install(): Promise<void> {
   }
 }
 
+function processEmbeddedImage(base64Data: string | null) {
+  if (!base64Data) {
+    // No embedded image, use default
+    imageSource.value = new URL('./left.webp', import.meta.url).href;
+    return;
+  }
+
+  try {
+    // Decode base64 to check first 16 bytes
+    const binaryString = atob(base64Data);
+    const bytes = new Uint8Array(binaryString.length);
+    for (let i = 0; i < binaryString.length; i++) {
+      bytes[i] = binaryString.charCodeAt(i);
+    }
+
+    // Check if first 16 bytes are all printable ASCII (0x20-0x7E)
+    const first16Bytes = bytes.slice(0, Math.min(16, bytes.length));
+    const isAscii = first16Bytes.every((byte) => byte >= 0x20 && byte <= 0x7e);
+
+    if (isAscii) {
+      // It's CSS - decode and inject
+      const cssContent = new TextDecoder().decode(bytes);
+      dynamicCss.value = cssContent;
+      useDynamicCss.value = true;
+      log('Loaded embedded CSS stylesheet');
+    } else {
+      // It's an image - use as data URI
+      imageSource.value = `data:image/webp;base64,${base64Data}`;
+      useDynamicCss.value = false;
+      log('Loaded embedded image');
+    }
+  } catch (e) {
+    error('Failed to process embedded image:', e);
+    // Fallback to default
+    imageSource.value = new URL('./left.webp', import.meta.url).href;
+  }
+}
+
 onMounted(async () => {
   try {
     const win = getCurrentWindow();
@@ -1615,6 +1693,8 @@ onMounted(async () => {
     });
     if (INSTALLER_CONFIG.embedded_config) {
       Object.assign(PROJECT_CONFIG, INSTALLER_CONFIG.embedded_config);
+      // Process embedded image/CSS
+      processEmbeddedImage(INSTALLER_CONFIG.embedded_image);
       if (process.env.NODE_ENV === 'development') {
         if (
           INSTALLER_CONFIG.embedded_files &&
