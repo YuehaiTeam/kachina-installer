@@ -46,13 +46,13 @@ jobs:
       - name: Build
         run: pnpm build
       - name: Copy Binary
-        run: copy src-tauri/target/release/kachina-builder.exe kachina-builder.exe
+        run: copy src-tauri/target/x86_64-win7-windows-msvc/release/kachina-builder.exe kachina-builder.exe
       - name: Artifact
         uses: actions/upload-artifact@v4.6.0
         with:
           path: |
-            src-tauri/target/release/*.exe
-            src-tauri/target/release/*.pdb
+            src-tauri/target/x86_64-win7-windows-msvc/release/*.exe
+            src-tauri/target/x86_64-win7-windows-msvc/release/*.pdb
   release:
     needs: [build, test]
     runs-on: windows-latest
@@ -121,6 +121,9 @@ jobs:
         run: |
           # 复制构建的二进制文件到正确位置
           New-Item -ItemType Directory -Force -Path "src-tauri/target/release"
+          New-Item -ItemType Directory -Force -Path "src-tauri/target/x86_64-win7-windows-msvc/release"
+          Copy-Item "artifacts/artifact/*.exe" "src-tauri/target/x86_64-win7-windows-msvc/release/" -Force
+          Copy-Item "artifacts/artifact/*.pdb" "src-tauri/target/x86_64-win7-windows-msvc/release/" -Force
           Copy-Item "artifacts/artifact/*.exe" "src-tauri/target/release/" -Force
           Copy-Item "artifacts/artifact/*.pdb" "src-tauri/target/release/" -Force
       - name: Prepare test fixtures
