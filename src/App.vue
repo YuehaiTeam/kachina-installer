@@ -1340,8 +1340,29 @@ async function runInstall(): Promise<void> {
   ) {
     current.value = '删除旧版残留文件……';
     try {
+      // 过滤掉 ignoreFolderPath 中的文件
+      const filesToDelete = latest_meta.deletes.filter((deleteFile) => {
+        // 如果是更新场景且有 ignoreMap（已检查过的非空文件夹）
+        if (isUpdate.value && ignoreMap.length > 0) {
+          // 构造待删除文件的完整路径
+          const deleteFullPath = `${source.value}${sep()}${deleteFile}`
+            .toLowerCase()
+            .replace(/[\\\/]+/g, sep());
+
+          // 检查文件是否在任何需要忽略的文件夹下
+          const shouldIgnore = ignoreMap.some((ignoreFolder) => {
+            return deleteFullPath.startsWith(ignoreFolder);
+          });
+
+          // 如果应该忽略，则不删除（返回 false）
+          return !shouldIgnore;
+        }
+        // 默认情况下，保留在删除列表中
+        return true;
+      });
+
       await ipcRmList(
-        latest_meta.deletes.map((e) => `${source.value}${sep()}${e}`),
+        filesToDelete.map((e) => `${source.value}${sep()}${e}`),
         needElevate.value,
       );
     } catch (e) {
