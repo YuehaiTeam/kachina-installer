@@ -139,3 +139,15 @@ export async function waitForServer(url, maxAttempts = 10, interval = 1000) {
     `Server at ${url} did not respond after ${maxAttempts} attempts`,
   );
 }
+
+export async function printLogFileIfExists() {
+  const logFile = path.join(os.tmpdir(), 'KachinaInstaller.log');
+  if (await fs.pathExists(logFile)) {
+    console.log(chalk.yellow('\n=== Installer Log File Contents ==='));
+    const logs = await fs.readFile(logFile, 'utf-8');
+    console.log(logs);
+    console.log(chalk.yellow('=== End of Log File ===\n'));
+  } else {
+    console.log(chalk.yellow('Log file not found at: ' + logFile));
+  }
+}

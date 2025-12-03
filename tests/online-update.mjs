@@ -6,6 +6,7 @@ import {
   getTestDir,
   waitForServer,
   getFileHash,
+  printLogFileIfExists,
   FLAGS,
 } from './utils.mjs';
 import { startServer } from './server.mjs';
@@ -38,7 +39,16 @@ async function test() {
 
     // 步骤1: 安装v1
     console.log('Installing v1...');
-    let result = await $`${installerV1} -S -D ${testDir}`.quiet();
+    let result;
+    try {
+      result = await $`${installerV1} -S -D ${testDir}`.timeout('3m').quiet();
+    } catch (error) {
+      if (error.message && error.message.includes('timed out')) {
+        console.error(chalk.red('V1 installation timed out after 3 minutes'));
+        await printLogFileIfExists();
+      }
+      throw error;
+    }
     if (result.exitCode !== 0) {
       throw new Error(
         `V1 installation failed with exit code ${result.exitCode}`,
@@ -53,7 +63,15 @@ async function test() {
     }
     console.log('Updating to v2 from server...');
     const updaterPath = path.join(testDir, 'updater.exe');
-    result = await $`& ${updaterPath} ${FLAGS} -D ${testDir} --source local-v2`;
+    try {
+      result = await $`& ${updaterPath} ${FLAGS} -D ${testDir} --source local-v2`.timeout('3m');
+    } catch (error) {
+      if (error.message && error.message.includes('timed out')) {
+        console.error(chalk.red('Update to v2 timed out after 3 minutes'));
+        await printLogFileIfExists();
+      }
+      throw error;
+    }
     if (result.exitCode !== 0) {
       throw new Error(`Update to v2 failed with exit code ${result.exitCode}`);
     }

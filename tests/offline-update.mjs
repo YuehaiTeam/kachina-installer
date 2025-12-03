@@ -3,6 +3,7 @@ import {
   verifyFilesRemoved,
   cleanupTestDir,
   getTestDir,
+  printLogFileIfExists,
   FLAGS,
 } from './utils.mjs';
 import 'zx/globals';
@@ -20,7 +21,16 @@ async function test() {
   try {
     // 步骤1: 安装v1
     console.log('Installing v1...');
-    let result = await $`${installerV1} ${FLAGS} -D ${testDir}`.quiet();
+    let result;
+    try {
+      result = await $`${installerV1} ${FLAGS} -D ${testDir}`.timeout('3m').quiet();
+    } catch (error) {
+      if (error.message && error.message.includes('timed out')) {
+        console.error(chalk.red('V1 installation timed out after 3 minutes'));
+        await printLogFileIfExists();
+      }
+      throw error;
+    }
     if (result.exitCode !== 0) {
       throw new Error(
         `V1 installation failed with exit code ${result.exitCode}`,
@@ -29,7 +39,15 @@ async function test() {
 
     // 步骤2: 使用v2包进行更新
     console.log('Updating to v2...');
-    result = await $`${installerV2} ${FLAGS} -D ${testDir}`.quiet();
+    try {
+      result = await $`${installerV2} ${FLAGS} -D ${testDir}`.timeout('3m').quiet();
+    } catch (error) {
+      if (error.message && error.message.includes('timed out')) {
+        console.error(chalk.red('Update to v2 timed out after 3 minutes'));
+        await printLogFileIfExists();
+      }
+      throw error;
+    }
     if (result.exitCode !== 0) {
       throw new Error(`Update to v2 failed with exit code ${result.exitCode}`);
     }
