@@ -528,6 +528,7 @@
 }
 
 .btn {
+  app-region: no-drag;
   align-items: center;
   appearance: auto;
   background-color: var(--colorBrandBackground);
@@ -590,6 +591,7 @@
   background-color: var(--colorBrandBackground) !important;
 }
 .checkbox {
+  app-region: no-drag;
   position: relative;
   cursor: pointer;
   .checkbox-ind {
@@ -741,6 +743,7 @@ a:hover {
   background: var(--colorBrandForeground1);
 }
 .input-div {
+  app-region: no-drag;
   border: 1px solid var(--colorNeutralStroke1);
   display: inline-flex;
   align-items: center;

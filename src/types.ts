@@ -27,6 +27,7 @@ export type ProjectConfig = {
   // force: 强制请求UAC
   uacStrategy: 'prefer-admin' | 'prefer-user' | 'force';
   runtimes?: string[];
+  windowBorderless?: boolean;
 };
 
 export type InstallStat = {

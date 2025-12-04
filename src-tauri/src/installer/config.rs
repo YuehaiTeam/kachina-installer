@@ -68,6 +68,23 @@ pub async fn get_config_pre(
                 }
             }
         }
+        #[cfg(debug_assertions)]
+        {
+            if embedded_image.is_none() {
+                let exe_dir = exe_path_path.parent();
+                if let Some(exe_dir) = exe_dir {
+                    let image_bin = exe_dir.join(".image.bin");
+                    if image_bin.exists() {
+                        if let Ok(image_content) = tokio::fs::read(&image_bin).await {
+                            use base64::Engine;
+                            embedded_image = Some(
+                                base64::engine::general_purpose::STANDARD.encode(&image_content),
+                            );
+                        }
+                    }
+                }
+            }
+        }
         let embed_name = embedded_config
             .as_ref()
             .and_then(|c| c["appName"].as_str())

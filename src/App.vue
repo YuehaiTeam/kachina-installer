@@ -1,11 +1,23 @@
 <template>
   <div class="main">
-    <div v-show="!init" class="init-loading">
+    <div v-show="init === 0" class="init-loading">
       <span class="fui-Spinner__spinner">
         <span class="fui-Spinner__spinnerTail"></span>
       </span>
     </div>
-    <div v-show="init && !dialog" class="content">
+    <div
+      v-show="init === 2 && !dialog"
+      class="content"
+      :class="{ borderless: PROJECT_CONFIG.windowBorderless }"
+    >
+      <div class="controls">
+        <button class="cont-minimize" @click="minimize">
+          <IconMinimize />
+        </button>
+        <button class="cont-close" @click="close">
+          <IconClose />
+        </button>
+      </div>
       <div class="image">
         <img
           v-if="!useDynamicCss"
@@ -36,6 +48,7 @@
                 v-if="
                   !INSTALLER_CONFIG.is_uninstall &&
                   Array.isArray(PROJECT_CONFIG.source) &&
+                  PROJECT_CONFIG.source.length > 1 &&
                   !INSTALLER_CONFIG.embedded_index?.length
                 "
               >
@@ -237,6 +250,7 @@
 <style scoped>
 .main {
   min-height: 100vh;
+  app-region: drag;
 }
 .init-loading {
   height: 100vh;
@@ -292,6 +306,9 @@
   padding: 16px;
   box-sizing: border-box;
   overflow: hidden;
+  .borderless & {
+    padding-top: 44px;
+  }
 }
 
 .title {
@@ -300,6 +317,7 @@
 }
 
 .btn-install {
+  app-region: no-drag;
   height: 40px;
   width: 140px;
   position: absolute;
@@ -316,6 +334,7 @@
   flex-direction: column;
   gap: 8px;
   padding-top: 16px;
+  app-region: no-drag;
 }
 
 .read,
@@ -502,6 +521,7 @@
   min-width: 36px;
 }
 .cdk-input {
+  app-region: no-drag;
   margin: 30px 10px;
   margin-bottom: 48px;
   width: 320px;
@@ -540,10 +560,47 @@
   justify-content: center;
   align-items: center;
   height: 150px;
+  app-region: no-drag;
 }
 
 .card svg {
   width: 40px;
+}
+
+.controls {
+  app-region: no-drag;
+  position: absolute;
+  right: 0;
+  top: 0;
+  z-index: 9999;
+  height: 32px;
+  display: flex;
+  & > button {
+    width: 45px;
+    height: 32px;
+    overflow: hidden;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    svg {
+      height: 14px;
+    }
+    appearance: none;
+    background: transparent;
+    border: 0;
+    color: inherit;
+    &:active {
+      opacity: 0.8;
+    }
+  }
+  .cont-close:hover {
+    background: #c42b1c;
+  }
+
+  .cont-minimize:hover {
+    background: rgba(255, 255, 255, 0.07);
+  }
 }
 </style>
 <script lang="ts" setup>
@@ -612,8 +669,10 @@ import {
   ProjectConfig,
   VirtualMergedFile,
 } from './types.ts';
+import IconMinimize from './IconMinimize.vue';
+import IconClose from './IconClose.vue';
 
-const init = ref(false);
+const init = ref(0);
 
 const subStepList: ReadonlyArray<string> = [
   '获取最新版本',
@@ -715,6 +774,7 @@ const PROJECT_CONFIG: ProjectConfig = reactive({
   description: 'description',
   windowTitle: ' ',
   uacStrategy: 'prefer-admin',
+  windowBorderless: false,
 });
 
 const INSTALLER_CONFIG: InstallerConfig = reactive({
@@ -724,6 +784,7 @@ const INSTALLER_CONFIG: InstallerConfig = reactive({
   is_uninstall: false,
   embedded_config: null,
   enbedded_metadata: null,
+  embedded_image: null,
   embedded_files: [],
   embedded_index: [],
   exe_path: '',
@@ -1710,12 +1771,14 @@ onMounted(async () => {
       },
       embedded_index: undefined,
       embedded_files: undefined,
+      embedded_image: undefined,
       enbedded_metadata: undefined,
     });
     if (INSTALLER_CONFIG.embedded_config) {
       Object.assign(PROJECT_CONFIG, INSTALLER_CONFIG.embedded_config);
       // Process embedded image/CSS
       processEmbeddedImage(INSTALLER_CONFIG.embedded_image);
+
       if (process.env.NODE_ENV === 'development') {
         if (
           INSTALLER_CONFIG.embedded_files &&
@@ -1800,7 +1863,22 @@ onMounted(async () => {
         return;
       }
     }
-    init.value = true;
+    init.value = 1;
+    // Apply window borderless setting
+    if (PROJECT_CONFIG.windowBorderless === true) {
+      try {
+        await getCurrentWindow().setDecorations(false);
+      } catch (e) {
+        warn('Failed to set window borderless:', e);
+      }
+    } else {
+      try {
+        await getCurrentWindow().setDecorations(true);
+      } catch (e) {
+        warn('Failed to set window decorations:', e);
+      }
+    }
+    init.value = 2;
     if (INSTALLER_CONFIG.args.silent || INSTALLER_CONFIG.args.non_interactive) {
       if (INSTALLER_CONFIG.args.uninstall || INSTALLER_CONFIG.is_uninstall) {
         uninstall();
@@ -2109,4 +2187,12 @@ function resetHiddenSourcesState() {
     commaTimeout.value = 0;
   }
 }
+const minimize = async () => {
+  const win = getCurrentWindow();
+  win.minimize();
+};
+const close = async () => {
+  const win = getCurrentWindow();
+  win.close();
+};
 </script>
