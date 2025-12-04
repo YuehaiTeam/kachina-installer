@@ -4,7 +4,7 @@ on:
   pull_request:
 env:
   CARGO_TERM_COLOR: always
-  RUST_NIGHTLY_VERSION: nightly-2025-08-15
+  RUST_NIGHTLY_VERSION: nightly
 jobs:
   build:
     runs-on: windows-latest

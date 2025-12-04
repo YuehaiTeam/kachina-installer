@@ -26,3 +26,5 @@ dist-ssr
 .env
 
 tests/fixtures
+
+rustc-ice*
