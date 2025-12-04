@@ -130,7 +130,7 @@ pub fn safe_patch_single_stream(
     diff_size: usize,
     mut input: impl std::io::Read + std::io::Seek,
     input_size: usize,
-) -> bool {
+) -> i32 {
     // 10k buffer
     let mut buffer_info = BufferInfo {
         buffer: None,
@@ -163,7 +163,7 @@ pub fn safe_patch_single_stream(
         write: Some(write_seq_callback),
         read_writed: None,
     };
-    let res = (unsafe {
+    let res: i32 = unsafe {
         patch_single_stream(
             listener_ptr,
             &mut stream_output as *mut hpatch_TStreamOutput,
@@ -172,7 +172,7 @@ pub fn safe_patch_single_stream(
             0,
             coverlistener_ptr,
         )
-    } != 0);
+    };
     if buffer_info.buffer.is_some() {
         let mut buffer = buffer_info.buffer.take().unwrap();
         unsafe {

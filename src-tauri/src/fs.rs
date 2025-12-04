@@ -983,7 +983,7 @@ where
     })
     .await
     .context("RUN_HPATCH_ERR")?;
-    if res {
+    if res == 1 {
         // move target to target.old
         let old_target = target_cl.with_extension("old");
         let exe_path = std::env::current_exe().context("GET_EXE_PATH_ERR")?;
@@ -1019,10 +1019,10 @@ where
         tokio::fs::remove_file(new_target)
             .await
             .context("REMOVE_NEW_TARGET_ERR")?;
-        return Err(
-            anyhow::Error::new(std::io::Error::other("Patch operation failed"))
-                .context("PATCH_FAILED_ERR"),
-        );
+        return Err(anyhow::Error::new(std::io::Error::other(format!(
+            "Patch failed with code {res}"
+        )))
+        .context("PATCH_FAILED_ERR"));
     }
     // 更新网络下载统计信息
     if let Some(ref mut insight) = insight {

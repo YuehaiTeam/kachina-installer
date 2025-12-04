@@ -2041,12 +2041,12 @@ hpatch_BOOL getSingleCompressedDiffInfo(hpatch_singleCompressedDiffInfo* out_dif
     {//type
         const char* kVersionType="HDIFFSF20";
         char* tempType=out_diffInfo->compressType;
-        if (!_TStreamCacheClip_readType_end(diffHeadClip,'&',tempType)) return _hpatch_FALSE;
-        if (0!=strcmp(tempType,kVersionType)) return _hpatch_FALSE;
+        if (!_TStreamCacheClip_readType_end(diffHeadClip,'&',tempType)) return 1099;
+        if (0!=strcmp(tempType,kVersionType)) return 1002;
     }
     {//read compressType
         if (!_TStreamCacheClip_readType_end(diffHeadClip,'\0',
-                                            out_diffInfo->compressType)) return _hpatch_FALSE;
+                                            out_diffInfo->compressType)) return 1003;
     }
     _clip_unpackUIntTo(&out_diffInfo->newDataSize,diffHeadClip);
     _clip_unpackUIntTo(&out_diffInfo->oldDataSize,diffHeadClip);
@@ -2056,11 +2056,11 @@ hpatch_BOOL getSingleCompressedDiffInfo(hpatch_singleCompressedDiffInfo* out_dif
     _clip_unpackUIntTo(&out_diffInfo->compressedSize,diffHeadClip);
     out_diffInfo->diffDataPos=_TStreamCacheClip_readPosOfSrcStream(diffHeadClip)-diffInfo_pos;
     if (out_diffInfo->compressedSize>out_diffInfo->uncompressedSize)
-        return _hpatch_FALSE;
+        return 1004;
     if (out_diffInfo->stepMemSize>(out_diffInfo->newDataSize>=_kStepMemSizeSafeLimit?out_diffInfo->newDataSize:_kStepMemSizeSafeLimit))
-        return _hpatch_FALSE;
+        return 1005;
     if (out_diffInfo->stepMemSize>out_diffInfo->uncompressedSize)
-        return _hpatch_FALSE;
+        return 1006;
     return hpatch_TRUE;
 }
 
@@ -2359,19 +2359,19 @@ hpatch_BOOL patch_single_stream(sspatch_listener_t* listener,
     assert((listener)&&(listener->onDiffInfo));
     TDiffToSingleStream_init(&_toSStream,singleCompressedDiff);
     singleCompressedDiff=&_toSStream.base;
-
-    if (!getSingleCompressedDiffInfo(&diffInfo,singleCompressedDiff,diffInfo_pos))
-        return _hpatch_FALSE;
+    int res1 = getSingleCompressedDiffInfo(&diffInfo,singleCompressedDiff,diffInfo_pos);
+    if (res1!=1)
+        return res1;
     if (diffInfo.newDataSize>out_newData->streamSize)
-        return _hpatch_FALSE;
+        return 2000;
     out_newData->streamSize=diffInfo.newDataSize;
     if (diffInfo.oldDataSize!=oldData->streamSize)
-        return _hpatch_FALSE;
+        return 3000;
     if (!listener->onDiffInfo(listener,&diffInfo,&decompressPlugin,&temp_cache,&temp_cacheEnd))
-        return _hpatch_FALSE;
+        return 4000;
 
     if ((temp_cache==0)||(temp_cache>=temp_cacheEnd))
-        result=_hpatch_FALSE;
+        result=5000;
     if (result){
         result=patch_single_compressed_diff(out_newData,oldData,singleCompressedDiff,diffInfo.diffDataPos,
                                             diffInfo.uncompressedSize,diffInfo.compressedSize,decompressPlugin,
