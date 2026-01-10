@@ -1,3 +1,7 @@
+html,body,#root{
+  overflow: hidden;
+  margin: 0;
+}
 @media (prefers-color-scheme: dark) {
   body {
     margin: 0;

@@ -14,6 +14,9 @@ export default defineConfig({
   output: {
     overrideBrowserslist: ['edge >= 100'],
   },
+  html: {
+    title: 'Kachina Installer',
+  },
   performance: {
     chunkSplit: {
       strategy: 'single-vendor',
@@ -21,20 +24,6 @@ export default defineConfig({
   },
   plugins: [pluginVue()],
   tools: {
-    bundlerChain: (chain) => {
-      // if (process.env.NODE_ENV !== 'development') {
-      //   chain.plugin('compress').use(CompressionPlugin, [
-      //     {
-      //       test: /\.(js|css|svg)$/,
-      //       filename: '[path][base].gz',
-      //       algorithm: 'gzip',
-      //       threshold: 1024,
-      //       minRatio: 0.8,
-      //       deleteOriginalAssets: true,
-      //     },
-      //   ]);
-      // }
-    },
     rspack: {
       experiments: {
         rspackFuture: {
@@ -42,7 +31,6 @@ export default defineConfig({
         },
       },
     },
-    // @ts-expect-error -- postcss type not compatible
     postcss: {
       postcssOptions: {
         plugins: [
