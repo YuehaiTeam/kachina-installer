@@ -23,7 +23,16 @@ async function test() {
     console.log('Installing v1...');
     let result;
     try {
-      result = await $`${installerV1} ${FLAGS} -D ${testDir}`.timeout('3m').quiet();
+      const prom = $`${installerV1} ${FLAGS} -D ${testDir}`.timeout('3m').quiet();
+      result = await Promise.race([
+        prom,
+        new Promise((_, reject) =>
+          setTimeout(
+            () => reject(new Error('V1 installation timed out after 3 minutes')),
+            3 * 60 * 1000,
+          ),
+        ),
+      ]);
     } catch (error) {
       if (error.message && error.message.includes('timed out')) {
         console.error(chalk.red('V1 installation timed out after 3 minutes'));
@@ -40,7 +49,16 @@ async function test() {
     // 步骤2: 使用v2包进行更新
     console.log('Updating to v2...');
     try {
-      result = await $`${installerV2} ${FLAGS} -D ${testDir}`.timeout('3m').quiet();
+      const prom = $`${installerV2} ${FLAGS} -D ${testDir}`.timeout('3m').quiet();
+      result = await Promise.race([
+        prom,
+        new Promise((_, reject) =>
+          setTimeout(
+            () => reject(new Error('Update to v2 timed out after 3 minutes')),
+            3 * 60 * 1000,
+          ),
+        ),
+      ]);
     } catch (error) {
       if (error.message && error.message.includes('timed out')) {
         console.error(chalk.red('Update to v2 timed out after 3 minutes'));
