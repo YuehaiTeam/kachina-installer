@@ -204,18 +204,26 @@ pub async fn get_installer_config(
                 .open(&key_path)
         });
     if let Ok(key) = key {
-        let path: String = key.get_string("InstallLocation").context("READ_REG_ERR")?;
-        let path = Path::new(&path);
-        let exe_path = Path::new(&path).join(exe_name);
-        if exe_path.exists() {
-            return Ok(config.fill(path, true, "REG"));
-        }
-        let sub_exe_path = Path::new(&path).join(reg_name).join(exe_name);
-        if sub_exe_path.exists() {
-            let sub_exe_dir = Path::new(&path).join(reg_name);
-            return Ok(config.fill(&sub_exe_dir, true, "REG_FOLDED"));
+        match key.get_string("InstallLocation") {
+            Ok(path) => {
+                let path = Path::new(&path);
+                let exe_path = path.join(exe_name);
+                if exe_path.exists() {
+                    return Ok(config.fill(path, true, "REG"));
+                }
+
+                let sub_exe_path = path.join(reg_name).join(exe_name);
+                if sub_exe_path.exists() {
+                    let sub_exe_dir = path.join(reg_name);
+                    return Ok(config.fill(&sub_exe_dir, true, "REG_FOLDED"));
+                }
+            }
+            Err(err) => {
+                tracing::warn!(%err, "READ_REG_ERR");
+            }
         }
     }
+
     let program_files = std::env::var("ProgramFiles").context("GET_KNOWNFOLDER_ERR")?;
     let program_files_real_path = Path::new(&program_files).join(program_files_path);
     let program_files_exe_path = program_files_real_path.join(exe_name);
