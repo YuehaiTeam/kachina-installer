@@ -21,6 +21,20 @@ use tauri_utils::{config::WindowEffectsConfig, WindowEffect};
 use tracing_subscriber::prelude::*;
 use utils::sentry::sentry_init;
 
+fn windows_text_scale_factor() -> f64 {
+    use windows::UI::ViewManagement::UISettings;
+
+    let scale = UISettings::new()
+        .and_then(|settings| settings.TextScaleFactor())
+        .unwrap_or(1.0);
+
+    if scale.is_finite() && scale > 0.0 {
+        scale
+    } else {
+        1.0
+    }
+}
+
 lazy_static::lazy_static! {
     pub static ref REQUEST_CLIENT: reqwest::Client = reqwest::Client::builder()
         .user_agent(ua_string())
@@ -251,6 +265,12 @@ async fn tauri_main(args: InstallArgs) {
             });
             let temp_dir_for_data = temp_dir.join("KachinaInstaller");
 
+            let text_scale = windows_text_scale_factor();
+            let base_width = 520.0;
+            let base_height = 250.0;
+            let scaled_width = base_width * text_scale;
+            let scaled_height = base_height * text_scale;
+
             // Helper function to create base window builder
             let create_window_builder = || {
                 tauri::WebviewWindowBuilder::new(
@@ -262,7 +282,7 @@ async fn tauri_main(args: InstallArgs) {
                 .resizable(false)
                 .maximizable(false)
                 .transparent(true)
-                .inner_size(520.0, 250.0)
+                .inner_size(scaled_width, scaled_height)
                 .center()
             };
 
