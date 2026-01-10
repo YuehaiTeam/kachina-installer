@@ -1,10 +1,8 @@
 use crate::{
-    cli::arg::InstallArgs,
-    local::{get_config_from_embedded, get_embedded, mmap, Embedded},
-    utils::{
-        error::{return_ta_result, TAResult},
+    APP_BOOT_SIGNAL, cli::arg::InstallArgs, local::{Embedded, get_config_from_embedded, get_embedded, mmap}, utils::{
+        error::{TAResult, return_ta_result},
         uac::check_elevated,
-    },
+    }
 };
 use anyhow::Context;
 use serde::Serialize;
@@ -157,6 +155,7 @@ pub async fn get_installer_config(
     args: State<'_, InstallArgs>,
     scan_exe: bool,
 ) -> TAResult<InstallerConfig> {
+    APP_BOOT_SIGNAL.store(true, std::sync::atomic::Ordering::SeqCst);
     // check if current dir has exeName
     let exe_path = std::env::current_exe().context("GET_EXE_PATH_ERR")?;
     let mut config = get_config_pre(&exe_path, args.inner().clone(), scan_exe).await?;

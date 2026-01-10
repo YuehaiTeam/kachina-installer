@@ -15,8 +15,8 @@ use clap::Parser;
 use cli::arg::{Command, InstallArgs};
 use installer::uninstall::delete_self_on_exit;
 use sentry_tracing::EventFilter;
-use std::time::Duration;
-use tauri::{window::Color, Manager, WindowEvent};
+use std::{sync::atomic::AtomicBool, time::Duration};
+use tauri::{window::Color, WindowEvent};
 use tauri_utils::{config::WindowEffectsConfig, WindowEffect};
 use tracing_subscriber::prelude::*;
 use utils::sentry::sentry_init;
@@ -44,6 +44,7 @@ lazy_static::lazy_static! {
         .connect_timeout(std::time::Duration::from_secs(5))
         .build()
         .unwrap();
+    pub static ref APP_BOOT_SIGNAL: AtomicBool = AtomicBool::new(false);
 }
 
 fn ua_string() -> String {
@@ -232,35 +233,19 @@ async fn tauri_main(args: InstallArgs) {
         .setup(move |app| {
             // sleep 5s to check if window is alive
             tokio::spawn({
-                let app_handle = app.app_handle().clone();
                 async move {
                     tokio::time::sleep(Duration::from_secs(5)).await;
-                    let window = app_handle.get_webview_window("main");
-                    // if window is not visible, there may be a js error or a webview2 fault
-                    // throw a dialog and exit
-                    let mut fault = false;
-                    if let Some(window) = &window {
-                        if let Ok(visible) = window.is_visible() {
-                            if !visible {
-                                fault = true;
-                            }
-                        } else {
-                            fault = true;
-                        }
-                    } else {
-                        fault = true;
-                    }
-                    if fault {
-                        rfd::MessageDialog::new()
-                            .set_title("Kachina Installer")
-                            .set_description("Initialization failed due to webview2 fault")
-                            .set_level(rfd::MessageLevel::Error)
-                            .show();
-                        tracing::error!("Webview2 fault detected");
-                        std::process::exit(1);
-                    } else {
+                    if APP_BOOT_SIGNAL.load(std::sync::atomic::Ordering::SeqCst) {
                         tracing::info!("Webview2 is alive");
+                        return;
                     }
+                    rfd::MessageDialog::new()
+                        .set_title("Kachina Installer")
+                        .set_description("Initialization failed due to webview2 fault")
+                        .set_level(rfd::MessageLevel::Error)
+                        .show();
+                    tracing::error!("Webview2 fault detected");
+                    std::process::exit(1);
                 }
             });
             let temp_dir_for_data = temp_dir.join("KachinaInstaller");
