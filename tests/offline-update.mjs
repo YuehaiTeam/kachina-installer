@@ -116,6 +116,7 @@ async function test() {
   } finally {
     await cleanupTestDir(testDir);
   }
+  process.exit(0);
 }
 
 test();

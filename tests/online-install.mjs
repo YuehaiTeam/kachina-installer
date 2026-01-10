@@ -90,6 +90,7 @@ async function test() {
     server?.close();
     await cleanupTestDir(testDir);
   }
+  process.exit(0);
 }
 
 test();
