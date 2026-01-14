@@ -34,17 +34,22 @@ pub async fn install_dotnet(
     notify: impl Fn(serde_json::Value) + std::marker::Send + 'static,
 ) -> Result<String> {
     let tag_without_version = tag.split('.').take(3).collect::<Vec<&str>>().join(".");
+    pub struct PackageLinks {
+        pub latest_link_template: &'static str,
+        pub versioned_link_template: &'static str,
+        pub tag: &'static str,
+    }
     let runtime = match tag_without_version.as_str() {
-        "Microsoft.DotNet.DesktopRuntime" => (
-            "https://builds.dotnet.microsoft.com/dotnet/WindowsDesktop/$/latest.version",
-            "https://builds.dotnet.microsoft.com/dotnet/WindowsDesktop/$/windowsdesktop-runtime-$-win-x64.exe",
-            "Microsoft.WindowsDesktop.App",
-        ),
-        "Microsoft.DotNet.Runtime" => (
-            "https://builds.dotnet.microsoft.com/dotnet/Runtime/$/latest.version",
-            "https://builds.dotnet.microsoft.com/dotnet/Runtime/$/dotnet-runtime-$-win-x64.exe",
-            "Microsoft.NETCore.App",
-        ),
+        "Microsoft.DotNet.DesktopRuntime" => PackageLinks {
+            latest_link_template: "https://aka.ms/dotnet/$/windowsdesktop-runtime-win-x64.exe",
+            versioned_link_template: "https://builds.dotnet.microsoft.com/dotnet/WindowsDesktop/$/windowsdesktop-runtime-$-win-x64.exe",
+            tag: "Microsoft.WindowsDesktop.App",
+        },
+        "Microsoft.DotNet.Runtime" => PackageLinks {
+            latest_link_template: "https://aka.ms/dotnet/$/dotnet-runtime-win-x64.exe",
+            versioned_link_template: "https://builds.dotnet.microsoft.com/dotnet/Runtime/$/dotnet-runtime-$-win-x64.exe",
+            tag: "Microsoft.NETCore.App",
+        },
         _ => {
             return Err(anyhow::anyhow!("UNSUPPORTED_DOTNET_RUNTIME"));
         }
@@ -63,7 +68,7 @@ pub async fn install_dotnet(
                 .split('.')
                 .nth(3)
                 .ok_or_else(|| anyhow::anyhow!("INVALID_DOTNET_VERSION"))?;
-            let query_name = format!("{} {}", runtime.2, version_primary);
+            let query_name = format!("{} {}", runtime.tag, version_primary);
             if stdout.contains(&query_name) {
                 return Ok("ALREADY_INSTALLED".to_string());
             }
@@ -91,25 +96,18 @@ pub async fn install_dotnet(
         (stream, size.unwrap())
     } else {
         let mut vernum = tag.split('.').skip(3).collect::<Vec<&str>>().join(".");
-        // if vernum is release version, get real version
-        if vernum.len() == 1 || vernum.len() == 2 {
-            let relver = if vernum.len() == 1 {
-                format!("{vernum}.0")
-            } else {
-                vernum.clone()
-            };
-            let url = runtime.0.replace("$", &relver);
-            let resp = reqwest::get(&url)
-                .await
-                .context("RUNTIME_VERSION_FETCH_ERR")?;
-            if !resp.status().is_success() {
-                return Err(anyhow::anyhow!("RUNTIME_VERSION_API_ERR"));
-            }
-            let text = resp.text().await.context("RUNTIME_VERSION_READ_ERR")?;
-            vernum = text.trim().to_string();
+        let url;
+        if vernum.len() == 1 {
+            vernum = format!("{vernum}.0");
         }
-        // get real download url
-        let url = runtime.1.replace("$", &vernum);
+
+        if vernum.len() == 2 {
+            // Download the latest version
+            url = runtime.latest_link_template.replace("$", &vernum);
+        } else {
+            // Download a specific version
+            url = runtime.versioned_link_template.replace("$", &vernum);
+        }
         let (stream, len, _insight) = create_http_stream(&url, 0, 0, true)
             .await
             .context("RUNTIME_DOWNLOAD_ERR")?;
@@ -160,11 +158,11 @@ pub async fn install_vcredist(
     let x86_prefix = "SOFTWARE\\Wow6432Node\\Microsoft\\VisualStudio\\14.0\\VC\\Runtimes\\";
     let (url, reg) = match tag.as_str() {
         "Microsoft.VCRedist.2015+.x64" => (
-            "https://aka.ms/vs/17/release/vc_redist.x64.exe",
+            "https://aka.ms/vc14/vc_redist.x64.exe",
             format!("{}{}", x64_prefix, "x64"),
         ),
         "Microsoft.VCRedist.2015+.x86" => (
-            "https://aka.ms/vs/17/release/vc_redist.x86.exe",
+            "https://aka.ms/vc14/vc_redist.x86.exe",
             format!("{}{}", x86_prefix, "x86"),
         ),
         _ => {
