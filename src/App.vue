@@ -10,7 +10,7 @@
       class="content"
       :class="{ borderless: PROJECT_CONFIG.windowBorderless }"
     >
-      <div class="controls">
+      <div class="controls" v-if="PROJECT_CONFIG.windowBorderless">
         <button class="cont-minimize" @click="minimize">
           <IconMinimize />
         </button>
