@@ -1061,10 +1061,18 @@ async function runInstall(): Promise<void> {
   const ignoreMap: string[] = [];
   if (isUpdate.value && ignoreFolderPath.length > 0) {
     for (const folder of ignoreFolderPath) {
-      const fullPath = replacePathEnvirables(folder).replace(/[\\\/]+/g, sep());
-      const [isEmpty] = await ipcIsFolderEmpty(fullPath);
-      if (!isEmpty) {
-        ignoreMap.push(fullPath.toLowerCase().replace(/[\\\/]+/g, sep()));
+      try {
+        const fullPath = replacePathEnvirables(folder).replace(
+          /[\\\/]+/g,
+          sep(),
+        );
+        const [isEmpty] = await ipcIsFolderEmpty(fullPath);
+        if (!isEmpty) {
+          ignoreMap.push(fullPath.toLowerCase().replace(/[\\\/]+/g, sep()));
+        }
+      } catch (e) {
+        // 预检查失败不阻塞安装，仅记录警告并跳过该规则
+        warn(`ignoreFolderPath 检查失败 (${folder}), 将跳过该规则:`, e);
       }
     }
   }
@@ -1207,7 +1215,7 @@ async function runInstall(): Promise<void> {
       }
     } catch (e) {
       error('Failed to create plugin session:', e);
-      await dialog_error(`创建插件会话失败: ${e}`);
+      await dialog_error(`创建下载会话失败: ${e}`);
       step.value = 1;
       return;
     }
@@ -1602,10 +1610,10 @@ async function finishInstall(
   const { program, desktop, uninstall } = await getLnkPath();
   const exePath = `${source.value}${sep()}${PROJECT_CONFIG.exeName}`;
   if (createLnk.value && !isUpdate.value) {
-    await ipcCreateLnk(exePath, desktop, needElevate.value);
+    await ipcCreateLnk(exePath, desktop, needElevate.value).catch(warn);
   }
   if (!isUpdate.value) {
-    await ipcCreateLnk(exePath, program, needElevate.value).catch(log);
+    await ipcCreateLnk(exePath, program, needElevate.value).catch(warn);
   }
   if (
     !isUpdate.value ||
