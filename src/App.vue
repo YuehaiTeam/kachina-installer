@@ -1387,15 +1387,18 @@ async function runInstall(): Promise<void> {
   log('All tasks completed successfully:', stats);
   clearInterval(progressInterval.value);
 
+  // Create snapshot of networkInsights before any cleanup to ensure consistent reporting
+  const serversSnapshot = [...networkInsights];
+
   // Clean up DFS2 sessions immediately after download completion, before post-processing
-  await cleanupAllDfs2Sessions();
+  await cleanupAllDfs2Sessions(serversSnapshot);
 
   // Clean up plugin sessions
   if (plugin?.endSession) {
     try {
       const cleanUrl = pluginManager.getCleanUrl(selectedSource.value);
       if (cleanUrl) {
-        await plugin.endSession(cleanUrl, { servers: networkInsights });
+        await plugin.endSession(cleanUrl, { servers: serversSnapshot });
       }
     } catch (e) {
       warn('Plugin session cleanup failed:', e);
@@ -1690,7 +1693,10 @@ async function install(): Promise<void> {
 
     // Clean up DFS2 sessions on error (only for DFS mode)
     if (installMode.value === 'default') {
-      await cleanupAllDfs2Sessions();
+      // Create snapshot of networkInsights before any cleanup to ensure consistent reporting
+      const serversSnapshot = [...networkInsights];
+
+      await cleanupAllDfs2Sessions(serversSnapshot);
 
       // 清理插件会话
       const plugin = pluginManager.findPlugin(selectedSource.value);
@@ -1698,7 +1704,7 @@ async function install(): Promise<void> {
         try {
           const cleanUrl = pluginManager.getCleanUrl(selectedSource.value);
           if (cleanUrl) {
-            await plugin.endSession(cleanUrl, { servers: networkInsights });
+            await plugin.endSession(cleanUrl, { servers: serversSnapshot });
           }
         } catch (e) {
           warn('Plugin session cleanup failed:', e);

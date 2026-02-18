@@ -3,6 +3,8 @@ import {
   VirtualMergedFile,
   DfsMetadataHashType,
   Embedded,
+  InsightItem,
+  TAError,
 } from './types';
 import {
   runDfsDownload,
@@ -10,7 +12,6 @@ import {
   getFileInstallMode,
 } from './dfs';
 import { log, error } from './api/ipc';
-import { networkInsights } from './networkInsights';
 import { friendlyError } from './utils/friendlyError';
 
 // 格式化文件大小
@@ -27,14 +28,13 @@ const logTaskResult = (
   mode: string,
   isSuccess: boolean,
   errorMsg?: string,
+  insight?: InsightItem,
 ) => {
   const size = formatFileSize(file.size);
   const filename = file.file_name;
 
-  // 获取最新的网络洞察数据（过滤出与当前文件相关的）
-  const recentInsights = networkInsights.slice(-1); // 获取最近的一条
-  const insightsJson =
-    recentInsights.length > 0 ? JSON.stringify(recentInsights[0]) : '{}';
+  // 使用传入的 insight 参数，不再读取全局数组
+  const insightsJson = insight ? JSON.stringify(insight) : '{}';
 
   if (isSuccess) {
     log(`[${mode}] ${size} ${filename} ${insightsJson}`);
@@ -65,13 +65,12 @@ const logMergedGroupResult = (
   files: DfsUpdateTask[],
   isSuccess: boolean,
   errorMsg?: string,
+  insight?: InsightItem,
 ) => {
   const fileNames = files.map((f) => f.file_name).join(',');
 
-  // 获取最新的网络洞察数据
-  const recentInsights = networkInsights.slice(-1);
-  const insightsJson =
-    recentInsights.length > 0 ? JSON.stringify(recentInsights[0]) : '{}';
+  // 使用传入的 insight 参数，不再读取全局数组
+  const insightsJson = insight ? JSON.stringify(insight) : '{}';
 
   if (isSuccess) {
     log(`[MERGED] ${fileNames} ${insightsJson}`);
@@ -122,7 +121,7 @@ export class SingleFileTask implements DownloadTask {
       this.context.hashKey,
     );
     try {
-      await runDfsDownload(
+      const result = await runDfsDownload(
         this.context.dfsSource,
         this.context.extras,
         this.context.local,
@@ -133,17 +132,27 @@ export class SingleFileTask implements DownloadTask {
         this.file.failed || false,
         this.context.elevate,
       );
-      logTaskResult(this.file, mode.toUpperCase(), true);
-    } catch (error) {
+      // 使用返回的 insight 进行日志输出
+      logTaskResult(
+        this.file,
+        mode.toUpperCase(),
+        true,
+        undefined,
+        result.insight,
+      );
+    } catch (err) {
       // 第一次失败后标记文件为失败状态，禁用patch模式
       this.file.failed = true;
+      // 错误路径：如果是 TAError 且包含 insight，使用该 insight
+      const errorInsight = err instanceof TAError ? err.insight : undefined;
       logTaskResult(
         this.file,
         mode.toUpperCase(),
         false,
-        JSON.stringify(error),
+        JSON.stringify(err),
+        errorInsight,
       );
-      throw error;
+      throw err;
     }
   }
   isLocalTask() {
@@ -185,15 +194,15 @@ export class LocalFileTask implements DownloadTask {
         this.context.elevate,
       );
 
-      // 成功：Local文件总是LOCAL模式
-      logTaskResult(this.file, 'LOCAL', true);
-    } catch (error) {
+      // 成功：Local文件总是LOCAL模式，无网络 insight
+      logTaskResult(this.file, 'LOCAL', true, undefined, undefined);
+    } catch (err) {
       // 第一次失败后标记文件为失败状态，禁用patch模式
       this.file.failed = true;
 
-      // 失败：Local文件记录错误
-      logTaskResult(this.file, 'LOCAL', false, JSON.stringify(error));
-      throw error;
+      // 失败：Local文件记录错误，无网络 insight
+      logTaskResult(this.file, 'LOCAL', false, JSON.stringify(err), undefined);
+      throw err;
     }
   }
 }
@@ -201,6 +210,7 @@ export class LocalFileTask implements DownloadTask {
 // 合并组释放任务
 export class MergedGroupTask implements DownloadTask {
   private hasRetriedMerged = false;
+  private lastInsight?: InsightItem;
 
   constructor(
     private virtualFile: VirtualMergedFile,
@@ -217,11 +227,14 @@ export class MergedGroupTask implements DownloadTask {
   }
 
   async execute(): Promise<void> {
+    // 每次尝试前重置 insight，避免重试时复用上次尝试的 insight
+    this.lastInsight = undefined;
+
     try {
       // 重置文件状态
       this.resetFilesState();
 
-      await runMergedGroupDownload(
+      const result = await runMergedGroupDownload(
         this.virtualFile._mergedInfo,
         this.context.dfsSource,
         this.context.extras,
@@ -231,11 +244,19 @@ export class MergedGroupTask implements DownloadTask {
         this.context.elevate,
       );
 
+      // 保存返回的 insight 用于日志输出
+      this.lastInsight = result.insight;
+
       // 成功：为每个文件输出日志，并输出汇总日志
       this.logMergedResults(true);
-    } catch (error) {
+    } catch (err) {
+      // 错误路径：如果是 TAError 且包含 insight，使用该 insight
+      if (err instanceof TAError && err.insight) {
+        this.lastInsight = err.insight;
+      }
+
       // 整个合并失败：输出汇总错误日志
-      this.logMergedResults(false, JSON.stringify(error));
+      this.logMergedResults(false, JSON.stringify(err));
 
       // 如果还没重试过，重试一次合并下载
       if (!this.hasRetriedMerged) {
@@ -308,11 +329,21 @@ export class MergedGroupTask implements DownloadTask {
         }
       });
 
-      // 输出汇总日志
-      logMergedGroupResult(this.virtualFile._mergedInfo.files, true);
+      // 输出汇总日志，使用保存的 insight
+      logMergedGroupResult(
+        this.virtualFile._mergedInfo.files,
+        true,
+        undefined,
+        this.lastInsight,
+      );
     } else {
-      // 整个合并失败
-      logMergedGroupResult(this.virtualFile._mergedInfo.files, false, errorMsg);
+      // 整个合并失败，使用保存的 insight
+      logMergedGroupResult(
+        this.virtualFile._mergedInfo.files,
+        false,
+        errorMsg,
+        this.lastInsight,
+      );
     }
   }
 

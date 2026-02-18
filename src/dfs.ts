@@ -1,7 +1,7 @@
 import { hybridPatch, InstallFile } from './api/installFile';
 import { ipc, log, warn, addInsightWithMode } from './api/ipc';
 import { invoke } from './tauri';
-import { networkInsights, clearNetworkInsights } from './networkInsights';
+import { clearNetworkInsights } from './networkInsights';
 import { KachinaInstallSource, pluginManager } from './plugins';
 import { registerAllPlugins } from './plugins/registry';
 import {
@@ -226,7 +226,7 @@ export async function refreshDfsIndex(
   const index_sz = dataView.getUint32(index_offset + 12, false);
   const metadata_sz = dataView.getUint32(index_offset + 16, false);
   const data_end = index_start + index_sz + config_sz + theme_sz + metadata_sz;
-  const index: [number, number][] = await invoke('get_http_with_range', {
+  const index: [number, number[]] = await invoke('get_http_with_range', {
     url: binurl,
     offset: index_start,
     size: data_end - index_start,
@@ -703,17 +703,21 @@ export const storeDfs2Session = (apiUrl: string, sessionId: string): void => {
 };
 
 // Clean up specific DFS2 session
-export const cleanupDfs2Session = async (apiUrl: string): Promise<void> => {
+export const cleanupDfs2Session = async (
+  apiUrl: string,
+  serversSnapshot?: InsightItem[],
+): Promise<void> => {
   const sessionInfo = dfs2Sessions.get(apiUrl);
   if (sessionInfo) {
     try {
       log('Ending DFS2 session:', sessionInfo.sessionId);
       const sessionApiUrl = `${sessionInfo.baseUrl}/session/${sessionInfo.sessionId}/${sessionInfo.resId}`;
 
-      // 只负责上报数据，不打印不清空
+      // 使用快照上报数据，防止被并发修改
+      // 始终结束 session，如有快照则带上 insights
       await invoke('end_dfs2_session', {
         sessionApiUrl: sessionApiUrl,
-        insights: { servers: networkInsights },
+        insights: serversSnapshot ? { servers: serversSnapshot } : undefined,
       });
       log('DFS2 session ended successfully:', sessionInfo.sessionId);
     } catch (error) {
@@ -724,18 +728,23 @@ export const cleanupDfs2Session = async (apiUrl: string): Promise<void> => {
 };
 
 // Clean up all DFS2 sessions (call at end of installation)
-export const cleanupAllDfs2Sessions = async (): Promise<void> => {
+export const cleanupAllDfs2Sessions = async (
+  serversSnapshot?: InsightItem[],
+): Promise<void> => {
   const cleanupPromises: Promise<void>[] = [];
 
   for (const apiUrl of dfs2Sessions.keys()) {
-    cleanupPromises.push(cleanupDfs2Session(apiUrl));
+    cleanupPromises.push(cleanupDfs2Session(apiUrl, serversSnapshot));
   }
 
   // 等待所有session清理完成
   await Promise.allSettled(cleanupPromises);
 
-  // 清空统计数据
-  clearNetworkInsights();
+  // 清空统计数据（在所有上报完成后）
+  // 只有提供快照时才清空（表示是正常的安装结束流程）
+  if (serversSnapshot) {
+    clearNetworkInsights();
+  }
 
   // 清理session缓存
   dfs2Sessions.clear();
@@ -1028,7 +1037,7 @@ export const runDfsDownload = async (
   disable_patch = false,
   disable_local = false,
   elevate = false,
-) => {
+): Promise<{ insight?: InsightItem }> => {
   const filename_with_first_slash = item.file_name.startsWith('/')
     ? item.file_name
     : `/${item.file_name}`;
@@ -1042,6 +1051,10 @@ export const runDfsDownload = async (
   const hasLpatchFile = local.find(
     (l) => l.name === item.lpatch?.from[hashKey],
   );
+
+  // Track insight for return
+  let collectedInsight: InsightItem | undefined = undefined;
+
   try {
     if (hasLocalFile && !disable_local) {
       // Local files don't involve network downloads, so no insight collection
@@ -1059,6 +1072,7 @@ export const runDfsDownload = async (
         elevate,
         onProgress,
       );
+      // Local: no insight
     } else if (
       hasLpatchFile &&
       item.lpatch &&
@@ -1081,6 +1095,7 @@ export const runDfsDownload = async (
       );
       if (result.insight) {
         addInsightWithMode(result.insight, 'hybridpatch');
+        collectedInsight = result.insight;
       }
     } else if (item.patch && !disable_patch) {
       // Patch: collect insights with 'patch' mode
@@ -1104,6 +1119,7 @@ export const runDfsDownload = async (
       );
       if (result.insight) {
         addInsightWithMode(result.insight, 'patch');
+        collectedInsight = result.insight;
       }
     } else {
       // Direct: collect insights with 'direct' mode
@@ -1127,6 +1143,7 @@ export const runDfsDownload = async (
       );
       if (result.insight) {
         addInsightWithMode(result.insight, 'direct');
+        collectedInsight = result.insight;
       }
     }
   } catch (e) {
@@ -1154,6 +1171,8 @@ export const runDfsDownload = async (
       if (mode) {
         addInsightWithMode(e.insight, mode);
       }
+      // Capture error insight for return (will be thrown, but caller can catch)
+      collectedInsight = e.insight;
     }
 
     throw e;
@@ -1161,6 +1180,7 @@ export const runDfsDownload = async (
     item.running = false;
   }
   item.downloaded = item.patch ? item.patch.size : item.size;
+  return { insight: collectedInsight };
 };
 
 // 小文件合并下载相关函数
@@ -1498,12 +1518,15 @@ export const runMergedGroupDownload = async (
   source: string,
   hashKey: DfsMetadataHashType,
   elevate: boolean,
-) => {
+): Promise<{ insight?: InsightItem }> => {
   // 标记组内所有文件为running
   groupInfo.files.forEach((f) => {
     f.running = true;
     f.downloaded = 0;
   });
+
+  // Track insight for return
+  let collectedInsight: InsightItem | undefined = undefined;
 
   try {
     // 从DFS source中提取API URL
@@ -1592,6 +1615,7 @@ export const runMergedGroupDownload = async (
     // 收集合并组的网络统计
     if (result.insight) {
       addInsightWithMode(result.insight, mode);
+      collectedInsight = result.insight;
     }
 
     // 处理结果并检查每个文件的状态
@@ -1646,11 +1670,13 @@ export const runMergedGroupDownload = async (
       );
     }
     // 日志将由 MergedGroupTask 统一处理
+    return { insight: collectedInsight };
   } catch (e) {
     // 处理错误情况下的网络统计
     if (e instanceof TAError && e.insight) {
       const mode = getMergedGroupMode(groupInfo.files, local, hashKey);
       addInsightWithMode(e.insight, mode);
+      collectedInsight = e.insight;
     }
     throw e;
   } finally {
