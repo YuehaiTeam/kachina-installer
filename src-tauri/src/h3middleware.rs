@@ -682,10 +682,13 @@ impl H3Middleware {
             None => original_url.path().to_string(),
         };
         // IPv6 addresses need brackets in URI authority: https://[::1]:443/path
-        let authority_host = if host.contains(':') {
-            format!("[{}]", host)
+        // Note: url.host_str() may already include brackets for IPv6, so check first
+        let authority_host = if host.starts_with('[') {
+            host.clone() // Already has brackets
+        } else if host.contains(':') {
+            format!("[{}]", host) // IPv6 without brackets
         } else {
-            host.clone()
+            host.clone() // IPv4 or hostname
         };
         let h3_uri = format!("https://{}:{}{}", authority_host, port, path_and_query);
 
