@@ -137,3 +137,4 @@ rustflags = ["-Zthreads=16"] # Better compile performance.
 
 [patch.crates-io]
 msquic-async = { git = "https://github.com/xytoki/msquic-async-rs.git", branch = "main" }
+ctor = { git = "https://github.com/xytoki/rust-ctor.git", branch = "master" }
