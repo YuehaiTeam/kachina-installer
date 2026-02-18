@@ -27,7 +27,7 @@ use crate::{
         progressed_read::ReadWithCallback,
         url::HttpContextExt,
     },
-    REQUEST_CLIENT,
+    DOWNLOAD_CLIENT,
 };
 use anyhow::{Context, Result};
 
@@ -623,7 +623,7 @@ pub async fn create_http_stream(
     let has_range = size > 0;
 
     // 构建HTTP请求
-    let mut builder = REQUEST_CLIENT.get(url);
+    let mut builder = DOWNLOAD_CLIENT.get(url);
     if has_range {
         builder = builder.header("Range", format!("bytes={}-{}", offset, offset + size - 1));
     }
@@ -740,7 +740,7 @@ pub async fn create_multi_http_stream(
     let request_start_time = Instant::now();
     let range_info = parse_range_string(range);
 
-    let res = REQUEST_CLIENT
+    let res = DOWNLOAD_CLIENT
         .get(url)
         .header("Range", format!("bytes={range}"))
         .send()

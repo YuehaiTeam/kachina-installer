@@ -4,13 +4,14 @@
 pub mod cli;
 pub mod dfs;
 pub mod fs;
+pub mod h3middleware;
+pub mod h3support;
 pub mod installer;
 pub mod ipc;
 pub mod local;
 pub mod module;
 pub mod thirdparty;
 pub mod utils;
-
 use clap::Parser;
 use cli::arg::{Command, InstallArgs};
 use installer::uninstall::delete_self_on_exit;
@@ -36,35 +37,53 @@ fn windows_text_scale_factor() -> f64 {
 }
 
 lazy_static::lazy_static! {
-    pub static ref REQUEST_CLIENT: reqwest::Client = reqwest::Client::builder()
-        .user_agent(ua_string())
-        .gzip(true)
-        .zstd(true)
-        .read_timeout(Duration::from_secs(30))
-        .connect_timeout(std::time::Duration::from_secs(5))
-        .build()
-        .unwrap();
-    pub static ref APP_BOOT_SIGNAL: AtomicBool = AtomicBool::new(false);
-}
-
-fn ua_string() -> String {
-    let winver = nt_version::get();
-    let cpu_cores = num_cpus::get();
-    let wv2ver = tauri::webview_version();
-    let wv2ver = if let Ok(ver) = wv2ver {
-        ver
-    } else {
-        "Unknown".to_string()
+    /// HTTP client for API calls (supports .json())
+    pub static ref API_CLIENT: reqwest::Client = {
+        reqwest::Client::builder()
+            .user_agent(h3support::ua_string())
+            .gzip(true)
+            .zstd(true)
+            .read_timeout(Duration::from_secs(30))
+            .connect_timeout(Duration::from_secs(5))
+            .build()
+            .unwrap()
     };
-    format!(
-        "KachinaInstaller/{} Webview2/{} Windows/{}.{}.{} Threads/{}",
-        env!("CARGO_PKG_VERSION"),
-        wv2ver,
-        winver.0,
-        winver.1,
-        winver.2 & 0xffff,
-        cpu_cores
-    )
+
+    /// HTTP client for downloads (supports H3/QUIC via middleware)
+    pub static ref DOWNLOAD_CLIENT: reqwest_middleware::ClientWithMiddleware = {
+        let h3_ok = h3support::init();
+
+        let reqwest_client = reqwest::Client::builder()
+            .user_agent("init") // Will be overwritten by DynamicUaMiddleware
+            .gzip(true)
+            .zstd(true)
+            .read_timeout(Duration::from_secs(30))
+            .connect_timeout(Duration::from_secs(5))
+            .build()
+            .unwrap();
+
+        let mut builder = reqwest_middleware::ClientBuilder::new(reqwest_client)
+            .with(h3support::DynamicUaMiddleware::new());
+
+        if h3_ok {
+            match h3support::H3FallbackMiddleware::new(Duration::from_secs(60)) {
+                Ok(h3mw) => {
+                    builder = builder.with(h3mw);
+                    tracing::info!("[H3] H3FallbackMiddleware enabled");
+                }
+                Err(e) => {
+                    tracing::warn!("[H3] Middleware init failed: {:#}, disabling", e);
+                    h3support::disable_h3();
+                }
+            }
+        }
+
+        builder.build()
+    };
+
+    /// Legacy alias - will be removed after migration
+    pub static ref REQUEST_CLIENT: &'static reqwest::Client = &*API_CLIENT;
+    pub static ref APP_BOOT_SIGNAL: AtomicBool = AtomicBool::new(false);
 }
 
 fn main() {

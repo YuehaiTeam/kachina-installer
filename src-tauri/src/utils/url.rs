@@ -111,6 +111,36 @@ impl<T> HttpContextExt<T> for Result<T, reqwest::Error> {
     }
 }
 
+impl<T> HttpContextExt<T> for Result<T, reqwest_middleware::Error> {
+    fn with_http_context(self, function_name: &str, url: &str) -> anyhow::Result<T> {
+        self.map_err(|e| anyhow::anyhow!(e))
+            .context(create_reqwest_context(
+                function_name,
+                url,
+                "HTTP_REQUEST_ERR",
+            ))
+    }
+
+    fn with_http_status_context(self, function_name: &str, url: &str) -> anyhow::Result<T> {
+        self.map_err(|e| anyhow::anyhow!(e))
+            .context(create_reqwest_context(
+                function_name,
+                url,
+                "HTTP_STATUS_ERR",
+            ))
+    }
+
+    fn with_http_error_context(
+        self,
+        function_name: &str,
+        url: &str,
+        error_type: &str,
+    ) -> anyhow::Result<T> {
+        self.map_err(|e| anyhow::anyhow!(e))
+            .context(create_reqwest_context(function_name, url, error_type))
+    }
+}
+
 impl<T> HttpContextExt<T> for anyhow::Result<T> {
     fn with_http_context(self, function_name: &str, url: &str) -> anyhow::Result<T> {
         self.context(create_reqwest_context(

@@ -51,6 +51,7 @@ windows = { version = "0.61.1", features = [
     "Win32_System_Registry",
     "Win32_Security_Authorization",
     "Win32_Security_Credentials",
+    "Win32_Security_Cryptography",
     "Security",
     "Win32_System_ProcessStatus",
     "Win32_System_Diagnostics_ToolHelp",
@@ -105,6 +106,12 @@ multer = "3.1.0"
 bytes = "1.10.1"
 url = "2.5"
 base64 = "0.22.1"
+h3 = "0.0.8"
+h3-msquic-async = { version = "0.3", default-features = false, features = ["msquic-seera", "msquic-seera-static", "tracing"] }
+hex = "0.4"
+async-trait = "0.1"
+async-stream = "0.3"
+http = "1"
 
 [[bin]]
 name = "kachina-installer"
@@ -127,3 +134,6 @@ opt-level = "s" # Prioritizes small binary size. Use `3` if you prefer speed.
 panic = "abort" # Higher performance by disabling panic handlers.
 trim-paths = "all" # Removes potentially privileged information from your binaries.
 rustflags = ["-Zthreads=16"] # Better compile performance.
+
+[patch.crates-io]
+msquic-async = { git = "https://github.com/xytoki/msquic-async-rs.git", branch = "main" }
