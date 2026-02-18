@@ -838,7 +838,7 @@ dependencies = [
 [[package]]
 name = "ctor"
 version = "0.6.3"
-source = "git+https://github.com/xytoki/rust-ctor.git?branch=master#d0cf66c9ba32a4e1c870eb35990f604a82197a3e"
+source = "git+https://github.com/xytoki/rust-ctor.git?branch=master#99c1fe9808ef2f10cd9e30c10adb5078ad2da027"
 dependencies = [
  "ctor-proc-macro",
  "dtor",
