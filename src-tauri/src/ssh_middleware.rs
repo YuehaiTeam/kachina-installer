@@ -35,15 +35,14 @@ struct SshHandler {
     expected_fingerprint: String, // hex-encoded SHA-256, always required
 }
 
-#[async_trait]
 impl russh::client::Handler for SshHandler {
     type Error = anyhow::Error;
 
     async fn check_server_key(
         &mut self,
-        server_public_key: &ssh_key::PublicKey,
+        server_public_key: &russh::keys::PublicKey,
     ) -> Result<bool, Self::Error> {
-        let fp = server_public_key.fingerprint(ssh_key::HashAlg::Sha256);
+        let fp = server_public_key.fingerprint(russh::keys::HashAlg::Sha256);
         let actual_hex: String = fp.as_bytes().iter().map(|b| format!("{b:02x}")).collect();
         let expected_norm = normalize_hex(&self.expected_fingerprint);
 
@@ -314,12 +313,12 @@ async fn ssh_connect(
     let auth_fut = async {
         if pass.is_empty() {
             anyhow::ensure!(
-                session.authenticate_none(user).await?,
+                session.authenticate_none(user).await?.success(),
                 "SSH none-auth failed for {user}@{host}:{port}"
             );
         } else {
             anyhow::ensure!(
-                session.authenticate_password(user, pass).await?,
+                session.authenticate_password(user, pass).await?.success(),
                 "SSH password-auth failed for {user}@{host}:{port}"
             );
         }
