@@ -360,6 +360,7 @@ pub struct SshMiddleware {
 }
 
 impl SshMiddleware {
+    #[allow(dead_code)]
     pub fn new(idle_timeout: Duration) -> Self {
         Self {
             inner: Arc::new(SshPoolInner::new(idle_timeout)),
@@ -458,7 +459,7 @@ impl SshMiddleware {
         .await
         .map_err(|e| {
             reqwest_middleware::Error::Middleware(
-                anyhow::anyhow!("SSH connect to {} failed: {e}", parts.ssh_target()).into(),
+                anyhow::anyhow!("SSH connect to {} failed: {e}", parts.ssh_target()),
             )
         })?;
 
@@ -539,8 +540,7 @@ impl SshMiddleware {
                         parts.internal_host,
                         parts.internal_port,
                         parts.ssh_target()
-                    )
-                    .into(),
+                    ),
                 ));
             }
             Ok(Err(err)) => {
@@ -574,8 +574,7 @@ impl SshMiddleware {
                     parts.internal_host,
                     parts.internal_port,
                     parts.ssh_target()
-                )
-                .into(),
+                ),
             )
         })?
         .map_err(|e| {
@@ -586,8 +585,7 @@ impl SshMiddleware {
                     parts.internal_host,
                     parts.internal_port,
                     parts.ssh_target()
-                )
-                .into(),
+                ),
             )
         })?;
 
@@ -601,7 +599,7 @@ impl SshMiddleware {
         req: reqwest::Request,
     ) -> Result<reqwest::Response, reqwest_middleware::Error> {
         let parts = parse_ssh_url(req.url())
-            .map_err(|e| reqwest_middleware::Error::Middleware(e.into()))?;
+            .map_err(|e| reqwest_middleware::Error::Middleware(e))?;
         let method = req.method().clone();
         let req_headers = req.headers().clone();
 
@@ -614,8 +612,7 @@ impl SshMiddleware {
                         anyhow::anyhow!(
                             "SSH tunnel to {} does not support streaming request bodies",
                             parts.ssh_target()
-                        )
-                        .into(),
+                        ),
                     ));
                 }
             },
@@ -732,7 +729,7 @@ impl SshMiddleware {
 }
 
 pub(crate) fn mw_err(msg: String) -> reqwest_middleware::Error {
-    reqwest_middleware::Error::Middleware(anyhow::anyhow!(msg).into())
+    reqwest_middleware::Error::Middleware(anyhow::anyhow!(msg))
 }
 
 #[async_trait]

@@ -444,7 +444,7 @@ impl H3Inner {
     ) -> Result<std::sync::MutexGuard<'_, HashMap<PoolKey, H3ConnEntry>>, reqwest_middleware::Error>
     {
         self.pool.lock().map_err(|_| {
-            reqwest_middleware::Error::Middleware(anyhow::anyhow!("H3 pool mutex poisoned").into())
+            reqwest_middleware::Error::Middleware(anyhow::anyhow!("H3 pool mutex poisoned"))
         })
     }
 }
@@ -590,7 +590,7 @@ impl H3Middleware {
         debug!(host = %norm_host, port, pin = ?pin_config, "[H3] Creating new QUIC connection");
         let conn =
             msquic_async::Connection::new_with_cert_validator(
-                &*self.inner.registration,
+                &self.inner.registration,
                 cert_validator,
             )
             .map_err(|e| {
@@ -598,7 +598,7 @@ impl H3Middleware {
                 reqwest_middleware::Error::Middleware(e.into())
             })?;
 
-        conn.start(&*self.inner.configuration, host, port)
+        conn.start(&self.inner.configuration, host, port)
             .await
             .map_err(|e| {
                 warn!(host = %norm_host, port, error = %e, "[H3] Connection::start failed");
@@ -758,8 +758,7 @@ impl H3Middleware {
                     }
                     Ok(None) => break,
                     Err(e) => {
-                        Err(std::io::Error::new(
-                            std::io::ErrorKind::Other,
+                        Err(std::io::Error::other(
                             format!("h3 recv_data error: {e}"),
                         ))?;
                     }
@@ -817,12 +816,12 @@ impl H3Middleware {
         let (validator, hashes) = DiscoveryValidator::new();
 
         let conn = msquic_async::Connection::new_with_cert_validator(
-            &*self.inner.registration,
+            &self.inner.registration,
             Some(Arc::new(validator) as Arc<dyn CertValidator>),
         )
         .map_err(|e| reqwest_middleware::Error::Middleware(e.into()))?;
 
-        conn.start(&*self.inner.configuration, host, port)
+        conn.start(&self.inner.configuration, host, port)
             .await
             .map_err(|e| reqwest_middleware::Error::Middleware(e.into()))?;
 

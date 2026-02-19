@@ -51,7 +51,7 @@ pub fn init() -> bool {
 fn probe_h3_support() -> bool {
     // 1. Win11+ check (MsQuic QUIC with Schannel requires build >= 22000)
     let (major, minor, build) = nt_version::get();
-    let build_num = (build & 0xffff) as u32;
+    let build_num = (build & 0xffff);
     if !(major == 10 && minor == 0 && build_num >= 22000) {
         tracing::info!(
             "[H3] Not Win11 (build={}, need 22000+), disabled",
@@ -96,6 +96,12 @@ fn has_system_proxy() -> bool {
 /// Middleware that injects a dynamic User-Agent header.
 /// Includes "h3/enabled" when H3 is available, so the control plane knows.
 pub struct DynamicUaMiddleware;
+
+impl Default for DynamicUaMiddleware {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl DynamicUaMiddleware {
     pub fn new() -> Self {
