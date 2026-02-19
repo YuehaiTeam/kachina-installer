@@ -98,7 +98,7 @@ zip = { git = "https://github.com/xytoki/zip2.git", default-features = false, fe
     "zstd",
 ] }
 anyhow = "1.0"
-reqwest-middleware = "0.4"
+reqwest-middleware = { version = "0.4", features = ["json"] }
 tracing = "0.1"
 whoami = "1.6.0"
 win32-version-info = "0.2.0"

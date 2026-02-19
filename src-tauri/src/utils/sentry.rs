@@ -3,8 +3,6 @@ use std::sync::{atomic::AtomicBool, Arc};
 use sentry::{ClientOptions, Transport};
 use tokio::sync::RwLock;
 
-use crate::REQUEST_CLIENT;
-
 pub enum SentryData {
     Breadcrumb(sentry::Breadcrumb),
     Envelope(sentry::Envelope),
@@ -63,8 +61,10 @@ impl sentry::TransportFactory for AutoTransportFactory {
             let transport = MpscTransport { mpsc_tx };
             return Arc::new(transport);
         }
-        let transport =
-            sentry::transports::ReqwestHttpTransport::with_client(options, REQUEST_CLIENT.clone());
+        let transport = sentry::transports::ReqwestHttpTransport::with_client(
+            options,
+            crate::RAW_CLIENT.clone(),
+        );
         Arc::new(transport)
     }
 }

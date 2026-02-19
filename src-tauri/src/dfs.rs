@@ -503,40 +503,42 @@ pub async fn http_get_request(
     headers: Option<HashMap<String, String>>,
     timeout_ms: Option<u64>,
 ) -> Result<HttpGetResponse, String> {
-    // Use global client by default, create custom client only if needed
-    let client = if ignore_redirects.unwrap_or(false) {
-        // Need custom client for no-redirect policy
-        reqwest::ClientBuilder::new()
-            .user_agent("KachinaInstaller/1.0")
+    // Send request — use a one-off raw client when redirect policy differs
+    let response = if ignore_redirects.unwrap_or(false) {
+        let client = reqwest::ClientBuilder::new()
+            .user_agent(crate::capabilities::ua_string())
             .redirect(reqwest::redirect::Policy::none())
             .build()
-            .map_err(|e| format!("Failed to create HTTP client: {}", e))?
-    } else {
-        // Use global client for better performance
-        REQUEST_CLIENT.clone()
-    };
+            .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
 
-    // Build request
-    let mut request_builder = client.get(&url);
-
-    // Set per-request timeout
-    if let Some(timeout) = timeout_ms {
-        request_builder = request_builder.timeout(Duration::from_millis(timeout));
-    }
-
-    // Add custom headers if provided
-    if let Some(custom_headers) = headers {
-        for (key, value) in custom_headers {
-            request_builder = request_builder.header(&key, &value);
+        let mut rb = client.get(&url);
+        if let Some(timeout) = timeout_ms {
+            rb = rb.timeout(Duration::from_millis(timeout));
         }
-    }
-
-    // Send request
-    let response = request_builder
-        .send()
-        .await
-        .with_http_context("http_get_request", &url)
-        .map_err(|e| e.to_string())?;
+        if let Some(ref custom_headers) = headers {
+            for (key, value) in custom_headers {
+                rb = rb.header(key, value);
+            }
+        }
+        rb.send()
+            .await
+            .with_http_context("http_get_request", &url)
+            .map_err(|e| e.to_string())?
+    } else {
+        let mut rb = REQUEST_CLIENT.get(&url);
+        if let Some(timeout) = timeout_ms {
+            rb = rb.timeout(Duration::from_millis(timeout));
+        }
+        if let Some(ref custom_headers) = headers {
+            for (key, value) in custom_headers {
+                rb = rb.header(key, value);
+            }
+        }
+        rb.send()
+            .await
+            .with_http_context("http_get_request", &url)
+            .map_err(|e| e.to_string())?
+    };
 
     // Get final URL (after redirects)
     let final_url = if let Some(redirected_url) = response.headers().get("Location") {
