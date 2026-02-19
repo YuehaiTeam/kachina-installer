@@ -175,12 +175,7 @@ impl H3FallbackMiddleware {
 
 #[async_trait]
 impl Middleware for H3FallbackMiddleware {
-    async fn handle(
-        &self,
-        req: Request,
-        ext: &mut Extensions,
-        next: Next<'_>,
-    ) -> Result<Response> {
+    async fn handle(&self, req: Request, ext: &mut Extensions, next: Next<'_>) -> Result<Response> {
         // Only intercept http3:// scheme
         if req.url().scheme() != "http3" {
             return next.run(req, ext).await;

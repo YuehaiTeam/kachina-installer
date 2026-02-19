@@ -176,9 +176,7 @@ pub async fn run_uninstall(
     clear_empty_dirs(source).await?;
 
     // delete registry - try both HKLM and HKCU since installation could have used either
-    let reg_path = format!(
-        "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\{reg_name}"
-    );
+    let reg_path = format!("SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\{reg_name}");
     let _ = windows_registry::LOCAL_MACHINE.remove_tree(&reg_path);
     let _ = windows_registry::CURRENT_USER.remove_tree(&reg_path);
 

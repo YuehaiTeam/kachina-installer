@@ -73,11 +73,11 @@ impl ManagedElevate {
         if process.is_none() {
             let name = self.pipe_id.clone();
             let name = format!(r"\\.\pipe\Kachina-Elevate-{name}");
-            
+
             // 先创建pipe服务器
             let mut server = Self::create_pipe(&name).context("ELEVATE_ERR")?;
             tracing::info!("Pipe server created at {:?}", name);
-            
+
             // pipe服务器创建成功后再启动UAC进程
             let command = run_elevated(
                 std::env::current_exe().unwrap(),
@@ -86,7 +86,7 @@ impl ManagedElevate {
             .context("ELEVATE_ERR")?;
             process.replace(command);
             tracing::info!("UAC process started, waiting for pipe connection...");
-            
+
             let tx = self.broadcast_tx.clone();
             let rx = self.mpsc_rx.write().await.take().unwrap();
             if !wait_conn(&mut server).await {

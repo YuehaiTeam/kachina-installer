@@ -289,7 +289,7 @@ where
             Poll::Ready(Some(Err(e))) => {
                 // Stream 实现中只更新 insight，因为泛型 E 的限制
                 // 实际的错误处理会在转换为 AsyncRead 时进行
-                let io_error = std::io::Error::new(std::io::ErrorKind::Other, e.to_string());
+                let io_error = std::io::Error::other(e.to_string());
                 let error_type = ClassifiedNetworkError::classify_error(&io_error);
                 let is_network_error = !matches!(error_type, NetworkErrorType::Other(_));
 
@@ -376,8 +376,8 @@ impl<S> NetworkInsightStream<S> {
             insight,
             network_bytes: Arc::new(AtomicU64::new(0)),
             response_received_time,
-            url: crate::utils::url::sanitize_url_for_logging(&url),   // 保存URL
-            range, // 保存Range
+            url: crate::utils::url::sanitize_url_for_logging(&url), // 保存URL
+            range,                                                  // 保存Range
             content_length,
             last_stall_check: now,
             last_stall_check_bytes: 0,
@@ -429,10 +429,7 @@ impl<S> NetworkInsightStream<S> {
 
                             if avg_speed < 100 * 1024 {
                                 // <100KB/s
-                                let base_error = std::io::Error::new(
-                                    std::io::ErrorKind::Other,
-                                    DOWNLOAD_TOO_SLOW,
-                                );
+                                let base_error = std::io::Error::other(DOWNLOAD_TOO_SLOW);
                                 return Err(ClassifiedNetworkError::new(
                                     NetworkErrorType::DownloadTooSlow,
                                     Box::new(base_error),

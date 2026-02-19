@@ -1,8 +1,11 @@
 use crate::{
-    APP_BOOT_SIGNAL, cli::arg::InstallArgs, local::{Embedded, get_config_from_embedded, get_embedded, mmap}, utils::{
-        error::{TAResult, return_ta_result},
+    cli::arg::InstallArgs,
+    local::{get_config_from_embedded, get_embedded, mmap, Embedded},
+    utils::{
+        error::{return_ta_result, TAResult},
         uac::check_elevated,
-    }
+    },
+    APP_BOOT_SIGNAL,
 };
 use anyhow::Context;
 use serde::Serialize;

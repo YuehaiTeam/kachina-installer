@@ -1,10 +1,10 @@
 // Prevents additional console window on Windows in release, DO NOT REMOVE!!
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+pub mod capabilities;
 pub mod cli;
 pub mod dfs;
 pub mod fs;
-pub mod capabilities;
 pub mod installer;
 pub mod ipc;
 pub mod local;
@@ -36,10 +36,10 @@ fn windows_text_scale_factor() -> f64 {
 }
 
 lazy_static::lazy_static! {
-    /// HTTP client for API calls (supports .json())
-    pub static ref API_CLIENT: reqwest::Client = {
+    /// Raw HTTP client without middleware (for internal use)
+    pub(crate) static ref RAW_CLIENT: reqwest::Client = {
         reqwest::Client::builder()
-            .user_agent(capabilities::ua_string())
+            .user_agent(capabilities::ua_string()) // overwritten per-request by DynamicUaMiddleware
             .gzip(true)
             .zstd(true)
             .read_timeout(Duration::from_secs(30))
@@ -48,20 +48,18 @@ lazy_static::lazy_static! {
             .unwrap()
     };
 
+    /// HTTP client for API calls — carries real-time dynamic UA
+    pub static ref API_CLIENT: reqwest_middleware::ClientWithMiddleware = {
+        reqwest_middleware::ClientBuilder::new(RAW_CLIENT.clone())
+            .with(capabilities::DynamicUaMiddleware::new())
+            .build()
+    };
+
     /// HTTP client for downloads (supports H3/QUIC via middleware)
     pub static ref DOWNLOAD_CLIENT: reqwest_middleware::ClientWithMiddleware = {
-        let h3_ok = capabilities::init();
+        let h3_ok = capabilities::is_h3_available();
 
-        let reqwest_client = reqwest::Client::builder()
-            .user_agent("init") // Will be overwritten by DynamicUaMiddleware
-            .gzip(true)
-            .zstd(true)
-            .read_timeout(Duration::from_secs(30))
-            .connect_timeout(Duration::from_secs(5))
-            .build()
-            .unwrap();
-
-        let mut builder = reqwest_middleware::ClientBuilder::new(reqwest_client)
+        let mut builder = reqwest_middleware::ClientBuilder::new(RAW_CLIENT.clone())
             .with(capabilities::DynamicUaMiddleware::new());
 
         if h3_ok {
@@ -94,7 +92,7 @@ lazy_static::lazy_static! {
     };
 
     /// Legacy alias - will be removed after migration
-    pub static ref REQUEST_CLIENT: &'static reqwest::Client = &*API_CLIENT;
+    pub static ref REQUEST_CLIENT: &'static reqwest_middleware::ClientWithMiddleware = &*API_CLIENT;
     pub static ref APP_BOOT_SIGNAL: AtomicBool = AtomicBool::new(false);
 }
 
@@ -140,6 +138,10 @@ fn main() {
     } else {
         registry.init();
     }
+
+    // Initialize H3/QUIC probe early — before any client is created
+    capabilities::init();
+
     // command is not  Command::Install, can be anything
     match command {
         Command::HeadlessUac(args) => {
@@ -181,7 +183,7 @@ fn main() {
                 .unwrap()
                 .block_on(tauri_main(install));
         }
-        Command::Other(str) => {
+        Command::Other(_str) => {
             sentry::add_breadcrumb(sentry::Breadcrumb {
                 category: Some("app".into()),
                 message: Some("KachinaInstaller started".into()),

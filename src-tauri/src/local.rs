@@ -114,7 +114,12 @@ pub async fn get_embedded(file: &'static AsyncMmapFile) -> anyhow::Result<Vec<Em
 
 pub async fn get_config_from_embedded(
     embedded: &[Embedded],
-) -> anyhow::Result<(Option<Value>, Option<Value>, Option<Vec<Embedded>>, Option<String>)> {
+) -> anyhow::Result<(
+    Option<Value>,
+    Option<Value>,
+    Option<Vec<Embedded>>,
+    Option<String>,
+)> {
     let file = mmap().await;
     let mut config = None;
     let mut metadata = None;

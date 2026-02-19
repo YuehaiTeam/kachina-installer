@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, warn, trace};
+use tracing::{debug, trace, warn};
 
 // Re-export for user convenience
 pub use h3_msquic_async::msquic_async::{CertValidator, PeerCertInfo};
@@ -145,10 +145,8 @@ mod win_pin {
         if cert_ctx.pbCertEncoded.is_null() || cert_ctx.cbCertEncoded == 0 {
             return None;
         }
-        let der = std::slice::from_raw_parts(
-            cert_ctx.pbCertEncoded,
-            cert_ctx.cbCertEncoded as usize,
-        );
+        let der =
+            std::slice::from_raw_parts(cert_ctx.pbCertEncoded, cert_ctx.cbCertEncoded as usize);
 
         let mut hash = [0u8; 32];
         if BCryptHash(BCRYPT_SHA256_ALG_HANDLE, None, der, &mut hash).is_err() {
@@ -255,7 +253,12 @@ mod win_pin {
     impl DiscoveryValidator {
         pub fn new() -> (Self, std::sync::Arc<std::sync::Mutex<DiscoveredHashes>>) {
             let results = std::sync::Arc::new(std::sync::Mutex::new(DiscoveredHashes::default()));
-            (Self { results: results.clone() }, results)
+            (
+                Self {
+                    results: results.clone(),
+                },
+                results,
+            )
         }
     }
 
@@ -326,14 +329,13 @@ fn parse_pin_from_fragment(url: &url::Url) -> Option<PinConfig> {
     }
 
     // cert takes priority over spki
-    let (hex_str, make_target): (&str, fn([u8; 32]) -> PinTarget) =
-        if let Some(h) = cert_hex {
-            (h, PinTarget::Cert)
-        } else if let Some(h) = spki_hex {
-            (h, PinTarget::Spki)
-        } else {
-            return None;
-        };
+    let (hex_str, make_target): (&str, fn([u8; 32]) -> PinTarget) = if let Some(h) = cert_hex {
+        (h, PinTarget::Cert)
+    } else if let Some(h) = spki_hex {
+        (h, PinTarget::Spki)
+    } else {
+        return None;
+    };
 
     // Guard: SHA-256 hex must be exactly 64 chars, reject early to avoid large alloc
     if hex_str.len() != 64 {
@@ -483,8 +485,7 @@ impl H3Middleware {
             .set_PeerBidiStreamCount(100)
             .set_PeerUnidiStreamCount(100);
 
-        let configuration =
-            msquic::Configuration::open(&registration, &alpn, Some(&settings))?;
+        let configuration = msquic::Configuration::open(&registration, &alpn, Some(&settings))?;
         let cred_config = msquic::CredentialConfig::new_client()
             .set_credential_flags(msquic::CredentialFlags::INDICATE_CERTIFICATE_RECEIVED)
             .set_credential_flags(msquic::CredentialFlags::DEFER_CERTIFICATE_VALIDATION);
@@ -512,7 +513,7 @@ impl H3Middleware {
         // Check pool (hold std::sync::Mutex briefly, release before .await)
         {
             let mut pool = self.inner.lock_pool()?;
-            
+
             // P1-1: Sweep stale connections and enforce max pool size
             let now = Instant::now();
             let keys_to_evict: Vec<PoolKey> = pool
@@ -523,7 +524,8 @@ impl H3Middleware {
                         Ok(()) | Err(std::sync::mpsc::TryRecvError::Disconnected)
                     );
                     let driver_done = entry.driver_handle.is_finished();
-                    let idle_expired = now.duration_since(entry.last_used) > self.inner.idle_timeout;
+                    let idle_expired =
+                        now.duration_since(entry.last_used) > self.inner.idle_timeout;
                     let active = entry.active_streams.load(Ordering::Relaxed);
                     if dead || driver_done || (idle_expired && active == 0) {
                         Some(k.clone())
@@ -536,19 +538,24 @@ impl H3Middleware {
                 debug!(host = %k.0, port = k.1, "[H3] Sweep: evicting stale connection");
                 pool.remove(&k);
             }
-            
+
             // Enforce max pool size by evicting oldest entries
             if pool.len() >= MAX_POOL_SIZE {
-                let mut entries: Vec<_> = pool.iter().map(|(k, e)| (k.clone(), e.last_used)).collect();
+                let mut entries: Vec<_> =
+                    pool.iter().map(|(k, e)| (k.clone(), e.last_used)).collect();
                 entries.sort_by_key(|(_, last_used)| *last_used);
                 let to_remove = pool.len() - MAX_POOL_SIZE + 1;
-                let keys_to_evict: Vec<PoolKey> = entries.into_iter().take(to_remove).map(|(k, _)| k).collect();
+                let keys_to_evict: Vec<PoolKey> = entries
+                    .into_iter()
+                    .take(to_remove)
+                    .map(|(k, _)| k)
+                    .collect();
                 for k in keys_to_evict {
                     debug!(host = %k.0, port = k.1, "[H3] Pool full: evicting oldest");
                     pool.remove(&k);
                 }
             }
-            
+
             if let Some(entry) = pool.get_mut(&key) {
                 let dead = match entry.close_rx.try_recv() {
                     Ok(()) | Err(std::sync::mpsc::TryRecvError::Disconnected) => true,
@@ -583,20 +590,18 @@ impl H3Middleware {
         // Lock released
 
         // Create per-request CertValidator from PinConfig
-        let cert_validator: Option<Arc<dyn CertValidator>> = pin_config.map(|cfg| {
-            Arc::new(PinValidator { config: cfg }) as Arc<dyn CertValidator>
-        });
+        let cert_validator: Option<Arc<dyn CertValidator>> =
+            pin_config.map(|cfg| Arc::new(PinValidator { config: cfg }) as Arc<dyn CertValidator>);
 
         debug!(host = %norm_host, port, pin = ?pin_config, "[H3] Creating new QUIC connection");
-        let conn =
-            msquic_async::Connection::new_with_cert_validator(
-                &self.inner.registration,
-                cert_validator,
-            )
-            .map_err(|e| {
-                warn!(host = %norm_host, port, error = %e, "[H3] Connection::new failed");
-                reqwest_middleware::Error::Middleware(e.into())
-            })?;
+        let conn = msquic_async::Connection::new_with_cert_validator(
+            &self.inner.registration,
+            cert_validator,
+        )
+        .map_err(|e| {
+            warn!(host = %norm_host, port, error = %e, "[H3] Connection::new failed");
+            reqwest_middleware::Error::Middleware(e.into())
+        })?;
 
         conn.start(&self.inner.configuration, host, port)
             .await
@@ -661,7 +666,7 @@ impl H3Middleware {
     }
 
     /// Perform an H3/QUIC request.
-    /// 
+    ///
     /// **NOTE**: Only GET requests without body are supported. Request body is ignored.
     /// This is designed for file downloads where the server provides the content.
     pub async fn h3_request(
@@ -674,7 +679,9 @@ impl H3Middleware {
 
         let host = original_url
             .host_str()
-            .ok_or_else(|| reqwest_middleware::Error::Middleware(anyhow::anyhow!("no host in URL")))?
+            .ok_or_else(|| {
+                reqwest_middleware::Error::Middleware(anyhow::anyhow!("no host in URL"))
+            })?
             .to_string();
         let port = original_url.port().unwrap_or(443);
         let path_and_query = match original_url.query() {
@@ -713,17 +720,14 @@ impl H3Middleware {
         // Clone key for error paths
         let pool_key = (normalize_host(&host), port, pin_config);
 
-        let mut stream = send_request
-            .send_request(h3_req)
-            .await
-            .map_err(|e| {
-                warn!(host = %host, port, error = %e, "[H3] send_request failed, evicting");
-                if let Ok(mut pool) = self.inner.pool.lock() {
-                    pool.remove(&pool_key);
-                }
-                reqwest_middleware::Error::Middleware(anyhow::anyhow!("h3 send: {}", e))
-            })?;
-        
+        let mut stream = send_request.send_request(h3_req).await.map_err(|e| {
+            warn!(host = %host, port, error = %e, "[H3] send_request failed, evicting");
+            if let Ok(mut pool) = self.inner.pool.lock() {
+                pool.remove(&pool_key);
+            }
+            reqwest_middleware::Error::Middleware(anyhow::anyhow!("h3 send: {}", e))
+        })?;
+
         // P1-4: Also evict on finish/recv_response errors
         stream.finish().await.map_err(|e| {
             warn!(host = %host, port, error = %e, "[H3] finish failed, evicting");
@@ -827,9 +831,9 @@ impl H3Middleware {
 
         // Do a minimal H3 handshake to ensure cert callback fires
         let h3_conn = h3_msquic_async::Connection::new(conn);
-        let (_driver, _send_request) = h3::client::new(h3_conn)
-            .await
-            .map_err(|e| reqwest_middleware::Error::Middleware(anyhow::anyhow!("h3 discover: {}", e)))?;
+        let (_driver, _send_request) = h3::client::new(h3_conn).await.map_err(|e| {
+            reqwest_middleware::Error::Middleware(anyhow::anyhow!("h3 discover: {}", e))
+        })?;
 
         let result = hashes
             .lock()

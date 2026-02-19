@@ -13,8 +13,8 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use async_stream::try_stream;
-use futures::TryStreamExt;
 use bytes::Bytes;
+use futures::TryStreamExt;
 use http::header::{ACCEPT_RANGES, CONTENT_LENGTH, CONTENT_RANGE, RANGE};
 use reqwest_middleware::{Middleware, Next};
 use russh_sftp::client::SftpSession;
@@ -296,7 +296,10 @@ impl SftpMiddleware {
                 }
                 None => {
                     // Unparseable, multi-range, or suffix-range → 416
-                    warn!(range = range_val, "SFTP: rejecting unsupported Range header");
+                    warn!(
+                        range = range_val,
+                        "SFTP: rejecting unsupported Range header"
+                    );
                     return Self::build_416_response(total_size);
                 }
             }
@@ -306,18 +309,13 @@ impl SftpMiddleware {
 
         // Open + seek
         let mut file = sftp
-            .open_with_flags(
-                remote_path,
-                russh_sftp::protocol::OpenFlags::READ,
-            )
+            .open_with_flags(remote_path, russh_sftp::protocol::OpenFlags::READ)
             .await?;
         if offset > 0 {
             file.seek(std::io::SeekFrom::Start(offset)).await?;
         }
 
-        debug!(
-            offset, limit_len, status, total_size, "SFTP: serving file"
-        );
+        debug!(offset, limit_len, status, total_size, "SFTP: serving file");
 
         // Streaming body — capture guards to keep SSH/SFTP alive
         let sftp_clone = Arc::clone(sftp);
@@ -354,8 +352,7 @@ impl SftpMiddleware {
 
         if status == 206 {
             let end = offset + limit_len - 1;
-            builder = builder
-                .header(CONTENT_RANGE, format!("bytes {offset}-{end}/{total_size}"));
+            builder = builder.header(CONTENT_RANGE, format!("bytes {offset}-{end}/{total_size}"));
         }
 
         let http_resp = builder
@@ -417,8 +414,7 @@ impl SftpMiddleware {
         if let Some(sftp_err) = err.downcast_ref::<russh_sftp::client::error::Error>() {
             return matches!(
                 sftp_err,
-                russh_sftp::client::error::Error::IO(_)
-                    | russh_sftp::client::error::Error::Timeout
+                russh_sftp::client::error::Error::IO(_) | russh_sftp::client::error::Error::Timeout
             );
         }
         // Check for I/O errors

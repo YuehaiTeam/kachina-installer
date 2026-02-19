@@ -207,10 +207,9 @@ pub(crate) fn percent_decode(input: &str) -> anyhow::Result<String> {
     let mut i = 0;
     while i < src.len() {
         if src[i] == b'%' && i + 2 < src.len() {
-            if let Ok(byte) = u8::from_str_radix(
-                std::str::from_utf8(&src[i + 1..i + 3]).unwrap_or(""),
-                16,
-            ) {
+            if let Ok(byte) =
+                u8::from_str_radix(std::str::from_utf8(&src[i + 1..i + 3]).unwrap_or(""), 16)
+            {
                 bytes.push(byte);
                 i += 3;
                 continue;
@@ -251,7 +250,7 @@ const HOP_BY_HOP_HEADERS: &[&str] = &[
 
 #[derive(Clone, Eq, Hash, PartialEq)]
 pub(crate) struct PoolKey {
-    pub(crate) host: String,        // lowercased
+    pub(crate) host: String, // lowercased
     pub(crate) port: u16,
     pub(crate) user: String,
     pub(crate) fingerprint: String, // normalised hex
@@ -458,9 +457,10 @@ impl SshMiddleware {
         )
         .await
         .map_err(|e| {
-            reqwest_middleware::Error::Middleware(
-                anyhow::anyhow!("SSH connect to {} failed: {e}", parts.ssh_target()),
-            )
+            reqwest_middleware::Error::Middleware(anyhow::anyhow!(
+                "SSH connect to {} failed: {e}",
+                parts.ssh_target()
+            ))
         })?;
 
         let handle = Arc::new(handle);
@@ -534,14 +534,12 @@ impl SshMiddleware {
         match ch_result {
             Ok(Ok(ch)) => return Ok((ch, guard, handle)),
             Ok(Err(ref err)) if !is_recoverable_ssh_error(err) => {
-                return Err(reqwest_middleware::Error::Middleware(
-                    anyhow::anyhow!(
-                        "SSH channel to {}:{} via {} rejected: {err}",
-                        parts.internal_host,
-                        parts.internal_port,
-                        parts.ssh_target()
-                    ),
-                ));
+                return Err(reqwest_middleware::Error::Middleware(anyhow::anyhow!(
+                    "SSH channel to {}:{} via {} rejected: {err}",
+                    parts.internal_host,
+                    parts.internal_port,
+                    parts.ssh_target()
+                )));
             }
             Ok(Err(err)) => {
                 debug!(err = %err, target = %parts.ssh_target(),
@@ -568,25 +566,21 @@ impl SshMiddleware {
         )
         .await
         .map_err(|_| {
-            reqwest_middleware::Error::Middleware(
-                anyhow::anyhow!(
-                    "SSH channel to {}:{} via {} timed out after reconnect",
-                    parts.internal_host,
-                    parts.internal_port,
-                    parts.ssh_target()
-                ),
-            )
+            reqwest_middleware::Error::Middleware(anyhow::anyhow!(
+                "SSH channel to {}:{} via {} timed out after reconnect",
+                parts.internal_host,
+                parts.internal_port,
+                parts.ssh_target()
+            ))
         })?
         .map_err(|e| {
             self.evict(&parts.pool_key());
-            reqwest_middleware::Error::Middleware(
-                anyhow::anyhow!(
-                    "SSH channel to {}:{} via {} failed after reconnect: {e}",
-                    parts.internal_host,
-                    parts.internal_port,
-                    parts.ssh_target()
-                ),
-            )
+            reqwest_middleware::Error::Middleware(anyhow::anyhow!(
+                "SSH channel to {}:{} via {} failed after reconnect: {e}",
+                parts.internal_host,
+                parts.internal_port,
+                parts.ssh_target()
+            ))
         })?;
 
         Ok((ch, guard, handle))
@@ -598,8 +592,7 @@ impl SshMiddleware {
         &self,
         req: reqwest::Request,
     ) -> Result<reqwest::Response, reqwest_middleware::Error> {
-        let parts = parse_ssh_url(req.url())
-            .map_err(|e| reqwest_middleware::Error::Middleware(e))?;
+        let parts = parse_ssh_url(req.url()).map_err(reqwest_middleware::Error::Middleware)?;
         let method = req.method().clone();
         let req_headers = req.headers().clone();
 
@@ -608,12 +601,10 @@ impl SshMiddleware {
             Some(b) => match b.as_bytes() {
                 Some(slice) => Bytes::copy_from_slice(slice),
                 None => {
-                    return Err(reqwest_middleware::Error::Middleware(
-                        anyhow::anyhow!(
-                            "SSH tunnel to {} does not support streaming request bodies",
-                            parts.ssh_target()
-                        ),
-                    ));
+                    return Err(reqwest_middleware::Error::Middleware(anyhow::anyhow!(
+                        "SSH tunnel to {} does not support streaming request bodies",
+                        parts.ssh_target()
+                    )));
                 }
             },
         };
