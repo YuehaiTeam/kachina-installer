@@ -6,7 +6,11 @@
 //! - `DynamicUaMiddleware` — Injects User-Agent with h3/enabled when available
 //! - `H3FallbackMiddleware` — Intercepts http3:// URLs, falls back on failure
 
-use crate::h3middleware::H3Middleware;
+pub(crate) mod h3;
+pub(crate) mod sftp;
+pub(crate) mod ssh;
+
+use self::h3::H3Middleware;
 use async_trait::async_trait;
 use http::Extensions;
 use reqwest::{Request, Response};

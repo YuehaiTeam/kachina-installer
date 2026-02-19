@@ -4,11 +4,8 @@
 pub mod cli;
 pub mod dfs;
 pub mod fs;
-pub mod h3middleware;
-pub mod h3support;
+pub mod capabilities;
 pub mod installer;
-pub mod sftp_middleware;
-pub mod ssh_middleware;
 pub mod ipc;
 pub mod local;
 pub mod module;
@@ -42,7 +39,7 @@ lazy_static::lazy_static! {
     /// HTTP client for API calls (supports .json())
     pub static ref API_CLIENT: reqwest::Client = {
         reqwest::Client::builder()
-            .user_agent(h3support::ua_string())
+            .user_agent(capabilities::ua_string())
             .gzip(true)
             .zstd(true)
             .read_timeout(Duration::from_secs(30))
@@ -53,7 +50,7 @@ lazy_static::lazy_static! {
 
     /// HTTP client for downloads (supports H3/QUIC via middleware)
     pub static ref DOWNLOAD_CLIENT: reqwest_middleware::ClientWithMiddleware = {
-        let h3_ok = h3support::init();
+        let h3_ok = capabilities::init();
 
         let reqwest_client = reqwest::Client::builder()
             .user_agent("init") // Will be overwritten by DynamicUaMiddleware
@@ -65,32 +62,32 @@ lazy_static::lazy_static! {
             .unwrap();
 
         let mut builder = reqwest_middleware::ClientBuilder::new(reqwest_client)
-            .with(h3support::DynamicUaMiddleware::new());
+            .with(capabilities::DynamicUaMiddleware::new());
 
         if h3_ok {
-            match h3support::H3FallbackMiddleware::new(Duration::from_secs(60)) {
+            match capabilities::H3FallbackMiddleware::new(Duration::from_secs(60)) {
                 Ok(h3mw) => {
                     builder = builder.with(h3mw);
                     tracing::info!("[H3] H3FallbackMiddleware enabled");
                 }
                 Err(e) => {
                     tracing::warn!("[H3] Middleware init failed: {:#}, disabling", e);
-                    h3support::disable_h3();
+                    capabilities::disable_h3();
                 }
             }
         }
 
         // Shared SSH connection pool for both SSH tunnel and SFTP middlewares
         let ssh_pool = std::sync::Arc::new(
-            ssh_middleware::SshPoolInner::new(Duration::from_secs(300)),
+            capabilities::ssh::SshPoolInner::new(Duration::from_secs(300)),
         );
 
         // SSH tunnel middleware — routes ssh+http:// URLs through SSH direct-tcpip channels
-        builder = builder.with(ssh_middleware::SshMiddleware::with_pool(ssh_pool.clone()));
+        builder = builder.with(capabilities::ssh::SshMiddleware::with_pool(ssh_pool.clone()));
         tracing::info!("[SSH] SshMiddleware enabled");
 
         // SFTP download middleware — routes sftp:// URLs through SSH SFTP subsystem
-        builder = builder.with(sftp_middleware::SftpMiddleware::new(ssh_pool));
+        builder = builder.with(capabilities::sftp::SftpMiddleware::new(ssh_pool));
         tracing::info!("[SFTP] SftpMiddleware enabled");
 
         builder.build()

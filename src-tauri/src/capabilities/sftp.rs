@@ -21,7 +21,7 @@ use russh_sftp::client::SftpSession;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tracing::{debug, warn};
 
-use crate::ssh_middleware::{
+use super::ssh::{
     is_recoverable_ssh_error, mw_err, normalize_hex, percent_decode, ActiveStreamGuard, PoolKey,
     SshMiddleware, SshPoolInner, SshUrlParts,
 };
