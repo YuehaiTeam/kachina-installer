@@ -7,6 +7,7 @@ pub mod fs;
 pub mod h3middleware;
 pub mod h3support;
 pub mod installer;
+pub mod sftp_middleware;
 pub mod ssh_middleware;
 pub mod ipc;
 pub mod local;
@@ -79,9 +80,18 @@ lazy_static::lazy_static! {
             }
         }
 
+        // Shared SSH connection pool for both SSH tunnel and SFTP middlewares
+        let ssh_pool = std::sync::Arc::new(
+            ssh_middleware::SshPoolInner::new(Duration::from_secs(300)),
+        );
+
         // SSH tunnel middleware — routes ssh+http:// URLs through SSH direct-tcpip channels
-        builder = builder.with(ssh_middleware::SshMiddleware::new(Duration::from_secs(300)));
+        builder = builder.with(ssh_middleware::SshMiddleware::with_pool(ssh_pool.clone()));
         tracing::info!("[SSH] SshMiddleware enabled");
+
+        // SFTP download middleware — routes sftp:// URLs through SSH SFTP subsystem
+        builder = builder.with(sftp_middleware::SftpMiddleware::new(ssh_pool));
+        tracing::info!("[SFTP] SftpMiddleware enabled");
 
         builder.build()
     };

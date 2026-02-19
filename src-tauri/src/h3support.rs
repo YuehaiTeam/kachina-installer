@@ -132,6 +132,7 @@ pub fn ua_string() -> String {
     );
 
     ua.push_str(" ssh/enabled");
+    ua.push_str(" sftp/enabled");
 
     if is_h3_available() {
         ua.push_str(" h3/enabled");

@@ -31,7 +31,7 @@ use tracing::{debug, warn};
 // SSH Handler — host key fingerprint verification
 // ====================================================================
 
-struct SshHandler {
+pub(crate) struct SshHandler {
     expected_fingerprint: String, // hex-encoded SHA-256, always required
 }
 
@@ -59,7 +59,7 @@ impl russh::client::Handler for SshHandler {
 }
 
 /// Strip non-hex characters (colons, spaces, …) and lowercase.
-fn normalize_hex(s: &str) -> String {
+pub(crate) fn normalize_hex(s: &str) -> String {
     s.chars()
         .filter(|c| c.is_ascii_hexdigit())
         .collect::<String>()
@@ -70,16 +70,16 @@ fn normalize_hex(s: &str) -> String {
 // URL parsing
 // ====================================================================
 
-struct SshUrlParts {
-    ssh_user: String,
-    ssh_pass: String,
-    ssh_host: String,
-    ssh_port: u16,
-    fingerprint: String, // required
-    internal_host: String,
-    internal_port: u16,
+pub(crate) struct SshUrlParts {
+    pub(crate) ssh_user: String,
+    pub(crate) ssh_pass: String,
+    pub(crate) ssh_host: String,
+    pub(crate) ssh_port: u16,
+    pub(crate) fingerprint: String, // required
+    pub(crate) internal_host: String,
+    pub(crate) internal_port: u16,
     /// e.g. "/api/v1?foo=bar"
-    http_path_and_query: String,
+    pub(crate) http_path_and_query: String,
 }
 
 impl SshUrlParts {
@@ -201,7 +201,7 @@ fn parse_ssh_url(url: &reqwest::Url) -> anyhow::Result<SshUrlParts> {
 }
 
 /// Minimal percent-decoding for URL fragment components.
-fn percent_decode(input: &str) -> anyhow::Result<String> {
+pub(crate) fn percent_decode(input: &str) -> anyhow::Result<String> {
     let mut bytes = Vec::with_capacity(input.len());
     let src = input.as_bytes();
     let mut i = 0;
@@ -227,8 +227,8 @@ fn percent_decode(input: &str) -> anyhow::Result<String> {
 // Connection pool types
 // ====================================================================
 
-const MAX_POOL_SIZE: usize = 16;
-const MAX_STREAMS_PER_SESSION: usize = 64;
+pub(crate) const MAX_POOL_SIZE: usize = 16;
+pub(crate) const MAX_STREAMS_PER_SESSION: usize = 4;
 
 const SSH_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 const SSH_AUTH_TIMEOUT: Duration = Duration::from_secs(15);
@@ -250,22 +250,22 @@ const HOP_BY_HOP_HEADERS: &[&str] = &[
 ];
 
 #[derive(Clone, Eq, Hash, PartialEq)]
-struct PoolKey {
-    host: String,        // lowercased
-    port: u16,
-    user: String,
-    fingerprint: String, // normalised hex
+pub(crate) struct PoolKey {
+    pub(crate) host: String,        // lowercased
+    pub(crate) port: u16,
+    pub(crate) user: String,
+    pub(crate) fingerprint: String, // normalised hex
 }
 
-struct SshConnEntry {
-    handle: Arc<russh::client::Handle<SshHandler>>,
-    last_used: Instant,
-    active_streams: Arc<AtomicUsize>,
+pub(crate) struct SshConnEntry {
+    pub(crate) handle: Arc<russh::client::Handle<SshHandler>>,
+    pub(crate) last_used: Instant,
+    pub(crate) active_streams: Arc<AtomicUsize>,
 }
 
 /// RAII guard — decrements active-stream count on drop.
-struct ActiveStreamGuard {
-    counter: Arc<AtomicUsize>,
+pub(crate) struct ActiveStreamGuard {
+    pub(crate) counter: Arc<AtomicUsize>,
 }
 impl Drop for ActiveStreamGuard {
     fn drop(&mut self) {
@@ -281,16 +281,25 @@ impl Drop for AbortOnDrop {
     }
 }
 
-struct SshPoolInner {
-    pool: tokio::sync::Mutex<HashMap<PoolKey, SshConnEntry>>,
-    idle_timeout: Duration,
+pub(crate) struct SshPoolInner {
+    pub(crate) pool: tokio::sync::Mutex<HashMap<PoolKey, SshConnEntry>>,
+    pub(crate) idle_timeout: Duration,
+}
+
+impl SshPoolInner {
+    pub(crate) fn new(idle_timeout: Duration) -> Self {
+        Self {
+            pool: tokio::sync::Mutex::new(HashMap::new()),
+            idle_timeout,
+        }
+    }
 }
 
 // ====================================================================
 // SSH connect helper
 // ====================================================================
 
-async fn ssh_connect(
+pub(crate) async fn ssh_connect(
     host: &str,
     port: u16,
     user: &str,
@@ -335,7 +344,7 @@ async fn ssh_connect(
 /// Conservative check: only known "session is dead" errors trigger
 /// reconnection.  Everything else (policy rejection, auth failure, …)
 /// is treated as permanent.
-fn is_recoverable_ssh_error(err: &russh::Error) -> bool {
+pub(crate) fn is_recoverable_ssh_error(err: &russh::Error) -> bool {
     matches!(
         err,
         russh::Error::Disconnect | russh::Error::SendError | russh::Error::IO(_)
@@ -353,17 +362,19 @@ pub struct SshMiddleware {
 impl SshMiddleware {
     pub fn new(idle_timeout: Duration) -> Self {
         Self {
-            inner: Arc::new(SshPoolInner {
-                pool: tokio::sync::Mutex::new(HashMap::new()),
-                idle_timeout,
-            }),
+            inner: Arc::new(SshPoolInner::new(idle_timeout)),
         }
+    }
+
+    /// Create a middleware sharing an existing SSH connection pool.
+    pub(crate) fn with_pool(pool: Arc<SshPoolInner>) -> Self {
+        Self { inner: pool }
     }
 
     // ---- pool helpers ------------------------------------------------
 
     /// Evict idle entries.  **Never** evicts entries with `active_streams > 0`.
-    fn sweep(pool: &mut HashMap<PoolKey, SshConnEntry>, idle_timeout: Duration) {
+    pub(crate) fn sweep(pool: &mut HashMap<PoolKey, SshConnEntry>, idle_timeout: Duration) {
         let now = Instant::now();
         pool.retain(|_, e| {
             let idle = now.duration_since(e.last_used) > idle_timeout;
@@ -375,7 +386,7 @@ impl SshMiddleware {
     /// Enforce MAX_POOL_SIZE by evicting LRU entries **with zero active
     /// streams**.  If all entries are active, the pool is allowed to
     /// temporarily exceed the limit (hard cap enforced at insert time).
-    fn enforce_size(pool: &mut HashMap<PoolKey, SshConnEntry>) {
+    pub(crate) fn enforce_size(pool: &mut HashMap<PoolKey, SshConnEntry>) {
         while pool.len() >= MAX_POOL_SIZE {
             let victim = pool
                 .iter()
@@ -392,14 +403,17 @@ impl SshMiddleware {
     }
 
     /// Best-effort eviction of a single key (non-blocking).
-    fn evict(&self, key: &PoolKey) {
+    pub(crate) fn evict(&self, key: &PoolKey) {
         if let Ok(mut pool) = self.inner.pool.try_lock() {
             pool.remove(key);
         }
     }
 
     /// Get a pooled session or create a new one.
-    async fn get_session(
+    ///
+    /// When a connection's active streams reach [`MAX_STREAMS_PER_SESSION`],
+    /// a new SSH connection is opened to spread load across connections.
+    pub(crate) async fn get_session(
         &self,
         parts: &SshUrlParts,
     ) -> Result<
@@ -717,7 +731,7 @@ impl SshMiddleware {
     }
 }
 
-fn mw_err(msg: String) -> reqwest_middleware::Error {
+pub(crate) fn mw_err(msg: String) -> reqwest_middleware::Error {
     reqwest_middleware::Error::Middleware(anyhow::anyhow!(msg).into())
 }
 

@@ -113,6 +113,7 @@ async-trait = "0.1"
 async-stream = "0.3"
 http = "1"
 russh = "0.57"
+russh-sftp = "2"
 ssh-key = "0.6"
 hyper = { version = "1", features = ["client", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio"] }

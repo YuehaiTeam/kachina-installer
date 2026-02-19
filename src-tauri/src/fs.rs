@@ -362,7 +362,7 @@ impl<S> NetworkInsightStream<S> {
         let now = Instant::now();
 
         let insight = Arc::new(Mutex::new(InsightItem {
-            url: url.clone(),
+            url: crate::utils::url::sanitize_url_for_logging(&url),
             ttfb,
             time: 0,
             size: 0,
@@ -376,7 +376,7 @@ impl<S> NetworkInsightStream<S> {
             insight,
             network_bytes: Arc::new(AtomicU64::new(0)),
             response_received_time,
-            url,   // 保存URL
+            url: crate::utils::url::sanitize_url_for_logging(&url),   // 保存URL
             range, // 保存Range
             content_length,
             last_stall_check: now,
@@ -640,7 +640,7 @@ pub async fn create_http_stream(
         Err(e) => {
             // 创建错误insight并立即返回
             let insight = Arc::new(Mutex::new(InsightItem {
-                url: url.to_string(),
+                url: crate::utils::url::sanitize_url_for_logging(url),
                 ttfb: request_start_time.elapsed().as_millis() as u32,
                 time: 0,
                 size: 0,
@@ -660,7 +660,7 @@ pub async fn create_http_stream(
     let code = res.status();
     if (!has_range && code != 200) || (has_range && code != 206) {
         let insight = Arc::new(Mutex::new(InsightItem {
-            url: url.to_string(),
+            url: crate::utils::url::sanitize_url_for_logging(url),
             ttfb: request_start_time.elapsed().as_millis() as u32,
             time: 0,
             size: 0,
@@ -692,7 +692,7 @@ pub async fn create_http_stream(
     // 创建NetworkInsightStream包装
     let insight_stream = NetworkInsightStream::new_with_detection(
         reader,
-        url.to_string(),
+        crate::utils::url::sanitize_url_for_logging(url),
         if has_range {
             vec![(offset as u32, (offset + size - 1) as u32)]
         } else {
@@ -752,7 +752,7 @@ pub async fn create_multi_http_stream(
         Ok(r) => r,
         Err(e) => {
             let insight = Arc::new(Mutex::new(InsightItem {
-                url: url.to_string(),
+                url: crate::utils::url::sanitize_url_for_logging(url),
                 ttfb: request_start_time.elapsed().as_millis() as u32,
                 time: 0,
                 size: 0,
@@ -770,7 +770,7 @@ pub async fn create_multi_http_stream(
     let code = res.status();
     if code != 206 {
         let insight = Arc::new(Mutex::new(InsightItem {
-            url: url.to_string(),
+            url: crate::utils::url::sanitize_url_for_logging(url),
             ttfb: request_start_time.elapsed().as_millis() as u32,
             time: 0,
             size: 0,
@@ -804,7 +804,7 @@ pub async fn create_multi_http_stream(
     // 创建NetworkInsightStream包装HTTP响应流
     let insight_stream = NetworkInsightStream::new_with_detection(
         res.bytes_stream(),
-        url.to_string(),
+        crate::utils::url::sanitize_url_for_logging(url),
         range_info,
         request_start_time,
         response_received_time,
@@ -1021,8 +1021,8 @@ where
             .context("REMOVE_NEW_TARGET_ERR")?;
         return Err(anyhow::Error::new(std::io::Error::other(format!(
             "Patch failed with code {res}"
-        )))
-        .context("PATCH_FAILED_ERR"));
+        ))))
+        .context("PATCH_FAILED_ERR");
     }
     // 更新网络下载统计信息
     if let Some(ref mut insight) = insight {
@@ -1062,8 +1062,8 @@ pub async fn verify_hash(
     if hash != expected {
         return Err(anyhow::Error::new(std::io::Error::other(format!(
             "File {target} hash mismatch: expected {expected}, got {hash}"
-        )))
-        .context("HASH_MISMATCH_ERR"));
+        ))))
+        .context("HASH_MISMATCH_ERR");
     }
     Ok(())
 }
