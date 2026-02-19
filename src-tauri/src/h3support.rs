@@ -131,6 +131,8 @@ pub fn ua_string() -> String {
         cpu_cores
     );
 
+    ua.push_str(" ssh/enabled");
+
     if is_h3_available() {
         ua.push_str(" h3/enabled");
     }

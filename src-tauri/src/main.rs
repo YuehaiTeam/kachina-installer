@@ -7,6 +7,7 @@ pub mod fs;
 pub mod h3middleware;
 pub mod h3support;
 pub mod installer;
+pub mod ssh_middleware;
 pub mod ipc;
 pub mod local;
 pub mod module;
@@ -77,6 +78,10 @@ lazy_static::lazy_static! {
                 }
             }
         }
+
+        // SSH tunnel middleware — routes ssh+http:// URLs through SSH direct-tcpip channels
+        builder = builder.with(ssh_middleware::SshMiddleware::new(Duration::from_secs(300)));
+        tracing::info!("[SSH] SshMiddleware enabled");
 
         builder.build()
     };
