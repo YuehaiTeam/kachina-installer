@@ -56,6 +56,7 @@ pub struct PinConfig {
 #[cfg(target_os = "windows")]
 mod win_pin {
     use super::*;
+    use sha2::{Sha256, Digest};
     use std::ffi::c_void;
     use tracing::info;
     use windows::Win32::Security::Cryptography::*;
@@ -116,12 +117,8 @@ mod win_pin {
         }
         spki_der.truncate(spki_der_size as usize);
 
-        // SHA-256 hash via CNG (BCRYPT_SHA256_ALG_HANDLE is a pre-allocated pseudo-handle)
-        let mut hash = [0u8; 32];
-        if BCryptHash(BCRYPT_SHA256_ALG_HANDLE, None, &spki_der, &mut hash).is_err() {
-            debug!("[Pin] BCryptHash (SPKI) failed");
-            return None;
-        }
+        // SHA-256 hash via sha2 crate (avoids Win10+ BCryptHash API)
+        let hash: [u8; 32] = Sha256::digest(&spki_der).into();
 
         Some(hash)
     }
@@ -148,11 +145,7 @@ mod win_pin {
         let der =
             std::slice::from_raw_parts(cert_ctx.pbCertEncoded, cert_ctx.cbCertEncoded as usize);
 
-        let mut hash = [0u8; 32];
-        if BCryptHash(BCRYPT_SHA256_ALG_HANDLE, None, der, &mut hash).is_err() {
-            debug!("[Pin] BCryptHash (cert) failed");
-            return None;
-        }
+        let hash: [u8; 32] = Sha256::digest(der).into();
 
         Some(hash)
     }
