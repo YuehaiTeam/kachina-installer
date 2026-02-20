@@ -22,17 +22,17 @@ use tracing_subscriber::prelude::*;
 use utils::sentry::sentry_init;
 
 fn windows_text_scale_factor() -> f64 {
-    use windows::UI::ViewManagement::UISettings;
-
-    let scale = UISettings::new()
-        .and_then(|settings| settings.TextScaleFactor())
-        .unwrap_or(1.0);
-
-    if scale.is_finite() && scale > 0.0 {
-        scale
-    } else {
-        1.0
-    }
+    // Read TextScaleFactor from registry: HKEY_CURRENT_USER\Software\Microsoft\Accessibility\TextScaleFactor
+    // The registry value is a DWORD representing percentage (e.g., 100 = 100%, 125 = 125%)
+    windows_registry::CURRENT_USER
+        .options()
+        .read()
+        .open("Software\\Microsoft\\Accessibility")
+        .and_then(|key| key.get_u32("TextScaleFactor"))
+        .ok()
+        .map(|scale| scale as f64 / 100.0)
+        .filter(|&scale| scale.is_finite() && scale > 0.0)
+        .unwrap_or(1.0)
 }
 
 lazy_static::lazy_static! {
