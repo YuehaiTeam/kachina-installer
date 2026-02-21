@@ -111,7 +111,7 @@ hex = "0.4"
 async-trait = "0.1"
 async-stream = "0.3"
 http = "1"
-russh = { path = "../../russh/russh", default-features = false, features = ["algo-minimal", "crypto-cng"] }
+russh = { git = "https://github.com/xytoki/russh.git", default-features = false, features = ["algo-minimal", "crypto-cng"] }
 russh-sftp = "2"
 hyper = { version = "1", features = ["client", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio"] }

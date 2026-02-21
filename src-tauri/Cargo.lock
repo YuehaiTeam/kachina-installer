@@ -4385,6 +4385,7 @@ dependencies = [
 [[package]]
 name = "russh"
 version = "0.57.0"
+source = "git+https://github.com/xytoki/russh.git#1c8236b5fb668091e1f6555849debdd8c65fe720"
 dependencies = [
  "bitflags 2.11.0",
  "byteorder",
@@ -4408,6 +4409,7 @@ dependencies = [
 [[package]]
 name = "russh-cryptovec"
 version = "0.52.0"
+source = "git+https://github.com/xytoki/russh.git#1c8236b5fb668091e1f6555849debdd8c65fe720"
 dependencies = [
  "libc",
  "log",
@@ -4436,6 +4438,7 @@ dependencies = [
 [[package]]
 name = "russh-util"
 version = "0.52.0"
+source = "git+https://github.com/xytoki/russh.git#1c8236b5fb668091e1f6555849debdd8c65fe720"
 dependencies = [
  "chrono",
  "tokio",
