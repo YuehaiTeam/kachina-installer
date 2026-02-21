@@ -2853,7 +2853,6 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
- "ssh-key",
  "tauri",
  "tauri-build",
  "tauri-utils",
@@ -4975,8 +4974,6 @@ dependencies = [
 [[package]]
 name = "seera-msquic"
 version = "2.6.0-beta2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "68915b5f072e378c1d7ac8b47677dc3d7ddd02d380b652f8156b7255e29f62a0"
 dependencies = [
  "bitflags 2.11.0",
  "c-types",
@@ -5449,26 +5446,6 @@ dependencies = [
  "bytes",
  "pem-rfc7468",
  "sha2",
-]
-
-[[package]]
-name = "ssh-key"
-version = "0.6.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3b86f5297f0f04d08cabaa0f6bff7cb6aec4d9c3b49d87990d63da9d9156a8c3"
-dependencies = [
- "p256",
- "p384",
- "p521",
- "rand_core 0.6.4",
- "rsa",
- "sec1",
- "sha2",
- "signature",
- "ssh-cipher",
- "ssh-encoding",
- "subtle",
- "zeroize",
 ]
 
 [[package]]

@@ -57,8 +57,7 @@ windows = { version = "0.61.1", features = [
     "Win32_System_Diagnostics_ToolHelp",
     "Win32_UI_WindowsAndMessaging",
     "Win32_Graphics_Gdi",
-    "Win32_UI_Shell",
-    "UI_ViewManagement",
+    "Win32_UI_Shell"
 ] }
 
 rfd = { version = "0.15", default-features = false, features = [
@@ -112,9 +111,8 @@ hex = "0.4"
 async-trait = "0.1"
 async-stream = "0.3"
 http = "1"
-russh = { version="0.54.5", default-features = false, features= ["aws-lc-rs","flate2"] }
+russh = { version="0.54.5", default-features = false, features= ["aws-lc-rs", "flate2"] }
 russh-sftp = "2"
-ssh-key = "0.6"
 hyper = { version = "1", features = ["client", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 http-body-util = "0.1"
@@ -144,3 +142,4 @@ rustflags = ["-Zthreads=16"] # Better compile performance.
 [patch.crates-io]
 msquic-async = { git = "https://github.com/xytoki/msquic-async-rs.git", branch = "main" }
 ctor = { git = "https://github.com/xytoki/rust-ctor.git", branch = "master" }
+seera-msquic = { git = "ssh://git@github.com/xytoki/seera-msquic.git", branch = "seera-main" }
