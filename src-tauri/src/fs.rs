@@ -2,9 +2,10 @@ use async_compression::tokio::bufread::ZstdDecoder as TokioZstdDecoder;
 use bytes::Bytes;
 use fmmap::tokio::AsyncMmapFileExt;
 use futures::Stream;
-use futures::{StreamExt, TryStreamExt};
+use futures::TryStreamExt;
 use serde::Serialize;
 use std::{
+    collections::HashSet,
     os::windows::fs::MetadataExt,
     path::{Path, PathBuf},
     pin::Pin,
@@ -492,75 +493,86 @@ pub async fn check_local_files(
     file_list: Vec<String>,
     notify: impl Fn(serde_json::Value) + std::marker::Send + 'static,
 ) -> Result<Vec<Metadata>> {
-    let path = Path::new(&source);
-    if !path.exists() {
+    let source_path = Path::new(&source);
+    if !source_path.exists() {
         return Ok(Vec::new());
     }
-    let mut entries = async_walkdir::WalkDir::new(source);
     let mut files = Vec::new();
-    loop {
-        match entries.next().await {
-            Some(Ok(entry)) => {
-                let f = entry.file_type().await.context("GET_FILE_TYPE_ERR")?;
-                if f.is_file() {
-                    let path = entry.path();
-                    let path = path.to_str().context("PATH_TO_STRING_ERR")?;
-                    let size = entry.metadata().await.context("GET_METADATA_ERR")?.len();
-                    file_list.iter().for_each(|file| {
-                        if path
-                            .to_lowercase()
-                            .replace("\\", "/")
-                            .ends_with(&file.to_lowercase().replace("\\", "/"))
-                        {
-                            files.push(Metadata {
-                                file_name: path.to_string(),
-                                hash: "".to_string(),
-                                size,
-                                unwritable: false,
-                            });
-                        }
-                    });
-                }
-            }
-            Some(Err(e)) => {
-                return Err(anyhow::Error::new(e).context("READ_DIR_ERR"));
-            }
-            None => break,
+    let mut seen_paths = HashSet::new();
+
+    for file in file_list {
+        let relative_path = file.trim_start_matches(['/', '\\']);
+        if relative_path.is_empty() {
+            continue;
         }
+
+        let normalized_relative_path = relative_path.replace('\\', "/");
+        if !seen_paths.insert(normalized_relative_path.to_lowercase()) {
+            continue;
+        }
+
+        let mut target_path = PathBuf::from(&source);
+        for part in normalized_relative_path.split('/').filter(|part| !part.is_empty()) {
+            target_path.push(part);
+        }
+
+        let metadata = match tokio::fs::metadata(&target_path).await {
+            Ok(metadata) if metadata.is_file() => metadata,
+            Ok(_) => continue,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(anyhow::Error::new(e).context("GET_METADATA_ERR")),
+        };
+
+        files.push(Metadata {
+            file_name: target_path.to_string_lossy().to_string(),
+            hash: "".to_string(),
+            size: metadata.len(),
+            unwritable: false,
+        });
     }
+
     // send first progress
     notify(serde_json::json!((0, files.len())));
     let len = files.len();
+    if len == 0 {
+        return Ok(Vec::new());
+    }
+
+    let hash_concurrency = std::thread::available_parallelism()
+        .map(std::num::NonZeroUsize::get)
+        .unwrap_or(1);
+    let semaphore = Arc::new(tokio::sync::Semaphore::new(hash_concurrency));
     let mut joinset = tokio::task::JoinSet::new();
 
     for file in files.iter() {
         let hash_algorithm = hash_algorithm.clone();
         let mut file = file.clone();
+        let semaphore = semaphore.clone();
         joinset.spawn(async move {
-            let exists = Path::new(&file.file_name).exists();
-            let writable = !exists
-                || tokio::fs::OpenOptions::new()
-                    .read(true)
-                    .write(true)
-                    .open(&file.file_name)
-                    .await
-                    .is_ok();
+            let _permit = semaphore.acquire_owned().await.context("HASH_SEMAPHORE_ERR")?;
+            let writable = tokio::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&file.file_name)
+                .await
+                .is_ok();
+
             if !writable {
                 file.unwritable = true;
             }
-            let res = run_hash(&hash_algorithm, &file.file_name).await;
-            if res.is_err() && writable {
-                return Err(res.err().unwrap());
-            }
-            let hash = res.unwrap();
-            file.hash = hash;
+
+            file.hash = match run_hash(&hash_algorithm, &file.file_name).await {
+                Ok(hash) => hash,
+                Err(e) if writable => return Err(e),
+                Err(_) => String::new(),
+            };
 
             Ok(file)
         });
     }
 
     let mut finished = 0;
-    let mut finished_hashes = Vec::new();
+    let mut finished_hashes = Vec::with_capacity(len);
 
     while let Some(res) = joinset.join_next().await {
         let res = res.context("HASH_THREAD_ERR")?;
@@ -569,6 +581,7 @@ pub async fn check_local_files(
         notify(serde_json::json!((finished, len)));
         finished_hashes.push(res);
     }
+
     Ok(finished_hashes)
 }
 

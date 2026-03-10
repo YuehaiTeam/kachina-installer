@@ -1,6 +1,8 @@
 use anyhow::{Context, Result};
 use std::{io::Read, path::Path};
 
+const XXH_BUFFER_SIZE: usize = 256 * 1024;
+
 pub async fn run_hash(hash_algorithm: &str, path: &str) -> Result<String> {
     if hash_algorithm == "md5" {
         let md5 = chksum_md5::async_chksum(Path::new(path))
@@ -18,7 +20,7 @@ pub async fn run_hash(hash_algorithm: &str, path: &str) -> Result<String> {
                 .open(&path)
                 .context("OPEN_TARGET_ERR")?;
 
-            let mut buffer = [0u8; 1024];
+            let mut buffer = vec![0u8; XXH_BUFFER_SIZE];
             loop {
                 let read = file.read(&mut buffer).context("READ_FILE_ERR")?;
                 if read == 0 {
