@@ -8,11 +8,13 @@ function createServer() {
   const app = express();
 
   // 启用Range请求支持
-  app.use(express.static(path.resolve(FIXTURES_DIR), {
-    acceptRanges: true,
-    lastModified: true,
-    etag: true
-  }));
+  app.use(
+    express.static(path.resolve(FIXTURES_DIR), {
+      acceptRanges: true,
+      lastModified: true,
+      etag: true,
+    }),
+  );
 
   // 日志中间件
   app.use((req, res, next) => {
@@ -29,7 +31,9 @@ async function startServer() {
   return new Promise((resolve) => {
     const server = app.listen(PORT, () => {
       console.log(chalk.green(`Express server listening on port ${PORT}`));
-      console.log(chalk.gray(`Serving files from: ${path.resolve(FIXTURES_DIR)}`));
+      console.log(
+        chalk.gray(`Serving files from: ${path.resolve(FIXTURES_DIR)}`),
+      );
       resolve(server);
     });
 

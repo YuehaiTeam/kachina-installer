@@ -5,6 +5,7 @@ pub mod capabilities;
 pub mod cli;
 pub mod dfs;
 pub mod fs;
+pub mod host;
 pub mod installer;
 pub mod ipc;
 pub mod local;
@@ -14,15 +15,12 @@ pub mod thirdparty;
 pub mod utils;
 use clap::Parser;
 use cli::arg::{Command, InstallArgs};
-use installer::uninstall::delete_self_on_exit;
 use sentry_tracing::EventFilter;
 use std::{sync::atomic::AtomicBool, time::Duration};
-use tauri::{window::Color, WindowEvent};
-use tauri_utils::{config::WindowEffectsConfig, WindowEffect};
 use tracing_subscriber::prelude::*;
 use utils::sentry::sentry_init;
 
-fn windows_text_scale_factor() -> f64 {
+pub(crate) fn windows_text_scale_factor() -> f64 {
     // Read TextScaleFactor from registry: HKEY_CURRENT_USER\Software\Microsoft\Accessibility\TextScaleFactor
     // The registry value is a DWORD representing percentage (e.g., 100 = 100%, 125 = 125%)
     windows_registry::CURRENT_USER
@@ -104,7 +102,7 @@ fn main() {
     let cli = cli::Cli::parse();
     let mut command = cli.command();
     let silent = matches!(&command, Command::Install(args) if args.silent);
-    if !silent && tauri::webview_version().is_err() {
+    if !silent && host::webview_version().is_err() {
         command = Command::InstallWebview2;
     }
     let _guard = sentry_init(matches!(command, Command::HeadlessUac(_)));
@@ -193,7 +191,7 @@ fn main() {
                             std::process::exit(1);
                         }
                     } else {
-                        tauri_main(install).await;
+                        host_main(install);
                     }
                 });
         }
@@ -208,161 +206,31 @@ fn main() {
                 .enable_all()
                 .build()
                 .unwrap()
-                .block_on(tauri_main(InstallArgs {
-                    target: None,
-                    non_interactive: false,
-                    silent: false,
-                    online: false,
-                    uninstall: false,
-                    source: None,
-                    dfs_extras: None,
-                    mirrorc_cdk: None,
-                    dump_dir: None,
-                }));
+                .block_on(async move {
+                    host_main(InstallArgs {
+                        target: None,
+                        non_interactive: false,
+                        silent: false,
+                        online: false,
+                        uninstall: false,
+                        source: None,
+                        dfs_extras: None,
+                        mirrorc_cdk: None,
+                        dump_dir: None,
+                    });
+                });
         }
     }
 }
 
-async fn tauri_main(args: InstallArgs) {
-    tauri::async_runtime::set(tokio::runtime::Handle::current());
-    let (major, minor, build) = nt_version::get();
-    let build = (build & 0xffff) as u16;
-    // use 22000 as the build number of Windows 11
-    let is_win11 = major == 10 && minor == 0 && build >= 22000;
-    let is_win11_ = is_win11;
-
-    // set cwd to temp dir
-    let temp_dir = std::env::temp_dir();
-    let res = std::env::set_current_dir(&temp_dir);
-    if res.is_err() {
+fn host_main(args: InstallArgs) {
+    if let Err(err) = host::run(args) {
+        tracing::error!("gui host failed: {err:#}");
         rfd::MessageDialog::new()
             .set_title("错误")
-            .set_description("无法访问临时文件夹")
+            .set_description(format!("窗口初始化失败: {err}"))
+            .set_level(rfd::MessageLevel::Error)
             .show();
-        return;
+        std::process::exit(1);
     }
-    tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![
-            dfs::http_get_request,
-            installer::log,
-            installer::warn,
-            installer::error,
-            installer::launch,
-            installer::launch_and_exit,
-            installer::config::get_installer_config,
-            installer::registry::read_uninstall_metadata,
-            installer::select_dir,
-            installer::error_dialog,
-            installer::confirm_dialog,
-            utils::wincred::wincred_write,
-            utils::wincred::wincred_read,
-            utils::wincred::wincred_delete,
-            thirdparty::mirrorc::get_mirrorc_status,
-            session::commands::start_install,
-            session::commands::start_uninstall,
-            session::commands::answer_session_prompt,
-            session::commands::answer_session_plugin,
-        ])
-        .manage(args)
-        .manage(ipc::manager::ManagedElevate::new())
-        .manage(session::commands::SessionState::default())
-        .setup(move |app| {
-            // sleep 5s to check if window is alive
-            tokio::spawn({
-                async move {
-                    tokio::time::sleep(Duration::from_secs(5)).await;
-                    if APP_BOOT_SIGNAL.load(std::sync::atomic::Ordering::SeqCst) {
-                        tracing::info!("Webview2 is alive");
-                        return;
-                    }
-                    rfd::MessageDialog::new()
-                        .set_title("Kachina Installer")
-                        .set_description("Initialization failed due to webview2 fault")
-                        .set_level(rfd::MessageLevel::Error)
-                        .show();
-                    tracing::error!("Webview2 fault detected");
-                    std::process::exit(1);
-                }
-            });
-            let temp_dir_for_data = temp_dir.join("KachinaInstaller");
-
-            let text_scale = windows_text_scale_factor();
-            let base_width = 520.0;
-            let base_height = 250.0;
-            let scaled_width = base_width * text_scale;
-            let scaled_height = base_height * text_scale;
-
-            // Helper function to create base window builder
-            let create_window_builder = || {
-                tauri::WebviewWindowBuilder::new(
-                    app,
-                    "main",
-                    tauri::WebviewUrl::App("index.html".into()),
-                )
-                .title(" ")
-                .resizable(false)
-                .maximizable(false)
-                .transparent(true)
-                .inner_size(scaled_width, scaled_height)
-                .center()
-            };
-
-            // Extract icon from current exe
-            let window_icon = utils::icon::get_exe_icon_for_tauri();
-
-            // Create builder and optionally apply icon
-            let mut main_window = create_window_builder();
-            if let Some(icon) = window_icon {
-                main_window = main_window.icon(icon).unwrap_or_else(|e| {
-                    tracing::warn!("Failed to set window icon: {:?}", e);
-                    create_window_builder()
-                });
-            }
-
-            if !cfg!(debug_assertions) {
-                main_window = main_window.data_directory(temp_dir_for_data).visible(false);
-            }
-            let main_window = main_window.build().unwrap();
-            #[cfg(debug_assertions)]
-            {
-                let window = tauri::Manager::get_webview_window(app, "main");
-                if let Some(window) = window {
-                    window.open_devtools();
-                }
-            }
-            if is_win11 {
-                let _ = main_window.set_effects(Some(WindowEffectsConfig {
-                    effects: vec![WindowEffect::Mica],
-                    ..Default::default()
-                }));
-            } else {
-                // if mica is not available, just use solid background.
-                let _ = if utils::gui::is_dark_mode().unwrap_or(false) {
-                    main_window.set_background_color(Some(Color(0, 0, 0, 255)))
-                } else {
-                    main_window.set_background_color(Some(Color(255, 255, 255, 255)))
-                };
-            }
-            Ok(())
-        })
-        .on_window_event(move |window, event| {
-            if let WindowEvent::ThemeChanged(theme) = event {
-                if !is_win11_ {
-                    match theme {
-                        tauri::Theme::Dark => {
-                            let _ = window.set_background_color(Some(Color(0, 0, 0, 255)));
-                        }
-                        tauri::Theme::Light => {
-                            let _ = window.set_background_color(Some(Color(255, 255, 255, 255)));
-                        }
-                        _ => {}
-                    }
-                }
-            }
-            if let WindowEvent::CloseRequested { .. } = event {
-                delete_self_on_exit();
-            }
-        })
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
 }

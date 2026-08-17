@@ -521,11 +521,7 @@ import {
   stringifyErrorLog,
   uacNeeded,
 } from './ui';
-import {
-  InstallerConfig,
-  InvokeSelectDirRes,
-  ProjectConfig,
-} from './types.ts';
+import { InstallerConfig, InvokeSelectDirRes, ProjectConfig } from './types.ts';
 import IconMinimize from './IconMinimize.vue';
 import IconClose from './IconClose.vue';
 
@@ -677,7 +673,11 @@ async function install(): Promise<void> {
     sendInsight(insightBase(INSTALLER_CONFIG, PROJECT_CONFIG), 'error', {
       error: stringifyErrorLog(e),
     });
-    await dialogError(stringifyError(e), '出错了', INSTALLER_CONFIG.args.silent);
+    await dialogError(
+      stringifyError(e),
+      '出错了',
+      INSTALLER_CONFIG.args.silent,
+    );
     resetProgress();
   }
 }

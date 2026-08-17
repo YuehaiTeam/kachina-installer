@@ -4,8 +4,9 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tauri::Emitter;
 use tokio::sync::{oneshot, Mutex};
+
+use crate::host::HostHandle;
 
 use super::types::{PluginEvent, ProgressEvent, PromptEvent};
 
@@ -201,7 +202,7 @@ impl PluginHub {
 }
 
 struct GuiPluginHost {
-    window: tauri::WebviewWindow,
+    window: HostHandle,
     hub: Arc<PluginHub>,
 }
 
@@ -209,7 +210,7 @@ struct GuiPluginHost {
 impl PluginHost for GuiPluginHost {
     async fn call(&self, args: PluginArgs) -> anyhow::Result<PluginResult> {
         let id = uuid::Uuid::new_v4().to_string();
-        let _ = self.window.emit(
+        self.window.emit(
             "session-plugin",
             PluginEvent {
                 id: id.clone(),
@@ -237,7 +238,7 @@ impl PluginHost for GuiPluginHost {
 }
 
 pub struct GuiUi {
-    window: tauri::WebviewWindow,
+    window: HostHandle,
     hub: Arc<PromptHub>,
     plugins: Arc<PluginHub>,
     auto_answer: bool,
@@ -245,7 +246,7 @@ pub struct GuiUi {
 
 impl GuiUi {
     pub fn new(
-        window: tauri::WebviewWindow,
+        window: HostHandle,
         hub: Arc<PromptHub>,
         plugins: Arc<PluginHub>,
         auto_answer: bool,
@@ -266,7 +267,7 @@ impl SessionUi for GuiUi {
             return true;
         }
         let id = uuid::Uuid::new_v4().to_string();
-        let _ = self.window.emit(
+        self.window.emit(
             "session-prompt",
             PromptEvent {
                 id: id.clone(),
@@ -279,7 +280,7 @@ impl SessionUi for GuiUi {
     }
 
     fn progress(&self, event: ProgressEvent) {
-        let _ = self.window.emit("session-progress", event);
+        self.window.emit("session-progress", event);
     }
 
     async fn alert(&self, title: &str, message: &str) {
@@ -287,12 +288,12 @@ impl SessionUi for GuiUi {
             .set_title(title)
             .set_description(message)
             .set_level(rfd::MessageLevel::Error)
-            .set_parent(&self.window)
+            .set_parent(&self.window.parent())
             .show();
     }
 
     fn insight(&self, _url: &str, event: &str, data: Option<Value>) {
-        let _ = self.window.emit(
+        self.window.emit(
             "session-insight",
             serde_json::json!({
                 "event": event,
@@ -302,7 +303,7 @@ impl SessionUi for GuiUi {
     }
 
     fn reopen_source(&self) {
-        let _ = self.window.emit("session-reopen-source", ());
+        self.window.emit("session-reopen-source", ());
     }
 
     fn plugin_host(&self) -> Option<Arc<dyn PluginHost>> {

@@ -231,6 +231,10 @@ async function buildCompletePackages() {
     dev ? 'debug' : 'release',
     dev ? 'kachina-builder-bundle.exe' : 'kachina-builder.exe',
   );
+  const iconPath = path.resolve('../src-tauri/icons/icon.ico');
+  if (!(await fs.pathExists(iconPath))) {
+    throw new Error(`icon not found at ${iconPath}`);
+  }
 
   // 检查builder是否存在
   if (!(await fs.pathExists(builderPath))) {
@@ -244,7 +248,7 @@ async function buildCompletePackages() {
   // === V1 构建流程 ===
   console.log(chalk.gray('  Building v1 updater...'));
   // 步骤2: 构建v1更新器
-  await $`& ${builderPath} pack -c ${path.join(FIXTURES_DIR, 'kachina.config.json')} -o ${path.join(V1_DIR, 'updater.exe')}`;
+  await $`& ${builderPath} pack -c ${path.join(FIXTURES_DIR, 'kachina.config.json')} --icon ${iconPath} -o ${path.join(V1_DIR, 'updater.exe')}`;
 
   console.log(chalk.gray('  Generating v1 metadata...'));
   // 步骤3: 生成v1 metadata
@@ -252,12 +256,12 @@ async function buildCompletePackages() {
 
   console.log(chalk.gray('  Building v1 offline package...'));
   // 步骤4: 构建v1离线包
-  await $`& ${builderPath} pack -c ${path.join(FIXTURES_DIR, 'kachina.config.json')} -m ${path.join(FIXTURES_DIR, 'v1-metadata.json')} -d ${path.join(FIXTURES_DIR, 'v1-hashed')} -o ${path.join(FIXTURES_DIR, 'test-app-v1.exe')}`;
+  await $`& ${builderPath} pack -c ${path.join(FIXTURES_DIR, 'kachina.config.json')} -m ${path.join(FIXTURES_DIR, 'v1-metadata.json')} -d ${path.join(FIXTURES_DIR, 'v1-hashed')} --icon ${iconPath} -o ${path.join(FIXTURES_DIR, 'test-app-v1.exe')}`;
 
   // === V2 构建流程 ===
   console.log(chalk.gray('  Building v2 updater...'));
   // 步骤2: 构建v2更新器
-  await $`& ${builderPath} pack -c ${path.join(FIXTURES_DIR, 'kachina.config.v2.json')} -o ${path.join(V2_DIR, 'updater.exe')}`;
+  await $`& ${builderPath} pack -c ${path.join(FIXTURES_DIR, 'kachina.config.v2.json')} --icon ${iconPath} -o ${path.join(V2_DIR, 'updater.exe')}`;
 
   console.log(chalk.gray('  Generating v2 metadata...'));
   // 步骤3: 生成v2 metadata
@@ -265,7 +269,7 @@ async function buildCompletePackages() {
 
   console.log(chalk.gray('  Building v2 offline package...'));
   // 步骤4: 构建v2离线包
-  await $`& ${builderPath} pack -c ${path.join(FIXTURES_DIR, 'kachina.config.v2.json')} -m ${path.join(FIXTURES_DIR, 'v2-metadata.json')} -d ${path.join(FIXTURES_DIR, 'v2-hashed')} -o ${path.join(FIXTURES_DIR, 'test-app-v2.exe')}`;
+  await $`& ${builderPath} pack -c ${path.join(FIXTURES_DIR, 'kachina.config.v2.json')} -m ${path.join(FIXTURES_DIR, 'v2-metadata.json')} -d ${path.join(FIXTURES_DIR, 'v2-hashed')} --icon ${iconPath} -o ${path.join(FIXTURES_DIR, 'test-app-v2.exe')}`;
 
   console.log(chalk.gray('  All packages built'));
 }
