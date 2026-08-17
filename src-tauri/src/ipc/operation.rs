@@ -28,6 +28,11 @@ pub enum IpcOperation {
         source: String,
         hash_algorithm: String,
         file_list: Vec<String>,
+        #[serde(default)]
+        skip_hash: Vec<String>,
+    },
+    ProbeWritable {
+        file_list: Vec<String>,
     },
     RunMirrorcDownload {
         zip_path: String,
@@ -58,6 +63,7 @@ pub async fn run_opr(
         IpcOperation::RmList { .. } => "RmList",
         IpcOperation::InstallRuntime { .. } => "InstallRuntime",
         IpcOperation::CheckLocalFiles { .. } => "CheckLocalFiles",
+        IpcOperation::ProbeWritable { .. } => "ProbeWritable",
         IpcOperation::RunMirrorcDownload { .. } => "RunMirrorcDownload",
         IpcOperation::RunMirrorcInstall { .. } => "RunMirrorcInstall",
     };
@@ -113,8 +119,13 @@ pub async fn run_opr(
             source,
             hash_algorithm,
             file_list,
+            skip_hash,
         } => Ok(serde_json::json!(
-            crate::fs::check_local_files(source, hash_algorithm, file_list, notify).await?
+            crate::fs::check_local_files(source, hash_algorithm, file_list, skip_hash, notify)
+                .await?
+        )),
+        IpcOperation::ProbeWritable { file_list } => Ok(serde_json::json!(
+            crate::fs::probe_writable(file_list).await
         )),
         IpcOperation::RunMirrorcDownload { zip_path, url } => {
             crate::thirdparty::mirrorc::run_mirrorc_download(&zip_path, &url, notify).await?;

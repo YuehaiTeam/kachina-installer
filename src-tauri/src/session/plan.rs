@@ -291,6 +291,49 @@ pub fn build_plan(input: &PlanInput) -> InstallPlan {
     InstallPlan { files, deletes }
 }
 
+pub fn collect_skip_hash(
+    hashed: &[HashInfo],
+    install_path: &str,
+    app_name: &str,
+    user_data_path: &[String],
+    ignore_nonempty: &[String],
+) -> Vec<String> {
+    let user_data_dirs: Vec<String> = user_data_path
+        .iter()
+        .map(|tpl| expand_template(tpl, install_path, app_name))
+        .collect();
+    let ignore_dirs: Vec<String> = ignore_nonempty.iter().map(|p| normalize_full(p)).collect();
+    hashed
+        .iter()
+        .filter(|item| {
+            let full = join_install(install_path, &item.file_name);
+            user_data_dirs.iter().any(|dir| is_under(&full, dir))
+                || ignore_dirs.iter().any(|dir| is_under(&full, dir))
+        })
+        .map(|item| item.file_name.clone())
+        .collect()
+}
+
+pub fn files_to_probe_writable(plan: &InstallPlan, local: &[LocalFile]) -> Vec<String> {
+    plan.files
+        .iter()
+        .filter(|file| file.action == PlanAction::Install)
+        .filter(|file| find_local(local, &file.file_name).is_some())
+        .map(|file| file.file_name.clone())
+        .collect()
+}
+
+pub fn mark_unwritable(files: &mut [PlanFile], install_path: &str, unwritable_abs: &[String]) {
+    let set: std::collections::HashSet<String> = unwritable_abs
+        .iter()
+        .map(|path| normalize_full(path))
+        .collect();
+    for file in files {
+        let full = normalize_full(&join_install(install_path, &file.file_name));
+        file.unwritable = set.contains(&full);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -503,5 +546,59 @@ mod tests {
         input.ignore_nonempty = vec![r"C:\app\cache".to_string()];
         let plan = build_plan(&input);
         assert_eq!(plan.deletes, vec!["readme.txt".to_string()]);
+    }
+
+    #[test]
+    fn skip_hash_covers_user_data_and_ignore_folder() {
+        let skip = collect_skip_hash(
+            &[
+                hash_info("app.exe", "aaa"),
+                hash_info("User/settings.json", "v2"),
+                hash_info("cache/keep.dat", "v2"),
+            ],
+            r"C:\app",
+            "Test",
+            &["${INSTALL_PATH}/User".to_string()],
+            &[r"C:\app\cache".to_string()],
+        );
+        assert_eq!(skip, vec!["User/settings.json", "cache/keep.dat"]);
+    }
+
+    #[test]
+    fn probe_list_only_existing_install_files() {
+        let mut input = base_input();
+        input.hashed = vec![
+            hash_info("app.exe", "bbb"),
+            hash_info("new.dll", "ccc"),
+            hash_info("same.bin", "aaa"),
+        ];
+        input.local = vec![local("app.exe", "aaa"), local("same.bin", "aaa")];
+        let plan = build_plan(&input);
+        assert_eq!(plan.files[2].action, PlanAction::Skip);
+        assert_eq!(
+            files_to_probe_writable(&plan, &input.local),
+            vec!["app.exe".to_string()]
+        );
+    }
+
+    #[test]
+    fn mark_unwritable_only_sets_probed_paths() {
+        let mut input = base_input();
+        input.hashed = vec![hash_info("app.exe", "bbb"), hash_info("data.dll", "ccc")];
+        input.local = vec![local("app.exe", "aaa"), local("data.dll", "old")];
+        let mut plan = build_plan(&input);
+        mark_unwritable(&mut plan.files, r"C:\app", &[r"C:\app\app.exe".to_string()]);
+        let app = plan
+            .files
+            .iter()
+            .find(|f| f.file_name == "app.exe")
+            .unwrap();
+        let data = plan
+            .files
+            .iter()
+            .find(|f| f.file_name == "data.dll")
+            .unwrap();
+        assert!(app.unwritable);
+        assert!(!data.unwritable);
     }
 }
