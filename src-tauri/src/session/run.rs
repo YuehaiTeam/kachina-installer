@@ -18,7 +18,8 @@ use crate::local::Embedded;
 use crate::session::dump::write_dump;
 use crate::session::merge::{dfs2_ranges, file_mode, plan_tasks, FileMode, FilePos, InstallTask};
 use crate::session::plan::{
-    build_plan, find_local, join_install, HashInfo, HashKey, LocalFile, PlanAction, PlanInput,
+    build_plan, collect_skip_hash, files_to_probe_writable, find_local, join_install,
+    mark_unwritable, HashInfo, HashKey, LocalFile, PlanAction, PlanInput,
 };
 use crate::session::source::{
     cleanup_dfs2, ensure_dfs2_session, fetch_metadata, hash_of_item, parse_source,
@@ -379,9 +380,6 @@ async fn run_dfs_install(
     }
 
     let hash_key = latest.hash_key()?;
-    progress(ui, 1, 5.0, "校验本地文件……");
-    let local = scan_local(settings, &latest, hash_key, ui, mgr).await?;
-
     let mut ignore_nonempty = Vec::new();
     if settings.is_update {
         for folder in &project.ignore_folder_path {
@@ -392,6 +390,17 @@ async fn run_dfs_install(
             }
         }
     }
+    progress(ui, 1, 5.0, "校验本地文件……");
+    let local = scan_local(
+        settings,
+        project,
+        &latest,
+        hash_key,
+        &ignore_nonempty,
+        ui,
+        mgr,
+    )
+    .await?;
 
     let plan = build_plan(&PlanInput {
         install_path: settings.install_path.clone(),
@@ -427,6 +436,33 @@ async fn run_dfs_install(
         }),
     )
     .await;
+    let mut plan = plan;
+    let probe_rels = files_to_probe_writable(&plan, &local);
+    if !probe_rels.is_empty() {
+        let paths: Vec<String> = probe_rels
+            .iter()
+            .map(|name| join_install(&settings.install_path, name))
+            .collect();
+        let raw = run_op(
+            mgr,
+            settings.elevate,
+            op_from(json!({
+                "type": "ProbeWritable",
+                "file_list": paths,
+            }))?,
+            |_| {},
+        )
+        .await?;
+        let unwritable: Vec<String> = raw
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        mark_unwritable(&mut plan.files, &settings.install_path, &unwritable);
+    }
     write_dump(settings.dump_dir.as_deref(), "03-plan.json", &plan).await;
 
     let to_install: Vec<_> = plan
@@ -677,8 +713,10 @@ async fn prepare_process(
 
 async fn scan_local(
     settings: &Settings,
+    project: &ProjectConfig,
     latest: &DfsMetadata,
     hash_key: HashKey,
+    ignore_nonempty: &[String],
     ui: &dyn SessionUi,
     mgr: &ManagedElevate,
 ) -> anyhow::Result<Vec<LocalFile>> {
@@ -687,6 +725,13 @@ async fn scan_local(
         HashKey::Xxh => "xxh",
     };
     let files: Vec<String> = latest.hashed.iter().map(|e| e.file_name.clone()).collect();
+    let skip_hash = collect_skip_hash(
+        &latest.hashed,
+        &settings.install_path,
+        &project.app_name,
+        &project.user_data_path,
+        ignore_nonempty,
+    );
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Value>();
     let mut op_fut = Box::pin(run_op(
         mgr,
@@ -696,6 +741,7 @@ async fn scan_local(
             "source": settings.install_path,
             "hash_algorithm": algo,
             "file_list": files,
+            "skip_hash": skip_hash,
         }))?,
         move |p| {
             let _ = tx.send(p);
