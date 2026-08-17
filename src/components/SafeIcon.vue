@@ -1,9 +1,5 @@
 <template>
-  <div 
-    v-if="sanitizedSvg" 
-    class="safe-icon"
-    v-html="sanitizedSvg"
-  />
+  <div v-if="sanitizedSvg" class="safe-icon" v-html="sanitizedSvg" />
   <component v-else :is="fallbackComponent" />
 </template>
 

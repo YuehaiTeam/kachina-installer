@@ -1,4 +1,6 @@
-html,body,#root{
+html,
+body,
+#root {
   overflow: hidden;
   margin: 0;
 }
@@ -33,12 +35,13 @@ html,body,#root{
     --lineHeightHero800: 40px;
     --lineHeightHero900: 52px;
     --lineHeightHero1000: 92px;
-    --fontFamilyBase: 'Segoe UI', 'Segoe UI Web (West European)', -apple-system,
+    --fontFamilyBase:
+      'Segoe UI', 'Segoe UI Web (West European)', -apple-system,
       BlinkMacSystemFont, Roboto, 'Helvetica Neue', sans-serif;
     --fontFamilyMonospace: Consolas, 'Courier New', Courier, monospace;
-    --fontFamilyNumeric: Bahnschrift, 'Segoe UI',
-      'Segoe UI Web (West European)', -apple-system, BlinkMacSystemFont, Roboto,
-      'Helvetica Neue', sans-serif;
+    --fontFamilyNumeric:
+      Bahnschrift, 'Segoe UI', 'Segoe UI Web (West European)', -apple-system,
+      BlinkMacSystemFont, Roboto, 'Helvetica Neue', sans-serif;
     --fontWeightRegular: 400;
     --fontWeightMedium: 500;
     --fontWeightSemibold: 600;
@@ -262,8 +265,10 @@ html,body,#root{
     --shadow4Brand: 0 0 2px rgba(0, 0, 0, 0.3), 0 2px 4px rgba(0, 0, 0, 0.25);
     --shadow8Brand: 0 0 2px rgba(0, 0, 0, 0.3), 0 4px 8px rgba(0, 0, 0, 0.25);
     --shadow16Brand: 0 0 2px rgba(0, 0, 0, 0.3), 0 8px 16px rgba(0, 0, 0, 0.25);
-    --shadow28Brand: 0 0 8px rgba(0, 0, 0, 0.3), 0 14px 28px rgba(0, 0, 0, 0.25);
-    --shadow64Brand: 0 0 8px rgba(0, 0, 0, 0.3), 0 32px 64px rgba(0, 0, 0, 0.25);
+    --shadow28Brand:
+      0 0 8px rgba(0, 0, 0, 0.3), 0 14px 28px rgba(0, 0, 0, 0.25);
+    --shadow64Brand:
+      0 0 8px rgba(0, 0, 0, 0.3), 0 32px 64px rgba(0, 0, 0, 0.25);
   }
 }
 @media (prefers-color-scheme: light) {
@@ -297,12 +302,13 @@ html,body,#root{
     --lineHeightHero800: 40px;
     --lineHeightHero900: 52px;
     --lineHeightHero1000: 92px;
-    --fontFamilyBase: 'Segoe UI', 'Segoe UI Web (West European)', -apple-system,
+    --fontFamilyBase:
+      'Segoe UI', 'Segoe UI Web (West European)', -apple-system,
       BlinkMacSystemFont, Roboto, 'Helvetica Neue', sans-serif;
     --fontFamilyMonospace: Consolas, 'Courier New', Courier, monospace;
-    --fontFamilyNumeric: Bahnschrift, 'Segoe UI',
-      'Segoe UI Web (West European)', -apple-system, BlinkMacSystemFont, Roboto,
-      'Helvetica Neue', sans-serif;
+    --fontFamilyNumeric:
+      Bahnschrift, 'Segoe UI', 'Segoe UI Web (West European)', -apple-system,
+      BlinkMacSystemFont, Roboto, 'Helvetica Neue', sans-serif;
     --fontWeightRegular: 400;
     --fontWeightMedium: 500;
     --fontWeightSemibold: 600;
@@ -526,8 +532,10 @@ html,body,#root{
     --shadow4Brand: 0 0 2px rgba(0, 0, 0, 0.3), 0 2px 4px rgba(0, 0, 0, 0.25);
     --shadow8Brand: 0 0 2px rgba(0, 0, 0, 0.3), 0 4px 8px rgba(0, 0, 0, 0.25);
     --shadow16Brand: 0 0 2px rgba(0, 0, 0, 0.3), 0 8px 16px rgba(0, 0, 0, 0.25);
-    --shadow28Brand: 0 0 8px rgba(0, 0, 0, 0.3), 0 14px 28px rgba(0, 0, 0, 0.25);
-    --shadow64Brand: 0 0 8px rgba(0, 0, 0, 0.3), 0 32px 64px rgba(0, 0, 0, 0.25);
+    --shadow28Brand:
+      0 0 8px rgba(0, 0, 0, 0.3), 0 14px 28px rgba(0, 0, 0, 0.25);
+    --shadow64Brand:
+      0 0 8px rgba(0, 0, 0, 0.3), 0 32px 64px rgba(0, 0, 0, 0.25);
   }
 }
 
@@ -764,7 +772,7 @@ a:hover {
   border-bottom-color: var(--colorNeutralStrokeAccessible);
   gap: var(--spacingHorizontalXXS);
   border-radius: var(--borderRadiusMedium);
-  transition: all .1s;
+  transition: all 0.1s;
   input {
     align-self: stretch;
     box-sizing: border-box;

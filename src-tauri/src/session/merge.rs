@@ -345,10 +345,7 @@ mod tests {
     #[test]
     fn patch_declares_delta_and_full_file() {
         let mut ctx = SourceCtx::from_embedded(&[]);
-        ctx.restore_local_package(
-            Some(&[emb("bbb", 100, 50), emb("aaa_bbb", 200, 21)]),
-            None,
-        );
+        ctx.restore_local_package(Some(&[emb("bbb", 100, 50), emb("aaa_bbb", 200, 21)]), None);
         let tasks = vec![InstallTask::Single(item("app.exe", "bbb", false))];
         let disk = vec![LocalFile {
             file_name: "app.exe".to_string(),

@@ -120,7 +120,7 @@ pub fn forward_breadcrumb(breadcrumb: sentry::Breadcrumb) {
 }
 
 pub fn sentry_set_info() {
-    let wv2ver = tauri::webview_version();
+    let wv2ver = crate::host::webview_version();
     let wv2ver = if let Ok(ver) = wv2ver {
         ver
     } else {

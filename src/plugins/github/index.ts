@@ -36,7 +36,7 @@ export class GitHubPlugin implements KachinaInstallSource {
       if (customRegex) {
         versionRegex = customRegex;
       }
-      
+
       const cacheTimeParam = searchParams.get('cacheTime');
       if (cacheTimeParam) {
         const parsedTime = parseInt(cacheTimeParam, 10);
@@ -49,19 +49,23 @@ export class GitHubPlugin implements KachinaInstallSource {
     // 提取到 /releases/ 的前缀
     const releasesIndex = baseUrl.indexOf('/releases/');
     if (releasesIndex === -1) throw new Error('URL must contain /releases/');
-    
-    const releasesPrefix = baseUrl.substring(0, releasesIndex + '/releases'.length);
+
+    const releasesPrefix = baseUrl.substring(
+      0,
+      releasesIndex + '/releases'.length,
+    );
     const releasesLatestUrl = `${releasesPrefix}/latest`;
 
     // 仍然需要提取owner和repo用于缓存键
     const match = baseUrl.match(/\/([^/]+)\/([^/]+)\/releases/);
     if (!match) throw new Error('Invalid releases URL format');
-    
+
     const [, owner, repo] = match;
-    
+
     // 判断是否应该启用缓存
     const urlObj = new URL(baseUrl);
-    const shouldCache = urlObj.hostname === 'github.com' || cacheTime !== undefined;
+    const shouldCache =
+      urlObj.hostname === 'github.com' || cacheTime !== undefined;
 
     return {
       baseUrl,
@@ -79,7 +83,7 @@ export class GitHubPlugin implements KachinaInstallSource {
     try {
       const urlObj = new URL(url);
       const searchParams = urlObj.searchParams;
-      
+
       // 尝试从ske参数提取过期时间（GitHub的签名过期时间）
       const ske = searchParams.get('ske');
       if (ske) {
@@ -88,7 +92,7 @@ export class GitHubPlugin implements KachinaInstallSource {
           return expiryTime;
         }
       }
-      
+
       // 尝试从se参数提取过期时间（备用）
       const se = searchParams.get('se');
       if (se) {
@@ -100,7 +104,7 @@ export class GitHubPlugin implements KachinaInstallSource {
     } catch (e) {
       // URL解析失败，返回默认过期时间
     }
-    
+
     // 默认1小时过期
     return Date.now() + 300 * 1000;
   }
@@ -114,35 +118,38 @@ export class GitHubPlugin implements KachinaInstallSource {
     }
   }
 
-  private async resolveDirectUrl(originalUrl: string, cacheTime?: number): Promise<string> {
+  private async resolveDirectUrl(
+    originalUrl: string,
+    cacheTime?: number,
+  ): Promise<string> {
     // 先清理过期缓存
     this.cleanExpiredCache();
-    
+
     // 检查缓存
     const cached = this.urlCache.get(originalUrl);
     if (cached && cached.expiryTime > Date.now()) {
       return cached.resolvedUrl;
     }
-    
+
     // 发起HTTP请求获取重定向URL
     const response = await invoke<HttpGetResponse>('http_get_request', {
       url: originalUrl,
       ignoreRedirects: true,
     });
-    
+
     // 从Location header或final_url获取重定向地址
     let redirectUrl = response.headers['location'] || response.final_url;
     if (!redirectUrl || redirectUrl === originalUrl) {
       // 没有重定向，直接返回原URL
       return originalUrl;
     }
-    
+
     // 如果重定向URL是相对路径，转换为绝对路径
     if (redirectUrl.startsWith('/')) {
       const baseUrl = new URL(originalUrl);
       redirectUrl = `${baseUrl.protocol}//${baseUrl.host}${redirectUrl}`;
     }
-    
+
     // 计算过期时间
     let expiryTime: number;
     if (cacheTime) {
@@ -150,14 +157,14 @@ export class GitHubPlugin implements KachinaInstallSource {
     } else {
       expiryTime = this.extractExpiryFromUrl(redirectUrl);
     }
-    
+
     // 缓存结果
     this.urlCache.set(originalUrl, {
       resolvedUrl: redirectUrl,
       expiryTime,
       originalUrl,
     });
-    
+
     return redirectUrl;
   }
 
@@ -200,19 +207,22 @@ export class GitHubPlugin implements KachinaInstallSource {
     url: string,
     range: string,
   ): Promise<{ url: string; range: string }> {
-    const { 
-      baseUrl, 
-      versionRegex, 
-      releasesLatestUrl, 
-      cacheKey, 
-      shouldCache, 
-      cacheTime 
+    const {
+      baseUrl,
+      versionRegex,
+      releasesLatestUrl,
+      cacheKey,
+      shouldCache,
+      cacheTime,
     } = this.parseUrl(url);
 
     let cached = this.versionCache.get(cacheKey);
 
     if (!cached) {
-      const version = await this.resolveVersion(releasesLatestUrl, versionRegex);
+      const version = await this.resolveVersion(
+        releasesLatestUrl,
+        versionRegex,
+      );
       const resolvedUrl = baseUrl.replace(/\$\{version\}/g, version);
       cached = { version, resolvedUrl };
       this.versionCache.set(cacheKey, cached);
@@ -220,7 +230,10 @@ export class GitHubPlugin implements KachinaInstallSource {
 
     // 如果需要缓存URL解析，进行重定向解析
     if (shouldCache) {
-      const finalUrl = await this.resolveDirectUrl(cached.resolvedUrl, cacheTime);
+      const finalUrl = await this.resolveDirectUrl(
+        cached.resolvedUrl,
+        cacheTime,
+      );
       return {
         url: finalUrl,
         range: range,

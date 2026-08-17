@@ -488,7 +488,6 @@ pub async fn get_http_with_range(url: String, offset: u64, size: u64) -> TAResul
     Ok((status.as_u16(), bytes))
 }
 
-#[tauri::command]
 pub async fn http_get_request(
     url: String,
     ignore_redirects: Option<bool>,

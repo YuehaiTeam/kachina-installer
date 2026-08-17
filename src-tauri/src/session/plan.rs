@@ -385,7 +385,11 @@ mod tests {
             .unwrap();
         assert_eq!(user.action, PlanAction::Skip);
         assert_eq!(user.skip_reason, Some(SkipReason::UserData));
-        let app = plan.files.iter().find(|f| f.file_name == "app.exe").unwrap();
+        let app = plan
+            .files
+            .iter()
+            .find(|f| f.file_name == "app.exe")
+            .unwrap();
         assert_eq!(app.action, PlanAction::Install);
     }
 
@@ -399,10 +403,9 @@ mod tests {
         ];
         input.local = vec![local("cache/keep.dat", "modified")];
         let plan = build_plan(&input);
-        assert!(plan
-            .files
-            .iter()
-            .all(|f| f.action == PlanAction::Skip && f.skip_reason == Some(SkipReason::IgnoreFolder)));
+        assert!(plan.files.iter().all(
+            |f| f.action == PlanAction::Skip && f.skip_reason == Some(SkipReason::IgnoreFolder)
+        ));
     }
 
     #[test]
@@ -426,7 +429,11 @@ mod tests {
             },
         }];
         let plan = build_plan(&input);
-        let app = plan.files.iter().find(|f| f.file_name == "app.exe").unwrap();
+        let app = plan
+            .files
+            .iter()
+            .find(|f| f.file_name == "app.exe")
+            .unwrap();
         assert!(!app.has_lpatch);
         let other = plan
             .files
@@ -471,7 +478,8 @@ mod tests {
 
     #[test]
     fn compare_offline_install_dump_if_present() {
-        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../tests/plan-dumps/offline-install");
+        let dir =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../tests/plan-dumps/offline-install");
         let settings_path = dir.join("01-settings.json");
         let meta_path = dir.join("02-meta-scan.json");
         let js_plan_path = dir.join("03-plan.json");

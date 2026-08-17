@@ -76,8 +76,8 @@ pub async fn resolve_github_file_url(source: &str) -> anyhow::Result<String> {
     let resolved = if let Some(url) = cached {
         url
     } else {
-        let version = resolve_version(&parsed.releases_latest_url, parsed.version_regex.as_deref())
-            .await?;
+        let version =
+            resolve_version(&parsed.releases_latest_url, parsed.version_regex.as_deref()).await?;
         let resolved = parsed.base_url.replace("${version}", &version);
         VERSION_CACHE.lock().unwrap().insert(
             parsed.cache_key.clone(),
@@ -132,13 +132,19 @@ fn parse_github_url(url: &str) -> anyhow::Result<GitHubUrl> {
         .ok_or_else(|| hide(error::META_FAILED, "URL must contain /releases/"))?;
     let releases_prefix = format!("{}{}", &base_url[..releases_index], "/releases");
     let releases_latest_url = format!("{releases_prefix}/latest");
-    let re = regex::Regex::new(r"/([^/]+)/([^/]+)/releases")
-        .map_err(|e| hide(error::META_FAILED, e))?;
+    let re =
+        regex::Regex::new(r"/([^/]+)/([^/]+)/releases").map_err(|e| hide(error::META_FAILED, e))?;
     let caps = re
         .captures(&base_url)
         .ok_or_else(|| hide(error::META_FAILED, "Invalid releases URL format"))?;
-    let owner = caps.get(1).map(|m| m.as_str().to_string()).unwrap_or_default();
-    let repo = caps.get(2).map(|m| m.as_str().to_string()).unwrap_or_default();
+    let owner = caps
+        .get(1)
+        .map(|m| m.as_str().to_string())
+        .unwrap_or_default();
+    let repo = caps
+        .get(2)
+        .map(|m| m.as_str().to_string())
+        .unwrap_or_default();
     let host_ok = url::Url::parse(&base_url)
         .ok()
         .and_then(|u| u.host_str().map(|h| h == "github.com"))
@@ -157,14 +163,9 @@ async fn resolve_version(
     releases_latest_url: &str,
     version_regex: Option<&str>,
 ) -> anyhow::Result<String> {
-    let response = http_get_request(
-        releases_latest_url.to_string(),
-        Some(true),
-        None,
-        None,
-    )
-    .await
-    .map_err(|e| hide(error::META_FAILED, e))?;
+    let response = http_get_request(releases_latest_url.to_string(), Some(true), None, None)
+        .await
+        .map_err(|e| hide(error::META_FAILED, e))?;
     let redirect = if !response.final_url.is_empty() {
         response.final_url
     } else {
@@ -175,20 +176,33 @@ async fn resolve_version(
             .unwrap_or_default()
     };
     if redirect.is_empty() {
-        return Err(hide(error::META_FAILED, "No redirect found for GitHub latest release"));
+        return Err(hide(
+            error::META_FAILED,
+            "No redirect found for GitHub latest release",
+        ));
     }
     if let Some(custom) = version_regex {
         let re = regex::Regex::new(custom).map_err(|e| hide(error::META_FAILED, e))?;
         return re
             .captures(&redirect)
             .and_then(|c| c.get(1).map(|m| m.as_str().to_string()))
-            .ok_or_else(|| hide(error::META_FAILED, format!("Failed to extract version from {redirect}")));
+            .ok_or_else(|| {
+                hide(
+                    error::META_FAILED,
+                    format!("Failed to extract version from {redirect}"),
+                )
+            });
     }
-    let re = regex::Regex::new(r"/releases/tag/([^/?#]+)")
-        .map_err(|e| hide(error::META_FAILED, e))?;
+    let re =
+        regex::Regex::new(r"/releases/tag/([^/?#]+)").map_err(|e| hide(error::META_FAILED, e))?;
     re.captures(&redirect)
         .and_then(|c| c.get(1).map(|m| m.as_str().to_string()))
-        .ok_or_else(|| hide(error::META_FAILED, format!("Failed to extract tag from {redirect}")))
+        .ok_or_else(|| {
+            hide(
+                error::META_FAILED,
+                format!("Failed to extract tag from {redirect}"),
+            )
+        })
 }
 
 async fn resolve_direct_url(original_url: &str, cache_time: Option<u64>) -> anyhow::Result<String> {

@@ -7,6 +7,7 @@ use futures::future::join_all;
 use serde_json::{json, Value};
 use tokio::sync::Semaphore;
 
+use crate::dfs::InsightItem;
 use crate::fs::is_dir_empty;
 use crate::installer::config::InstallerConfig;
 use crate::installer::lnk::get_dirs;
@@ -15,11 +16,10 @@ use crate::ipc::manager::ManagedElevate;
 use crate::ipc::operation::IpcOperation;
 use crate::local::Embedded;
 use crate::session::dump::write_dump;
+use crate::session::merge::{dfs2_ranges, file_mode, plan_tasks, FileMode, FilePos, InstallTask};
 use crate::session::plan::{
     build_plan, find_local, join_install, HashInfo, HashKey, LocalFile, PlanAction, PlanInput,
 };
-use crate::dfs::InsightItem;
-use crate::session::merge::{dfs2_ranges, file_mode, plan_tasks, FileMode, FilePos, InstallTask};
 use crate::session::source::{
     cleanup_dfs2, ensure_dfs2_session, fetch_metadata, hash_of_item, parse_source,
     prefetch_chunk_urls, resolve_file_location, resolve_range_url, FileLocation, ParsedSource,
@@ -233,7 +233,11 @@ fn prepare_event(
     version: &str,
     used_online: bool,
 ) -> String {
-    let action = if settings.is_update { "update" } else { "install" };
+    let action = if settings.is_update {
+        "update"
+    } else {
+        "install"
+    };
     let packed = config
         .embedded_index
         .as_ref()
@@ -258,7 +262,11 @@ fn emit_insight(
     data: Option<Value>,
     uninstall: bool,
 ) {
-    ui.insight(&insight_base(project, settings, config, uninstall), event, data);
+    ui.insight(
+        &insight_base(project, settings, config, uninstall),
+        event,
+        data,
+    );
 }
 
 pub async fn run_install(
@@ -429,7 +437,12 @@ async fn run_dfs_install(
         .collect();
 
     if to_install.is_empty() {
-        write_dump(settings.dump_dir.as_deref(), "04-install-ops.json", &json!([])).await;
+        write_dump(
+            settings.dump_dir.as_deref(),
+            "04-install-ops.json",
+            &json!([]),
+        )
+        .await;
         finish_install(settings, config, project, Some(&latest), ui, mgr).await?;
         progress(ui, 2, 100.0, "已是最新版本");
         return Ok(SessionResult::install(true, settings.is_update));
@@ -468,7 +481,10 @@ async fn run_dfs_install(
         .collect();
 
     let tasks = plan_tasks(
-        &install_items.iter().map(|i| i.item.clone()).collect::<Vec<_>>(),
+        &install_items
+            .iter()
+            .map(|i| i.item.clone())
+            .collect::<Vec<_>>(),
         hash_key,
         config.embedded_files.as_deref().unwrap_or(&[]),
         &latest.patches,
@@ -482,8 +498,12 @@ async fn run_dfs_install(
         &latest.patches,
         &local,
     );
-    if let Err(err) =
-        ensure_dfs2_session(&mut source_ctx, ranges.clone(), settings.dfs_extras.as_deref()).await
+    if let Err(err) = ensure_dfs2_session(
+        &mut source_ctx,
+        ranges.clone(),
+        settings.dfs_extras.as_deref(),
+    )
+    .await
     {
         cleanup_dfs2(&mut source_ctx).await;
         let detail = crate::session::error::friendly(&err);
@@ -711,7 +731,10 @@ async fn scan_local(
                     .unwrap_or_default()
                     .to_string(),
                 size: e.get("size").and_then(|v| v.as_u64()).unwrap_or(0),
-                unwritable: e.get("unwritable").and_then(|v| v.as_bool()).unwrap_or(false),
+                unwritable: e
+                    .get("unwritable")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false),
             }
         })
         .collect())
@@ -936,7 +959,14 @@ fn scan_progress_pair(p: &Value) -> (u64, u64) {
     )
 }
 
-fn log_task(mode: &str, size: u64, name: &str, insight: Option<&InsightItem>, ok: bool, err: Option<&str>) {
+fn log_task(
+    mode: &str,
+    size: u64,
+    name: &str,
+    insight: Option<&InsightItem>,
+    ok: bool,
+    err: Option<&str>,
+) {
     let insight_json = insight
         .and_then(|i| serde_json::to_string(i).ok())
         .unwrap_or_else(|| "{}".to_string());
@@ -1105,17 +1135,8 @@ async fn install_files(
                                     tracing::warn!("merged download failed, fallback: {err:#}");
                                     let all: Vec<usize> = (0..files.len()).collect();
                                     fallback_merged_files(
-                                        settings,
-                                        local_ref,
-                                        disk_ref,
-                                        latest,
-                                        hash_key,
-                                        files,
-                                        &all,
-                                        source_ctx,
-                                        mgr,
-                                        &handle,
-                                        &has_error,
+                                        settings, local_ref, disk_ref, latest, hash_key, files,
+                                        &all, source_ctx, mgr, &handle, &has_error,
                                     )
                                     .await
                                 }
@@ -1282,7 +1303,14 @@ async fn install_one(
         }
     }
     let err = last_err.unwrap_or_else(|| anyhow!("安装失败，请重试"));
-    log_task("direct", item.size, &file_name, last_insight.as_ref(), false, Some(&err.to_string()));
+    log_task(
+        "direct",
+        item.size,
+        &file_name,
+        last_insight.as_ref(),
+        false,
+        Some(&err.to_string()),
+    );
     Err(crate::session::error::file_release(&file_name, &err))
 }
 
@@ -1340,7 +1368,15 @@ async fn install_merged(
     let mode = merged_mode(files, local_files, &latest.patches, hash_key);
     let ipc = op_from(op.clone())?;
     let (value, insight) = if let Some(handle) = handle.clone() {
-        run_download_op(mgr, settings.elevate, ipc, source_ctx, Some(mode), handle.callback()).await?
+        run_download_op(
+            mgr,
+            settings.elevate,
+            ipc,
+            source_ctx,
+            Some(mode),
+            handle.callback(),
+        )
+        .await?
     } else {
         run_download_op(mgr, settings.elevate, ipc, source_ctx, Some(mode), |_| {}).await?
     };
@@ -1358,7 +1394,14 @@ async fn install_merged(
         .collect::<Vec<_>>()
         .join(",");
     if failed.is_empty() {
-        log_task("MERGED", download_size as u64, &names, insight.as_ref(), true, None);
+        log_task(
+            "MERGED",
+            download_size as u64,
+            &names,
+            insight.as_ref(),
+            true,
+            None,
+        );
     } else {
         log_task(
             "MERGED",
@@ -1383,8 +1426,8 @@ async fn build_install_op(
     skip_patch: bool,
 ) -> anyhow::Result<Value> {
     let target = join_install(&settings.install_path, &item.file_name);
-    let hash = hash_of_item(item, hash_key)
-        .ok_or_else(|| anyhow!(crate::session::error::HASH_INVALID))?;
+    let hash =
+        hash_of_item(item, hash_key).ok_or_else(|| anyhow!(crate::session::error::HASH_INVALID))?;
     let installer = item.installer.unwrap_or(false);
     if !skip_patch {
         if let Some(local) = local_files.iter().find(|l| l.name == hash) {
@@ -1433,19 +1476,20 @@ async fn build_install_op(
                 )
                 .await
                 {
-                    return Ok(url_op(loc, &target, item, Some(patch.size as usize), installer));
+                    return Ok(url_op(
+                        loc,
+                        &target,
+                        item,
+                        Some(patch.size as usize),
+                        installer,
+                    ));
                 }
             }
         }
     }
 
-    let loc = resolve_file_location(
-        source_ctx,
-        &hash,
-        settings.dfs_extras.as_deref(),
-        installer,
-    )
-    .await?;
+    let loc =
+        resolve_file_location(source_ctx, &hash, settings.dfs_extras.as_deref(), installer).await?;
     Ok(url_op(loc, &target, item, None, installer))
 }
 
@@ -1579,11 +1623,8 @@ async fn install_runtimes(
         }
         if let Some(err) = last_err {
             tracing::error!("安装{name}失败: {err:#}，请手动安装");
-            ui.alert(
-                "出错了",
-                &format!("安装{name}失败: {err}，请手动安装"),
-            )
-            .await;
+            ui.alert("出错了", &format!("安装{name}失败: {err}，请手动安装"))
+                .await;
         }
     }
     Ok(())
@@ -1599,9 +1640,15 @@ async fn finish_install(
 ) -> anyhow::Result<()> {
     let (program, desktop) = get_dirs(settings.elevate).await.into_anyhow()?;
     let exe_path = join_install(&settings.install_path, &project.exe_name);
-    let program_lnk = format!("{}\\{}\\{}.lnk", program, project.app_name, project.app_name);
+    let program_lnk = format!(
+        "{}\\{}\\{}.lnk",
+        program, project.app_name, project.app_name
+    );
     let desktop_lnk = format!("{}\\{}.lnk", desktop, project.app_name);
-    let uninstall_lnk = format!("{}\\{}\\卸载{}.lnk", program, project.app_name, project.app_name);
+    let uninstall_lnk = format!(
+        "{}\\{}\\卸载{}.lnk",
+        program, project.app_name, project.app_name
+    );
     if settings.create_lnk && !settings.is_update {
         let _ = run_op(
             mgr,
@@ -1635,7 +1682,8 @@ async fn finish_install(
         .await
         {
             tracing::warn!("create uninstaller failed: {err:#}");
-            ui.alert("出错了", &format!("创建卸载程序失败: {err}")).await;
+            ui.alert("出错了", &format!("创建卸载程序失败: {err}"))
+                .await;
         }
         let _ = run_op(
             mgr,
@@ -1766,18 +1814,24 @@ async fn run_mirrorc(
         &format!("KachinaInstaller_Mirrorc_{sha256}.zip"),
     );
     progress(ui, 1, 5.0, "准备从Mirror酱下载……");
-    run_op_with_ui(mgr, settings.elevate, op_from(json!({"type": "RunMirrorcDownload", "url": url, "zip_path": zip_path}))?, ui, |ui, p| {
-        if p.get("type").and_then(|v| v.as_str()) == Some("download") {
-            let downloaded = p.get("downloaded").and_then(|v| v.as_u64()).unwrap_or(0);
-            let total = p.get("total").and_then(|v| v.as_u64()).unwrap_or(1).max(1);
-            progress(
-                ui,
-                1,
-                5.0 + (downloaded as f64 / total as f64) * 65.0,
-                format!("{} / {}", format_size(downloaded), format_size(total)),
-            );
-        }
-    })
+    run_op_with_ui(
+        mgr,
+        settings.elevate,
+        op_from(json!({"type": "RunMirrorcDownload", "url": url, "zip_path": zip_path}))?,
+        ui,
+        |ui, p| {
+            if p.get("type").and_then(|v| v.as_str()) == Some("download") {
+                let downloaded = p.get("downloaded").and_then(|v| v.as_u64()).unwrap_or(0);
+                let total = p.get("total").and_then(|v| v.as_u64()).unwrap_or(1).max(1);
+                progress(
+                    ui,
+                    1,
+                    5.0 + (downloaded as f64 / total as f64) * 65.0,
+                    format!("{} / {}", format_size(downloaded), format_size(total)),
+                );
+            }
+        },
+    )
     .await?;
     progress(ui, 2, 70.0, "检查压缩包……");
     let installed = run_op_with_ui(
@@ -1803,7 +1857,12 @@ async fn run_mirrorc(
             }
             Some("delete") => {
                 let file = p.get("file").and_then(|v| v.as_str()).unwrap_or("");
-                progress(ui, 2, 97.0, format!("<div class=\"d-single-stat\">删除 {file}</div>"));
+                progress(
+                    ui,
+                    2,
+                    97.0,
+                    format!("<div class=\"d-single-stat\">删除 {file}</div>"),
+                );
             }
             _ => {}
         },
@@ -1860,11 +1919,10 @@ pub async fn run_uninstall(
     mgr: &ManagedElevate,
 ) -> anyhow::Result<SessionResult> {
     progress(ui, 0, 10.0, "准备卸载……");
-    let meta = read_uninstall_metadata_raw(
-        &project.reg_name,
-        Some(settings.install_path.as_str()),
-    )
-    .map_err(|e| crate::session::error::hide(crate::session::error::UNINSTALL_META_MISSING, e))?;
+    let meta = read_uninstall_metadata_raw(&project.reg_name, Some(settings.install_path.as_str()))
+        .map_err(|e| {
+            crate::session::error::hide(crate::session::error::UNINSTALL_META_MISSING, e)
+        })?;
     let hashed: Vec<HashInfo> = meta
         .get("hashed")
         .and_then(|v| v.as_array())
@@ -1936,11 +1994,7 @@ pub async fn silent_main(args: crate::cli::arg::InstallArgs) -> anyhow::Result<(
         None => {
             tracing::error!(
                 "embedded config missing (embedded_files={})",
-                config
-                    .embedded_files
-                    .as_ref()
-                    .map(|f| f.len())
-                    .unwrap_or(0)
+                config.embedded_files.as_ref().map(|f| f.len()).unwrap_or(0)
             );
             return Err(anyhow!(crate::session::error::PKG_BROKEN));
         }

@@ -131,8 +131,10 @@ pub async fn get_embedded(file: &'static AsyncMmapFile) -> anyhow::Result<Vec<Em
 }
 
 fn is_embedded_name(name: &str) -> bool {
-    matches!(name, "\0CONFIG" | "\0META" | "\0INDEX" | "\0IMAGE" | "\0THEME")
-        || name.chars().all(|c| c.is_ascii_hexdigit())
+    matches!(
+        name,
+        "\0CONFIG" | "\0META" | "\0INDEX" | "\0IMAGE" | "\0THEME"
+    ) || name.chars().all(|c| c.is_ascii_hexdigit())
         || name
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-')

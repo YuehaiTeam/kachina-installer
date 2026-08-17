@@ -337,7 +337,10 @@ mod tests {
     fn prerelease_is_older_than_release() {
         assert!(version_gt("1.0.0", "1.0.0-beta"));
         assert!(!version_gt("1.0.0-beta", "1.0.0"));
-        assert_eq!(version_cmp("1.0.0", "1.0.0-beta"), std::cmp::Ordering::Greater);
+        assert_eq!(
+            version_cmp("1.0.0", "1.0.0-beta"),
+            std::cmp::Ordering::Greater
+        );
     }
 
     #[test]

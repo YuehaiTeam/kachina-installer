@@ -1,17 +1,13 @@
 use crate::{
     cli::arg::InstallArgs,
     local::{get_config_from_embedded, get_embedded, mmap, Embedded},
-    utils::{
-        error::TAResult,
-        uac::check_elevated,
-    },
+    utils::{error::TAResult, uac::check_elevated},
     APP_BOOT_SIGNAL,
 };
 use anyhow::Context;
 use serde::Serialize;
 use serde_json::Value;
 use std::{collections::BTreeMap, path::Path};
-use tauri::State;
 
 #[derive(Serialize, Debug, Clone)]
 pub struct InstallerConfig {
@@ -226,13 +222,9 @@ pub async fn resolve_installer_config(
     ))
 }
 
-#[tauri::command]
-pub async fn get_installer_config(
-    args: State<'_, InstallArgs>,
-    scan_exe: bool,
-) -> TAResult<InstallerConfig> {
+pub async fn get_installer_config(args: &InstallArgs, scan_exe: bool) -> TAResult<InstallerConfig> {
     APP_BOOT_SIGNAL.store(true, std::sync::atomic::Ordering::SeqCst);
-    resolve_installer_config(args.inner().clone(), scan_exe)
+    resolve_installer_config(args.clone(), scan_exe)
         .await
         .map_err(|e| crate::utils::error::TACommandError::new(e))
 }

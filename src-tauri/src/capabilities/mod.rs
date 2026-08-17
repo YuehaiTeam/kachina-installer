@@ -129,7 +129,7 @@ impl Middleware for DynamicUaMiddleware {
 pub fn ua_string() -> String {
     let (major, minor, build) = nt_version::get();
     let cpu_cores = num_cpus::get();
-    let wv2ver = tauri::webview_version().unwrap_or_else(|_| "Unknown".to_string());
+    let wv2ver = crate::host::webview_version().unwrap_or_else(|_| "Unknown".to_string());
 
     let mut ua = format!(
         "KachinaInstaller/{} Webview2/{} Windows/{}.{}.{} Threads/{}",

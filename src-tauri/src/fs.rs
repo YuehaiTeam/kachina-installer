@@ -512,7 +512,10 @@ pub async fn check_local_files(
         }
 
         let mut target_path = PathBuf::from(&source);
-        for part in normalized_relative_path.split('/').filter(|part| !part.is_empty()) {
+        for part in normalized_relative_path
+            .split('/')
+            .filter(|part| !part.is_empty())
+        {
             target_path.push(part);
         }
 
@@ -549,7 +552,10 @@ pub async fn check_local_files(
         let mut file = file.clone();
         let semaphore = semaphore.clone();
         joinset.spawn(async move {
-            let _permit = semaphore.acquire_owned().await.context("HASH_SEMAPHORE_ERR")?;
+            let _permit = semaphore
+                .acquire_owned()
+                .await
+                .context("HASH_SEMAPHORE_ERR")?;
             let writable = tokio::fs::OpenOptions::new()
                 .read(true)
                 .write(true)

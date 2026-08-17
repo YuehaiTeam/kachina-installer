@@ -158,22 +158,3 @@ fn bgra_to_rgba(bgra: Vec<u8>) -> Vec<u8> {
 
     rgba
 }
-
-/// 提取当前 exe 图标并返回 Tauri Image
-/// 失败时返回 None（会记录警告日志）
-pub fn get_exe_icon_for_tauri() -> Option<tauri::image::Image<'static>> {
-    let exe_path = std::env::current_exe().ok()?;
-
-    match extract_icon_from_exe(&exe_path) {
-        Some((rgba_data, width, height)) => {
-            tracing::info!("Successfully extracted icon: {}x{}", width, height);
-            // Leak the data to get 'static lifetime
-            let rgba_static: &'static [u8] = Box::leak(rgba_data.into_boxed_slice());
-            Some(tauri::image::Image::new(rgba_static, width, height))
-        }
-        None => {
-            tracing::warn!("Failed to extract icon from exe, using default");
-            None
-        }
-    }
-}

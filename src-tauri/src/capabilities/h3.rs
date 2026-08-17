@@ -56,7 +56,7 @@ pub struct PinConfig {
 #[cfg(target_os = "windows")]
 mod win_pin {
     use super::*;
-    use sha2::{Sha256, Digest};
+    use sha2::{Digest, Sha256};
     use std::ffi::c_void;
     use tracing::info;
     use windows::Win32::Security::Cryptography::*;

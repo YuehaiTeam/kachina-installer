@@ -163,8 +163,12 @@ impl SourceCtx {
 
 pub fn parse_source(source: &str) -> anyhow::Result<ParsedSource> {
     if source.starts_with("mirrorc://") {
-        let url = url::Url::parse(source)
-            .map_err(|e| hide(format!("无法获取Mirror酱数据，安装包可能已经损坏：{source}"), e))?;
+        let url = url::Url::parse(source).map_err(|e| {
+            hide(
+                format!("无法获取Mirror酱数据，安装包可能已经损坏：{source}"),
+                e,
+            )
+        })?;
         let resource_id = url.host_str().unwrap_or_default().to_string();
         if resource_id.is_empty() {
             return Err(user(format!(
@@ -262,10 +266,7 @@ async fn fetch_hashed_metadata(url: &str) -> anyhow::Result<DfsMetadata> {
             format!("hashed metadata http {}", res.status()),
         ));
     }
-    let body = res
-        .text()
-        .await
-        .map_err(|e| hide(error::META_FAILED, e))?;
+    let body = res.text().await.map_err(|e| hide(error::META_FAILED, e))?;
     serde_json::from_str(&body).map_err(|e| hide(error::META_FAILED, e))
 }
 
@@ -331,7 +332,8 @@ async fn refresh_packed_index(
         if offset + 2 > index_data.len() {
             break;
         }
-        let name_len = u16::from_be_bytes(index_data[offset..offset + 2].try_into().unwrap()) as usize;
+        let name_len =
+            u16::from_be_bytes(index_data[offset..offset + 2].try_into().unwrap()) as usize;
         offset += 2;
         if offset + name_len + 4 > index_data.len() {
             break;
@@ -424,7 +426,9 @@ pub async fn fetch_metadata(
             RemoteKind::Dfs2 => fetch_dfs2_metadata(&url, ctx).await,
             _ => match storage {
                 StorageKind::Hashed => fetch_hashed_metadata(&url).await,
-                StorageKind::Packed => refresh_packed_index(source, &url, remote, extras, ctx).await,
+                StorageKind::Packed => {
+                    refresh_packed_index(source, &url, remote, extras, ctx).await
+                }
             },
         },
     }
@@ -443,7 +447,10 @@ pub async fn resolve_file_location(
         ParsedSource::Plugin { name, raw } => {
             resolve_plugin_location(ctx, name, raw, hash, installer).await
         }
-        ParsedSource::Mirrorc { .. } => Err(hide(error::META_FAILED, "mirrorc does not resolve hashed files")),
+        ParsedSource::Mirrorc { .. } => Err(hide(
+            error::META_FAILED,
+            "mirrorc does not resolve hashed files",
+        )),
         ParsedSource::GitHub { raw, storage } => {
             let file_url = resolve_github_file_url(raw).await?;
             match storage {
@@ -542,7 +549,11 @@ async fn resolve_dfs2_location(
         session.base_url, session.session_id, session.res_id
     );
     if let Some(file) = ctx.find(hash) {
-        let range = format!("{}-{}", file.offset, file.offset + file.size.saturating_sub(1));
+        let range = format!(
+            "{}-{}",
+            file.offset,
+            file.offset + file.size.saturating_sub(1)
+        );
         let url = dfs2_chunk_url(ctx, &session_api, &range).await?;
         Ok(FileLocation {
             url: Some(url),
@@ -591,11 +602,7 @@ pub async fn resolve_range_url(
         }
         ParsedSource::Mirrorc { .. } => Err(hide(error::META_FAILED, "mirrorc has no range url")),
         ParsedSource::GitHub { raw, .. } => resolve_github_file_url(raw).await,
-        ParsedSource::Http {
-            remote,
-            url,
-            ..
-        } => match remote {
+        ParsedSource::Http { remote, url, .. } => match remote {
             RemoteKind::Direct => Ok(url.clone()),
             RemoteKind::Dfs => resolve_dfs_file_url(url, extras, Some(size), start).await,
             RemoteKind::Dfs2 => {
@@ -636,15 +643,16 @@ pub async fn ensure_dfs2_session(
     if ranges.is_empty() {
         return Ok(());
     }
-    let extras_obj = extras.filter(|s| !s.trim().is_empty()).and_then(|s| {
-        match serde_json::from_str::<Value>(s) {
-            Ok(value) => Some(value),
-            Err(err) => {
-                tracing::warn!("dfs extras is not JSON, ignore: {err}");
-                None
+    let extras_obj =
+        extras.filter(|s| !s.trim().is_empty()).and_then(|s| {
+            match serde_json::from_str::<Value>(s) {
+                Ok(value) => Some(value),
+                Err(err) => {
+                    tracing::warn!("dfs extras is not JSON, ignore: {err}");
+                    None
+                }
             }
-        }
-    });
+        });
     let sid = create_dfs2_session_with_challenge(
         url.clone(),
         Some(ranges),
@@ -740,9 +748,7 @@ async fn create_dfs2_session_once(
                 return Ok(sid);
             }
         }
-        if let (Some(challenge), Some(data), Some(sid)) =
-            (resp.challenge, resp.data, resp.sid)
-        {
+        if let (Some(challenge), Some(data), Some(sid)) = (resp.challenge, resp.data, resp.sid) {
             if challenge == "web" {
                 let _ = data;
                 return Err(user("当前下载源需要网页验证，请更换下载源"));
@@ -839,8 +845,7 @@ async fn fetch_plugin_metadata(
 }
 
 fn apply_plugin_metadata(ctx: &mut SourceCtx, data: Value) -> anyhow::Result<DfsMetadata> {
-    let data: Dfs2Data =
-        serde_json::from_value(data).map_err(|e| hide(error::META_FAILED, e))?;
+    let data: Dfs2Data = serde_json::from_value(data).map_err(|e| hide(error::META_FAILED, e))?;
     ctx.index.clear();
     for (name, info) in data.index {
         ctx.index.insert(
@@ -943,7 +948,12 @@ async fn plugin_chunk_url(
             .and_then(|v| v.as_str())
             .filter(|s| !s.is_empty())
             .map(|s| s.to_string())
-            .ok_or_else(|| hide(error::NO_DOWNLOAD_NODE, "plugin getChunkUrl returned no url")),
+            .ok_or_else(|| {
+                hide(
+                    error::NO_DOWNLOAD_NODE,
+                    "plugin getChunkUrl returned no url",
+                )
+            }),
     }
 }
 
@@ -984,13 +994,9 @@ async fn resolve_dfs_file_url(
     start: usize,
 ) -> anyhow::Result<String> {
     let range = length.map(|len| format!("{}-{}", start, start + len.saturating_sub(1)));
-    let dfs = get_dfs(
-        apiurl.to_string(),
-        range,
-        extras.map(|s| s.to_string()),
-    )
-    .await
-    .map_err(|e| anyhow!(e))?;
+    let dfs = get_dfs(apiurl.to_string(), range, extras.map(|s| s.to_string()))
+        .await
+        .map_err(|e| anyhow!(e))?;
     if let Some(url) = dfs.url {
         return Ok(url);
     }

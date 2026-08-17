@@ -114,12 +114,24 @@ export async function bootstrap(
       installer.embedded_files.length > 0 &&
       !installer.embedded_files.find((e) => e.name === '\0CONFIG')
     ) {
-      dialogError('打包错误，请确保配置文件被正确打包', '出错了', installer.args.silent);
+      dialogError(
+        '打包错误，请确保配置文件被正确打包',
+        '出错了',
+        installer.args.silent,
+      );
     }
   } else if (process.env.NODE_ENV === 'development') {
-    dialogError('未找到配置文件，请将配置文件放在exe同目录下', '出错了', installer.args.silent);
+    dialogError(
+      '未找到配置文件，请将配置文件放在exe同目录下',
+      '出错了',
+      installer.args.silent,
+    );
   } else {
-    await dialogError('安装包损坏，请重新下载', '出错了', installer.args.silent);
+    await dialogError(
+      '安装包损坏，请重新下载',
+      '出错了',
+      installer.args.silent,
+    );
     win.close();
     return null;
   }
@@ -164,9 +176,17 @@ export async function bootstrap(
     }
     if (hasWrongIndex) {
       if (process.env.NODE_ENV === 'development') {
-        dialogError('打包错误，请确保索引文件正确', '出错了', installer.args.silent);
+        dialogError(
+          '打包错误，请确保索引文件正确',
+          '出错了',
+          installer.args.silent,
+        );
       } else {
-        await dialogError('安装包损坏，请重新下载', '出错了', installer.args.silent);
+        await dialogError(
+          '安装包损坏，请重新下载',
+          '出错了',
+          installer.args.silent,
+        );
         win.close();
         return null;
       }
