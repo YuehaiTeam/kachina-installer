@@ -9,6 +9,7 @@ pub mod installer;
 pub mod ipc;
 pub mod local;
 pub mod module;
+pub mod session;
 pub mod thirdparty;
 pub mod utils;
 use clap::Parser;
@@ -102,8 +103,8 @@ fn main() {
 
     let cli = cli::Cli::parse();
     let mut command = cli.command();
-    let wv2ver = tauri::webview_version();
-    if wv2ver.is_err() {
+    let silent = matches!(&command, Command::Install(args) if args.silent);
+    if !silent && tauri::webview_version().is_err() {
         command = Command::InstallWebview2;
     }
     let _guard = sentry_init(matches!(command, Command::HeadlessUac(_)));
@@ -173,7 +174,11 @@ fn main() {
         Command::Install(install) => {
             sentry::add_breadcrumb(sentry::Breadcrumb {
                 category: Some("app".into()),
-                message: Some("KachinaInstaller started".into()),
+                message: Some(if install.silent {
+                    "KachinaInstaller started (silent)".into()
+                } else {
+                    "KachinaInstaller started".into()
+                }),
                 level: sentry::Level::Info,
                 ..Default::default()
             });
@@ -181,7 +186,16 @@ fn main() {
                 .enable_all()
                 .build()
                 .unwrap()
-                .block_on(tauri_main(install));
+                .block_on(async move {
+                    if install.silent {
+                        if let Err(err) = session::run::silent_main(install).await {
+                            tracing::error!("silent install failed: {err:#}");
+                            std::process::exit(1);
+                        }
+                    } else {
+                        tauri_main(install).await;
+                    }
+                });
         }
         Command::Other(_str) => {
             sentry::add_breadcrumb(sentry::Breadcrumb {
@@ -203,6 +217,7 @@ fn main() {
                     source: None,
                     dfs_extras: None,
                     mirrorc_cdk: None,
+                    dump_dir: None,
                 }));
         }
     }
@@ -260,9 +275,15 @@ async fn tauri_main(args: InstallArgs) {
             thirdparty::mirrorc::get_mirrorc_status,
             // new mamaned operation
             ipc::manager::managed_operation,
+            session::dump::write_session_dump,
+            session::commands::start_install,
+            session::commands::start_uninstall,
+            session::commands::answer_session_prompt,
+            session::commands::answer_session_plugin,
         ])
         .manage(args)
         .manage(ipc::manager::ManagedElevate::new())
+        .manage(session::commands::SessionState::default())
         .setup(move |app| {
             // sleep 5s to check if window is alive
             tokio::spawn({

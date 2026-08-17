@@ -151,3 +151,61 @@ export async function printLogFileIfExists() {
     console.log(chalk.yellow('Log file not found at: ' + logFile));
   }
 }
+
+export function getLogFilePath() {
+  return path.join(os.tmpdir(), 'KachinaInstaller.log');
+}
+
+export async function clearLogFile() {
+  const logFile = getLogFilePath();
+  if (await fs.pathExists(logFile)) {
+    await fs.remove(logFile);
+  }
+}
+
+export async function runInstaller(exe, args, label, timeout = '3m') {
+  const { $, usePwsh } = await import('zx');
+  usePwsh();
+  try {
+    const result = await $`& ${exe} ${args}`.timeout(timeout);
+    return result;
+  } catch (error) {
+    if (error.message && error.message.includes('timed out')) {
+      console.error(chalk.red(`${label} timed out after ${timeout}`));
+      await printLogFileIfExists();
+    }
+    throw error;
+  }
+}
+
+export function assertExitOk(result, label) {
+  if (result.exitCode !== 0) {
+    throw new Error(`${label} failed with exit code ${result.exitCode}`);
+  }
+}
+
+export async function assertNoInstallerError() {
+  const logFile = getLogFilePath();
+  if (!(await fs.pathExists(logFile))) {
+    return;
+  }
+  const logs = await fs.readFile(logFile, 'utf-8');
+  console.log(logs);
+  if (logs.includes('ERROR kachina_installer::installer')) {
+    throw new Error('Installer log contains errors');
+  }
+}
+
+export function reportVerification(name, verification, extraFailed = []) {
+  const failed = [...verification.failed, ...extraFailed];
+  if (failed.length === 0) {
+    console.log(chalk.green(`✓ ${name}`));
+    if (verification.passed?.length) {
+      console.log(chalk.gray(`  Verified: ${verification.passed.join(', ')}`));
+    }
+    return;
+  }
+  console.error(chalk.red(`✗ ${name} failed:`));
+  failed.forEach((msg) => console.error(chalk.red(`  - ${msg}`)));
+  process.exit(1);
+}

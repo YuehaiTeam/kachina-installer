@@ -1,6 +1,13 @@
-import { verifyFiles, cleanupTestDir, getTestDir, printLogFileIfExists, FLAGS } from './utils.mjs';
+import {
+  verifyFiles,
+  cleanupTestDir,
+  getTestDir,
+  FLAGS,
+  runInstaller,
+  assertExitOk,
+} from './utils.mjs';
 import 'zx/globals';
-import { $, usePwsh } from 'zx';
+import { usePwsh } from 'zx';
 usePwsh();
 
 async function test() {
@@ -14,20 +21,12 @@ async function test() {
   try {
     // 执行离线安装
     console.log('Running offline installation...');
-    let result;
-    try {
-      result = await $`${installerPath} ${FLAGS} -D ${testDir}`.timeout('3m').quiet();
-    } catch (error) {
-      if (error.message && error.message.includes('timed out')) {
-        console.error(chalk.red('Offline installation timed out after 3 minutes'));
-        await printLogFileIfExists();
-      }
-      throw error;
-    }
-
-    if (result.exitCode !== 0) {
-      throw new Error(`Installation failed with exit code ${result.exitCode}`);
-    }
+    const result = await runInstaller(
+      installerPath,
+      [FLAGS, '-D', testDir],
+      'Offline installation',
+    );
+    assertExitOk(result, 'Offline installation');
 
     // 验证安装的文件
     const expectedFiles = [

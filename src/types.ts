@@ -236,6 +236,7 @@ export interface InstallerConfig {
     source?: string;
     dfs_extras?: string;
     mirrorc_cdk?: string;
+    dump_dir?: string | null;
   };
   elevated: boolean;
 }

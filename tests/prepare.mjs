@@ -76,6 +76,14 @@ async function createAppFiles() {
     crypto.randomBytes(1024 * 10),
   );
 
+  await fs.ensureDir(path.join(V1_DIR, 'User'));
+  await fs.writeFile(
+    path.join(V1_DIR, 'User/settings.json'),
+    '{"from":"v1"}\n',
+  );
+  await fs.ensureDir(path.join(V1_DIR, 'cache'));
+  await fs.writeFile(path.join(V1_DIR, 'cache/keep.dat'), 'CACHE_V1');
+
   // === V2 文件 ===
   // app.exe - 更新的主程序
   const appExeV2 = Buffer.concat([
@@ -118,6 +126,15 @@ async function createAppFiles() {
     crypto.randomBytes(1024 * 5),
   );
 
+  await fs.ensureDir(path.join(V2_DIR, 'User'));
+  await fs.writeFile(
+    path.join(V2_DIR, 'User/settings.json'),
+    '{"from":"v2"}\n',
+  );
+  await fs.ensureDir(path.join(V2_DIR, 'cache'));
+  await fs.writeFile(path.join(V2_DIR, 'cache/keep.dat'), 'CACHE_V2');
+  await fs.writeFile(path.join(V2_DIR, 'cache/new.dat'), 'CACHE_NEW_V2');
+
   console.log(chalk.gray('  App files created'));
 }
 
@@ -147,6 +164,9 @@ async function createConfig() {
     description: 'Integration test application',
     windowTitle: 'Test Application Installer',
     uacStrategy: 'prefer-user',
+    userDataPath: ['${INSTALL_PATH}/User'],
+    ignoreFolderPath: ['${INSTALL_PATH}/cache'],
+    extraUninstallPath: ['${INSTALL_PATH}/log'],
   };
 
   // v1和v2使用相同配置

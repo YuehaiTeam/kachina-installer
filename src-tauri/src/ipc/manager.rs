@@ -96,6 +96,62 @@ impl ManagedElevate {
         }
         Ok(())
     }
+
+    pub async fn run(
+        &self,
+        ipc: IpcOperation,
+        elevate: bool,
+        on_progress: impl Fn(serde_json::Value) + Send + Clone + 'static,
+    ) -> TAResult<serde_json::Value> {
+        if !elevate || self.already_elevated {
+            return run_opr(ipc, on_progress, vec![]).await;
+        }
+        if self.process.read().await.is_none() {
+            tracing::info!("Elevate process not started, starting...");
+            self.start().await?;
+            tracing::info!("Elevate process started");
+        }
+        let mut context = vec![];
+        if let Some(span) = sentry::configure_scope(|scope| scope.get_span()) {
+            for (k, v) in span.iter_headers() {
+                context.push((k.to_string(), v.to_string()));
+            }
+        }
+        let id = uuid::Uuid::new_v4().to_string();
+        let _ = self
+            .mpsc_tx
+            .send(IpcInner {
+                op: ipc,
+                id: id.clone(),
+                context,
+            })
+            .await;
+        let mut rx = self.broadcast_tx.subscribe();
+        while let Ok(v) = rx.recv().await {
+            let msgid = v["id"].as_str();
+            if let Some(msgid) = msgid {
+                if msgid == id {
+                    if let Some(done) = v["done"].as_bool() {
+                        if done {
+                            return Ok(v["data"].clone());
+                        }
+                    }
+                    on_progress(v["data"].clone());
+                }
+            }
+            let pipeerr = v["PipeErr"].as_str();
+            if let Some(pipeerr) = pipeerr {
+                return Err(anyhow::anyhow!("Elevate process disconnected: {}", pipeerr)
+                    .context("IPC_ERR")
+                    .into());
+            }
+        }
+        Err(
+            anyhow::anyhow!("Failed to receive response from elevate process")
+                .context("IPC_ERR")
+                .into(),
+        )
+    }
 }
 
 pub async fn wait_conn(server: &mut NamedPipeServer) -> bool {
@@ -191,61 +247,10 @@ pub async fn managed_operation(
     mgr: tauri::State<'_, ManagedElevate>,
     window: tauri::WebviewWindow,
 ) -> TAResult<serde_json::Value> {
-    if !elevate || mgr.already_elevated {
-        run_opr(
-            ipc,
-            move |opr| {
-                let _ = window.emit(&id, opr);
-            },
-            vec![],
-        )
-        .await
-    } else {
-        if mgr.process.read().await.is_none() {
-            tracing::info!("Elevate process not started, starting...");
-            mgr.start().await?;
-            tracing::info!("Elevate process started");
-        }
-        let mut context = vec![];
-        if let Some(span) = sentry::configure_scope(|scope| scope.get_span()) {
-            for (k, v) in span.iter_headers() {
-                context.push((k.to_string(), v.to_string()));
-            }
-        }
-        let _ = mgr
-            .mpsc_tx
-            .send(IpcInner {
-                op: ipc,
-                id: id.clone(),
-                context,
-            })
-            .await;
-        let mut rx = mgr.broadcast_tx.subscribe();
-        while let Ok(v) = rx.recv().await {
-            let msgid = v["id"].as_str();
-            if let Some(msgid) = msgid {
-                if msgid == id {
-                    if let Some(done) = v["done"].as_bool() {
-                        if done {
-                            return Ok(v["data"].clone());
-                        }
-                    }
-                    let _ = window.emit(&id, v["data"].clone());
-                }
-            }
-            let pipeerr = v["PipeErr"].as_str();
-            if let Some(pipeerr) = pipeerr {
-                return Err(anyhow::anyhow!("Elevate process disconnected: {}", pipeerr)
-                    .context("IPC_ERR")
-                    .into());
-            }
-        }
-        Err(
-            anyhow::anyhow!("Failed to receive response from elevate process")
-                .context("IPC_ERR")
-                .into(),
-        )
-    }
+    mgr.run(ipc, elevate, move |opr| {
+        let _ = window.emit(&id, opr);
+    })
+    .await
 }
 
 pub async fn uac_ipc_main(args: crate::cli::arg::UacArgs) {

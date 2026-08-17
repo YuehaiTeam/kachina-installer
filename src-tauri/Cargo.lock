@@ -2695,6 +2695,7 @@ dependencies = [
  "open",
  "pin-project",
  "rcedit",
+ "regex",
  "reqwest 0.12.28",
  "reqwest-middleware",
  "rfd",

@@ -62,6 +62,10 @@ pub async fn select_dir(
         let res = res.unwrap();
         res.path().to_str().map(|s| s.to_string())?
     };
+    inspect_dir(pathstr, exe_name).await
+}
+
+pub async fn inspect_dir(pathstr: String, exe_name: String) -> Option<SelectDirRes> {
     let mut empty = true;
     let mut upgrade = false;
     let path = std::path::Path::new(&pathstr);
@@ -70,7 +74,6 @@ pub async fn select_dir(
         return None;
     }
     if path.exists() {
-        // check writeable by direct open the directory
         let handle = tokio::fs::OpenOptions::new()
             .read(true)
             .write(true)
@@ -96,10 +99,7 @@ pub async fn select_dir(
             }
         }
     } else {
-        // get parent dir
-        let parent = path.parent();
-        parent?;
-        let parent = parent.unwrap();
+        let parent = path.parent()?;
         let handle = tokio::fs::OpenOptions::new()
             .read(true)
             .write(true)
