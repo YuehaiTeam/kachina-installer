@@ -3,11 +3,12 @@ import {
   verifyFilesRemoved,
   cleanupTestDir,
   getTestDir,
-  printLogFileIfExists,
   FLAGS,
+  runInstaller,
+  assertExitOk,
 } from './utils.mjs';
 import 'zx/globals';
-import { $, usePwsh } from 'zx';
+import { usePwsh } from 'zx';
 usePwsh();
 
 async function test() {
@@ -21,54 +22,21 @@ async function test() {
   try {
     // 步骤1: 安装v1
     console.log('Installing v1...');
-    let result;
-    try {
-      const prom = $`${installerV1} ${FLAGS} -D ${testDir}`.timeout('3m').quiet();
-      result = await Promise.race([
-        prom,
-        new Promise((_, reject) =>
-          setTimeout(
-            () => reject(new Error('V1 installation timed out after 3 minutes')),
-            3 * 60 * 1000,
-          ),
-        ),
-      ]);
-    } catch (error) {
-      if (error.message && error.message.includes('timed out')) {
-        console.error(chalk.red('V1 installation timed out after 3 minutes'));
-        await printLogFileIfExists();
-      }
-      throw error;
-    }
-    if (result.exitCode !== 0) {
-      throw new Error(
-        `V1 installation failed with exit code ${result.exitCode}`,
-      );
-    }
+    let result = await runInstaller(
+      installerV1,
+      [FLAGS, '-D', testDir],
+      'V1 installation',
+    );
+    assertExitOk(result, 'V1 installation');
 
     // 步骤2: 使用v2包进行更新
     console.log('Updating to v2...');
-    try {
-      const prom = $`${installerV2} ${FLAGS} -D ${testDir}`.timeout('3m').quiet();
-      result = await Promise.race([
-        prom,
-        new Promise((_, reject) =>
-          setTimeout(
-            () => reject(new Error('Update to v2 timed out after 3 minutes')),
-            3 * 60 * 1000,
-          ),
-        ),
-      ]);
-    } catch (error) {
-      if (error.message && error.message.includes('timed out')) {
-        console.error(chalk.red('Update to v2 timed out after 3 minutes'));
-        await printLogFileIfExists();
-      }
-      throw error;
-    }
-    if (result.exitCode !== 0) {
-      throw new Error(`Update to v2 failed with exit code ${result.exitCode}`);
-    }
+    result = await runInstaller(
+      installerV2,
+      [FLAGS, '-D', testDir],
+      'Update to v2',
+    );
+    assertExitOk(result, 'Update to v2');
 
     // 验证v2文件存在
     const expectedFiles = [

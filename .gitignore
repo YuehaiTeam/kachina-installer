@@ -26,6 +26,7 @@ dist-ssr
 .env
 
 tests/fixtures
+tests/plan-dumps
 
 rustc-ice*
 

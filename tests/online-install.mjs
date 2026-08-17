@@ -3,12 +3,13 @@ import {
   cleanupTestDir,
   getTestDir,
   waitForServer,
-  printLogFileIfExists,
   FLAGS,
+  runInstaller,
+  assertExitOk,
 } from './utils.mjs';
 import { startServer } from './server.mjs';
 import 'zx/globals';
-import { $, usePwsh } from 'zx';
+import { usePwsh } from 'zx';
 usePwsh();
 
 async function test() {
@@ -34,21 +35,12 @@ async function test() {
 
     // 执行在线安装
     console.log('Running online installation...');
-    let result;
-    try {
-      result =
-        await $`${installerPath} ${FLAGS} -O -D ${testDir} --source local-v1`.timeout('3m').quiet();
-    } catch (error) {
-      if (error.message && error.message.includes('timed out')) {
-        console.error(chalk.red('Installation process timed out after 3 minutes'));
-        await printLogFileIfExists();
-      }
-      throw error;
-    }
-
-    if (result.exitCode !== 0) {
-      throw new Error(`Installation failed with exit code ${result.exitCode}`);
-    }
+    const result = await runInstaller(
+      installerPath,
+      [FLAGS, '-O', '-D', testDir, '--source', 'local-v1'],
+      'Online installation',
+    );
+    assertExitOk(result, 'Online installation');
     
     // check if fail in logs
     if (await fs.pathExists(logFile)) {

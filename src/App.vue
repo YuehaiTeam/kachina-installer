@@ -170,79 +170,24 @@
         </div>
       </div>
     </div>
-    <Dialog v-show="dialog === 'source'" @keydown="handleKeyDown">
-      <template #title>
-        <div class="title">选择安装源</div>
-      </template>
-      <template #desc>
-        <div class="desc">{{ PROJECT_CONFIG.title }}支持多种在线安装方式。</div>
-      </template>
-      <template #body v-if="Array.isArray(PROJECT_CONFIG.source)">
-        <div class="card-container">
-          <template v-for="i in PROJECT_CONFIG.source">
-            <div
-              class="card"
-              v-if="
-                !i.hidden ||
-                showHiddenSources ||
-                INSTALLER_CONFIG.args.source === i.id
-              "
-              :key="i.id"
-              :class="{ active: i.uri === selectedSource }"
-              @click="changeSelectedSource(i.uri)"
-            >
-              <SafeIcon
-                :svg-content="i.icon"
-                :fallback-component="getDefaultIconComponent(i.uri)"
-              />
-              <span>{{ i.name }}</span>
-            </div>
-          </template>
-        </div>
-      </template>
-    </Dialog>
-    <Dialog v-show="dialog === 'mirrorc'">
-      <template #title><div class="title">设置 Mirror酱 CDK</div></template>
-      <template #desc>
-        <div class="desc">
-          Mirror酱是独立的第三方软件下载平台，提供付费的软件下载加速服务。<br />
-          如果你有 Mirror酱的 CDK，可以在这里输入。
-        </div>
-      </template>
-      <template #body>
-        <FInput
-          class="cdk-input"
-          v-model="mirrorcTempKey"
-          type="text"
-          placeholder="请输入 Mirror酱 CDK"
-        />
-        <div class="desc">
-          <a style="cursor: pointer" @click="openMirrorc">获取 CDK</a>
-        </div>
-      </template>
-      <template #footer>
-        <button
-          class="btn btn-install btn-install-2rd neutral"
-          @click="dialog = ''"
-        >
-          取消
-        </button>
-        <button
-          class="btn btn-install"
-          :disabled="mirrorcChecking"
-          @click="changeMirrorcKey"
-        >
-          <span
-            v-if="mirrorcChecking"
-            class="fui-Spinner__spinner"
-            style="width: 16px; height: 16px; margin-right: 8px"
-          >
-            <span class="fui-Spinner__spinnerTail"></span>
-          </span>
-          确定
-        </button>
-      </template>
-    </Dialog>
+    <SourceDialog
+      v-show="dialog === 'source'"
+      v-if="Array.isArray(PROJECT_CONFIG.source)"
+      :title="PROJECT_CONFIG.title"
+      :sources="PROJECT_CONFIG.source"
+      :selected-uri="selectedSource"
+      :forced-id="INSTALLER_CONFIG.args.source"
+      :active="dialog === 'source'"
+      @select="changeSelectedSource"
+    />
+    <MirrorcDialog
+      v-show="dialog === 'mirrorc'"
+      :app-name="PROJECT_CONFIG.appName"
+      :source-url="mirrorcTempUrl"
+      :initial-key="mirrorcKey"
+      @cancel="dialog = ''"
+      @applied="onMirrorcApplied"
+    />
     <component :is="'style'" v-if="useDynamicCss">{{ dynamicCss }}</component>
   </div>
 </template>
@@ -520,53 +465,6 @@
   width: 36px;
   min-width: 36px;
 }
-.cdk-input {
-  app-region: no-drag;
-  margin: 30px 10px;
-  margin-bottom: 48px;
-  width: 320px;
-  input {
-    font-family: Consolas, monospace !important;
-  }
-}
-.card {
-  padding: 8px 10px;
-  font-size: 12px;
-  opacity: 0.6;
-  border: 1px solid #fff;
-  border-radius: 5px;
-  width: 74px;
-  height: 74px;
-  text-align: center;
-  display: flex;
-  flex-direction: column;
-  justify-content: space-evenly;
-  align-items: center;
-  cursor: pointer;
-  transition: all 0.1s ease-in-out;
-  &:hover {
-    opacity: 1;
-  }
-  &.active {
-    background: rgba(255, 255, 255, 0.1);
-    opacity: 1;
-  }
-}
-
-.card-container {
-  padding: 8px 10px;
-  display: flex;
-  gap: 18px;
-  justify-content: center;
-  align-items: center;
-  height: 150px;
-  app-region: no-drag;
-}
-
-.card svg {
-  width: 40px;
-}
-
 .controls {
   app-region: no-drag;
   position: absolute;
@@ -604,70 +502,29 @@
 }
 </style>
 <script lang="ts" setup>
-import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue';
+import { computed, onMounted, reactive, ref, watch } from 'vue';
 import Checkbox from './Checkbox.vue';
 import CircleSuccess from './CircleSuccess.vue';
 import IconEdit from './IconEdit.vue';
 import { getCurrentWindow, invoke, sep } from './tauri';
-import {
-  getDfsMetadata,
-  cleanupAllDfs2Sessions,
-  collectDfs2Ranges,
-  dfsIndexCache,
-  createDfs2Session,
-  preprocessFiles,
-  getFileInstallMode,
-} from './dfs';
-import { pluginManager } from './plugins';
-import { networkInsights } from './networkInsights';
-import {
-  DownloadTaskManager,
-  SingleFileTask,
-  LocalFileTask,
-  MergedGroupTask,
-  type DownloadContext,
-} from './downloadTaskManager';
-import {
-  error,
-  ipcCheckLocalFiles,
-  ipcCreateLnk,
-  ipcCreateUninstaller,
-  ipcFindProcessByName,
-  ipcInstallRuntime,
-  ipcIsFolderEmpty,
-  ipcKillProcess,
-  ipcRmList,
-  ipcRunMirrorcDownload,
-  ipcRunMirrorcInstall,
-  ipcRunUninstall,
-  ipcWriteRegistry,
-  ipPrepare,
-  log,
-  MirrorcUpdate,
-  sendInsight,
-  warn,
-} from './api/ipc';
+import { error, log, sendInsight } from './api/ipc';
 import IconSheild from './IconSheild.vue';
-import { getRuntimeName } from './consts';
-import Dialog from './Dialog.vue';
-import Cloud from './Cloud.vue';
-import CloudPaid from './CloudPaid.vue';
-import Feedback from './Feedback.vue';
-import SafeIcon from './components/SafeIcon.vue';
-import FInput from './FInput.vue';
-import { compare } from 'compare-versions';
-import { processMirrorcError } from './mirrorc-errors';
+import SourceDialog from './components/SourceDialog.vue';
+import MirrorcDialog from './components/MirrorcDialog.vue';
+import { bootstrap } from './bootstrap';
+import { runSession } from './session';
 import {
-  DfsMetadataHashInfo,
-  DfsMetadataHashType,
-  DfsUpdateTask,
+  confirmDialog,
+  dialogError,
+  insightBase,
+  stringifyError,
+  stringifyErrorLog,
+  uacNeeded,
+} from './ui';
+import {
   InstallerConfig,
-  InstallStat,
-  InvokeGetDfsMetadataRes,
-  InvokeGetDirsRes,
   InvokeSelectDirRes,
   ProjectConfig,
-  VirtualMergedFile,
 } from './types.ts';
 import IconMinimize from './IconMinimize.vue';
 import IconClose from './IconClose.vue';
@@ -687,73 +544,43 @@ const subStepListMirrorc: ReadonlyArray<string> = [
   '准备运行环境',
 ];
 
-const isUpdate = ref<boolean>(false);
-const acceptEula = ref<boolean>(true);
-const createLnk = ref<boolean>(true);
-const deleteUserData = ref<boolean>(false);
-const step = ref<number>(1);
-const subStep = ref<number>(0);
+const isUpdate = ref(false);
+const acceptEula = ref(true);
+const createLnk = ref(true);
+const deleteUserData = ref(false);
+const step = ref(1);
+const subStep = ref(0);
 const needElevate = ref(true);
-
-const current = ref<string>('');
-const percent = ref<number>(0);
-const source = ref<string>('');
-const progressInterval = ref<number>(0);
-
+const current = ref('');
+const percent = ref(0);
+const source = ref('');
 const dialog = ref<'' | 'mirrorc' | 'source'>('');
+const imageSource = ref('');
+const dynamicCss = ref('');
+const useDynamicCss = ref(false);
+const selectedSource = ref('');
+const mirrorcKey = ref('');
+const mirrorcTempUrl = ref('');
 
-// Dynamic image/CSS state
-const imageSource = ref<string>('');
-const dynamicCss = ref<string>('');
-const useDynamicCss = ref<boolean>(false);
-
-// Hidden sources easter egg state
-const commaCount = ref<number>(0);
-const showHiddenSources = ref<boolean>(false);
-const commaTimeout = ref<number>(0);
-
-const selectedSource = ref<string>('');
-const installMode = computed<'default' | 'mirrorc'>(() => {
-  if (selectedSource.value.startsWith('mirrorc://')) {
-    return 'mirrorc';
-  } else {
-    return 'default';
-  }
-});
-const mirrorcKey = ref<string>('');
-const markedKey = computed(() => {
-  return (
+const installMode = computed<'default' | 'mirrorc'>(() =>
+  selectedSource.value.startsWith('mirrorc://') ? 'mirrorc' : 'default',
+);
+const markedKey = computed(
+  () =>
     mirrorcKey.value.substring(0, 4) +
     '****' +
-    mirrorcKey.value.substring(mirrorcKey.value.length - 4)
-  );
-});
+    mirrorcKey.value.substring(mirrorcKey.value.length - 4),
+);
 
-const getDefaultIconComponent = (uri: string) => {
-  if (uri.includes('=beta')) return Feedback;
-  if (uri.startsWith('mirrorc://')) return CloudPaid;
-  return Cloud;
-};
 watch(
   () => installMode.value,
-  async (newValue) => {
-    if (newValue === 'mirrorc' && !mirrorcKey.value) {
+  async (mode) => {
+    if (mode === 'mirrorc' && !mirrorcKey.value) {
       try {
         mirrorcKey.value = await invoke('wincred_read', {
           target: `KachinaInstaller_MirrorChyanCDK_${PROJECT_CONFIG.appName}`,
         });
-      } catch (e) {}
-    }
-  },
-);
-
-// Watch dialog state changes to reset hidden sources state
-watch(
-  () => dialog.value,
-  (newValue, oldValue) => {
-    // Reset hidden sources state when leaving the source dialog
-    if (oldValue === 'source' && newValue !== 'source') {
-      resetHiddenSourcesState();
+      } catch {}
     }
   },
 );
@@ -798,1142 +625,111 @@ const INSTALLER_CONFIG: InstallerConfig = reactive({
   elevated: false,
 });
 
-const getInsightBase = () => {
-  const qs = new URLSearchParams();
-  if (INSTALLER_CONFIG.args.non_interactive) {
-    qs.set('non_interactive', '1');
-  }
-  if (INSTALLER_CONFIG.args.silent) {
-    qs.set('silent', '1');
-  }
-  if (INSTALLER_CONFIG.args.uninstall) {
-    qs.set('uninstall', '1');
-  }
-  if (INSTALLER_CONFIG.args.online) {
-    qs.set('online', '1');
-  }
-  if ((INSTALLER_CONFIG.embedded_index?.length || 0) > 0) {
-    qs.set('pack', '1');
-  }
-  return `/${PROJECT_CONFIG.appName}?${qs.toString()}`;
-};
-
-async function getSource(scan: boolean): Promise<InstallerConfig> {
-  return await invoke<InstallerConfig>('get_installer_config', {
-    scanExe: scan,
-  });
-}
-
-function getSourceId(): string {
-  if (Array.isArray(PROJECT_CONFIG.source)) {
-    const sourceItem = PROJECT_CONFIG.source.find(
-      (s) => s.uri === selectedSource.value,
-    );
-    return sourceItem?.id || 'unknown';
-  } else {
-    return 'default';
-  }
-}
-
-function buildEventString(
-  version: string,
-  useOnlineSource: boolean = false,
-): string {
-  const action = isUpdate.value ? 'update' : 'install';
-  const isPackedMode = (INSTALLER_CONFIG.embedded_index?.length || 0) > 0;
-
-  if (isPackedMode) {
-    if (useOnlineSource) {
-      return `${action}/packed+${getSourceId()}/${version}`;
-    } else {
-      return `${action}/packed/${version}`;
-    }
-  } else {
-    return `${action}/${getSourceId()}/${version}`;
-  }
-}
-
-async function installPrepare(
-  version: string,
-  useOnlineSource: boolean = false,
-): Promise<boolean> {
-  await ipPrepare(needElevate.value);
-  sendInsight(getInsightBase(), buildEventString(version, useOnlineSource));
-  const target_exe_path = `${source.value}${sep()}${PROJECT_CONFIG.exeName}`;
-  const runningExes =
-    (await ipcFindProcessByName(PROJECT_CONFIG.exeName).catch(log)) || [];
-  if (
-    runningExes.find(
-      (e) =>
-        e[1].toLowerCase().replace(/\\/g, '/') ===
-        target_exe_path.toLowerCase().replace(/\\/g, '/'),
-    )
-  ) {
-    const result =
-      INSTALLER_CONFIG.args.non_interactive ||
-      INSTALLER_CONFIG.args.silent ||
-      (await confirm(
-        `检测到${PROJECT_CONFIG.appName}正在运行，是否结束进程并继续安装？`,
-        '提示',
-      ));
-    if (!result) {
-      step.value = 1;
-      return false;
-    } else {
-      try {
-        try {
-          await Promise.all(
-            runningExes.map((e) => ipcKillProcess(e[0], needElevate.value)),
-          );
-        } catch (e) {
-          await Promise.all(runningExes.map((e) => ipcKillProcess(e[0], true)));
-        }
-        return true;
-      } catch (e) {
-        error(e);
-        await dialog_error(`结束进程失败: ${e}`, '出错了');
-        step.value = 1;
-        return false;
-      }
-    }
-  }
-  return false;
-}
-
-async function installRuntimes() {
-  if (PROJECT_CONFIG.runtimes) {
-    log('latest_meta.runtimes', PROJECT_CONFIG.runtimes);
-    subStep.value = 3;
-    current.value = '安装运行库……';
-    for (const tag of PROJECT_CONFIG.runtimes) {
-      log(`Installing runtime: ${tag}`);
-      current.value = `安装${getRuntimeName(tag)}……`;
-      const tryTimes = 3;
-      const embedRuntime = INSTALLER_CONFIG.embedded_files?.find(
-        (e) => e.name === tag,
-      );
-      for (let i = 0; i < tryTimes; i++) {
-        try {
-          await ipcInstallRuntime(
-            tag,
-            embedRuntime?.offset,
-            embedRuntime?.size,
-            ({ payload }) => {
-              const currentSize = formatSize(payload[0]);
-              const targetSize = payload[1] ? formatSize(payload[1]) : '';
-              if (payload[0] >= payload[1] - 1) {
-                current.value = `安装 ${getRuntimeName(tag)} ……`;
-              } else {
-                current.value = `下载 ${getRuntimeName(tag)} ……<br>${currentSize}${targetSize ? ` / ${targetSize}` : ''}`;
-              }
-            },
-            needElevate.value,
-          );
-          break;
-        } catch (e) {
-          if (i === tryTimes - 1) {
-            error(e);
-            await dialog_error(
-              `安装${getRuntimeName(tag)}失败: ${e}，请手动安装`,
-              '出错了',
-            );
-            break;
-          } else {
-            log(`安装${getRuntimeName(tag)}失败: ${e}，重试中`);
-          }
-        }
-      }
-    }
-  }
-}
-
-async function runInstall(): Promise<void> {
-  step.value = 2;
-  let latest_meta = INSTALLER_CONFIG.enbedded_metadata;
-  let online_meta: InvokeGetDfsMetadataRes | null = null;
-  let online_meta_err = '';
-  try {
-    online_meta = await getDfsMetadata(
-      selectedSource.value,
-      INSTALLER_CONFIG.args.dfs_extras,
-    );
-  } catch (e) {
-    online_meta_err = error(e);
-  }
-  let meta_tag = '';
-  if (!latest_meta && !online_meta) {
-    await dialog_error(
-      '获取更新信息失败，请检查网络连接' +
-        (online_meta_err ? `\n${online_meta_err}` : '：未知错误，请检查日志'),
-      '出错了',
-    );
-    step.value = 1;
-    return;
-  } else if (!latest_meta) {
-    latest_meta = online_meta;
-    log('Local meta not found, use online meta');
-  } else if (
-    online_meta &&
-    online_meta.tag_name !== latest_meta.tag_name &&
-    compare(online_meta.tag_name, latest_meta.tag_name, '>')
-  ) {
-    log('Version update detected');
-    if (
-      !INSTALLER_CONFIG.args.non_interactive &&
-      !INSTALLER_CONFIG.args.silent &&
-      ((isUpdate.value &&
-        (INSTALLER_CONFIG.embedded_index?.length || 0) <= 0) ||
-        (await confirm('当前安装包不是最新版本，是否直接安装最新版本？')))
-    ) {
-      meta_tag = latest_meta.tag_name;
-      latest_meta = online_meta;
-    } else {
-      log('Has version update but use local meta');
-    }
-  } else {
-    log('Local meta found, use local meta');
-  }
-  latest_meta = latest_meta as InvokeGetDfsMetadataRes;
-  if (
-    isUpdate.value &&
-    latest_meta.installer &&
-    !INSTALLER_CONFIG.enbedded_metadata
-  ) {
-    if (
-      !latest_meta.hashed.find(
-        (e) => e.file_name === PROJECT_CONFIG.updaterName,
-      )
-    ) {
-      const installerMeta: DfsMetadataHashInfo = {
-        file_name: PROJECT_CONFIG.updaterName,
-        size: latest_meta.installer.size,
-        md5: latest_meta.installer.md5,
-        xxh: latest_meta.installer.xxh,
-        installer: true,
-      };
-      latest_meta.hashed.push(installerMeta);
-    }
-  }
-  const useOnlineSource = latest_meta !== INSTALLER_CONFIG.enbedded_metadata;
-  if (await installPrepare(latest_meta?.tag_name, useOnlineSource))
-    return runInstall();
-  let hashKey = '';
-  if (latest_meta.hashed.every((e) => e.md5)) {
-    hashKey = 'md5';
-  } else if (latest_meta.hashed.every((e) => e.xxh)) {
-    hashKey = 'xxh';
-  } else {
-    throw new Error('更新服务端配置有误，不支持的哈希算法');
-  }
-  subStep.value = 1;
-  percent.value = 5;
-  const local_meta = (
-    await ipcCheckLocalFiles(
-      {
-        source: source.value,
-        hash_algorithm: hashKey,
-        file_list: latest_meta.hashed.map((e) => e.file_name),
-      },
-      ({ payload }) => {
-        const [currentValue, total] = payload;
-        current.value = `${currentValue} / ${total}`;
-        percent.value = 5 + (currentValue / total) * 15;
-      },
-      needElevate.value,
-    )
-  ).map((e) => {
-    return {
-      ...e,
-      file_name: e.file_name.replace(source.value, ''),
-    };
-  });
-  current.value = '校验本地文件……';
-  const diff_files: Array<DfsUpdateTask> = [];
-  const strip_first_slash = (s: string) => {
-    let ss = s.replace(/\\/g, '/');
-    if (ss.startsWith('/')) return ss.slice(1);
-    return ss;
+function sessionInput() {
+  return {
+    install_path: source.value,
+    source_uri: selectedSource.value,
+    create_lnk: createLnk.value,
+    delete_user_data: deleteUserData.value,
+    mirrorc_cdk: mirrorcKey.value || null,
   };
-  const userDataPath = PROJECT_CONFIG.userDataPath.map(replacePathEnvirables);
-  const ignoreFolderPath = PROJECT_CONFIG.ignoreFolderPath || [];
+}
 
-  // 预先检查所有 ignoreFolderPath 是否非空（仅在更新场景下检查）
-  const ignoreMap: string[] = [];
-  if (isUpdate.value && ignoreFolderPath.length > 0) {
-    for (const folder of ignoreFolderPath) {
-      try {
-        const fullPath = replacePathEnvirables(folder).replace(
-          /[\\\/]+/g,
-          sep(),
-        );
-        const [isEmpty] = await ipcIsFolderEmpty(fullPath);
-        if (!isEmpty) {
-          ignoreMap.push(fullPath.toLowerCase().replace(/[\\\/]+/g, sep()));
-        }
-      } catch (e) {
-        // 预检查失败不阻塞安装，仅记录警告并跳过该规则
-        warn(`ignoreFolderPath 检查失败 (${folder}), 将跳过该规则:`, e);
-      }
-    }
-  }
-  for (const item of latest_meta.hashed) {
-    const local = local_meta.find(
-      (e: { file_name: string }) =>
-        strip_first_slash(e.file_name.toLowerCase()) ===
-        strip_first_slash(item.file_name.toLowerCase()),
-    );
-    if (
-      local &&
-      userDataPath.some((userData) =>
-        strip_first_slash(local.file_name)
-          .toLowerCase()
-          .startsWith(strip_first_slash(userData).toLowerCase()),
-      )
-    ) {
-      continue;
-    }
+function resetProgress() {
+  step.value = 1;
+  subStep.value = 0;
+  percent.value = 0;
+  current.value = '';
+}
 
-    // 新增的 ignoreFolderPath 检查
-    // 关键：必须是更新场景 + 文件夹非空才跳过
-    if (isUpdate.value && ignoreFolderPath.length > 0) {
-      const itemCheckFullPath = `${source.value}${sep()}${item.file_name}`
-        .toLowerCase()
-        .replace(/[\\\/]+/g, sep());
-      if (
-        ignoreMap.some((ignoreFolder) => {
-          return itemCheckFullPath.startsWith(ignoreFolder);
-        })
-      ) {
-        continue;
-      }
-    }
-    if (!local || local.hash !== item[hashKey as DfsMetadataHashType]) {
-      let patch = latest_meta.patches?.find(
-        (e) =>
-          e.from[hashKey as DfsMetadataHashType] === local?.hash &&
-          e.to[hashKey as DfsMetadataHashType] ===
-            item[hashKey as DfsMetadataHashType],
-      );
-      let lpatch = latest_meta.patches?.find((e) =>
-        INSTALLER_CONFIG.embedded_files?.some(
-          (em) => em.name === e.from[hashKey as DfsMetadataHashType],
-        ),
-      );
-      diff_files.push({
-        ...item,
-        patch,
-        lpatch,
-        downloaded: 0,
-        running: false,
-        old_hash: local?.hash,
-        unwritable: local?.unwritable || false,
-      });
-    }
-  }
-  if (diff_files.length === 0) {
-    await finishInstall(latest_meta);
-    percent.value = 100;
-    step.value = 4;
-    return;
-  }
-  if (
-    diff_files.find(
-      (e) => e.unwritable && e.file_name !== PROJECT_CONFIG.updaterName,
-    )
-  ) {
-    if (
-      !INSTALLER_CONFIG.args.non_interactive &&
-      !INSTALLER_CONFIG.args.silent &&
-      !(await confirm(
-        '检测到部分文件被占用，继续安装可能无法成功，是否继续？\n\n被占用的文件列表：' +
-          diff_files
-            .filter(
-              (e) => e.unwritable && e.file_name !== PROJECT_CONFIG.updaterName,
-            )
-            .map((e) => e.file_name)
-            .join('\n'),
-      ))
-    ) {
-      step.value = 1;
-      return;
-    }
-  }
-  console.log('Files to install:', diff_files);
-
-  // Create DFS2 session if using DFS2 source
-  if (selectedSource.value.startsWith('dfs2+')) {
-    current.value = '创建下载会话……';
-    try {
-      const ranges = collectDfs2Ranges(
-        diff_files,
-        INSTALLER_CONFIG.embedded_files || [],
-        selectedSource.value,
-        hashKey as DfsMetadataHashType,
-      );
-
-      if (ranges.length > 0) {
-        const apiUrl = selectedSource.value.replace(/^dfs2\+packed\+/, '');
-
-        // Get resource version from cache
-        const cache = dfsIndexCache.get(selectedSource.value);
-        const resourceVersion = cache?.resource_version;
-
-        const sessionId = await createDfs2Session(
-          apiUrl,
-          ranges,
-          resourceVersion, // Use specific version from metadata
-          INSTALLER_CONFIG.args.dfs_extras || undefined,
-        );
-
-        log('DFS2 session created successfully:', sessionId);
-      }
-    } catch (e) {
-      error('Failed to create DFS2 session:', e);
-      await dialog_error(`创建下载会话失败: ${e}`);
-      step.value = 1;
-      return;
-    }
-  }
-
-  // 插件会话创建
-  const plugin = pluginManager.findPlugin(selectedSource.value);
-  if (plugin?.createSession) {
-    try {
-      const ranges = collectDfs2Ranges(
-        diff_files,
-        INSTALLER_CONFIG.embedded_files || [],
-        selectedSource.value,
-        hashKey as DfsMetadataHashType,
-      );
-
-      if (ranges.length > 0) {
-        const cleanUrl = pluginManager.getCleanUrl(selectedSource.value);
-        if (!cleanUrl)
-          throw new Error('Invalid plugin URL: ' + selectedSource.value);
-        const sessionId = await plugin.createSession(cleanUrl, ranges);
-        log('Plugin session created:', sessionId);
-      }
-    } catch (e) {
-      error('Failed to create plugin session:', e);
-      await dialog_error(`创建下载会话失败: ${e}`);
-      step.value = 1;
-      return;
-    }
-  }
-
-  subStep.value = 2;
-  current.value = '准备下载……';
-
-  // 预处理文件，进行合并分组
-  const { processedFiles } = preprocessFiles(
-    diff_files,
-    selectedSource.value,
-    hashKey as DfsMetadataHashType,
-    INSTALLER_CONFIG.embedded_files || [],
+async function startSession(kind: 'install' | 'uninstall') {
+  return runSession(
+    kind,
+    sessionInput(),
+    insightBase(INSTALLER_CONFIG, PROJECT_CONFIG),
+    () => {
+      dialog.value = 'source';
+    },
+    (event) => {
+      subStep.value = event.sub_step;
+      percent.value = event.percent;
+      current.value = event.current;
+    },
   );
-
-  let stat: InstallStat = {
-    speedLastSize: 0,
-    lastTime: performance.now(),
-    speed: 0,
-  };
-  progressInterval.value = setInterval(() => {
-    // 更新虚拟文件的状态
-    processedFiles.forEach((item) => {
-      if ((item as VirtualMergedFile)._isMergedGroup) {
-        const virtualFile = item as VirtualMergedFile;
-        // 计算虚拟文件的总下载量（所有内部文件的下载量之和）
-        virtualFile.downloaded = virtualFile._mergedInfo.files.reduce(
-          (sum, f) => sum + f.downloaded,
-          0,
-        );
-        // 更新虚拟文件的运行状态（任意内部文件运行中则虚拟文件运行中）
-        virtualFile.running = virtualFile._mergedInfo.files.some(
-          (f) => f.running,
-        );
-      }
-      // 单文件无需处理，因为runDfsDownload直接更新了对象
-    });
-
-    // 计算总大小和已下载大小，直接使用processedFiles
-    const total_size = processedFiles.reduce((acc, cur) => {
-      if ((cur as VirtualMergedFile)._isMergedGroup) {
-        const virtualFile = cur as VirtualMergedFile;
-        // 使用实际文件大小总和，不是合并下载大小
-        return (
-          acc +
-          virtualFile._mergedInfo.files.reduce(
-            (sum, f) =>
-              sum +
-              ((!f.failed && (f?.patch?.size || f?.lpatch?.size)) || f.size),
-            0,
-          )
-        );
-      } else {
-        const file = cur as DfsUpdateTask;
-        return (
-          acc +
-          ((!file.failed && (file?.patch?.size || file?.lpatch?.size)) ||
-            file.size)
-        );
-      }
-    }, 0);
-
-    const now = performance.now();
-    const time_diff = now - stat.lastTime;
-    const downloadedTotalSize = processedFiles.reduce((acc, cur) => {
-      if ((cur as VirtualMergedFile)._isMergedGroup) {
-        const virtualFile = cur as VirtualMergedFile;
-        return (
-          acc +
-          virtualFile._mergedInfo.files.reduce(
-            (sum, f) => sum + f.downloaded,
-            0,
-          )
-        );
-      } else {
-        return acc + (cur as DfsUpdateTask).downloaded;
-      }
-    }, 0);
-    if (time_diff > 100) {
-      stat.speed = (downloadedTotalSize - stat.speedLastSize) / time_diff;
-      stat.speedLastSize = downloadedTotalSize;
-      stat.lastTime = now;
-    }
-    const speed = formatSize(stat.speed * 1000);
-    const downloaded = formatSize(downloadedTotalSize);
-    const total = formatSize(total_size);
-
-    // 更新运行中任务显示逻辑
-    const runningTasks: string[] = [];
-
-    processedFiles
-      .filter((e) => e.running)
-      .forEach((e) => {
-        if ((e as VirtualMergedFile)._isMergedGroup) {
-          // 对于合并组，只显示未完成的文件进度
-          const virtualFile = e as VirtualMergedFile;
-          virtualFile._mergedInfo.files
-            .filter((f) => f.downloaded < f.size) // 只显示未完成的文件
-            .forEach((f) => {
-              runningTasks.push(
-                `${basename(f.file_name)} ${formatSize(f.downloaded)}/${formatSize(f.size)}`,
-              );
-            });
-        } else {
-          // 单文件正常显示
-          runningTasks.push(
-            `${basename(e.file_name)} ${formatSize(e.downloaded)}/${formatSize(e.size)}`,
-          );
-        }
-      });
-
-    current.value = `
-      <span class="d-single-stat">${downloaded} / ${total} (${speed}/s)</span>
-      <div class="d-single-list">
-        <div class="d-single">
-          ${runningTasks.join('</div><div class="d-single">')}
-        </div>
-      </div>
-    `;
-    percent.value = 20 + (downloadedTotalSize / total_size) * 80;
-  }, 30);
-
-  // 使用动态任务管理器进行下载
-  const downloadContext: DownloadContext = {
-    dfsSource: selectedSource.value,
-    extras: INSTALLER_CONFIG.args.dfs_extras,
-    local: INSTALLER_CONFIG.embedded_files || [],
-    source: source.value,
-    hashKey: hashKey as DfsMetadataHashType,
-    elevate: needElevate.value,
-  };
-
-  const taskManager = new DownloadTaskManager(processedFiles);
-
-  // 初始化任务
-  processedFiles.forEach((item) => {
-    let task;
-
-    if ((item as VirtualMergedFile)._isMergedGroup) {
-      task = new MergedGroupTask(
-        item as VirtualMergedFile,
-        downloadContext,
-        taskManager,
-      );
-    } else {
-      // 根据文件模式选择合适的任务类型
-      const file = item as DfsUpdateTask;
-      const mode = getFileInstallMode(
-        file,
-        INSTALLER_CONFIG.embedded_files || [],
-        hashKey as DfsMetadataHashType,
-      );
-
-      if (mode === 'local') {
-        task = new LocalFileTask(file, downloadContext);
-      } else {
-        // hybridpatch, patch, direct 都使用 SingleFileTask
-        task = new SingleFileTask(file, downloadContext, taskManager);
-      }
-    }
-
-    taskManager.addTask(task);
-  });
-
-  await taskManager.waitForCompletion();
-
-  const stats = taskManager.getStats();
-  log('All tasks completed successfully:', stats);
-  clearInterval(progressInterval.value);
-
-  // Create snapshot of networkInsights before any cleanup to ensure consistent reporting
-  const serversSnapshot = [...networkInsights];
-
-  // Clean up DFS2 sessions immediately after download completion, before post-processing
-  await cleanupAllDfs2Sessions(serversSnapshot);
-
-  // Clean up plugin sessions
-  if (plugin?.endSession) {
-    try {
-      const cleanUrl = pluginManager.getCleanUrl(selectedSource.value);
-      if (cleanUrl) {
-        await plugin.endSession(cleanUrl, { servers: serversSnapshot });
-      }
-    } catch (e) {
-      warn('Plugin session cleanup failed:', e);
-    }
-  }
-
-  if (
-    latest_meta.deletes &&
-    Array.isArray(latest_meta.deletes) &&
-    latest_meta.deletes.length > 0
-  ) {
-    current.value = '删除旧版残留文件……';
-    try {
-      // 过滤掉 ignoreFolderPath 中的文件
-      const filesToDelete = latest_meta.deletes.filter((deleteFile) => {
-        // 如果是更新场景且有 ignoreMap（已检查过的非空文件夹）
-        if (isUpdate.value && ignoreMap.length > 0) {
-          // 构造待删除文件的完整路径
-          const deleteFullPath = `${source.value}${sep()}${deleteFile}`
-            .toLowerCase()
-            .replace(/[\\\/]+/g, sep());
-
-          // 检查文件是否在任何需要忽略的文件夹下
-          const shouldIgnore = ignoreMap.some((ignoreFolder) => {
-            return deleteFullPath.startsWith(ignoreFolder);
-          });
-
-          // 如果应该忽略，则不删除（返回 false）
-          return !shouldIgnore;
-        }
-        // 默认情况下，保留在删除列表中
-        return true;
-      });
-
-      await ipcRmList(
-        filesToDelete.map((e) => `${source.value}${sep()}${e}`),
-        needElevate.value,
-      );
-    } catch (e) {
-      warn(e);
-    }
-  }
-
-  await installRuntimes();
-
-  current.value = '很快就好……';
-  await finishInstall(latest_meta);
-  current.value = '安装完成';
-  step.value = 3;
-  percent.value = 100;
 }
 
-async function runMirrorcInstall() {
-  if (!mirrorcKey.value) {
+async function install(): Promise<void> {
+  if (installMode.value === 'mirrorc' && !mirrorcKey.value) {
     changeSelectedSource(selectedSource.value);
     return;
   }
   step.value = 2;
-  let source_version = {
-    product_version: '',
-  } as { product_version: string };
   try {
-    source_version = await invoke<{ product_version: string }>(
-      'get_exe_version',
-      {
-        exeName: `${source.value}${sep()}${PROJECT_CONFIG.exeName}`,
-      },
-    );
-  } catch (e) {}
-  const source_url = new URL(selectedSource.value);
-  if (!source_url.hostname) {
-    await dialog_error(
-      '无法获取Mirror酱数据，安装包可能已经损坏：' + selectedSource.value,
-      '出错了',
-    );
-    error('Invalid Mirrorc source URL:', selectedSource.value);
-    step.value = 1;
-    return;
-  }
-  const mirrorc_status = await invoke<MirrorcUpdate>('get_mirrorc_status', {
-    resourceId: source_url.hostname,
-    cdk: mirrorcKey.value,
-    currentVersion: source_version.product_version,
-    channel: source_url.searchParams.get('channel') || 'stable',
-    arch: source_url.searchParams.get('arch') || undefined,
-    os: source_url.searchParams.get('os') || undefined,
-  }).catch((e) => {
-    return Promise.reject(`从获取Mirror酱获取更新数据失败: ${e}`);
-  });
-  const errorResult = processMirrorcError(mirrorc_status, 'install');
-  if (errorResult) {
-    await dialog_error(errorResult.message, '出错了');
-    if (errorResult.showSourceDialog) {
-      dialog.value = 'source';
+    const result = await startSession('install');
+    if (result.cancelled) {
+      resetProgress();
+      return;
     }
-    step.value = 1;
-    return;
-  }
-  if (mirrorc_status.data?.version_name === source_version.product_version) {
-    await finishInstall();
     percent.value = 100;
-    step.value = 4;
-    return;
-  }
-  if (
-    await installPrepare(
-      `${mirrorc_status.data?.version_name || 'unknown'}`,
-      true,
-    )
-  )
-    return runMirrorcInstall();
-  if (!mirrorc_status.data?.url) {
-    await dialog_error(
-      '从Mirror酱获取更新失败: 下载地址为空，请联系Mirror酱客服',
-      '出错了',
-    );
-    return;
-  }
-  if (!mirrorc_status.data?.sha256) {
-    await dialog_error(
-      '从Mirror酱获取更新失败: 校验数据为空，请联系Mirror酱客服',
-      '出错了',
-    );
-    return;
-  }
-  console.log(mirrorc_status);
-  log('Mirrorc source version', source_version.product_version);
-  log('Mirrorc target version', mirrorc_status.data.version_name);
-  log('Mirrorc update mode', mirrorc_status.data.update_type);
-  log('Mirrorc URL', mirrorc_status.data.url);
-  const mirrorc_zip_url = mirrorc_status.data.url;
-  const mirrorc_zip_path = `${source.value}${sep()}KachinaInstaller_Mirrorc_${mirrorc_status.data.sha256}.zip`;
-  subStep.value = 1;
-  percent.value = 5;
-  current.value = '准备从Mirror酱下载……';
-  let lastDownloaded = 0;
-  let lastSpeedCalcTime = 0;
-  let lastSpeedStr = '';
-  await ipcRunMirrorcDownload(
-    mirrorc_zip_url,
-    mirrorc_zip_path,
-    ({ payload }) => {
-      if (payload.type === 'download') {
-        const { downloaded, total } = payload;
-        if (lastSpeedCalcTime !== 0) {
-          const now = performance.now();
-          const time_diff = now - lastSpeedCalcTime;
-          if (time_diff > 100) {
-            const speed = (downloaded - lastDownloaded) / time_diff;
-            lastDownloaded = downloaded;
-            lastSpeedCalcTime = now;
-            lastSpeedStr = `(${formatSize(speed * 1000)}/s)`;
-            lastSpeedCalcTime = now;
-          }
-        } else {
-          lastSpeedCalcTime = performance.now();
-        }
-        current.value = `${formatSize(downloaded)} / ${formatSize(
-          total,
-        )} ${lastSpeedStr}`;
-        percent.value = 5 + (downloaded / total) * 65;
-      }
-    },
-    needElevate.value,
-  );
-  subStep.value = 2;
-  current.value = '检查压缩包……';
-  const [meta, changeset] = await ipcRunMirrorcInstall(
-    mirrorc_zip_path,
-    source.value,
-    ({ payload }) => {
-      console.log(payload);
-      switch (payload.type) {
-        case 'extract':
-          current.value = `<div class="d-single-stat">解压 ${payload.file}</div>`;
-          percent.value = 70 + (payload.count / payload.total) * 25;
-          break;
-        case 'delete':
-          current.value = `<div class="d-single-stat">删除 ${payload.file}</div>`;
-          percent.value = 97;
-          break;
-      }
-    },
-    needElevate.value,
-  );
-  console.log(changeset, meta);
-  await installRuntimes();
-
-  current.value = '很快就好……';
-  await finishInstall(meta);
-  current.value = '安装完成';
-  step.value = 3;
-  percent.value = 100;
-}
-
-async function getLnkPath() {
-  const [program, desktop] = await invoke<InvokeGetDirsRes>('get_dirs', {
-    elevated: needElevate.value,
-  });
-  return {
-    programFolder: `${program}${sep()}${PROJECT_CONFIG.appName}`,
-    program: `${program}${sep()}${PROJECT_CONFIG.appName}${sep()}${PROJECT_CONFIG.appName}.lnk`,
-    desktop: `${desktop}${sep()}${PROJECT_CONFIG.appName}.lnk`,
-    uninstall: `${program}${sep()}${PROJECT_CONFIG.appName}${sep()}卸载${PROJECT_CONFIG.appName}.lnk`,
-  };
-}
-
-async function finishInstall(
-  latest_meta?: InvokeGetDfsMetadataRes,
-): Promise<void> {
-  sendInsight(getInsightBase(), 'finish');
-  const { program, desktop, uninstall } = await getLnkPath();
-  const exePath = `${source.value}${sep()}${PROJECT_CONFIG.exeName}`;
-  if (createLnk.value && !isUpdate.value) {
-    await ipcCreateLnk(exePath, desktop, needElevate.value).catch(warn);
-  }
-  if (!isUpdate.value) {
-    await ipcCreateLnk(exePath, program, needElevate.value).catch(warn);
-  }
-  if (
-    !isUpdate.value ||
-    INSTALLER_CONFIG.install_path_source.startsWith('REG')
-  ) {
-    try {
-      await ipcCreateUninstaller(
-        source.value,
-        PROJECT_CONFIG.uninstallName,
-        PROJECT_CONFIG.updaterName,
-        needElevate.value,
-      );
-    } catch (e) {
-      dialog_error(`创建卸载程序失败: ${e}`, '出错了');
-      warn(e);
-    }
-    if (latest_meta) {
-      try {
-        await ipcWriteRegistry(
-          {
-            reg_name: PROJECT_CONFIG.regName,
-            name: PROJECT_CONFIG.appName,
-            version: latest_meta.tag_name || '0.0',
-            exe: `${source.value}${sep()}${PROJECT_CONFIG.exeName}`,
-            source: source.value,
-            uninstaller: `${source.value}${sep()}${PROJECT_CONFIG.uninstallName}`,
-            metadata: JSON.stringify(latest_meta),
-            size: latest_meta.hashed.reduce((acc, cur) => acc + cur.size, 0),
-            publisher: PROJECT_CONFIG.publisher,
-          },
-          needElevate.value,
-        );
-      } catch (e) {
-        dialog_error(`写入注册表失败: ${e}`, '出错了');
-        warn(e);
-      }
-    }
-    await ipcCreateLnk(
-      `${source.value}${sep()}${PROJECT_CONFIG.uninstallName}`,
-      uninstall,
-      needElevate.value,
-    ).catch(log);
-  }
-  if (INSTALLER_CONFIG.args.silent) {
-    const win = getCurrentWindow();
-    win.close();
-  }
-}
-
-async function install(): Promise<void> {
-  try {
-    void cleanupAllDfs2Sessions();
-  } catch (e) {}
-  try {
-    if (installMode.value === 'mirrorc') {
-      await runMirrorcInstall();
-    } else {
-      await runInstall();
-    }
+    step.value = result.already_latest ? 4 : 3;
   } catch (e) {
     error(e);
-    const errstr =
-      e instanceof Error
-        ? e.message || e.toString() // 使用 message 而不是 stack，更用户友好
-        : typeof e === 'string'
-          ? e
-          : JSON.stringify(e);
-    const logErrStr =
-      e instanceof Error
-        ? e.stack || e.toString() // 日志中保留完整的 stack
-        : errstr;
-    sendInsight(getInsightBase(), 'error', { error: logErrStr });
-    await dialog_error(errstr);
-
-    // Clean up DFS2 sessions on error (only for DFS mode)
-    if (installMode.value === 'default') {
-      // Create snapshot of networkInsights before any cleanup to ensure consistent reporting
-      const serversSnapshot = [...networkInsights];
-
-      await cleanupAllDfs2Sessions(serversSnapshot);
-
-      // 清理插件会话
-      const plugin = pluginManager.findPlugin(selectedSource.value);
-      if (plugin?.endSession) {
-        try {
-          const cleanUrl = pluginManager.getCleanUrl(selectedSource.value);
-          if (cleanUrl) {
-            await plugin.endSession(cleanUrl, { servers: serversSnapshot });
-          }
-        } catch (e) {
-          warn('Plugin session cleanup failed:', e);
-        }
-      }
-    }
-
-    step.value = 1;
-    subStep.value = 0;
-    percent.value = 0;
-    current.value = '';
-    clearInterval(progressInterval.value);
-    progressInterval.value = 0;
+    sendInsight(insightBase(INSTALLER_CONFIG, PROJECT_CONFIG), 'error', {
+      error: stringifyErrorLog(e),
+    });
+    await dialogError(stringifyError(e), '出错了', INSTALLER_CONFIG.args.silent);
+    resetProgress();
   }
 }
 
-function processEmbeddedImage(base64Data: string | null) {
-  if (!base64Data) {
-    // No embedded image, use default
-    imageSource.value = new URL('./left.webp', import.meta.url).href;
-    return;
-  }
-
+async function uninstall() {
+  step.value = 5;
+  sendInsight(insightBase(INSTALLER_CONFIG, PROJECT_CONFIG), 'uninstall');
   try {
-    // Decode base64 to check first 16 bytes
-    const binaryString = atob(base64Data);
-    const bytes = new Uint8Array(binaryString.length);
-    for (let i = 0; i < binaryString.length; i++) {
-      bytes[i] = binaryString.charCodeAt(i);
-    }
-
-    // Check if first 16 bytes are all printable ASCII (0x20-0x7E)
-    const first16Bytes = bytes.slice(0, Math.min(16, bytes.length));
-    const isAscii = first16Bytes.every((byte) => byte >= 0x20 && byte <= 0x7e);
-
-    if (isAscii) {
-      // It's CSS - decode and inject
-      const cssContent = new TextDecoder().decode(bytes);
-      dynamicCss.value = cssContent;
-      useDynamicCss.value = true;
-      log('Loaded embedded CSS stylesheet');
-    } else {
-      // It's an image - use as data URI
-      imageSource.value = `data:image/webp;base64,${base64Data}`;
-      useDynamicCss.value = false;
-      log('Loaded embedded image');
-    }
+    await startSession('uninstall');
+    step.value = 6;
   } catch (e) {
-    error('Failed to process embedded image:', e);
-    // Fallback to default
-    imageSource.value = new URL('./left.webp', import.meta.url).href;
+    error(e);
+    const errstr = stringifyErrorLog(e);
+    await dialogError(errstr, '出错了', INSTALLER_CONFIG.args.silent);
+    await sendInsight(insightBase(INSTALLER_CONFIG, PROJECT_CONFIG), 'error', {
+      error: errstr,
+    });
+    step.value = 1;
   }
 }
 
 onMounted(async () => {
   try {
-    const win = getCurrentWindow();
-    const ps = [];
-    ps.push(win.setTitle(' '));
-    if (process.env.NODE_ENV === 'development') {
-      ps.push(win.show());
-    }
-    let rsrc = await getSource(false);
-    Object.assign(INSTALLER_CONFIG, rsrc);
-    if (!rsrc.args.silent) {
-      await win.show();
-    }
-    await Promise.all(ps);
-    rsrc = await getSource(true);
-    Object.assign(INSTALLER_CONFIG, rsrc);
-    log('INSTALLER_CONFIG: ', {
-      ...rsrc,
-      embedded_config: {
-        ...rsrc.embedded_config,
-        source: Array.isArray(rsrc.embedded_config?.source)
-          ? rsrc.embedded_config?.source.map((e) => ({ id: e.id, uri: e.uri }))
-          : rsrc.embedded_config?.source,
-      },
-      embedded_index: undefined,
-      embedded_files: undefined,
-      embedded_image: undefined,
-      enbedded_metadata: undefined,
-    });
-    if (INSTALLER_CONFIG.embedded_config) {
-      Object.assign(PROJECT_CONFIG, INSTALLER_CONFIG.embedded_config);
-      // Process embedded image/CSS
-      processEmbeddedImage(INSTALLER_CONFIG.embedded_image);
-
-      if (process.env.NODE_ENV === 'development') {
-        if (
-          INSTALLER_CONFIG.embedded_files &&
-          INSTALLER_CONFIG.embedded_files.length > 0 &&
-          !INSTALLER_CONFIG.embedded_files.find((e) => e.name === '\0CONFIG')
-        ) {
-          dialog_error('打包错误，请确保配置文件被正确打包');
-        }
-      }
-    } else if (process.env.NODE_ENV === 'development') {
-      dialog_error('未找到配置文件，请将配置文件放在exe同目录下');
-    } else {
-      await dialog_error('安装包损坏，请重新下载');
-      const win = getCurrentWindow();
-      win.close();
+    const result = await bootstrap(PROJECT_CONFIG, INSTALLER_CONFIG);
+    if (!result) {
       return;
     }
-    const xsrc = rsrc.embedded_config?.source;
-    if (!xsrc) {
-      throw new Error('打包错误，请确保配置文件被正确打包');
-    }
-    if (!Array.isArray(xsrc)) {
-      selectedSource.value = xsrc;
-    } else if (xsrc.length > 0) {
-      selectedSource.value =
-        xsrc.find((e) => e.id === rsrc.args.source)?.uri || xsrc[0]?.uri;
-    }
-    source.value =
-      INSTALLER_CONFIG.args.target || INSTALLER_CONFIG.install_path;
-    const seldir = await invoke<InvokeSelectDirRes>('select_dir', {
-      exeName: PROJECT_CONFIG.exeName,
-      silent: true,
-      path: source.value,
-    });
-    if (seldir) {
-      setUacByState(seldir.state, PROJECT_CONFIG.uacStrategy);
-    }
-    if (INSTALLER_CONFIG.embedded_index && INSTALLER_CONFIG.embedded_files) {
-      let hasWrongIndex = false;
-      for (const i of INSTALLER_CONFIG.embedded_index) {
-        const target = INSTALLER_CONFIG.embedded_files.find(
-          (e) => e.name === i.name,
-        );
-        if (!target) {
-          log('Unfound index', target, i);
-          hasWrongIndex = true;
-          continue;
-        }
-        if (target.offset !== i.offset || target.raw_offset !== i.raw_offset) {
-          log('Wrong index: pack=', target, 'index=', i);
-          hasWrongIndex = true;
-        }
-      }
-      if (hasWrongIndex) {
-        if (process.env.NODE_ENV === 'development') {
-          dialog_error('打包错误，请确保索引文件正确');
-        } else {
-          await dialog_error('安装包损坏，请重新下载');
-          const win = getCurrentWindow();
-          win.close();
-          return;
-        }
-      }
-    }
-    sendInsight(getInsightBase());
-    if (INSTALLER_CONFIG.install_path_exists) isUpdate.value = true;
-    await win.setTitle(PROJECT_CONFIG.windowTitle);
-    INSTALLER_CONFIG.is_uninstall =
-      INSTALLER_CONFIG.is_uninstall || INSTALLER_CONFIG.args.uninstall;
-    if (INSTALLER_CONFIG.is_uninstall) {
-      const uninstallConfig = await invoke(
-        'read_uninstall_metadata',
-        PROJECT_CONFIG,
-      ).catch(log);
-      log('UNINSTALL_METADATA: ', uninstallConfig);
-      if (!uninstallConfig) {
-        await dialog_error('未找到卸载配置文件，请重新安装后再卸载');
-        if (process.env.NODE_ENV !== 'development') {
-          const win = getCurrentWindow();
-          win.close();
-        }
-        return;
-      }
-    }
-    init.value = 1;
-    // Apply window borderless setting
-    if (PROJECT_CONFIG.windowBorderless === true) {
-      try {
-        await getCurrentWindow().setDecorations(false);
-      } catch (e) {
-        warn('Failed to set window borderless:', e);
-      }
-    } else {
-      try {
-        await getCurrentWindow().setDecorations(true);
-      } catch (e) {
-        warn('Failed to set window decorations:', e);
-      }
-    }
+    selectedSource.value = result.selectedSource;
+    source.value = result.source;
+    isUpdate.value = result.isUpdate;
+    needElevate.value = result.needElevate;
+    imageSource.value = result.theme.imageSource;
+    dynamicCss.value = result.theme.dynamicCss;
+    useDynamicCss.value = result.theme.useDynamicCss;
     init.value = 2;
-    if (INSTALLER_CONFIG.args.silent || INSTALLER_CONFIG.args.non_interactive) {
-      if (INSTALLER_CONFIG.args.uninstall || INSTALLER_CONFIG.is_uninstall) {
-        uninstall();
-      } else {
-        install();
-      }
+    if (result.autoRun === 'uninstall') {
+      uninstall();
+    } else if (result.autoRun === 'install') {
+      install();
     }
   } catch (e) {
     error(e);
-    if (e instanceof Error)
-      await dialog_error(e.stack || e.toString(), '安装程序初始化失败');
-    else
-      await dialog_error(
-        typeof e === 'string' ? e : JSON.stringify(e),
-        '安装程序初始化失败',
-      );
+    await dialogError(
+      stringifyErrorLog(e),
+      '安装程序初始化失败',
+      INSTALLER_CONFIG.args.silent,
+    );
     if (process.env.NODE_ENV !== 'development') {
-      const win = getCurrentWindow();
-      win.close();
+      getCurrentWindow().close();
     }
   }
 });
-
-// Cleanup on component unmount
-onUnmounted(() => {
-  resetHiddenSourcesState();
-});
-
-function formatSize(size: number): string {
-  if (size < 1024) {
-    return `${size.toFixed(2)} B`;
-  }
-  if (size < 1024 * 1024) {
-    return `${(size / 1024).toFixed(2)} KB`;
-  }
-  return `${(size / 1024 / 1024).toFixed(2)} MB`;
-}
-
-function basename(path: string): string {
-  return path.replace(/\\/g, '/').split('/').pop() as string;
-}
 
 async function launch() {
   const mainExe = PROJECT_CONFIG.exeName;
@@ -1954,13 +750,13 @@ async function changeSource() {
     });
     if (seldir === null) return;
     log('SELECT_DIR: ', seldir);
-    setUacByState(seldir.state, PROJECT_CONFIG.uacStrategy);
+    needElevate.value = uacNeeded(seldir.state, PROJECT_CONFIG.uacStrategy);
     isUpdate.value = seldir.upgrade;
     if (!seldir.empty && !seldir.upgrade) {
       const isDriveRoot = seldir.path.replace(/\\/g, '/').match(/^\w:\/$/);
       const confirmRes =
         isDriveRoot ||
-        (await confirm(
+        (await confirmDialog(
           '您选择的目录不为空，是否创建新文件夹再安装？选【否】将可能影响原有数据。',
           '提示',
         ));
@@ -1977,15 +773,15 @@ async function changeSource() {
       source.value = seldir.path;
     }
   } catch (e) {
-    if (e instanceof Error) await dialog_error(e.stack || e.toString());
-    else await dialog_error(JSON.stringify(e));
+    await dialogError(
+      stringifyErrorLog(e),
+      '出错了',
+      INSTALLER_CONFIG.args.silent,
+    );
     throw e;
   }
 }
 
-const mirrorcTempUrl = ref('');
-const mirrorcTempKey = ref('');
-const mirrorcChecking = ref(false);
 async function changeSelectedSource(url: string) {
   const isMirrorc = url.startsWith('mirrorc://');
   dialog.value = isMirrorc ? 'mirrorc' : '';
@@ -1998,209 +794,18 @@ async function changeSelectedSource(url: string) {
       console.warn(e);
     }
     mirrorcTempUrl.value = url;
-    mirrorcTempKey.value = mirrorcKey.value;
   } else {
     selectedSource.value = url;
     mirrorcTempUrl.value = '';
-    mirrorcTempKey.value = '';
   }
 }
 
-async function changeMirrorcKey() {
-  if (!mirrorcTempKey.value) {
-    try {
-      await invoke('wincred_delete', {
-        target: `KachinaInstaller_MirrorChyanCDK_${PROJECT_CONFIG.appName}`,
-      });
-      mirrorcKey.value = '';
-    } catch (e) {
-      console.warn(e);
-    }
-  } else {
-    if (mirrorcChecking.value) return;
-    mirrorcChecking.value = true;
-    const source_url = new URL(mirrorcTempUrl.value);
-    if (!source_url.hostname) {
-      await dialog_error(
-        '无法获取Mirror酱数据，安装包可能已经损坏：' + selectedSource.value,
-        '出错了',
-      );
-      mirrorcChecking.value = false;
-      return;
-    }
-    const mirrorc_status = await invoke<MirrorcUpdate>('get_mirrorc_status', {
-      resourceId: source_url.hostname,
-      cdk: mirrorcTempKey.value,
-      currentVersion: '',
-      channel: source_url.searchParams.get('channel') || 'stable',
-      arch: source_url.searchParams.get('arch') || undefined,
-      os: source_url.searchParams.get('os') || undefined,
-    });
-    const errorResult = processMirrorcError(mirrorc_status, 'cdk-validation');
-    if (errorResult) {
-      await dialog_error(errorResult.message, '出错了');
-      mirrorcChecking.value = false;
-      return;
-    }
-    mirrorcKey.value = mirrorcTempKey.value;
-    try {
-      await invoke('wincred_write', {
-        target: `KachinaInstaller_MirrorChyanCDK_${PROJECT_CONFIG.appName}`,
-        token: mirrorcTempKey.value,
-        comment: 'MirrorChyan CDK for BetterGI',
-      });
-    } catch (e) {
-      console.warn(e);
-    }
-  }
-  selectedSource.value = mirrorcTempUrl.value;
+function onMirrorcApplied(payload: { url: string; key: string }) {
+  mirrorcKey.value = payload.key;
+  selectedSource.value = payload.url;
   dialog.value = '';
-  mirrorcChecking.value = false;
 }
 
-async function dialog_error(message: string, title = '出错了'): Promise<void> {
-  await invoke('error_dialog', {
-    message: message.replace(new RegExp(location.origin, 'g'), ''),
-    title,
-  });
-  if (INSTALLER_CONFIG.args.silent) {
-    const win = getCurrentWindow();
-    win.close();
-  }
-}
-async function confirm(message: string, title = '提示'): Promise<boolean> {
-  return await invoke<boolean>('confirm_dialog', { message, title });
-}
-async function uninstall() {
-  step.value = 5;
-  sendInsight(getInsightBase(), 'uninstall');
-  try {
-    const uninstallConfig = (await invoke(
-      'read_uninstall_metadata',
-      PROJECT_CONFIG,
-    )) as InvokeGetDfsMetadataRes;
-    if (!uninstallConfig) {
-      throw new Error('未找到卸载配置文件，请重新安装后再卸载');
-    }
-    await ipPrepare(needElevate.value);
-    const { programFolder, desktop } = await getLnkPath();
-    await ipcRunUninstall(
-      {
-        source: INSTALLER_CONFIG.install_path,
-        files: [
-          ...uninstallConfig.hashed.map((e) => e.file_name),
-          PROJECT_CONFIG.updaterName,
-        ],
-        user_data_path: deleteUserData.value
-          ? PROJECT_CONFIG.userDataPath.map(replacePathEnvirables)
-          : [],
-        extra_uninstall_path: [
-          ...(PROJECT_CONFIG.extraUninstallPath?.map(replacePathEnvirables) ||
-            []),
-          programFolder,
-          desktop,
-        ],
-        reg_name: PROJECT_CONFIG.regName,
-        uninstall_name: PROJECT_CONFIG.uninstallName,
-      },
-      needElevate.value,
-    );
-    step.value = 6;
-    if (INSTALLER_CONFIG.args.silent) {
-      const win = getCurrentWindow();
-      win.close();
-    }
-  } catch (e) {
-    error(e);
-    const errstr =
-      e instanceof Error
-        ? e.stack || e.toString()
-        : typeof e === 'string'
-          ? e
-          : JSON.stringify(e);
-    await dialog_error(errstr);
-    await sendInsight(getInsightBase(), 'error', { error: errstr });
-    step.value = 1;
-  }
-}
-
-function tplReplace(template: string, data: Record<string, string>): string {
-  const regex = /\${(.*?)}/g;
-  return template.replace(regex, (_match, key) => {
-    return typeof data[key] !== 'undefined' ? data[key] : '';
-  });
-}
-function replacePathEnvirables(path: string): string {
-  return tplReplace(path, {
-    INSTALL_PATH: INSTALLER_CONFIG.install_path,
-    APP_NAME: PROJECT_CONFIG.appName,
-  });
-}
-function setUacByState(
-  state: 'Unwritable' | 'Writable' | 'Private',
-  uacStrategy: ProjectConfig['uacStrategy'],
-) {
-  needElevate.value = false;
-  switch (uacStrategy) {
-    case 'force':
-      needElevate.value = true;
-      break;
-    case 'prefer-admin':
-      needElevate.value = state !== 'Private';
-      break;
-    case 'prefer-user':
-      needElevate.value = state === 'Unwritable';
-      break;
-  }
-}
-function openMirrorc() {
-  invoke('launch', {
-    path: `https://mirrorchyan.com/?source=Kachina${PROJECT_CONFIG.appName}`,
-  });
-}
-
-// Hidden sources easter egg functionality
-function handleKeyDown(event: KeyboardEvent) {
-  // Only handle comma key when source dialog is open
-  if (
-    dialog.value !== 'source' ||
-    (event.key !== ',' && event.code !== 'Comma')
-  ) {
-    return;
-  }
-
-  event.preventDefault();
-
-  // Clear existing timeout
-  if (commaTimeout.value) {
-    clearTimeout(commaTimeout.value);
-  }
-
-  // Increment comma count
-  commaCount.value++;
-
-  // Check if we've reached 5 consecutive comma presses
-  if (commaCount.value >= 5) {
-    showHiddenSources.value = true;
-    commaCount.value = 0; // Reset counter
-    return;
-  }
-
-  // Set timeout to reset counter after 2 seconds
-  commaTimeout.value = setTimeout(() => {
-    commaCount.value = 0;
-    commaTimeout.value = 0;
-  }, 2000);
-}
-
-function resetHiddenSourcesState() {
-  commaCount.value = 0;
-  showHiddenSources.value = false;
-  if (commaTimeout.value) {
-    clearTimeout(commaTimeout.value);
-    commaTimeout.value = 0;
-  }
-}
 const minimize = async () => {
   const win = getCurrentWindow();
   win.minimize();
