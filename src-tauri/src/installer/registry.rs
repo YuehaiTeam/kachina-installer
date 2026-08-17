@@ -33,7 +33,6 @@ pub async fn write_registry_with_params(params: WriteRegistryParams) -> TAResult
     .await
 }
 
-#[tauri::command]
 pub async fn write_registry(
     reg_name: String,
     name: String,

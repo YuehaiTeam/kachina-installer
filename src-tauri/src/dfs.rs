@@ -123,7 +123,6 @@ pub struct Dfs2DeleteRequest {
     pub insights: Option<Dfs2SessionInsights>,
 }
 
-#[tauri::command]
 pub async fn get_dfs(
     url: String,
     range: Option<String>,
@@ -238,7 +237,6 @@ pub async fn get_dfs(
 }
 
 // DFS2 API commands
-#[tauri::command]
 pub async fn get_dfs2_metadata(api_url: String) -> Result<Dfs2Metadata, String> {
     let url_with_metadata = if api_url.contains('?') {
         format!("{}&with_metadata=1", api_url)
@@ -271,7 +269,6 @@ pub async fn get_dfs2_metadata(api_url: String) -> Result<Dfs2Metadata, String> 
     Ok(metadata)
 }
 
-#[tauri::command]
 pub async fn create_dfs2_session(
     api_url: String,
     chunks: Option<Vec<String>>,
@@ -316,7 +313,6 @@ pub async fn create_dfs2_session(
     Ok(response)
 }
 
-#[tauri::command]
 pub async fn get_dfs2_chunk_url(
     session_api_url: String,
     range: String,
@@ -348,7 +344,6 @@ pub async fn get_dfs2_chunk_url(
     Ok(response)
 }
 
-#[tauri::command]
 pub async fn get_dfs2_batch_chunk_urls(
     session_api_url: String,
     chunks: Vec<String>,
@@ -381,7 +376,6 @@ pub async fn get_dfs2_batch_chunk_urls(
     Ok(response)
 }
 
-#[tauri::command]
 pub async fn end_dfs2_session(
     session_api_url: String,
     insights: Option<Dfs2SessionInsights>,
@@ -404,7 +398,6 @@ pub async fn end_dfs2_session(
     Ok(())
 }
 
-#[tauri::command]
 pub async fn solve_dfs2_challenge(challenge_type: String, data: String) -> Result<String, String> {
     match challenge_type.as_str() {
         "md5" => {
@@ -476,7 +469,6 @@ pub async fn solve_dfs2_challenge(challenge_type: String, data: String) -> Resul
     }
 }
 
-#[tauri::command]
 pub async fn get_http_with_range(url: String, offset: u64, size: u64) -> TAResult<(u16, Vec<u8>)> {
     let mut res = REQUEST_CLIENT.get(&url);
     if offset != 0 || size != 0 {

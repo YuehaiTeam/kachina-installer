@@ -243,39 +243,21 @@ async fn tauri_main(args: InstallArgs) {
     }
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
-            // things which can be run directly
-            fs::is_dir_empty,
-            dfs::get_dfs,
-            dfs::get_http_with_range,
             dfs::http_get_request,
-            // DFS2 commands
-            dfs::get_dfs2_metadata,
-            dfs::create_dfs2_session,
-            dfs::get_dfs2_chunk_url,
-            dfs::get_dfs2_batch_chunk_urls,
-            dfs::end_dfs2_session,
-            dfs::solve_dfs2_challenge,
             installer::log,
             installer::warn,
             installer::error,
             installer::launch,
             installer::launch_and_exit,
             installer::config::get_installer_config,
-            installer::lnk::get_dirs,
             installer::registry::read_uninstall_metadata,
             installer::select_dir,
             installer::error_dialog,
             installer::confirm_dialog,
-            installer::get_exe_version,
-            // wincred
             utils::wincred::wincred_write,
             utils::wincred::wincred_read,
             utils::wincred::wincred_delete,
-            // mirrorc
             thirdparty::mirrorc::get_mirrorc_status,
-            // new mamaned operation
-            ipc::manager::managed_operation,
-            session::dump::write_session_dump,
             session::commands::start_install,
             session::commands::start_uninstall,
             session::commands::answer_session_prompt,
