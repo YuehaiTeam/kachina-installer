@@ -104,7 +104,6 @@ win32-version-info = "0.2.0"
 multer = "3.1.0"
 bytes = "1.10.1"
 url = "2.5"
-regex = "1"
 base64 = "0.22.1"
 h3 = "0.0.8"
 h3-msquic-async = { version = "0.3", default-features = false, features = ["msquic-seera", "msquic-seera-static", "tracing"] }
