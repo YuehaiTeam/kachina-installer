@@ -8,6 +8,16 @@ use tokio::sync::OnceCell;
 
 use crate::utils::error::return_anyhow_result;
 static MMAP_SELF: OnceCell<AsyncMmapFile> = OnceCell::const_new();
+static EMBEDDED_FILES: OnceCell<Vec<Embedded>> = OnceCell::const_new();
+static PARSED_PACK: OnceCell<ParsedPack> = OnceCell::const_new();
+
+#[derive(Clone)]
+struct ParsedPack {
+    config: Option<Value>,
+    metadata: Option<Value>,
+    index: Option<Vec<Embedded>>,
+    image: Option<String>,
+}
 
 pub async fn mmap() -> &'static AsyncMmapFile {
     MMAP_SELF
@@ -77,6 +87,13 @@ pub struct Embedded {
     pub size: usize,
 }
 pub async fn get_embedded(file: &'static AsyncMmapFile) -> anyhow::Result<Vec<Embedded>> {
+    EMBEDDED_FILES
+        .get_or_try_init(|| scan_embedded(file))
+        .await
+        .cloned()
+}
+
+async fn scan_embedded(file: &'static AsyncMmapFile) -> anyhow::Result<Vec<Embedded>> {
     let offsets = search_pattern(file).await?;
     let mut entries = Vec::new();
     let mut last_offset: usize = 0;
@@ -148,6 +165,21 @@ pub async fn get_config_from_embedded(
     Option<Vec<Embedded>>,
     Option<String>,
 )> {
+    let parsed = PARSED_PACK
+        .get_or_try_init(|| {
+            let embedded = embedded.to_vec();
+            async move { parse_embedded(&embedded).await }
+        })
+        .await?;
+    Ok((
+        parsed.config.clone(),
+        parsed.metadata.clone(),
+        parsed.index.clone(),
+        parsed.image.clone(),
+    ))
+}
+
+async fn parse_embedded(embedded: &[Embedded]) -> anyhow::Result<ParsedPack> {
     let file = mmap().await;
     let mut config = None;
     let mut metadata = None;
@@ -203,7 +235,12 @@ pub async fn get_config_from_embedded(
         }
     }
 
-    Ok((config, metadata, index, image_base64))
+    Ok(ParsedPack {
+        config,
+        metadata,
+        index,
+        image: image_base64,
+    })
 }
 
 pub fn get_header_size(name: &str) -> usize {
