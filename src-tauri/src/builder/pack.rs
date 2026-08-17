@@ -1,7 +1,11 @@
 use std::path::PathBuf;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 
-use crate::{cli::PackArgs, local::get_reader_for_bundle, utils::metadata::RepoMetadata};
+use crate::{
+    cli::PackArgs,
+    local::{get_reader_for_bundle, preferred_file_hash},
+    utils::metadata::RepoMetadata,
+};
 
 pub struct PackFile {
     pub name: String,
@@ -86,11 +90,7 @@ pub async fn pack_cli(args: PackArgs) {
         if let Some(metadata) = metadata.as_ref() {
             if let Some(hashed) = metadata.hashed.as_ref() {
                 for file in hashed.iter() {
-                    let hash = if file.md5.is_some() {
-                        file.md5.as_ref().unwrap()
-                    } else if file.xxh.is_some() {
-                        file.xxh.as_ref().unwrap()
-                    } else {
+                    let Some(hash) = preferred_file_hash(&file.md5, &file.xxh) else {
                         eprintln!("No hash found for file: {:?}", file.file_name);
                         return;
                     };
@@ -114,19 +114,12 @@ pub async fn pack_cli(args: PackArgs) {
             }
             if let Some(patches) = metadata.patches.as_ref() {
                 for patch in patches.iter() {
-                    let from_hash = if patch.from.md5.is_some() {
-                        patch.from.md5.as_ref().unwrap()
-                    } else if patch.from.xxh.is_some() {
-                        patch.from.xxh.as_ref().unwrap()
-                    } else {
+                    let Some(from_hash) = preferred_file_hash(&patch.from.md5, &patch.from.xxh)
+                    else {
                         eprintln!("No hash found for patch: {:?}", patch.file_name);
                         return;
                     };
-                    let to_hash = if patch.to.md5.is_some() {
-                        patch.to.md5.as_ref().unwrap()
-                    } else if patch.to.xxh.is_some() {
-                        patch.to.xxh.as_ref().unwrap()
-                    } else {
+                    let Some(to_hash) = preferred_file_hash(&patch.to.md5, &patch.to.xxh) else {
                         eprintln!("No hash found for patch: {:?}", patch.file_name);
                         return;
                     };

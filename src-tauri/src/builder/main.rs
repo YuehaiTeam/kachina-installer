@@ -32,10 +32,16 @@ async fn async_main() {
         Command::Pack(args) => pack::pack_cli(args).await,
         Command::Gen(args) => gen::gen_cli(args).await,
         Command::Append(args) => append::append_cli(args).await,
-        Command::Extract(args) => extract::extract_cli(args).await,
+        Command::Extract(args) => {
+            if let Err(e) = extract::extract_cli(args).await {
+                eprintln!("Extract failed: {e}");
+                std::process::exit(1);
+            }
+        }
         Command::ReplaceBin(args) => {
             if let Err(e) = replace_bin::replace_bin_cli(args).await {
-                eprintln!("Replace-bin failed: {}", e);
+                eprintln!("Replace-bin failed: {e}");
+                std::process::exit(1);
             }
         }
     }

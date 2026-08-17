@@ -5,7 +5,7 @@ use fmmap::tokio::{AsyncMmapFile, AsyncMmapFileExt};
 
 use crate::{
     cli::ExtractArgs,
-    local::{get_embedded, Embedded},
+    local::{get_embedded, preferred_file_hash, Embedded},
     utils::metadata::RepoMetadata,
 };
 
@@ -22,6 +22,7 @@ enum FileType {
     Config,
     Image,
     Meta,
+    Index,
     File,
     Patch,
 }
@@ -32,6 +33,7 @@ impl std::fmt::Display for FileType {
             FileType::Config => write!(f, "CONFIG"),
             FileType::Image => write!(f, "IMAGE"),
             FileType::Meta => write!(f, "META"),
+            FileType::Index => write!(f, "INDEX"),
             FileType::File => write!(f, "FILE"),
             FileType::Patch => write!(f, "PATCH"),
         }
@@ -51,6 +53,9 @@ fn validate_args(args: &ExtractArgs) -> Result<(), String> {
     .filter(|&&x| x)
     .count();
 
+    if feature_count == 0 {
+        return Err("Specify one of --list, --all, --name, or --meta-name".to_string());
+    }
     if feature_count > 1 {
         return Err("Only one extraction mode can be used at a time".to_string());
     }
@@ -107,6 +112,7 @@ fn classify_file_type(name: &str) -> FileType {
         "\0CONFIG" => FileType::Config,
         "\0IMAGE" => FileType::Image,
         "\0META" => FileType::Meta,
+        "\0INDEX" => FileType::Index,
         name if name.contains('_') && !name.starts_with('\0') => FileType::Patch,
         _ => FileType::File,
     }
@@ -119,7 +125,7 @@ fn build_hash_to_name_map(metadata: &RepoMetadata) -> HashMap<String, String> {
     // 处理普通文件
     if let Some(hashed) = &metadata.hashed {
         for file in hashed {
-            if let Some(hash) = file.xxh.as_ref().or(file.md5.as_ref()) {
+            if let Some(hash) = preferred_file_hash(&file.md5, &file.xxh) {
                 map.insert(hash.clone(), file.file_name.clone());
             }
         }
@@ -128,9 +134,8 @@ fn build_hash_to_name_map(metadata: &RepoMetadata) -> HashMap<String, String> {
     // 处理补丁文件
     if let Some(patches) = &metadata.patches {
         for patch in patches {
-            let from_hash = patch.from.xxh.as_ref().or(patch.from.md5.as_ref());
-            let to_hash = patch.to.xxh.as_ref().or(patch.to.md5.as_ref());
-
+            let from_hash = preferred_file_hash(&patch.from.md5, &patch.from.xxh);
+            let to_hash = preferred_file_hash(&patch.to.md5, &patch.to.xxh);
             if let (Some(from), Some(to)) = (from_hash, to_hash) {
                 let patch_name = format!("{}_{}", from, to);
                 map.insert(patch_name, patch.file_name.clone());
@@ -245,7 +250,7 @@ async fn extract_by_hash_name(
             output_file.clone()
         } else {
             let mut path = input_path.to_path_buf();
-            path.set_file_name(&embedded_file.name);
+            path.set_file_name(sanitize_output_name(&embedded_file.name));
             path
         };
 
@@ -407,60 +412,119 @@ async fn extract_all_files(
     Ok(())
 }
 
-pub async fn extract_cli(args: ExtractArgs) {
-    // 参数验证
-    if let Err(err) = validate_args(&args) {
-        eprintln!("Error: {}", err);
-        return;
+fn sanitize_output_name(name: &str) -> String {
+    let name = name.replace('\0', "_");
+    if name.is_empty() {
+        "_unnamed".to_string()
+    } else {
+        name
+    }
+}
+
+pub async fn extract_cli(args: ExtractArgs) -> Result<(), String> {
+    validate_args(&args)?;
+
+    let mmap = AsyncMmapFile::open(args.input.clone())
+        .await
+        .map_err(|e| format!("Failed to open input file {}: {}", args.input.display(), e))?;
+
+    if args.list {
+        return list_files(&mmap).await;
+    }
+    if let Some(output_dir) = args.all {
+        let metadata = parse_metadata(&mmap).await?;
+        return extract_all_files(&mmap, &output_dir, metadata.as_ref()).await;
+    }
+    if !args.meta_name.is_empty() {
+        let metadata = parse_metadata(&mmap)
+            .await?
+            .ok_or_else(|| "No metadata found for meta-name extraction".to_string())?;
+        return extract_by_meta_name(&mmap, &args.meta_name, &args.file, &metadata, &args.input)
+            .await;
+    }
+    let embedded = get_embedded(&mmap).await.map_err(|e| e.to_string())?;
+    extract_by_hash_name(&mmap, &embedded, &args.name, &args.file, &args.input).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cli::ExtractArgs;
+    use crate::utils::metadata::{Metadata, PatchInfo, PatchItem, RepoMetadata};
+    use std::path::PathBuf;
+
+    fn extract_args() -> ExtractArgs {
+        ExtractArgs {
+            input: PathBuf::from("pkg.exe"),
+            file: vec![],
+            name: vec![],
+            meta_name: vec![],
+            all: None,
+            list: false,
+        }
     }
 
-    // 打开文件
-    let mmap = match AsyncMmapFile::open(args.input.clone()).await {
-        Ok(file) => file,
-        Err(e) => {
-            eprintln!("Failed to open input file {}: {}", args.input.display(), e);
-            return;
-        }
-    };
+    #[test]
+    fn validate_requires_exactly_one_mode() {
+        assert!(validate_args(&extract_args()).is_err());
 
-    // 根据参数选择功能
-    let result = if args.list {
-        list_files(&mmap).await
-    } else if let Some(output_dir) = args.all {
-        let metadata = match parse_metadata(&mmap).await {
-            Ok(meta) => meta,
-            Err(e) => {
-                eprintln!("Failed to parse metadata: {}", e);
-                return;
-            }
-        };
-        extract_all_files(&mmap, &output_dir, metadata.as_ref()).await
-    } else if !args.meta_name.is_empty() {
-        let metadata = match parse_metadata(&mmap).await {
-            Ok(Some(meta)) => meta,
-            Ok(None) => {
-                eprintln!("No metadata found for meta-name extraction");
-                return;
-            }
-            Err(e) => {
-                eprintln!("Failed to parse metadata: {}", e);
-                return;
-            }
-        };
-        extract_by_meta_name(&mmap, &args.meta_name, &args.file, &metadata, &args.input).await
-    } else {
-        // 原有功能保持不变
-        let embedded = match get_embedded(&mmap).await {
-            Ok(emb) => emb,
-            Err(e) => {
-                eprintln!("Failed to get embedded files: {}", e);
-                return;
-            }
-        };
-        extract_by_hash_name(&mmap, &embedded, &args.name, &args.file, &args.input).await
-    };
+        let mut args = extract_args();
+        args.list = true;
+        assert!(validate_args(&args).is_ok());
 
-    if let Err(err) = result {
-        eprintln!("Extraction failed: {}", err);
+        args.name = vec!["abc".into()];
+        assert!(validate_args(&args).is_err());
+    }
+
+    #[test]
+    fn hash_map_prefers_md5_like_pack() {
+        let metadata = RepoMetadata {
+            repo_name: "r".into(),
+            tag_name: "t".into(),
+            assets: None,
+            hashed: Some(vec![Metadata {
+                file_name: "app.exe".into(),
+                size: 1,
+                md5: Some("md5hash".into()),
+                xxh: Some("xxhhash".into()),
+            }]),
+            patches: Some(vec![PatchInfo {
+                file_name: "app.exe".into(),
+                size: 1,
+                from: PatchItem {
+                    size: 1,
+                    md5: Some("frommd5".into()),
+                    xxh: Some("fromxxh".into()),
+                },
+                to: PatchItem {
+                    size: 1,
+                    md5: Some("tomd5".into()),
+                    xxh: Some("toxxh".into()),
+                },
+            }]),
+            installer: None,
+            deletes: None,
+            packing_info: None,
+        };
+        let map = build_hash_to_name_map(&metadata);
+        assert_eq!(map.get("md5hash").map(String::as_str), Some("app.exe"));
+        assert!(map.get("xxhhash").is_none());
+        assert!(map.contains_key("frommd5_tomd5"));
+        assert!(!map.contains_key("fromxxh_toxxh"));
+    }
+
+    #[test]
+    fn classify_internal_and_patch_names() {
+        assert!(matches!(classify_file_type("\0INDEX"), FileType::Index));
+        assert!(matches!(
+            classify_file_type("aaa_bbb"),
+            FileType::Patch
+        ));
+        assert!(matches!(classify_file_type("deadbeef"), FileType::File));
+    }
+
+    #[test]
+    fn sanitize_null_internal_names() {
+        assert_eq!(sanitize_output_name("\0CONFIG"), "_CONFIG");
     }
 }
