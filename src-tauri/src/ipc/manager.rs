@@ -10,7 +10,6 @@ use crate::utils::uac::SendableHandle;
 use anyhow::Context;
 use std::ffi::c_void;
 use std::time::Duration;
-use tauri::Emitter;
 use tokio::io::AsyncBufReadExt;
 use tokio::io::AsyncWriteExt;
 use tokio::net::windows::named_pipe::ClientOptions;
@@ -237,20 +236,6 @@ pub async fn handle_pipe(
             }
         }
     });
-}
-#[tracing::instrument(skip(ipc, mgr, window))]
-#[tauri::command]
-pub async fn managed_operation(
-    ipc: IpcOperation,
-    id: String,
-    elevate: bool,
-    mgr: tauri::State<'_, ManagedElevate>,
-    window: tauri::WebviewWindow,
-) -> TAResult<serde_json::Value> {
-    mgr.run(ipc, elevate, move |opr| {
-        let _ = window.emit(&id, opr);
-    })
-    .await
 }
 
 pub async fn uac_ipc_main(args: crate::cli::arg::UacArgs) {

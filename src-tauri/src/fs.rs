@@ -585,7 +585,6 @@ pub async fn check_local_files(
     Ok(finished_hashes)
 }
 
-#[tauri::command]
 pub async fn is_dir_empty(path: String, exe_name: String) -> (bool, bool) {
     let path = Path::new(&path);
     if !path.exists() {
@@ -607,7 +606,6 @@ pub async fn is_dir_empty(path: String, exe_name: String) -> (bool, bool) {
     (true, false)
 }
 
-#[tauri::command]
 pub async fn ensure_dir(path: String) -> Result<(), anyhow::Error> {
     let path = Path::new(&path);
     tokio::fs::create_dir_all(path)
