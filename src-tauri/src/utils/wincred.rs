@@ -11,7 +11,6 @@ use windows::{
 };
 
 use super::error::TAResult;
-#[tauri::command]
 pub fn wincred_write(target: &str, token: &str, comment: &str) -> TAResult<()> {
     let mut comment = comment.encode_utf16().collect::<Vec<u16>>();
     comment.push(0); // Null-terminate the string
@@ -48,7 +47,6 @@ pub fn wincred_write(target: &str, token: &str, comment: &str) -> TAResult<()> {
     Ok(())
 }
 
-#[tauri::command]
 pub fn wincred_read(target: &str) -> TAResult<String> {
     let mut target_name = target.encode_utf16().collect::<Vec<u16>>();
     target_name.push(0); // Null-terminate the string
@@ -81,7 +79,6 @@ pub fn wincred_read(target: &str) -> TAResult<String> {
         .context("READ_CRED_ERR")?)
 }
 
-#[tauri::command]
 pub fn wincred_delete(target: &str) -> TAResult<()> {
     let mut target_name = target.encode_utf16().collect::<Vec<u16>>();
     target_name.push(0); // Null-terminate the string

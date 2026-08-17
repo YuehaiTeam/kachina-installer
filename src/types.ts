@@ -76,7 +76,7 @@ export interface MergedGroupInfo {
   totalDownloadSize: number;
   totalEffectiveSize: number;
   wasteRatio: number;
-  gaps: Array<{start: number, end: number}>;
+  gaps: Array<{ start: number; end: number }>;
 }
 
 export interface VirtualMergedFile extends DfsUpdateTask {

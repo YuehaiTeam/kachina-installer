@@ -41,7 +41,7 @@ async function test() {
       'Online installation',
     );
     assertExitOk(result, 'Online installation');
-    
+
     // check if fail in logs
     if (await fs.pathExists(logFile)) {
       const logs = await fs.readFile(logFile, 'utf-8');

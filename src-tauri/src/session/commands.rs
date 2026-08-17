@@ -1,15 +1,12 @@
 use std::sync::Arc;
 
-use tauri::State;
-
 use crate::cli::arg::InstallArgs;
+use crate::host::HostHandle;
 use crate::installer::config::{resolve_installer_config, InstallerConfig};
 use crate::ipc::manager::ManagedElevate;
 use crate::session::run::{run_install, run_uninstall};
-use crate::session::types::{
-    elevate_from_state, SessionInput, SessionResult, Settings,
-};
-use crate::session::ui::{GuiUi, PluginAnswer, PluginHub, PromptHub};
+use crate::session::types::{elevate_from_state, SessionInput, SessionResult, Settings};
+use crate::session::ui::{GuiUi, PluginHub, PromptHub};
 use crate::session::ProjectConfig;
 use crate::utils::error::{TACommandError, TAResult};
 
@@ -19,85 +16,53 @@ pub struct SessionState {
     pub plugins: Arc<PluginHub>,
 }
 
-#[tauri::command]
 pub async fn start_install(
     input: SessionInput,
-    args: State<'_, InstallArgs>,
-    mgr: State<'_, ManagedElevate>,
-    session: State<'_, SessionState>,
-    window: tauri::WebviewWindow,
+    args: &InstallArgs,
+    mgr: &ManagedElevate,
+    session: &SessionState,
+    ui: HostHandle,
 ) -> TAResult<SessionResult> {
-    let config = resolve_installer_config(args.inner().clone(), true)
+    let config = resolve_installer_config(args.clone(), true)
         .await
         .map_err(TACommandError::new)?;
-    let (settings, project) = settings_from_input(&input, args.inner(), &config)
+    let (settings, project) = settings_from_input(&input, args, &config)
         .await
         .map_err(TACommandError::new)?;
     let ui = GuiUi::new(
-        window,
+        ui,
         session.prompts.clone(),
         session.plugins.clone(),
         settings.auto_answer,
     );
-    run_install(&settings, &config, &project, &ui, mgr.inner())
+    run_install(&settings, &config, &project, &ui, mgr)
         .await
         .map_err(TACommandError::new)
 }
 
-#[tauri::command]
 pub async fn start_uninstall(
     input: SessionInput,
-    args: State<'_, InstallArgs>,
-    mgr: State<'_, ManagedElevate>,
-    session: State<'_, SessionState>,
-    window: tauri::WebviewWindow,
+    args: &InstallArgs,
+    mgr: &ManagedElevate,
+    session: &SessionState,
+    ui: HostHandle,
 ) -> TAResult<SessionResult> {
-    let config = resolve_installer_config(args.inner().clone(), true)
+    let config = resolve_installer_config(args.clone(), true)
         .await
         .map_err(TACommandError::new)?;
-    let (mut settings, project) = settings_from_input(&input, args.inner(), &config)
+    let (mut settings, project) = settings_from_input(&input, args, &config)
         .await
         .map_err(TACommandError::new)?;
     settings.delete_user_data = input.delete_user_data;
     let ui = GuiUi::new(
-        window,
+        ui,
         session.prompts.clone(),
         session.plugins.clone(),
         settings.auto_answer,
     );
-    run_uninstall(&settings, &config, &project, &ui, mgr.inner())
+    run_uninstall(&settings, &config, &project, &ui, mgr)
         .await
         .map_err(TACommandError::new)
-}
-
-#[tauri::command]
-pub async fn answer_session_prompt(
-    id: String,
-    accept: bool,
-    session: State<'_, SessionState>,
-) -> TAResult<bool> {
-    Ok(session.prompts.answer(&id, accept).await)
-}
-
-#[tauri::command]
-pub async fn answer_session_plugin(
-    id: String,
-    ok: bool,
-    data: Option<serde_json::Value>,
-    error: Option<String>,
-    unimplemented: Option<bool>,
-    session: State<'_, SessionState>,
-) -> TAResult<bool> {
-    Ok(session
-        .plugins
-        .answer(PluginAnswer {
-            id,
-            ok,
-            data,
-            error,
-            unimplemented: unimplemented.unwrap_or(false),
-        })
-        .await)
 }
 
 async fn settings_from_input(

@@ -177,7 +177,6 @@ pub fn run_mirrorc_install_sync(
     Ok((metadata, changeset))
 }
 
-#[tauri::command]
 pub async fn get_mirrorc_status(
     resource_id: &str,
     current_version: &str,

@@ -74,8 +74,7 @@ export async function handleSessionPlugin(
         });
     }
   } catch (e) {
-    const message =
-      e instanceof Error ? e.message || e.toString() : String(e);
+    const message = e instanceof Error ? e.message || e.toString() : String(e);
     await answer({
       id: req.id,
       ok: false,

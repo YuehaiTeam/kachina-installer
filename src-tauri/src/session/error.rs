@@ -26,19 +26,17 @@ pub fn hide(user_msg: impl Into<String>, err: impl std::fmt::Display) -> anyhow:
 
 pub fn friendly(err: &impl std::fmt::Display) -> String {
     let err_str = err.to_string();
-    let first_url = err_str
-        .match_indices("http")
-        .find_map(|(i, _)| {
-            let rest = &err_str[i..];
-            if rest.starts_with("http://") || rest.starts_with("https://") {
-                let end = rest
-                    .find(|c: char| c.is_whitespace() || c == ')' || c == ',')
-                    .unwrap_or(rest.len());
-                Some(rest[..end].to_string())
-            } else {
-                None
-            }
-        });
+    let first_url = err_str.match_indices("http").find_map(|(i, _)| {
+        let rest = &err_str[i..];
+        if rest.starts_with("http://") || rest.starts_with("https://") {
+            let end = rest
+                .find(|c: char| c.is_whitespace() || c == ')' || c == ',')
+                .unwrap_or(rest.len());
+            Some(rest[..end].to_string())
+        } else {
+            None
+        }
+    });
     let without_url = {
         let mut s = err_str.clone();
         if let Some(url) = first_url.as_ref() {

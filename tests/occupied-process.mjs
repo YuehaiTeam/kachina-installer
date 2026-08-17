@@ -82,7 +82,9 @@ async function test() {
     ]);
 
     if (verification.failed.length === 0 && extraFailed.length === 0) {
-      console.log(chalk.green('✓ Occupied process was ended and update completed'));
+      console.log(
+        chalk.green('✓ Occupied process was ended and update completed'),
+      );
     } else {
       console.error(chalk.red('✗ Occupied process verification failed:'));
       [...verification.failed, ...extraFailed].forEach((msg) =>

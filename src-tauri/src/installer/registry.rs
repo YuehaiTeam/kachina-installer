@@ -95,15 +95,11 @@ pub async fn write_registry_raw(
     .context("WRITE_REG_ERR")
 }
 
-#[tauri::command]
 pub async fn read_uninstall_metadata(reg_name: String) -> TAResult<Value> {
     read_uninstall_metadata_raw(&reg_name, None).into_ta_result()
 }
 
-pub fn read_uninstall_metadata_raw(
-    reg_name: &str,
-    install_path: Option<&str>,
-) -> Result<Value> {
+pub fn read_uninstall_metadata_raw(reg_name: &str, install_path: Option<&str>) -> Result<Value> {
     let key_path = format!("SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\{reg_name}");
     let hives = [
         windows_registry::LOCAL_MACHINE,
@@ -123,9 +119,9 @@ pub fn read_uninstall_metadata_raw(
         if let Some(want) = install_path {
             let location = key.get_string("InstallLocation").unwrap_or_default();
             if !location.is_empty()
-                && location.trim_end_matches(['\\', '/']).eq_ignore_ascii_case(
-                    want.trim_end_matches(['\\', '/']),
-                )
+                && location
+                    .trim_end_matches(['\\', '/'])
+                    .eq_ignore_ascii_case(want.trim_end_matches(['\\', '/']))
             {
                 return Ok(parsed);
             }

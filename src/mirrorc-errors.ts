@@ -73,10 +73,10 @@ export function getMirrorcErrorInfo(code: number): MirrorcErrorInfo | null {
  */
 export function processMirrorcError(
   mirrorcStatus: { code: number; msg?: string },
-  contextType: 'install' | 'cdk-validation' = 'install'
-): { 
-  isError: boolean; 
-  errorInfo: MirrorcErrorInfo; 
+  contextType: 'install' | 'cdk-validation' = 'install',
+): {
+  isError: boolean;
+  errorInfo: MirrorcErrorInfo;
   message: string;
   showSourceDialog: boolean;
 } | null {
@@ -85,34 +85,39 @@ export function processMirrorcError(
   }
 
   const errorInfo = getMirrorcErrorInfo(mirrorcStatus.code);
-  
+
   if (errorInfo) {
     // 记录已知错误码
-    error(`Mirror酱${contextType === 'cdk-validation' ? 'CDK验证' : ''}错误 [${mirrorcStatus.code}]: ${errorInfo.message}`);
-    
+    error(
+      `Mirror酱${contextType === 'cdk-validation' ? 'CDK验证' : ''}错误 [${mirrorcStatus.code}]: ${errorInfo.message}`,
+    );
+
     return {
       isError: true,
       errorInfo,
       message: errorInfo.message,
-      showSourceDialog: errorInfo.showSourceDialog || false
+      showSourceDialog: errorInfo.showSourceDialog || false,
     };
   } else {
     // 处理未知错误码
-    const unknownMessage = contextType === 'cdk-validation' 
-      ? `从Mirror酱获取CDK状态失败: ${mirrorcStatus.msg || '未知错误'}，请联系Mirror酱客服`
-      : `从Mirror酱获取更新失败: ${mirrorcStatus.msg || '未知错误'}，请联系Mirror酱客服`;
-    
+    const unknownMessage =
+      contextType === 'cdk-validation'
+        ? `从Mirror酱获取CDK状态失败: ${mirrorcStatus.msg || '未知错误'}，请联系Mirror酱客服`
+        : `从Mirror酱获取更新失败: ${mirrorcStatus.msg || '未知错误'}，请联系Mirror酱客服`;
+
     // 记录未知错误码
-    error(`Mirror酱${contextType === 'cdk-validation' ? 'CDK验证' : ''}未知错误 [${mirrorcStatus.code}]: ${mirrorcStatus.msg || '无详细信息'}`);
-    
+    error(
+      `Mirror酱${contextType === 'cdk-validation' ? 'CDK验证' : ''}未知错误 [${mirrorcStatus.code}]: ${mirrorcStatus.msg || '无详细信息'}`,
+    );
+
     return {
       isError: true,
       errorInfo: {
         code: mirrorcStatus.code,
-        message: unknownMessage
+        message: unknownMessage,
       },
       message: unknownMessage,
-      showSourceDialog: false
+      showSourceDialog: false,
     };
   }
 }

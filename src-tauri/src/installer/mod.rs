@@ -1,4 +1,3 @@
-use tauri::{AppHandle, WebviewWindow};
 use windows::Win32::{
     Foundation::{CloseHandle, WAIT_FAILED, WAIT_TIMEOUT},
     System::Diagnostics::ToolHelp::PROCESSENTRY32W,
@@ -13,15 +12,8 @@ pub mod registry;
 pub mod runtimes;
 pub mod uninstall;
 
-#[tauri::command]
 pub async fn launch(path: String) {
     let _ = open::that(path);
-}
-
-#[tauri::command]
-pub async fn launch_and_exit(path: String, app: AppHandle) {
-    let _ = open::that(path);
-    app.exit(0);
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -39,12 +31,11 @@ pub struct SelectDirRes {
     pub upgrade: bool,
 }
 
-#[tauri::command]
 pub async fn select_dir(
     path: String,
     exe_name: String,
     silent: bool,
-    window: WebviewWindow,
+    parent: crate::host::HwndParent,
 ) -> Option<SelectDirRes> {
     let pathstr = if silent {
         path.clone()
@@ -52,7 +43,7 @@ pub async fn select_dir(
         let res = rfd::AsyncFileDialog::new()
             .set_directory(path)
             .set_can_create_directories(true)
-            .set_parent(&window)
+            .set_parent(&parent)
             .pick_folder()
             .await;
         res.as_ref()?;
@@ -142,7 +133,7 @@ pub async fn kill_process(pid: u32) -> Result<()> {
         let ret = unsafe { windows::Win32::System::Threading::WaitForSingleObject(handle, 10000) };
         match ret {
             WAIT_FAILED => {
-                let oserr = windows::core::Error::from_win32();
+                let oserr = windows::core::Error::from_thread();
                 return Err(anyhow::anyhow!(oserr).context("WAIT_PROCESS_ERR"));
             }
             WAIT_TIMEOUT => {
@@ -237,40 +228,39 @@ pub async fn find_process_by_name(name: String) -> Result<Vec<(u32, String)>> {
     Ok(processes)
 }
 
-#[tauri::command]
-pub async fn error_dialog(title: String, message: String, window: WebviewWindow) {
+pub async fn error_dialog(title: String, message: String, parent: crate::host::HwndParent) {
     rfd::MessageDialog::new()
         .set_title(&title)
         .set_description(&message)
         .set_level(rfd::MessageLevel::Error)
-        .set_parent(&window)
+        .set_parent(&parent)
         .show();
 }
 
-#[tauri::command]
-pub async fn confirm_dialog(title: String, message: String, window: WebviewWindow) -> bool {
+pub async fn confirm_dialog(
+    title: String,
+    message: String,
+    parent: crate::host::HwndParent,
+) -> bool {
     let ret = rfd::MessageDialog::new()
         .set_title(&title)
         .set_description(&message)
         .set_level(rfd::MessageLevel::Info)
-        .set_parent(&window)
+        .set_parent(&parent)
         .set_buttons(rfd::MessageButtons::YesNo)
         .show();
 
     matches!(ret, rfd::MessageDialogResult::Yes)
 }
 
-#[tauri::command]
 pub fn log(data: String) {
     tracing::info!("{}", data);
 }
 
-#[tauri::command]
 pub fn warn(data: String) {
     tracing::warn!("{}", data);
 }
 
-#[tauri::command]
 pub fn error(data: String) {
     tracing::error!("{}", data);
 }

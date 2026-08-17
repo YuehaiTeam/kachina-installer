@@ -17,7 +17,9 @@ async function test() {
   const installerV1 = './fixtures/test-app-v1.exe';
   const installerV2 = './fixtures/test-app-v2.exe';
 
-  console.log(chalk.blue('=== userDataPath / ignoreFolderPath Update Test ==='));
+  console.log(
+    chalk.blue('=== userDataPath / ignoreFolderPath Update Test ==='),
+  );
   console.log(`Test directory: ${testDir}`);
 
   try {
@@ -35,7 +37,10 @@ async function test() {
       '{"from":"USER_MODIFIED"}\n',
     );
     await fs.writeFile(path.join(testDir, 'cache/keep.dat'), 'CACHE_MODIFIED');
-    await fs.writeFile(path.join(testDir, 'cache/local-only.dat'), 'LOCAL_ONLY');
+    await fs.writeFile(
+      path.join(testDir, 'cache/local-only.dat'),
+      'LOCAL_ONLY',
+    );
 
     console.log('Updating to v2...');
     await clearLogFile();
@@ -82,7 +87,9 @@ async function test() {
       extraFailed.length === 0;
 
     if (allPassed) {
-      console.log(chalk.green('✓ userDataPath and ignoreFolderPath honored on update'));
+      console.log(
+        chalk.green('✓ userDataPath and ignoreFolderPath honored on update'),
+      );
     } else {
       console.error(chalk.red('✗ userData/ignore verification failed:'));
       [...kept.failed, ...skippedNew.failed, ...extraFailed].forEach((msg) =>

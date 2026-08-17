@@ -62,8 +62,14 @@ async function test() {
 
     const allPassed = removed.failed.length === 0 && kept.failed.length === 0;
     if (allPassed) {
-      console.log(chalk.green('✓ Uninstall removed package files and extraUninstallPath'));
-      console.log(chalk.green('✓ User runtime data kept (deleteUserData defaults to false)'));
+      console.log(
+        chalk.green('✓ Uninstall removed package files and extraUninstallPath'),
+      );
+      console.log(
+        chalk.green(
+          '✓ User runtime data kept (deleteUserData defaults to false)',
+        ),
+      );
     } else {
       console.error(chalk.red('✗ Uninstall verification failed:'));
       [...removed.failed, ...kept.failed].forEach((msg) =>
