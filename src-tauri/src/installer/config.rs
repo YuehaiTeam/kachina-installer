@@ -2,7 +2,7 @@ use crate::{
     cli::arg::InstallArgs,
     local::{get_config_from_embedded, get_embedded, mmap, Embedded},
     utils::{
-        error::{return_ta_result, TAResult},
+        error::TAResult,
         uac::check_elevated,
     },
     APP_BOOT_SIGNAL,
@@ -153,48 +153,41 @@ impl InstallerConfig {
     }
 }
 
-#[tauri::command]
-pub async fn get_installer_config(
-    args: State<'_, InstallArgs>,
+pub async fn resolve_installer_config(
+    args: InstallArgs,
     scan_exe: bool,
-) -> TAResult<InstallerConfig> {
-    APP_BOOT_SIGNAL.store(true, std::sync::atomic::Ordering::SeqCst);
-    // check if current dir has exeName
+) -> anyhow::Result<InstallerConfig> {
     let exe_path = std::env::current_exe().context("GET_EXE_PATH_ERR")?;
-    let mut config = get_config_pre(&exe_path, args.inner().clone(), scan_exe).await?;
+    let mut config = get_config_pre(&exe_path, args, scan_exe).await?;
     let mut uninstall_name = "uninst.exe";
     let mut exe_name = "main.exe";
     let mut program_files_path = "KachinaInstaller";
     let mut reg_name = "KachinaInstaller";
-    if let Some(config) = config.embedded_config.as_ref() {
-        uninstall_name = config["uninstallName"].as_str().unwrap_or("uninst.exe");
-        exe_name = config["exeName"].as_str().unwrap_or("main.exe");
-        program_files_path = config["programFilesPath"]
+    if let Some(embedded) = config.embedded_config.as_ref() {
+        uninstall_name = embedded["uninstallName"].as_str().unwrap_or("uninst.exe");
+        exe_name = embedded["exeName"].as_str().unwrap_or("main.exe");
+        program_files_path = embedded["programFilesPath"]
             .as_str()
             .unwrap_or("KachinaInstaller");
-        reg_name = config["regName"].as_str().unwrap_or("KachinaInstaller");
+        reg_name = embedded["regName"].as_str().unwrap_or("KachinaInstaller");
     }
     let is_uninstall = exe_path.file_name().unwrap().to_string_lossy() == uninstall_name;
     config.is_uninstall = is_uninstall;
-    let exe_dir = exe_path.parent();
-    if exe_dir.is_none() {
-        return return_ta_result("Failed to get exe dir".to_string(), "GET_EXE_PATH_ERR");
-    }
-    let exe_dir = exe_dir.unwrap();
-    let exe_path = exe_dir.join(exe_name);
-    if exe_path.exists() {
+    let exe_dir = exe_path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("Failed to get exe dir").context("GET_EXE_PATH_ERR"))?;
+    let exe_in_dir = exe_dir.join(exe_name);
+    if exe_in_dir.exists() {
         return Ok(config.fill(exe_dir, true, "CURRENT_DIR"));
     }
-    let exe_parent_dir = exe_dir.parent();
-    if let Some(exe_parent_dir) = exe_parent_dir {
-        let exe_path = exe_parent_dir.join(exe_name);
-        if exe_path.exists() {
+    if let Some(exe_parent_dir) = exe_dir.parent() {
+        let exe_in_parent = exe_parent_dir.join(exe_name);
+        if exe_in_parent.exists() {
             return Ok(config.fill(exe_parent_dir, true, "PARENT_DIR"));
         }
     }
     let key_path = format!("SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\{reg_name}");
 
-    // First try HKLM, if not exist, try HKCU
     let key = windows_registry::LOCAL_MACHINE
         .options()
         .read()
@@ -209,14 +202,11 @@ pub async fn get_installer_config(
         match key.get_string("InstallLocation") {
             Ok(path) => {
                 let path = Path::new(&path);
-                let exe_path = path.join(exe_name);
-                if exe_path.exists() {
+                if path.join(exe_name).exists() {
                     return Ok(config.fill(path, true, "REG"));
                 }
-
-                let sub_exe_path = path.join(reg_name).join(exe_name);
-                if sub_exe_path.exists() {
-                    let sub_exe_dir = path.join(reg_name);
+                let sub_exe_dir = path.join(reg_name);
+                if sub_exe_dir.join(exe_name).exists() {
                     return Ok(config.fill(&sub_exe_dir, true, "REG_FOLDED"));
                 }
             }
@@ -234,4 +224,15 @@ pub async fn get_installer_config(
         program_files_exe_path.exists(),
         "DEFAULT",
     ))
+}
+
+#[tauri::command]
+pub async fn get_installer_config(
+    args: State<'_, InstallArgs>,
+    scan_exe: bool,
+) -> TAResult<InstallerConfig> {
+    APP_BOOT_SIGNAL.store(true, std::sync::atomic::Ordering::SeqCst);
+    resolve_installer_config(args.inner().clone(), scan_exe)
+        .await
+        .map_err(|e| crate::utils::error::TACommandError::new(e))
 }

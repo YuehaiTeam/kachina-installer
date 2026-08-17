@@ -80,6 +80,7 @@ pub async fn get_embedded(file: &'static AsyncMmapFile) -> anyhow::Result<Vec<Em
     let offsets = search_pattern(file).await?;
     let mut entries = Vec::new();
     let mut last_offset: usize = 0;
+    let file_len = file.len();
     for offset in offsets.iter() {
         if *offset < last_offset {
             // in case of content includes header
@@ -92,17 +93,34 @@ pub async fn get_embedded(file: &'static AsyncMmapFile) -> anyhow::Result<Vec<Em
         // content length: 4 bytes big endian
         // content: variable length
         let mem_pos_name_length = *offset + 4;
-        let mem_pos_name = mem_pos_name_length + 2;
+        if mem_pos_name_length + 2 > file_len {
+            continue;
+        }
         let name_length =
             u16::from_be_bytes(file.slice(mem_pos_name_length, 2).try_into().unwrap()) as usize;
-        let name = file.slice(mem_pos_name, name_length);
-        let name = String::from_utf8_lossy(name).to_string();
+        if name_length == 0 || name_length > 512 {
+            continue;
+        }
+        let mem_pos_name = mem_pos_name_length + 2;
         let mem_pos_content_length = mem_pos_name + name_length;
+        if mem_pos_content_length + 4 > file_len {
+            continue;
+        }
+        let name_bytes = file.slice(mem_pos_name, name_length);
+        let Ok(name) = std::str::from_utf8(name_bytes) else {
+            continue;
+        };
+        if !is_embedded_name(name) {
+            continue;
+        }
         let content_length =
             u32::from_be_bytes(file.slice(mem_pos_content_length, 4).try_into().unwrap()) as usize;
         let mem_pos_content = mem_pos_content_length + 4;
+        if mem_pos_content.saturating_add(content_length) > file_len {
+            continue;
+        }
         entries.push(Embedded {
-            name,
+            name: name.to_string(),
             offset: mem_pos_content,
             size: content_length,
             raw_offset: *offset,
@@ -110,6 +128,14 @@ pub async fn get_embedded(file: &'static AsyncMmapFile) -> anyhow::Result<Vec<Em
         last_offset = mem_pos_content + content_length;
     }
     Ok(entries)
+}
+
+fn is_embedded_name(name: &str) -> bool {
+    matches!(name, "\0CONFIG" | "\0META" | "\0INDEX" | "\0IMAGE" | "\0THEME")
+        || name.chars().all(|c| c.is_ascii_hexdigit())
+        || name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-')
 }
 
 pub async fn get_config_from_embedded(

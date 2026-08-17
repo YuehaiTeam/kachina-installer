@@ -98,25 +98,42 @@ pub async fn write_registry_raw(
 
 #[tauri::command]
 pub async fn read_uninstall_metadata(reg_name: String) -> TAResult<Value> {
+    read_uninstall_metadata_raw(&reg_name, None).into_ta_result()
+}
+
+pub fn read_uninstall_metadata_raw(
+    reg_name: &str,
+    install_path: Option<&str>,
+) -> Result<Value> {
     let key_path = format!("SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\{reg_name}");
-
-    // First try HKLM, if not exist, try HKCU
-    let key = windows_registry::LOCAL_MACHINE
-        .options()
-        .read()
-        .open(&key_path)
-        .or_else(|_| {
-            windows_registry::CURRENT_USER
-                .options()
-                .read()
-                .open(&key_path)
-        })
-        .context("GET_INSTALLMETA_ERR")?;
-
-    let metadata: String = key
-        .get_string("InstallerMeta")
-        .context("GET_INSTALLMETA_ERR")?;
-
-    let metadata: Value = serde_json::from_str(&metadata).context("GET_INSTALLMETA_ERR")?;
-    Ok(metadata)
+    let hives = [
+        windows_registry::LOCAL_MACHINE,
+        windows_registry::CURRENT_USER,
+    ];
+    let mut fallback = None;
+    for hive in hives {
+        let Ok(key) = hive.options().read().open(&key_path) else {
+            continue;
+        };
+        let Ok(metadata) = key.get_string("InstallerMeta") else {
+            continue;
+        };
+        let Ok(parsed) = serde_json::from_str::<Value>(&metadata) else {
+            continue;
+        };
+        if let Some(want) = install_path {
+            let location = key.get_string("InstallLocation").unwrap_or_default();
+            if !location.is_empty()
+                && location.trim_end_matches(['\\', '/']).eq_ignore_ascii_case(
+                    want.trim_end_matches(['\\', '/']),
+                )
+            {
+                return Ok(parsed);
+            }
+        }
+        if fallback.is_none() {
+            fallback = Some(parsed);
+        }
+    }
+    fallback.context("GET_INSTALLMETA_ERR")
 }

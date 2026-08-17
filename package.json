@@ -14,7 +14,12 @@
     "test:online-install": "cd tests && node online-install.mjs",
     "test:offline-update": "cd tests && node offline-update.mjs",
     "test:online-update": "cd tests && node online-update.mjs",
-    "test:all": "npm run test:prepare && npm run test:offline-install && npm run test:online-install && npm run test:offline-update && npm run test:online-update"
+    "test:already-latest": "cd tests && node already-latest.mjs",
+    "test:uninstall": "cd tests && node uninstall.mjs",
+    "test:userdata-ignore": "cd tests && node userdata-ignore.mjs",
+    "test:occupied-process": "cd tests && node occupied-process.mjs",
+    "test:dump-offline-install": "cd tests && node dump-offline-install.mjs",
+    "test:all": "npm run test:prepare && npm run test:offline-install && npm run test:online-install && npm run test:offline-update && npm run test:online-update && npm run test:already-latest && npm run test:uninstall && npm run test:userdata-ignore && npm run test:occupied-process"
   },
   "dependencies": {
     "@sentry/cli": "^2.46.0",

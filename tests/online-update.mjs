@@ -6,15 +6,15 @@ import {
   getTestDir,
   waitForServer,
   getFileHash,
-  printLogFileIfExists,
   FLAGS,
+  runInstaller,
+  assertExitOk,
 } from './utils.mjs';
 import { startServer } from './server.mjs';
 import path from 'path';
-import { usePwsh, $ } from 'zx';
+import { usePwsh } from 'zx';
 import 'zx/globals';
 usePwsh();
-$.verbose = true;
 
 async function test() {
   const testDir = getTestDir('online-update');
@@ -39,21 +39,12 @@ async function test() {
 
     // 步骤1: 安装v1
     console.log('Installing v1...');
-    let result;
-    try {
-      result = await $`${installerV1} -S -D ${testDir}`.timeout('3m').quiet();
-    } catch (error) {
-      if (error.message && error.message.includes('timed out')) {
-        console.error(chalk.red('V1 installation timed out after 3 minutes'));
-        await printLogFileIfExists();
-      }
-      throw error;
-    }
-    if (result.exitCode !== 0) {
-      throw new Error(
-        `V1 installation failed with exit code ${result.exitCode}`,
-      );
-    }
+    let result = await runInstaller(
+      installerV1,
+      [FLAGS, '-D', testDir],
+      'V1 installation',
+    );
+    assertExitOk(result, 'V1 installation');
 
     // 步骤2: 从服务器获取v2进行更新
     // 删除日志文件 %temp%/KachinaInstaller.log
@@ -63,18 +54,12 @@ async function test() {
     }
     console.log('Updating to v2 from server...');
     const updaterPath = path.join(testDir, 'updater.exe');
-    try {
-      result = await $`& ${updaterPath} ${FLAGS} -D ${testDir} --source local-v2`.timeout('3m');
-    } catch (error) {
-      if (error.message && error.message.includes('timed out')) {
-        console.error(chalk.red('Update to v2 timed out after 3 minutes'));
-        await printLogFileIfExists();
-      }
-      throw error;
-    }
-    if (result.exitCode !== 0) {
-      throw new Error(`Update to v2 failed with exit code ${result.exitCode}`);
-    }
+    result = await runInstaller(
+      updaterPath,
+      [FLAGS, '-D', testDir, '--source', 'local-v2'],
+      'Update to v2',
+    );
+    assertExitOk(result, 'Update to v2');
 
     // check if fail in logs
     if (await fs.pathExists(logFile)) {

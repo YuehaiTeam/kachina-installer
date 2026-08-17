@@ -23,6 +23,9 @@ pub struct InstallArgs {
     // override mirrorc cdk
     #[clap(long, hide = true)]
     pub mirrorc_cdk: Option<String>,
+    /// Write session dump JSON here (dev / tests only)
+    #[clap(long, hide = true)]
+    pub dump_dir: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, clap::Args)]
