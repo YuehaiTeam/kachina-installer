@@ -491,13 +491,23 @@ pub async fn check_local_files(
     source: String,
     hash_algorithm: String,
     file_list: Vec<String>,
+    skip_hash: Vec<String>,
     notify: impl Fn(serde_json::Value) + std::marker::Send + 'static,
 ) -> Result<Vec<Metadata>> {
     let source_path = Path::new(&source);
     if !source_path.exists() {
         return Ok(Vec::new());
     }
+    let skip_hash: HashSet<String> = skip_hash
+        .into_iter()
+        .map(|name| {
+            name.replace('\\', "/")
+                .trim_start_matches('/')
+                .to_lowercase()
+        })
+        .collect();
     let mut files = Vec::new();
+    let mut stated = Vec::new();
     let mut seen_paths = HashSet::new();
 
     for file in file_list {
@@ -526,19 +536,28 @@ pub async fn check_local_files(
             Err(e) => return Err(anyhow::Error::new(e).context("GET_METADATA_ERR")),
         };
 
-        files.push(Metadata {
+        let item = Metadata {
             file_name: target_path.to_string_lossy().to_string(),
             hash: "".to_string(),
             size: metadata.len(),
             unwritable: false,
-        });
+        };
+        if skip_hash.contains(&normalized_relative_path.to_lowercase()) {
+            stated.push(item);
+        } else {
+            files.push(item);
+        }
     }
 
-    // send first progress
-    notify(serde_json::json!((0, files.len())));
-    let len = files.len();
+    files.sort_by(|a, b| b.size.cmp(&a.size));
+    let len = files.len() + stated.len();
+    notify(serde_json::json!((0, len)));
     if len == 0 {
         return Ok(Vec::new());
+    }
+    if files.is_empty() {
+        notify(serde_json::json!((len, len)));
+        return Ok(stated);
     }
 
     let hash_concurrency = std::thread::available_parallelism()
@@ -556,39 +575,46 @@ pub async fn check_local_files(
                 .acquire_owned()
                 .await
                 .context("HASH_SEMAPHORE_ERR")?;
-            let writable = tokio::fs::OpenOptions::new()
-                .read(true)
-                .write(true)
-                .open(&file.file_name)
-                .await
-                .is_ok();
-
-            if !writable {
-                file.unwritable = true;
-            }
-
-            file.hash = match run_hash(&hash_algorithm, &file.file_name).await {
-                Ok(hash) => hash,
-                Err(e) if writable => return Err(e),
-                Err(_) => String::new(),
-            };
-
-            Ok(file)
+            file.hash = run_hash(&hash_algorithm, &file.file_name).await?;
+            file.unwritable = false;
+            Ok::<Metadata, anyhow::Error>(file)
         });
     }
 
-    let mut finished = 0;
+    let mut finished = stated.len();
     let mut finished_hashes = Vec::with_capacity(len);
+    finished_hashes.extend(stated);
+    let mut last_notify = Instant::now();
+    const PROGRESS_FRAME: Duration = Duration::from_millis(50);
 
     while let Some(res) = joinset.join_next().await {
         let res = res.context("HASH_THREAD_ERR")?;
         let res = res.context("HASH_COMPLETE_ERR")?;
         finished += 1;
-        notify(serde_json::json!((finished, len)));
         finished_hashes.push(res);
+        if finished == len || last_notify.elapsed() >= PROGRESS_FRAME {
+            notify(serde_json::json!((finished, len)));
+            last_notify = Instant::now();
+        }
     }
 
     Ok(finished_hashes)
+}
+
+pub async fn probe_writable(file_list: Vec<String>) -> Vec<String> {
+    let mut unwritable = Vec::new();
+    for path in file_list {
+        let writable = tokio::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .await
+            .is_ok();
+        if !writable {
+            unwritable.push(path);
+        }
+    }
+    unwritable
 }
 
 pub async fn is_dir_empty(path: String, exe_name: String) -> (bool, bool) {
@@ -1080,4 +1106,123 @@ pub async fn verify_hash(
         .context("HASH_MISMATCH_ERR");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+    use std::os::windows::fs::OpenOptionsExt;
+    use std::sync::{Arc, Mutex};
+
+    fn temp_dir() -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "kachina-fs-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn write_file(dir: &Path, name: &str, bytes: &[u8]) -> PathBuf {
+        let path = dir.join(name);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        let mut file = std::fs::File::create(&path).unwrap();
+        file.write_all(bytes).unwrap();
+        file.flush().unwrap();
+        path
+    }
+
+    #[tokio::test]
+    async fn check_local_files_is_read_only_and_unwritable_false() {
+        let dir = temp_dir();
+        write_file(&dir, "app.exe", b"hello");
+        let path = dir.join("app.exe");
+        let mut perms = std::fs::metadata(&path).unwrap().permissions();
+        perms.set_readonly(true);
+        std::fs::set_permissions(&path, perms).unwrap();
+
+        let reports = Arc::new(Mutex::new(Vec::new()));
+        let reports_cb = reports.clone();
+        let scanned = check_local_files(
+            dir.to_string_lossy().to_string(),
+            "md5".to_string(),
+            vec!["app.exe".to_string()],
+            vec![],
+            move |v| reports_cb.lock().unwrap().push(v),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(scanned.len(), 1);
+        assert!(!scanned[0].unwritable);
+        assert_eq!(scanned[0].hash, "5d41402abc4b2a76b9719d911017c592");
+        let reports = reports.lock().unwrap();
+        assert_eq!(reports.first(), Some(&serde_json::json!((0, 1))));
+        assert_eq!(reports.last(), Some(&serde_json::json!((1, 1))));
+
+        let mut perms = std::fs::metadata(&path).unwrap().permissions();
+        perms.set_readonly(false);
+        let _ = std::fs::set_permissions(&path, perms);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn check_local_files_skip_hash_only_stats() {
+        let dir = temp_dir();
+        write_file(&dir, "User/settings.json", b"user-modified");
+        write_file(&dir, "app.exe", b"hello");
+        let scanned = check_local_files(
+            dir.to_string_lossy().to_string(),
+            "md5".to_string(),
+            vec!["app.exe".to_string(), "User/settings.json".to_string()],
+            vec!["User/settings.json".to_string()],
+            |_| {},
+        )
+        .await
+        .unwrap();
+        let user = scanned
+            .iter()
+            .find(|f| {
+                f.file_name
+                    .replace('\\', "/")
+                    .ends_with("User/settings.json")
+            })
+            .unwrap();
+        let app = scanned
+            .iter()
+            .find(|f| f.file_name.replace('\\', "/").ends_with("app.exe"))
+            .unwrap();
+        assert!(user.hash.is_empty());
+        assert_eq!(app.hash, "5d41402abc4b2a76b9719d911017c592");
+        assert!(scanned.iter().all(|f| !f.unwritable));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn probe_writable_marks_locked_file() {
+        let dir = temp_dir();
+        let free = write_file(&dir, "free.dll", b"ok");
+        let locked = write_file(&dir, "locked.dll", b"busy");
+        let _hold = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .share_mode(0)
+            .open(&locked)
+            .unwrap();
+        let unwritable = probe_writable(vec![
+            free.to_string_lossy().to_string(),
+            locked.to_string_lossy().to_string(),
+        ])
+        .await;
+        assert!(!unwritable.iter().any(|p| p.ends_with("free.dll")));
+        assert!(unwritable.iter().any(|p| p.ends_with("locked.dll")));
+        drop(_hold);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
