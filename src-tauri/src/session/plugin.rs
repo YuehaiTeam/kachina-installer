@@ -132,19 +132,8 @@ fn parse_github_url(url: &str) -> anyhow::Result<GitHubUrl> {
         .ok_or_else(|| hide(error::META_FAILED, "URL must contain /releases/"))?;
     let releases_prefix = format!("{}{}", &base_url[..releases_index], "/releases");
     let releases_latest_url = format!("{releases_prefix}/latest");
-    let re =
-        regex::Regex::new(r"/([^/]+)/([^/]+)/releases").map_err(|e| hide(error::META_FAILED, e))?;
-    let caps = re
-        .captures(&base_url)
+    let (owner, repo) = owner_repo_from_releases_url(&base_url)
         .ok_or_else(|| hide(error::META_FAILED, "Invalid releases URL format"))?;
-    let owner = caps
-        .get(1)
-        .map(|m| m.as_str().to_string())
-        .unwrap_or_default();
-    let repo = caps
-        .get(2)
-        .map(|m| m.as_str().to_string())
-        .unwrap_or_default();
     let host_ok = url::Url::parse(&base_url)
         .ok()
         .and_then(|u| u.host_str().map(|h| h == "github.com"))
@@ -182,27 +171,78 @@ async fn resolve_version(
         ));
     }
     if let Some(custom) = version_regex {
-        let re = regex::Regex::new(custom).map_err(|e| hide(error::META_FAILED, e))?;
-        return re
-            .captures(&redirect)
-            .and_then(|c| c.get(1).map(|m| m.as_str().to_string()))
-            .ok_or_else(|| {
-                hide(
-                    error::META_FAILED,
-                    format!("Failed to extract version from {redirect}"),
-                )
-            });
-    }
-    let re =
-        regex::Regex::new(r"/releases/tag/([^/?#]+)").map_err(|e| hide(error::META_FAILED, e))?;
-    re.captures(&redirect)
-        .and_then(|c| c.get(1).map(|m| m.as_str().to_string()))
-        .ok_or_else(|| {
+        return capture_first_group(custom, &redirect).ok_or_else(|| {
             hide(
                 error::META_FAILED,
-                format!("Failed to extract tag from {redirect}"),
+                format!("Failed to extract version from {redirect}"),
             )
-        })
+        });
+    }
+    tag_from_releases_redirect(&redirect).ok_or_else(|| {
+        hide(
+            error::META_FAILED,
+            format!("Failed to extract tag from {redirect}"),
+        )
+    })
+}
+
+fn owner_repo_from_releases_url(url: &str) -> Option<(String, String)> {
+    let idx = url.find("/releases")?;
+    let mut parts = url[..idx].rsplit('/');
+    let repo = parts.next()?.to_string();
+    let owner = parts.next()?.to_string();
+    if owner.is_empty() || repo.is_empty() {
+        return None;
+    }
+    Some((owner, repo))
+}
+
+fn tag_from_releases_redirect(url: &str) -> Option<String> {
+    const MARKER: &str = "/releases/tag/";
+    let start = url.find(MARKER)? + MARKER.len();
+    let rest = &url[start..];
+    let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let tag = &rest[..end];
+    if tag.is_empty() {
+        None
+    } else {
+        Some(tag.to_string())
+    }
+}
+
+/// Single capturing group, enough for plugin `versionRegex`. No `regex` crate.
+fn capture_first_group(pattern: &str, text: &str) -> Option<String> {
+    let open = pattern.find('(')?;
+    let close = pattern[open + 1..].find(')')? + open + 1;
+    let prefix = &pattern[..open];
+    let class = &pattern[open + 1..close];
+    let suffix = &pattern[close + 1..];
+    let start = text.find(prefix)? + prefix.len();
+    let rest = &text[start..];
+    let taken = match class {
+        "[^/?#]+" => rest.split(['/', '?', '#']).next().unwrap_or(""),
+        "[^/]+" => rest.split('/').next().unwrap_or(""),
+        "[^?#]+" => rest.split(['?', '#']).next().unwrap_or(""),
+        ".+" | ".*" => {
+            if suffix.is_empty() {
+                rest
+            } else {
+                rest.split(suffix).next().unwrap_or("")
+            }
+        }
+        _ => return None,
+    };
+    if class == ".+" && taken.is_empty() {
+        return None;
+    }
+    if !suffix.is_empty() && !rest[taken.len()..].starts_with(suffix) {
+        return None;
+    }
+    if taken.is_empty() && class != ".*" {
+        None
+    } else {
+        Some(taken.to_string())
+    }
 }
 
 async fn resolve_direct_url(original_url: &str, cache_time: Option<u64>) -> anyhow::Result<String> {
@@ -261,4 +301,51 @@ fn expiry_from_url(url: &str) -> Option<u128> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn owner_repo_from_github_releases_url() {
+        let (owner, repo) = owner_repo_from_releases_url(
+            "https://github.com/YuehaiTeam/app/releases/download/${version}/foo.exe",
+        )
+        .unwrap();
+        assert_eq!(owner, "YuehaiTeam");
+        assert_eq!(repo, "app");
+    }
+
+    #[test]
+    fn tag_from_latest_redirect() {
+        assert_eq!(
+            tag_from_releases_redirect("https://github.com/YuehaiTeam/app/releases/tag/v1.2.3")
+                .as_deref(),
+            Some("v1.2.3")
+        );
+        assert_eq!(
+            tag_from_releases_redirect(
+                "https://github.com/YuehaiTeam/app/releases/tag/v1.2.3?foo=1#bar"
+            )
+            .as_deref(),
+            Some("v1.2.3")
+        );
+    }
+
+    #[test]
+    fn custom_version_group() {
+        assert_eq!(
+            capture_first_group(
+                r"/releases/tag/([^/?#]+)",
+                "https://github.com/a/b/releases/tag/2.0.0"
+            )
+            .as_deref(),
+            Some("2.0.0")
+        );
+        assert_eq!(
+            capture_first_group(r"/releases/tag/v(.+)", "https://x/releases/tag/v3.1.4").as_deref(),
+            Some("3.1.4")
+        );
+    }
 }

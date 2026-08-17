@@ -1884,7 +1884,6 @@ dependencies = [
  "pin-project",
  "raw-window-handle",
  "rcedit",
- "regex",
  "reqwest",
  "reqwest-middleware",
  "rfd",
