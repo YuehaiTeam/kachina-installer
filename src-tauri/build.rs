@@ -1,35 +1,44 @@
 use std::env;
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
+
+use flate2::write::GzEncoder;
+use flate2::Compression;
 
 fn main() {
     let manifest = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
     embed_app_manifest(&manifest);
     let dist = manifest.join("../dist");
-    println!("cargo:rerun-if-changed={}", dist.display());
+    let html = dist.join("index.html");
+    println!("cargo:rerun-if-changed={}", html.display());
 
-    let mut files: Vec<(String, PathBuf)> = Vec::new();
-    if dist.is_dir() {
-        collect_files(&dist, &dist, &mut files);
-    }
-
-    let mut code = String::from(
-        "pub fn get(path: &str) -> Option<(&'static [u8], &'static str)> {\n    match path {\n",
-    );
-    for (url_path, file_path) in &files {
-        let abs = file_path
+    let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
+    let mut code =
+        String::from("pub fn get(path: &str) -> Option<(&'static [u8], &'static str, bool)> {\n");
+    if html.is_file() {
+        let gz_path = out_dir.join("index.html.gz");
+        gzip_file(&html, &gz_path);
+        let abs = gz_path
             .canonicalize()
-            .unwrap_or_else(|_| file_path.clone());
-        let abs = abs.to_string_lossy().replace('\\', "/");
-        let mime = mime_for(url_path);
+            .unwrap_or(gz_path)
+            .to_string_lossy()
+            .replace('\\', "/");
         code.push_str(&format!(
-            "        {url_path:?} => Some((include_bytes!(r\"{abs}\"), {mime:?})),\n"
+            "    match path {{\n        \"index.html\" => Some((include_bytes!(r\"{abs}\"), \"text/html; charset=utf-8\", true)),\n        _ => None,\n    }}\n"
         ));
+    } else {
+        code.push_str("    let _ = path;\n    None\n");
     }
-    code.push_str("        _ => None,\n    }\n}\n");
+    code.push_str("}\n");
+    fs::write(out_dir.join("ui_assets.rs"), code).unwrap();
+}
 
-    let out = PathBuf::from(env::var("OUT_DIR").unwrap()).join("ui_assets.rs");
-    fs::write(out, code).unwrap();
+fn gzip_file(src: &Path, dst: &Path) {
+    let data = fs::read(src).expect("read dist/index.html");
+    let mut encoder = GzEncoder::new(Vec::new(), Compression::best());
+    encoder.write_all(&data).expect("gzip frontend");
+    fs::write(dst, encoder.finish().expect("gzip finish")).expect("write index.html.gz");
 }
 
 fn embed_app_manifest(crate_dir: &Path) {
@@ -40,49 +49,4 @@ fn embed_app_manifest(crate_dir: &Path) {
         "cargo:rustc-link-arg=/MANIFESTINPUT:{}",
         app_manifest.display()
     );
-}
-
-fn collect_files(root: &Path, dir: &Path, out: &mut Vec<(String, PathBuf)>) {
-    let Ok(entries) = fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            collect_files(root, &path, out);
-            continue;
-        }
-        let rel = path
-            .strip_prefix(root)
-            .unwrap_or(&path)
-            .to_string_lossy()
-            .replace('\\', "/");
-        out.push((rel, path));
-    }
-}
-
-fn mime_for(path: &str) -> &'static str {
-    match Path::new(path)
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("")
-        .to_ascii_lowercase()
-        .as_str()
-    {
-        "html" | "htm" => "text/html; charset=utf-8",
-        "js" | "mjs" => "text/javascript; charset=utf-8",
-        "css" => "text/css; charset=utf-8",
-        "json" => "application/json",
-        "svg" => "image/svg+xml",
-        "png" => "image/png",
-        "jpg" | "jpeg" => "image/jpeg",
-        "webp" => "image/webp",
-        "gif" => "image/gif",
-        "ico" => "image/x-icon",
-        "woff" => "font/woff",
-        "woff2" => "font/woff2",
-        "ttf" => "font/ttf",
-        "map" => "application/json",
-        _ => "application/octet-stream",
-    }
 }
