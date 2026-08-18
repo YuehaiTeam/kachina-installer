@@ -11,12 +11,19 @@ use crate::dfs::InsightItem;
 use crate::fs::is_dir_empty;
 use crate::installer::config::InstallerConfig;
 use crate::installer::lnk::get_dirs;
+use crate::installer::lnk::CreateLnkArgs;
 use crate::installer::registry::read_uninstall_metadata_raw;
+use crate::installer::registry::WriteRegistryParams;
+use crate::installer::uninstall::{CreateUninstallerArgs, RunUninstallArgs};
+use crate::ipc::install_file::{
+    InstallFileArgs, InstallFileMode, InstallFileSource, InstallMultiStreamArgs,
+};
 use crate::ipc::manager::ManagedElevate;
 use crate::ipc::operation::IpcOperation;
+use crate::ipc::{progress_noop, progress_notify, ProgressNotify};
 use crate::local::Embedded;
 use crate::session::commands::SessionState;
-use crate::session::dump::write_dump;
+use crate::session::dump::session_dump;
 use crate::session::merge::{dfs2_ranges, file_mode, plan_tasks, FileMode, FilePos, InstallTask};
 use crate::session::plan::{
     build_plan, collect_skip_hash, files_to_probe_writable, find_local, join_install,
@@ -38,7 +45,7 @@ pub async fn run_op(
     mgr: &ManagedElevate,
     elevate: bool,
     op: IpcOperation,
-    on_progress: impl Fn(Value) + Send + Clone + 'static,
+    on_progress: ProgressNotify,
 ) -> anyhow::Result<Value> {
     let value = mgr.run(op, elevate, on_progress).await.into_anyhow()?;
     unwrap_ipc(value)
@@ -52,9 +59,14 @@ async fn run_op_with_ui(
     mut on_ui: impl FnMut(&dyn SessionUi, &Value),
 ) -> anyhow::Result<Value> {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Value>();
-    let mut op_fut = Box::pin(run_op(mgr, elevate, op, move |p| {
-        let _ = tx.send(p);
-    }));
+    let mut op_fut = Box::pin(run_op(
+        mgr,
+        elevate,
+        op,
+        progress_notify(move |p| {
+            let _ = tx.send(p);
+        }),
+    ));
     loop {
         tokio::select! {
             Some(p) = rx.recv() => on_ui(ui, &p),
@@ -77,7 +89,7 @@ async fn run_download_op(
     op: IpcOperation,
     ctx: &SourceCtx,
     mode: Option<&str>,
-    on_progress: impl Fn(Value) + Send + Clone + 'static,
+    on_progress: ProgressNotify,
 ) -> anyhow::Result<(Value, Option<InsightItem>)> {
     match mgr.run(op, elevate, on_progress).await {
         Ok(value) => {
@@ -129,11 +141,16 @@ fn collect_insight(ctx: &SourceCtx, insight: Option<InsightItem>, mode: Option<&
     }
 }
 
-fn mode_from_op(op: &Value) -> Option<&'static str> {
-    match op.pointer("/mode/type").and_then(|v| v.as_str()) {
-        Some("HybridPatch") => Some("hybridpatch"),
-        Some("Patch") => Some("patch"),
-        Some("Direct") if op.pointer("/mode/source/url").is_some() => Some("direct"),
+fn mode_from_op(op: &IpcOperation) -> Option<&'static str> {
+    match op {
+        IpcOperation::InstallFile(args) => match &args.mode {
+            InstallFileMode::HybridPatch { .. } => Some("hybridpatch"),
+            InstallFileMode::Patch { .. } => Some("patch"),
+            InstallFileMode::Direct {
+                source: InstallFileSource::Url { .. },
+            } => Some("direct"),
+            _ => None,
+        },
         _ => None,
     }
 }
@@ -174,10 +191,6 @@ fn unwrap_ipc(value: Value) -> anyhow::Result<Value> {
         return Ok(ok.clone());
     }
     Ok(value)
-}
-
-fn op_from(value: Value) -> anyhow::Result<IpcOperation> {
-    serde_json::from_value(value).map_err(|e| crate::session::error::hide("安装失败，请重试", e))
 }
 
 fn progress(ui: &dyn SessionUi, sub_step: u32, percent: f64, current: impl Into<String>) {
@@ -292,10 +305,10 @@ async fn run_dfs_install(
     mgr: &ManagedElevate,
 ) -> anyhow::Result<SessionResult> {
     progress(ui, 0, 1.0, "获取最新版本");
-    write_dump(
+    session_dump!(
         settings.dump_dir.as_deref(),
         "01-settings.json",
-        &json!({
+        json!({
             "install_path": settings.install_path,
             "source_uri": settings.source_uri,
             "is_update": settings.is_update,
@@ -306,9 +319,8 @@ async fn run_dfs_install(
             "app_name": project.app_name,
             "user_data_path": project.user_data_path,
             "ignore_folder_path": project.ignore_folder_path,
-        }),
-    )
-    .await;
+        })
+    );
 
     let embedded_meta = config
         .enbedded_metadata
@@ -359,7 +371,7 @@ async fn run_dfs_install(
     }
 
     if settings.elevate {
-        let _ = run_op(mgr, true, op_from(json!({"type": "Ping"}))?, |_| {}).await;
+        let _ = run_op(mgr, true, IpcOperation::Ping, progress_noop()).await;
     }
     emit_insight(
         ui,
@@ -421,10 +433,10 @@ async fn run_dfs_install(
         app_name: project.app_name.clone(),
     });
 
-    write_dump(
+    session_dump!(
         settings.dump_dir.as_deref(),
         "02-meta-scan.json",
-        &json!({
+        json!({
             "hash_key": hash_key,
             "used_online": used_online,
             "tag_name": latest.tag_name,
@@ -434,9 +446,8 @@ async fn run_dfs_install(
             "local": local,
             "embedded_names": config.embedded_files.as_ref().map(|f| f.iter().map(|e| e.name.clone()).collect::<Vec<_>>()).unwrap_or_default(),
             "ignore_nonempty": ignore_nonempty,
-        }),
-    )
-    .await;
+        })
+    );
     let mut plan = plan;
     let probe_rels = files_to_probe_writable(&plan, &local);
     if !probe_rels.is_empty() {
@@ -447,11 +458,8 @@ async fn run_dfs_install(
         let raw = run_op(
             mgr,
             settings.elevate,
-            op_from(json!({
-                "type": "ProbeWritable",
-                "file_list": paths,
-            }))?,
-            |_| {},
+            IpcOperation::ProbeWritable { file_list: paths },
+            progress_noop(),
         )
         .await?;
         let unwritable: Vec<String> = raw
@@ -464,7 +472,7 @@ async fn run_dfs_install(
             .unwrap_or_default();
         mark_unwritable(&mut plan.files, &settings.install_path, &unwritable);
     }
-    write_dump(settings.dump_dir.as_deref(), "03-plan.json", &plan).await;
+    session_dump!(settings.dump_dir.as_deref(), "03-plan.json", plan);
 
     let to_install: Vec<_> = plan
         .files
@@ -474,12 +482,11 @@ async fn run_dfs_install(
         .collect();
 
     if to_install.is_empty() {
-        write_dump(
+        session_dump!(
             settings.dump_dir.as_deref(),
             "04-install-ops.json",
-            &json!([]),
-        )
-        .await;
+            Vec::<IpcOperation>::new()
+        );
         finish_install(settings, config, project, Some(&latest), ui, mgr).await?;
         progress(ui, 2, 100.0, "已是最新版本");
         return Ok(SessionResult::install(true, settings.is_update));
@@ -571,8 +578,9 @@ async fn run_dfs_install(
     )
     .await;
     cleanup_dfs2(&mut source_ctx).await;
+    #[cfg_attr(not(debug_assertions), allow(unused_variables))]
     let ops = ops?;
-    write_dump(settings.dump_dir.as_deref(), "04-install-ops.json", &ops).await;
+    session_dump!(settings.dump_dir.as_deref(), "04-install-ops.json", ops);
 
     if !plan.deletes.is_empty() {
         progress(ui, 2, 95.0, "删除旧版残留文件……");
@@ -584,8 +592,8 @@ async fn run_dfs_install(
         let _ = run_op(
             mgr,
             settings.elevate,
-            op_from(json!({"type": "RmList", "list": list}))?,
-            |_| {},
+            IpcOperation::RmList { list },
+            progress_noop(),
         )
         .await;
     }
@@ -660,8 +668,10 @@ async fn prepare_process(
     let found = run_op(
         mgr,
         false,
-        op_from(json!({"type": "FindProcessByName", "name": project.exe_name}))?,
-        |_| {},
+        IpcOperation::FindProcessByName {
+            name: project.exe_name.clone(),
+        },
+        progress_noop(),
     )
     .await
     .unwrap_or(json!([]));
@@ -693,8 +703,8 @@ async fn prepare_process(
         if run_op(
             mgr,
             settings.elevate,
-            op_from(json!({"type": "KillProcess", "pid": pid}))?,
-            |_| {},
+            IpcOperation::KillProcess { pid: *pid },
+            progress_noop(),
         )
         .await
         .is_err()
@@ -702,8 +712,8 @@ async fn prepare_process(
             run_op(
                 mgr,
                 true,
-                op_from(json!({"type": "KillProcess", "pid": pid}))?,
-                |_| {},
+                IpcOperation::KillProcess { pid: *pid },
+                progress_noop(),
             )
             .await
             .context("结束进程失败")?;
@@ -737,16 +747,15 @@ async fn scan_local(
     let mut op_fut = Box::pin(run_op(
         mgr,
         settings.elevate,
-        op_from(json!({
-            "type": "CheckLocalFiles",
-            "source": settings.install_path,
-            "hash_algorithm": algo,
-            "file_list": files,
-            "skip_hash": skip_hash,
-        }))?,
-        move |p| {
-            let _ = tx.send(p);
+        IpcOperation::CheckLocalFiles {
+            source: settings.install_path.clone(),
+            hash_algorithm: algo.to_string(),
+            file_list: files,
+            skip_hash,
         },
+        progress_notify(move |p| {
+            let _ = tx.send(p);
+        }),
     ));
     let raw = loop {
         tokio::select! {
@@ -914,9 +923,9 @@ impl ProgressHandle {
         }
     }
 
-    fn callback(&self) -> impl Fn(Value) + Send + Clone + 'static {
+    fn callback(&self) -> ProgressNotify {
         let handle = self.clone();
-        move |p| apply_ipc_progress(&handle, &p)
+        progress_notify(move |p| apply_ipc_progress(&handle, &p))
     }
 }
 
@@ -1038,7 +1047,7 @@ async fn install_files(
     source_ctx: &SourceCtx,
     ui: &dyn SessionUi,
     mgr: &ManagedElevate,
-) -> anyhow::Result<Vec<Value>> {
+) -> anyhow::Result<Vec<IpcOperation>> {
     let local_files = Arc::new(config.embedded_files.clone().unwrap_or_default());
     let disk_files = Arc::new(disk_files.to_vec());
     let prog = Arc::new(Mutex::new(DownloadProg::from_tasks(tasks)));
@@ -1253,8 +1262,8 @@ async fn fallback_merged_files(
     mgr: &ManagedElevate,
     handle: &ProgressHandle,
     has_error: &AtomicBool,
-) -> anyhow::Result<Value> {
-    let mut ops = Vec::new();
+) -> anyhow::Result<IpcOperation> {
+    let mut last = None;
     for &i in failed {
         if has_error.load(Ordering::Relaxed) {
             return Err(anyhow!("merged fallback cancelled"));
@@ -1262,22 +1271,23 @@ async fn fallback_merged_files(
         let Some(file) = files.get(i) else {
             continue;
         };
-        let one = install_one(
-            settings,
-            local_files,
-            disk_files,
-            latest,
-            hash_key,
-            &file.item,
-            source_ctx,
-            mgr,
-            false,
-            Some(handle.only(i)),
-        )
-        .await?;
-        ops.push(one);
+        last = Some(
+            install_one(
+                settings,
+                local_files,
+                disk_files,
+                latest,
+                hash_key,
+                &file.item,
+                source_ctx,
+                mgr,
+                false,
+                Some(handle.only(i)),
+            )
+            .await?,
+        );
     }
-    Ok(json!({ "type": "MergedFallback", "ops": ops }))
+    last.ok_or_else(|| anyhow!("merged fallback cancelled"))
 }
 
 async fn install_one(
@@ -1291,14 +1301,14 @@ async fn install_one(
     mgr: &ManagedElevate,
     skip_patch_first: bool,
     handle: Option<ProgressHandle>,
-) -> anyhow::Result<Value> {
+) -> anyhow::Result<IpcOperation> {
     let file_name = item.file_name.clone();
     let mut last_err = None;
     let mut first_op = None;
     let mut last_insight = None;
     for attempt in 1..=3 {
         let skip_patch = skip_patch_first || attempt > 1;
-        let op = build_install_op(
+        let ipc = build_install_op(
             settings,
             local_files,
             disk_files,
@@ -1310,16 +1320,9 @@ async fn install_one(
         )
         .await?;
         if first_op.is_none() {
-            first_op = Some(op.clone());
+            first_op = Some(ipc.clone());
         }
-        let mode = mode_from_op(&op);
-        let ipc = match op_from(op) {
-            Ok(v) => v,
-            Err(err) => {
-                last_err = Some(err);
-                break;
-            }
-        };
+        let mode = mode_from_op(&ipc);
         let result = if let Some(handle) = handle.clone() {
             run_download_op(
                 mgr,
@@ -1331,7 +1334,15 @@ async fn install_one(
             )
             .await
         } else {
-            run_download_op(mgr, settings.elevate, ipc, source_ctx, mode, |_| {}).await
+            run_download_op(
+                mgr,
+                settings.elevate,
+                ipc,
+                source_ctx,
+                mode,
+                progress_noop(),
+            )
+            .await
         };
         match result {
             Ok((_, insight)) => {
@@ -1362,7 +1373,7 @@ async fn install_one(
 }
 
 struct MergedResult {
-    op: Value,
+    op: IpcOperation,
     failed: Vec<usize>,
 }
 
@@ -1386,46 +1397,49 @@ async fn install_merged(
         download_size,
     )
     .await?;
-    let chunks: Vec<Value> = files
+    let chunks: Vec<InstallFileArgs> = files
         .iter()
-        .map(|file| {
-            json!({
-                "type": "InstallFile",
-                "mode": {
-                    "type": "Direct",
-                    "source": {
-                        "url": url,
-                        "offset": file.offset.saturating_sub(start),
-                        "size": file.size,
-                        "skip_decompress": false,
-                    }
+        .map(|file| InstallFileArgs {
+            mode: InstallFileMode::Direct {
+                source: InstallFileSource::Url {
+                    url: url.clone(),
+                    offset: file.offset.saturating_sub(start),
+                    size: file.size,
+                    skip_decompress: false,
                 },
-                "target": join_install(&settings.install_path, &file.item.file_name),
-                "md5": file.item.md5,
-                "xxh": file.item.xxh,
-            })
+            },
+            target: join_install(&settings.install_path, &file.item.file_name),
+            md5: file.item.md5.clone(),
+            xxh: file.item.xxh.clone(),
+            clear_installer_index_mark: None,
         })
         .collect();
-    let op = json!({
-        "type": "InstallMultichunkStream",
-        "url": url,
-        "range": range,
-        "chunks": chunks,
+    let ipc = IpcOperation::InstallMultichunkStream(InstallMultiStreamArgs {
+        url,
+        range: range.to_string(),
+        chunks,
     });
     let mode = merged_mode(files, local_files, &latest.patches, hash_key);
-    let ipc = op_from(op.clone())?;
     let (value, insight) = if let Some(handle) = handle.clone() {
         run_download_op(
             mgr,
             settings.elevate,
-            ipc,
+            ipc.clone(),
             source_ctx,
             Some(mode),
             handle.callback(),
         )
         .await?
     } else {
-        run_download_op(mgr, settings.elevate, ipc, source_ctx, Some(mode), |_| {}).await?
+        run_download_op(
+            mgr,
+            settings.elevate,
+            ipc.clone(),
+            source_ctx,
+            Some(mode),
+            progress_noop(),
+        )
+        .await?
     };
     let mut failed = Vec::new();
     if let Some(results) = value.get("results").and_then(|v| v.as_array()) {
@@ -1459,7 +1473,7 @@ async fn install_merged(
             Some("merged chunk failed"),
         );
     }
-    Ok(MergedResult { op, failed })
+    Ok(MergedResult { op: ipc, failed })
 }
 
 async fn build_install_op(
@@ -1471,20 +1485,25 @@ async fn build_install_op(
     item: &HashInfo,
     source_ctx: &SourceCtx,
     skip_patch: bool,
-) -> anyhow::Result<Value> {
+) -> anyhow::Result<IpcOperation> {
     let target = join_install(&settings.install_path, &item.file_name);
     let hash =
         hash_of_item(item, hash_key).ok_or_else(|| anyhow!(crate::session::error::HASH_INVALID))?;
     let installer = item.installer.unwrap_or(false);
     if !skip_patch {
         if let Some(local) = local_files.iter().find(|l| l.name == hash) {
-            return Ok(json!({
-                "type": "InstallFile",
-                "mode": { "type": "Direct", "source": { "offset": local.offset, "size": local.size } },
-                "target": target,
-                "md5": item.md5,
-                "xxh": item.xxh,
-                "clear_installer_index_mark": installer,
+            return Ok(IpcOperation::InstallFile(InstallFileArgs {
+                mode: InstallFileMode::Direct {
+                    source: InstallFileSource::Local {
+                        offset: local.offset,
+                        size: local.size,
+                        skip_decompress: false,
+                    },
+                },
+                target,
+                md5: item.md5.clone(),
+                xxh: item.xxh.clone(),
+                clear_installer_index_mark: Some(installer),
             }));
         }
 
@@ -1547,60 +1566,59 @@ fn side_hash(side: &crate::session::plan::PatchSide, key: HashKey) -> Option<&st
     }
 }
 
+fn file_source(loc: FileLocation) -> InstallFileSource {
+    if let Some(url) = loc.url {
+        InstallFileSource::Url {
+            url,
+            offset: loc.offset,
+            size: loc.size,
+            skip_decompress: loc.skip_decompress,
+        }
+    } else {
+        InstallFileSource::Local {
+            offset: loc.offset,
+            size: loc.size,
+            skip_decompress: loc.skip_decompress,
+        }
+    }
+}
+
 fn url_op(
     loc: FileLocation,
     target: &str,
     item: &HashInfo,
     diff_size: Option<usize>,
     installer: bool,
-) -> Value {
-    let source = if let Some(url) = loc.url {
-        json!({
-            "url": url,
-            "offset": loc.offset,
-            "size": loc.size,
-            "skip_decompress": loc.skip_decompress,
-        })
+) -> IpcOperation {
+    let source = file_source(loc);
+    let mode = if let Some(diff_size) = diff_size {
+        InstallFileMode::Patch { source, diff_size }
     } else {
-        json!({ "offset": loc.offset, "size": loc.size, "skip_decompress": loc.skip_decompress })
+        InstallFileMode::Direct { source }
     };
-    if let Some(diff_size) = diff_size {
-        json!({
-            "type": "InstallFile",
-            "mode": { "type": "Patch", "source": source, "diff_size": diff_size },
-            "target": target,
-            "md5": item.md5,
-            "xxh": item.xxh,
-            "clear_installer_index_mark": installer,
-        })
-    } else {
-        json!({
-            "type": "InstallFile",
-            "mode": { "type": "Direct", "source": source },
-            "target": target,
-            "md5": item.md5,
-            "xxh": item.xxh,
-            "clear_installer_index_mark": installer,
-        })
-    }
+    IpcOperation::InstallFile(InstallFileArgs {
+        mode,
+        target: target.to_string(),
+        md5: item.md5.clone(),
+        xxh: item.xxh.clone(),
+        clear_installer_index_mark: Some(installer),
+    })
 }
 
-fn hybrid_op(local: &Embedded, loc: FileLocation, target: &str, item: &HashInfo) -> Value {
-    json!({
-        "type": "InstallFile",
-        "mode": {
-            "type": "HybridPatch",
-            "diff": {
-                "url": loc.url,
-                "offset": loc.offset,
-                "size": loc.size,
-                "skip_decompress": loc.skip_decompress,
+fn hybrid_op(local: &Embedded, loc: FileLocation, target: &str, item: &HashInfo) -> IpcOperation {
+    IpcOperation::InstallFile(InstallFileArgs {
+        mode: InstallFileMode::HybridPatch {
+            diff: file_source(loc),
+            source: InstallFileSource::Local {
+                offset: local.offset,
+                size: local.size,
+                skip_decompress: false,
             },
-            "source": { "offset": local.offset, "size": local.size },
         },
-        "target": target,
-        "md5": item.md5,
-        "xxh": item.xxh,
+        target: target.to_string(),
+        md5: item.md5.clone(),
+        xxh: item.xxh.clone(),
+        clear_installer_index_mark: None,
     })
 }
 
@@ -1628,15 +1646,14 @@ async fn install_runtimes(
             let mut op_fut = Box::pin(run_op(
                 mgr,
                 settings.elevate,
-                op_from(json!({
-                    "type": "InstallRuntime",
-                    "tag": tag,
-                    "offset": embed.map(|e| e.offset),
-                    "size": embed.map(|e| e.size),
-                }))?,
-                move |p| {
-                    let _ = tx.send(p);
+                IpcOperation::InstallRuntime {
+                    tag: tag.clone(),
+                    offset: embed.map(|e| e.offset),
+                    size: embed.map(|e| e.size),
                 },
+                progress_notify(move |p| {
+                    let _ = tx.send(p);
+                }),
             ));
             let res = loop {
                 tokio::select! {
@@ -1700,8 +1717,11 @@ async fn finish_install(
         let _ = run_op(
             mgr,
             settings.elevate,
-            op_from(json!({"type": "CreateLnk", "target": exe_path, "lnk": desktop_lnk}))?,
-            |_| {},
+            IpcOperation::CreateLnk(CreateLnkArgs {
+                target: exe_path.clone(),
+                lnk: desktop_lnk,
+            }),
+            progress_noop(),
         )
         .await;
     }
@@ -1709,8 +1729,11 @@ async fn finish_install(
         let _ = run_op(
             mgr,
             settings.elevate,
-            op_from(json!({"type": "CreateLnk", "target": exe_path, "lnk": program_lnk}))?,
-            |_| {},
+            IpcOperation::CreateLnk(CreateLnkArgs {
+                target: exe_path.clone(),
+                lnk: program_lnk,
+            }),
+            progress_noop(),
         )
         .await;
     }
@@ -1718,13 +1741,12 @@ async fn finish_install(
         if let Err(err) = run_op(
             mgr,
             settings.elevate,
-            op_from(json!({
-                "type": "CreateUninstaller",
-                "source": settings.install_path,
-                "uninstaller_name": project.uninstall_name,
-                "updater_name": project.updater_name,
-            }))?,
-            |_| {},
+            IpcOperation::CreateUninstaller(CreateUninstallerArgs {
+                source: settings.install_path.clone(),
+                uninstaller_name: project.uninstall_name.clone(),
+                updater_name: project.updater_name.clone(),
+            }),
+            progress_noop(),
         )
         .await
         {
@@ -1735,12 +1757,11 @@ async fn finish_install(
         let _ = run_op(
             mgr,
             settings.elevate,
-            op_from(json!({
-                "type": "CreateLnk",
-                "target": join_install(&settings.install_path, &project.uninstall_name),
-                "lnk": uninstall_lnk,
-            }))?,
-            |_| {},
+            IpcOperation::CreateLnk(CreateLnkArgs {
+                target: join_install(&settings.install_path, &project.uninstall_name),
+                lnk: uninstall_lnk,
+            }),
+            progress_noop(),
         )
         .await;
     }
@@ -1749,19 +1770,18 @@ async fn finish_install(
         if let Err(err) = run_op(
             mgr,
             settings.elevate,
-            op_from(json!({
-                "type": "WriteRegistry",
-                "reg_name": project.reg_name,
-                "name": project.app_name,
-                "version": latest.tag_name,
-                "exe": exe_path,
-                "source": settings.install_path,
-                "uninstaller": join_install(&settings.install_path, &project.uninstall_name),
-                "metadata": serde_json::to_string(latest).unwrap_or_default(),
-                "size": size,
-                "publisher": project.publisher,
-            }))?,
-            |_| {},
+            IpcOperation::WriteRegistry(WriteRegistryParams {
+                reg_name: project.reg_name.clone(),
+                name: project.app_name.clone(),
+                version: latest.tag_name.clone(),
+                exe: exe_path,
+                source: settings.install_path.clone(),
+                uninstaller: join_install(&settings.install_path, &project.uninstall_name),
+                metadata: serde_json::to_string(latest).unwrap_or_default(),
+                size,
+                publisher: project.publisher.clone(),
+            }),
+            progress_noop(),
         )
         .await
         {
@@ -1864,7 +1884,10 @@ async fn run_mirrorc(
     run_op_with_ui(
         mgr,
         settings.elevate,
-        op_from(json!({"type": "RunMirrorcDownload", "url": url, "zip_path": zip_path}))?,
+        IpcOperation::RunMirrorcDownload {
+            url: url.to_string(),
+            zip_path: zip_path.clone(),
+        },
         ui,
         |ui, p| {
             if p.get("type").and_then(|v| v.as_str()) == Some("download") {
@@ -1884,11 +1907,10 @@ async fn run_mirrorc(
     let installed = run_op_with_ui(
         mgr,
         settings.elevate,
-        op_from(json!({
-            "type": "RunMirrorcInstall",
-            "zip_path": zip_path,
-            "target_path": settings.install_path,
-        }))?,
+        IpcOperation::RunMirrorcInstall {
+            zip_path,
+            target_path: settings.install_path.clone(),
+        },
         ui,
         |ui, p| match p.get("type").and_then(|v| v.as_str()) {
             Some("extract") => {
@@ -2007,22 +2029,21 @@ pub async fn run_uninstall(
     extra.push(format!("{}\\{}", program, project.app_name));
     extra.push(format!("{}\\{}.lnk", desktop, project.app_name));
     if settings.elevate {
-        let _ = run_op(mgr, true, op_from(json!({"type": "Ping"}))?, |_| {}).await;
+        let _ = run_op(mgr, true, IpcOperation::Ping, progress_noop()).await;
     }
     progress(ui, 1, 40.0, "正在卸载……");
     run_op(
         mgr,
         settings.elevate,
-        op_from(json!({
-            "type": "RunUninstall",
-            "source": settings.install_path,
-            "files": files,
-            "user_data_path": user_data,
-            "extra_uninstall_path": extra,
-            "reg_name": project.reg_name,
-            "uninstall_name": project.uninstall_name,
-        }))?,
-        |_| {},
+        IpcOperation::RunUninstall(RunUninstallArgs {
+            source: settings.install_path.clone(),
+            files,
+            user_data_path: user_data,
+            extra_uninstall_path: extra,
+            reg_name: project.reg_name.clone(),
+            uninstall_name: project.uninstall_name.clone(),
+        }),
+        progress_noop(),
     )
     .await?;
     progress(ui, 2, 100.0, "卸载完成");

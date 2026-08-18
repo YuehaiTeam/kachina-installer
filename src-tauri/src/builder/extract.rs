@@ -516,10 +516,7 @@ mod tests {
     #[test]
     fn classify_internal_and_patch_names() {
         assert!(matches!(classify_file_type("\0INDEX"), FileType::Index));
-        assert!(matches!(
-            classify_file_type("aaa_bbb"),
-            FileType::Patch
-        ));
+        assert!(matches!(classify_file_type("aaa_bbb"), FileType::Patch));
         assert!(matches!(classify_file_type("deadbeef"), FileType::File));
     }
 

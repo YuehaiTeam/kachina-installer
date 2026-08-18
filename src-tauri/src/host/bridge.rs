@@ -1,12 +1,11 @@
 use std::sync::Arc;
 
-use serde::Deserialize;
 use serde_json::{json, Value};
 
 use super::{HostCtx, HostHandle, UiAction};
 use crate::utils::error::TACommandError;
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, serde::Deserialize)]
 struct InvokeMessage {
     id: u64,
     kind: String,
@@ -72,42 +71,21 @@ async fn dispatch(
             ok(())
         }
         "get_installer_config" => {
-            #[derive(Deserialize)]
-            #[serde(rename_all = "camelCase")]
-            struct Args {
-                scan_exe: bool,
-            }
-            let args: Args = parse(args)?;
-            let cfg =
-                crate::installer::config::get_installer_config(&ctx.args, args.scan_exe).await?;
+            let scan_exe = req_bool(&args, &["scanExe", "scan_exe"])?;
+            let cfg = crate::installer::config::get_installer_config(&ctx.args, scan_exe).await?;
             ok(cfg)
         }
         "select_dir" => {
-            #[derive(Deserialize)]
-            #[serde(rename_all = "camelCase")]
-            struct Args {
-                path: String,
-                exe_name: String,
-                silent: bool,
-            }
-            let args: Args = parse(args)?;
-            let res = crate::installer::select_dir(
-                args.path,
-                args.exe_name,
-                args.silent,
-                handle.parent(),
-            )
-            .await;
+            let path = req_str(&args, &["path"])?;
+            let exe_name = req_str(&args, &["exeName", "exe_name"])?;
+            let silent = req_bool(&args, &["silent"])?;
+            let res = crate::installer::select_dir(path, exe_name, silent, handle.parent()).await;
             ok(res)
         }
         "start_install" => {
-            #[derive(Deserialize)]
-            struct Args {
-                input: crate::session::types::SessionInput,
-            }
-            let args: Args = parse(args)?;
+            let input = parse_session_input(&args)?;
             let res = crate::session::commands::start_install(
-                args.input,
+                input,
                 &ctx.args,
                 &ctx.elevate,
                 &ctx.session,
@@ -117,13 +95,9 @@ async fn dispatch(
             ok(res)
         }
         "start_uninstall" => {
-            #[derive(Deserialize)]
-            struct Args {
-                input: crate::session::types::SessionInput,
-            }
-            let args: Args = parse(args)?;
+            let input = parse_session_input(&args)?;
             let res = crate::session::commands::start_uninstall(
-                args.input,
+                input,
                 &ctx.args,
                 &ctx.elevate,
                 &ctx.session,
@@ -133,154 +107,95 @@ async fn dispatch(
             ok(res)
         }
         "answer_session_prompt" => {
-            #[derive(Deserialize)]
-            struct Args {
-                id: String,
-                accept: bool,
-            }
-            let args: Args = parse(args)?;
-            ok(ctx.session.prompts.answer(&args.id, args.accept).await)
+            let id = req_str(&args, &["id"])?;
+            let accept = req_bool(&args, &["accept"])?;
+            ok(ctx.session.prompts.answer(&id, accept).await)
         }
-        "answer_session_plugin" => {
-            #[derive(Deserialize)]
-            struct Args {
-                id: String,
-                ok: bool,
-                data: Option<Value>,
-                error: Option<String>,
-                unimplemented: Option<bool>,
-            }
-            let args: Args = parse(args)?;
-            ok(ctx
-                .session
-                .plugins
-                .answer(crate::session::ui::PluginAnswer {
-                    id: args.id,
-                    ok: args.ok,
-                    data: args.data,
-                    error: args.error,
-                    unimplemented: args.unimplemented.unwrap_or(false),
-                })
-                .await)
-        }
+        "answer_session_plugin" => ok(ctx
+            .session
+            .plugins
+            .answer(crate::session::ui::PluginAnswer {
+                id: req_str(&args, &["id"])?,
+                ok: req_bool(&args, &["ok"])?,
+                data: args.get("data").cloned(),
+                error: opt_str(&args, &["error"]),
+                unimplemented: opt_bool(&args, &["unimplemented"]).unwrap_or(false),
+            })
+            .await),
         "http_get_request" => {
-            #[derive(Deserialize)]
-            #[serde(rename_all = "camelCase")]
-            struct Args {
-                url: String,
-                ignore_redirects: Option<bool>,
-                headers: Option<std::collections::HashMap<String, String>>,
-                timeout_ms: Option<u64>,
-            }
-            let args: Args = parse(args)?;
+            let url = req_str(&args, &["url"])?;
             let res = crate::dfs::http_get_request(
-                args.url,
-                args.ignore_redirects,
-                args.headers,
-                args.timeout_ms,
+                url,
+                opt_bool(&args, &["ignoreRedirects", "ignore_redirects"]),
+                opt_headers(&args),
+                opt_u64(&args, &["timeoutMs", "timeout_ms"]),
             )
             .await
             .map_err(|e| TACommandError::new(anyhow::anyhow!(e)))?;
             ok(res)
         }
         "wincred_read" => {
-            #[derive(Deserialize)]
-            struct Args {
-                target: String,
-            }
-            let args: Args = parse(args)?;
-            ok(crate::utils::wincred::wincred_read(&args.target)?)
+            let target = req_str(&args, &["target"])?;
+            ok(crate::utils::wincred::wincred_read(&target)?)
         }
         "wincred_write" => {
-            #[derive(Deserialize)]
-            struct Args {
-                target: String,
-                token: String,
-                comment: String,
-            }
-            let args: Args = parse(args)?;
-            crate::utils::wincred::wincred_write(&args.target, &args.token, &args.comment)?;
+            crate::utils::wincred::wincred_write(
+                &req_str(&args, &["target"])?,
+                &req_str(&args, &["token"])?,
+                &req_str(&args, &["comment"])?,
+            )?;
             ok(())
         }
         "wincred_delete" => {
-            #[derive(Deserialize)]
-            struct Args {
-                target: String,
-            }
-            let args: Args = parse(args)?;
-            crate::utils::wincred::wincred_delete(&args.target)?;
+            crate::utils::wincred::wincred_delete(&req_str(&args, &["target"])?)?;
             ok(())
         }
         "get_mirrorc_status" => {
-            #[derive(Deserialize)]
-            #[serde(rename_all = "camelCase")]
-            struct Args {
-                resource_id: String,
-                current_version: String,
-                cdk: String,
-                channel: String,
-                arch: Option<String>,
-                os: Option<String>,
-            }
-            let args: Args = parse(args)?;
+            let resource_id = req_str(&args, &["resourceId", "resource_id"])?;
+            let current_version = req_str(&args, &["currentVersion", "current_version"])?;
+            let cdk = req_str(&args, &["cdk"])?;
+            let channel = req_str(&args, &["channel"])?;
+            let arch = opt_str(&args, &["arch"]);
+            let os = opt_str(&args, &["os"]);
             let res = crate::thirdparty::mirrorc::get_mirrorc_status(
-                &args.resource_id,
-                &args.current_version,
-                &args.cdk,
-                &args.channel,
-                args.arch.as_deref(),
-                args.os.as_deref(),
+                &resource_id,
+                &current_version,
+                &cdk,
+                &channel,
+                arch.as_deref(),
+                os.as_deref(),
             )
             .await?;
             ok(res)
         }
         "read_uninstall_metadata" => {
-            #[derive(Deserialize)]
-            #[serde(rename_all = "camelCase")]
-            struct Args {
-                reg_name: String,
-            }
-            let args: Args = parse(args)?;
-            ok(crate::installer::registry::read_uninstall_metadata(args.reg_name).await?)
+            let reg_name = req_str(&args, &["regName", "reg_name"])?;
+            ok(crate::installer::registry::read_uninstall_metadata(reg_name).await?)
         }
         "launch" => {
-            #[derive(Deserialize)]
-            struct Args {
-                path: String,
-            }
-            let args: Args = parse(args)?;
-            crate::installer::launch(args.path).await;
+            crate::installer::launch(req_str(&args, &["path"])?).await;
             ok(())
         }
         "launch_and_exit" => {
-            #[derive(Deserialize)]
-            struct Args {
-                path: String,
-            }
-            let args: Args = parse(args)?;
-            crate::installer::launch(args.path).await;
+            crate::installer::launch(req_str(&args, &["path"])?).await;
             handle.close();
             ok(())
         }
         "error_dialog" => {
-            #[derive(Deserialize)]
-            struct Args {
-                title: String,
-                message: String,
-            }
-            let args: Args = parse(args)?;
-            crate::installer::error_dialog(args.title, args.message, handle.parent()).await;
+            crate::installer::error_dialog(
+                req_str(&args, &["title"])?,
+                req_str(&args, &["message"])?,
+                handle.parent(),
+            )
+            .await;
             ok(())
         }
-        "confirm_dialog" => {
-            #[derive(Deserialize)]
-            struct Args {
-                title: String,
-                message: String,
-            }
-            let args: Args = parse(args)?;
-            ok(crate::installer::confirm_dialog(args.title, args.message, handle.parent()).await)
-        }
+        "confirm_dialog" => ok(crate::installer::confirm_dialog(
+            req_str(&args, &["title"])?,
+            req_str(&args, &["message"])?,
+            handle.parent(),
+        )
+        .await),
         "log" => {
             crate::installer::log(string_arg(&args, "data"));
             ok(())
@@ -306,21 +221,11 @@ async fn dispatch(
             ok(())
         }
         "window_set_title" => {
-            #[derive(Deserialize)]
-            struct Args {
-                title: String,
-            }
-            let args: Args = parse(args)?;
-            handle.send(UiAction::SetTitle(args.title));
+            handle.send(UiAction::SetTitle(req_str(&args, &["title"])?));
             ok(())
         }
         "window_set_decorations" => {
-            #[derive(Deserialize)]
-            struct Args {
-                decorations: bool,
-            }
-            let args: Args = parse(args)?;
-            handle.send(UiAction::SetDecorations(args.decorations));
+            handle.send(UiAction::SetDecorations(req_bool(&args, &["decorations"])?));
             ok(())
         }
         other => Err(TACommandError::new(anyhow::anyhow!(
@@ -329,8 +234,53 @@ async fn dispatch(
     }
 }
 
-fn parse<T: for<'de> Deserialize<'de>>(args: Value) -> Result<T, TACommandError> {
-    serde_json::from_value(args).map_err(|e| TACommandError::new(anyhow::anyhow!(e)))
+fn parse_session_input(
+    args: &Value,
+) -> Result<crate::session::types::SessionInput, TACommandError> {
+    let input = args
+        .get("input")
+        .cloned()
+        .ok_or_else(|| TACommandError::new(anyhow::anyhow!("missing input")))?;
+    serde_json::from_value(input).map_err(|e| TACommandError::new(anyhow::anyhow!(e)))
+}
+
+fn field<'a>(args: &'a Value, keys: &[&str]) -> Option<&'a Value> {
+    keys.iter().find_map(|key| args.get(*key))
+}
+
+fn req_str(args: &Value, keys: &[&str]) -> Result<String, TACommandError> {
+    field(args, keys)
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .ok_or_else(|| TACommandError::new(anyhow::anyhow!("missing string field {}", keys[0])))
+}
+
+fn opt_str(args: &Value, keys: &[&str]) -> Option<String> {
+    field(args, keys)
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+}
+
+fn req_bool(args: &Value, keys: &[&str]) -> Result<bool, TACommandError> {
+    field(args, keys)
+        .and_then(|v| v.as_bool())
+        .ok_or_else(|| TACommandError::new(anyhow::anyhow!("missing bool field {}", keys[0])))
+}
+
+fn opt_bool(args: &Value, keys: &[&str]) -> Option<bool> {
+    field(args, keys).and_then(|v| v.as_bool())
+}
+
+fn opt_u64(args: &Value, keys: &[&str]) -> Option<u64> {
+    field(args, keys).and_then(|v| v.as_u64())
+}
+
+fn opt_headers(args: &Value) -> Option<std::collections::HashMap<String, String>> {
+    args.get("headers")?.as_object().map(|obj| {
+        obj.iter()
+            .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+            .collect()
+    })
 }
 
 fn ok<T: serde::Serialize>(value: T) -> Result<Value, TACommandError> {

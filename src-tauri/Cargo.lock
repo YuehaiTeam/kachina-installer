@@ -3205,7 +3205,7 @@ dependencies = [
 [[package]]
 name = "seera-msquic"
 version = "2.6.0-beta2"
-source = "git+https://github.com/xytoki/seera-msquic.git?branch=seera-main#b0c7eff7a51022aa82e88ba74cd58fbcf7605e88"
+source = "git+https://github.com/xytoki/seera-msquic.git?branch=seera-main#9c7c15b59460e3bf698321f3c17762af6b27211e"
 dependencies = [
  "bitflags 2.11.0",
  "c-types",

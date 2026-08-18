@@ -21,6 +21,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader, R
 use crate::{
     dfs::InsightItem,
     installer::uninstall::DELETE_SELF_ON_EXIT_PATH,
+    ipc::ProgressNotify,
     local::mmap,
     utils::{
         error::{TAResult, DOWNLOAD_STALLED, DOWNLOAD_TOO_SLOW},
@@ -492,7 +493,7 @@ pub async fn check_local_files(
     hash_algorithm: String,
     file_list: Vec<String>,
     skip_hash: Vec<String>,
-    notify: impl Fn(serde_json::Value) + std::marker::Send + 'static,
+    notify: ProgressNotify,
 ) -> Result<Vec<Metadata>> {
     let source_path = Path::new(&source);
     if !source_path.exists() {
@@ -914,9 +915,9 @@ pub async fn create_target_file(target: &str) -> Result<impl AsyncWrite, anyhow:
 }
 
 pub async fn progressed_copy(
-    mut source: impl AsyncRead + std::marker::Unpin,
-    mut target: impl AsyncWrite + std::marker::Unpin,
-    on_progress: impl Fn(usize),
+    source: &mut (dyn AsyncRead + Unpin + Send),
+    target: &mut (dyn AsyncWrite + Unpin + Send),
+    on_progress: &(dyn Fn(usize) + Send + Sync),
 ) -> Result<usize, anyhow::Error> {
     let mut downloaded = 0;
     let mut boxed = Box::new([0u8; 256 * 1024]);
@@ -968,18 +969,14 @@ pub async fn progressed_copy(
     Ok(downloaded)
 }
 
-pub async fn progressed_hpatch<R, F>(
-    source: R,
+pub async fn progressed_hpatch(
+    source: Box<dyn AsyncRead + Unpin + Send>,
     target: &str,
     diff_size: usize,
-    on_progress: F,
+    on_progress: Box<dyn Fn(usize) + Send>,
     override_old_path: Option<PathBuf>,
     mut insight: Option<InsightItem>,
-) -> Result<(usize, Option<InsightItem>), anyhow::Error>
-where
-    R: AsyncRead + std::marker::Unpin + Send + 'static,
-    F: Fn(usize) + Send + 'static,
-{
+) -> Result<(usize, Option<InsightItem>), anyhow::Error> {
     let download_start = std::time::Instant::now();
     let mut downloaded = 0;
 
@@ -1111,6 +1108,7 @@ pub async fn verify_hash(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ipc::progress_notify;
     use std::io::Write;
     use std::os::windows::fs::OpenOptionsExt;
     use std::sync::{Arc, Mutex};
@@ -1154,7 +1152,7 @@ mod tests {
             "md5".to_string(),
             vec!["app.exe".to_string()],
             vec![],
-            move |v| reports_cb.lock().unwrap().push(v),
+            progress_notify(move |v| reports_cb.lock().unwrap().push(v)),
         )
         .await
         .unwrap();
@@ -1182,7 +1180,7 @@ mod tests {
             "md5".to_string(),
             vec!["app.exe".to_string(), "User/settings.json".to_string()],
             vec!["User/settings.json".to_string()],
-            |_| {},
+            progress_notify(|_| {}),
         )
         .await
         .unwrap();

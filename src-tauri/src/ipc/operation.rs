@@ -1,3 +1,4 @@
+use crate::ipc::ProgressNotify;
 use crate::utils::error::TAResult;
 #[derive(serde::Deserialize, serde::Serialize, Clone, Debug)]
 #[serde(tag = "type")]
@@ -46,7 +47,7 @@ pub enum IpcOperation {
 
 pub async fn run_opr(
     op: IpcOperation,
-    notify: impl Fn(serde_json::Value) + std::marker::Send + 'static + Clone,
+    notify: ProgressNotify,
     context: Vec<(String, String)>,
 ) -> TAResult<serde_json::Value> {
     let op_name = match &op {
