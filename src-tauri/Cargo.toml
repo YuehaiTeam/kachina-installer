@@ -118,6 +118,7 @@ hyper-util = { version = "0.1", features = ["tokio"] }
 http-body-util = "0.1"
 
 [build-dependencies]
+embed-resource = "3"
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 
 [[bin]]
