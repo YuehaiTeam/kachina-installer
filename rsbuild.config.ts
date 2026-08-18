@@ -13,13 +13,18 @@ export default defineConfig({
   },
   output: {
     overrideBrowserslist: ['edge >= 100'],
+    inlineScripts: true,
+    inlineStyles: true,
+    legalComments: 'none',
+    dataUriLimit: Number.MAX_SAFE_INTEGER,
   },
   html: {
     title: 'Kachina Installer',
+    inject: 'body',
   },
   performance: {
     chunkSplit: {
-      strategy: 'single-vendor',
+      strategy: 'all-in-one',
     },
   },
   plugins: [pluginVue()],
@@ -28,6 +33,13 @@ export default defineConfig({
       experiments: {
         rspackFuture: {
           bundlerInfo: { force: false },
+        },
+      },
+      module: {
+        parser: {
+          javascript: {
+            dynamicImportMode: 'eager',
+          },
         },
       },
     },
