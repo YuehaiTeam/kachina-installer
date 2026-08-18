@@ -9,6 +9,7 @@ use flate2::Compression;
 fn main() {
     let manifest = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
     embed_app_manifest(&manifest);
+    embed_app_icon(&manifest);
     let dist = manifest.join("../dist");
     let html = dist.join("index.html");
     println!("cargo:rerun-if-changed={}", html.display());
@@ -49,4 +50,18 @@ fn embed_app_manifest(crate_dir: &Path) {
         "cargo:rustc-link-arg=/MANIFESTINPUT:{}",
         app_manifest.display()
     );
+}
+
+fn embed_app_icon(crate_dir: &Path) {
+    let icon = crate_dir.join("icons/icon.ico");
+    let rc = crate_dir.join("app.rc");
+    println!("cargo:rerun-if-changed={}", icon.display());
+    println!("cargo:rerun-if-changed={}", rc.display());
+    embed_resource::compile_for(
+        rc,
+        ["kachina-installer", "kachina-builder"],
+        embed_resource::NONE,
+    )
+    .manifest_optional()
+    .expect("embed default exe icon");
 }
