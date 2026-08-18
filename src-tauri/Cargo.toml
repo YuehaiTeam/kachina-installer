@@ -117,6 +117,9 @@ hyper = { version = "1", features = ["client", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 http-body-util = "0.1"
 
+[build-dependencies]
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+
 [[bin]]
 name = "kachina-installer"
 path = "src/main.rs"

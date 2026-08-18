@@ -1862,6 +1862,7 @@ dependencies = [
  "chrono",
  "clap",
  "console",
+ "flate2",
  "fmmap",
  "futures",
  "h3",
