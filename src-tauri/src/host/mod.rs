@@ -4,10 +4,11 @@ mod webview;
 mod window;
 
 use std::sync::mpsc;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use anyhow::Context;
 use serde_json::Value;
+use tokio::sync::oneshot;
 use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
 use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
 use windows::Win32::System::Threading::GetCurrentThreadId;
@@ -21,6 +22,7 @@ use crate::cli::arg::InstallArgs;
 use crate::installer::uninstall::delete_self_on_exit;
 use crate::ipc::manager::ManagedElevate;
 use crate::session::commands::SessionState;
+use crate::session::error::{self, user};
 use crate::APP_BOOT_SIGNAL;
 
 pub use window::HwndParent;
@@ -79,6 +81,38 @@ pub struct HostCtx {
     pub elevate: ManagedElevate,
     pub session: SessionState,
     pub ui: HostHandle,
+    pub plugin_runtime: bool,
+    pub plugin_ready: Mutex<Option<oneshot::Sender<()>>>,
+}
+
+pub struct PluginRuntime {
+    handle: HostHandle,
+    join: Option<std::thread::JoinHandle<()>>,
+}
+
+impl PluginRuntime {
+    pub fn handle(&self) -> &HostHandle {
+        &self.handle
+    }
+
+    pub fn close(mut self) {
+        self.shutdown();
+    }
+
+    fn shutdown(&mut self) {
+        self.handle.close();
+        if let Some(join) = self.join.take() {
+            let _ = join.join();
+        }
+    }
+}
+
+impl Drop for PluginRuntime {
+    fn drop(&mut self) {
+        if self.join.is_some() {
+            self.shutdown();
+        }
+    }
 }
 
 pub fn webview_version() -> Result<String, anyhow::Error> {
@@ -125,6 +159,8 @@ pub fn run(args: InstallArgs) -> anyhow::Result<()> {
         elevate: ManagedElevate::new(),
         session: SessionState::default(),
         ui: handle.clone(),
+        plugin_runtime: false,
+        plugin_ready: Mutex::new(None),
     });
 
     tokio::spawn({
@@ -144,8 +180,13 @@ pub fn run(args: InstallArgs) -> anyhow::Result<()> {
         }
     });
 
+    let start = if cfg!(debug_assertions) {
+        "http://localhost:1420".to_string()
+    } else {
+        format!("{UI_HOST}/index.html")
+    };
     let webview =
-        webview::attach(hwnd, handle.clone(), ctx, is_win11).context("attach webview2")?;
+        webview::attach(hwnd, handle.clone(), ctx, is_win11, &start).context("attach webview2")?;
 
     if !cfg!(debug_assertions) {
         window::set_visible(hwnd, false);
@@ -179,6 +220,134 @@ pub fn run(args: InstallArgs) -> anyhow::Result<()> {
                 if msg.message == WM_QUIT {
                     delete_self_on_exit();
                     break Ok(());
+                }
+                if msg.message != WM_APP {
+                    unsafe {
+                        let _ = TranslateMessage(&msg);
+                        DispatchMessageW(&msg);
+                    }
+                }
+            }
+        }
+    }
+}
+
+pub async fn spawn_plugin_runtime(
+    args: InstallArgs,
+    session: SessionState,
+) -> anyhow::Result<PluginRuntime> {
+    let (started_tx, started_rx) = oneshot::channel();
+    let (ready_tx, ready_rx) = oneshot::channel();
+    let rt = tokio::runtime::Handle::current();
+    let join = std::thread::Builder::new()
+        .name("kachina-plugin-host".into())
+        .spawn(move || {
+            let _enter = rt.enter();
+            plugin_runtime_thread(args, session, started_tx, ready_tx);
+        })
+        .context("spawn plugin host thread")?;
+
+    let handle = started_rx
+        .await
+        .map_err(|_| user(error::PLUGIN_HOST_FAILED))?
+        .map_err(|err| {
+            tracing::error!("plugin host thread failed: {err:#}");
+            user(error::PLUGIN_HOST_FAILED)
+        })?;
+
+    let runtime = PluginRuntime {
+        handle,
+        join: Some(join),
+    };
+    match tokio::time::timeout(std::time::Duration::from_secs(10), ready_rx).await {
+        Ok(Ok(())) => Ok(runtime),
+        _ => {
+            runtime.close();
+            Err(user(error::PLUGIN_HOST_FAILED))
+        }
+    }
+}
+
+fn plugin_runtime_thread(
+    args: InstallArgs,
+    session: SessionState,
+    started_tx: oneshot::Sender<anyhow::Result<HostHandle>>,
+    ready_tx: oneshot::Sender<()>,
+) {
+    match plugin_runtime_setup(args, session, ready_tx) {
+        Ok((handle, rx, hwnd, webview)) => {
+            let _ = started_tx.send(Ok(handle.clone()));
+            plugin_runtime_loop(handle, rx, hwnd, webview);
+        }
+        Err(err) => {
+            let _ = started_tx.send(Err(err));
+        }
+    }
+}
+
+fn plugin_runtime_setup(
+    args: InstallArgs,
+    session: SessionState,
+    ready_tx: oneshot::Sender<()>,
+) -> anyhow::Result<(
+    HostHandle,
+    mpsc::Receiver<UiAction>,
+    HWND,
+    webview::WebViewHost,
+)> {
+    unsafe {
+        CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok()?;
+    }
+
+    let (major, minor, build) = nt_version::get();
+    let build = (build & 0xffff) as u16;
+    let is_win11 = major == 10 && minor == 0 && build >= 22000;
+
+    let hwnd = window::create_hidden().context("create hidden plugin window")?;
+    let (tx, rx) = mpsc::channel();
+    let handle = HostHandle {
+        tx,
+        thread_id: unsafe { GetCurrentThreadId() },
+        hwnd: hwnd.0 as isize,
+    };
+    let ctx = Arc::new(HostCtx {
+        args,
+        elevate: ManagedElevate::new(),
+        session,
+        ui: handle.clone(),
+        plugin_runtime: true,
+        plugin_ready: Mutex::new(Some(ready_tx)),
+    });
+    let start = format!("{UI_HOST}/index.html?pluginHost=1");
+    let webview = webview::attach(hwnd, handle.clone(), ctx, is_win11, &start)
+        .context("attach hidden plugin webview")?;
+    window::set_visible(hwnd, false);
+    Ok((handle, rx, hwnd, webview))
+}
+
+fn plugin_runtime_loop(
+    _handle: HostHandle,
+    rx: mpsc::Receiver<UiAction>,
+    hwnd: HWND,
+    webview: webview::WebViewHost,
+) {
+    let mut msg = MSG::default();
+    loop {
+        while let Ok(action) = rx.try_recv() {
+            if !matches!(action, UiAction::Close) && !unsafe { IsWindow(Some(hwnd)) }.as_bool() {
+                continue;
+            }
+            if let Err(err) = webview.apply(hwnd, action) {
+                tracing::warn!("plugin host ui action failed: {err}");
+            }
+        }
+
+        let result = unsafe { GetMessageW(&mut msg, None, 0, 0) };
+        match result.0 {
+            -1 | 0 => break,
+            _ => {
+                if msg.message == WM_QUIT {
+                    break;
                 }
                 if msg.message != WM_APP {
                     unsafe {

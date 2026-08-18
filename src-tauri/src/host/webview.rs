@@ -85,6 +85,7 @@ pub fn attach(
     handle: HostHandle,
     ctx: Arc<HostCtx>,
     is_win11: bool,
+    start: &str,
 ) -> anyhow::Result<WebViewHost> {
     let user_data = std::env::temp_dir().join("KachinaInstaller");
     let _ = std::fs::create_dir_all(&user_data);
@@ -186,12 +187,7 @@ pub fn attach(
         )?;
     }
 
-    let start = if cfg!(debug_assertions) {
-        "http://localhost:1420".to_string()
-    } else {
-        format!("{UI_HOST}/index.html")
-    };
-    let start_w = wide(&start);
+    let start_w = wide(start);
     unsafe { webview.Navigate(PCWSTR(start_w.as_ptr())) }?;
 
     Ok(WebViewHost {
