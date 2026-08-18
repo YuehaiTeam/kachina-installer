@@ -102,7 +102,7 @@ jobs:
     runs-on: windows-latest
     strategy:
       matrix:
-        test: [offline-install, online-install, offline-update, online-update, already-latest, uninstall, userdata-ignore, occupied-process, builder-extract-replace]
+        test: [offline-install, online-install, offline-update, online-update, already-latest, uninstall, userdata-ignore, occupied-process, builder-extract-replace, plugin-stub]
       fail-fast: false
     steps:
       - uses: actions/checkout@v4

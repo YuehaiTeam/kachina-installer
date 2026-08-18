@@ -254,6 +254,10 @@ pub fn parse_source(source: &str) -> anyhow::Result<ParsedSource> {
     })
 }
 
+pub fn needs_js_plugin(source: &str) -> bool {
+    matches!(parse_source(source), Ok(ParsedSource::Plugin { .. }))
+}
+
 async fn fetch_hashed_metadata(url: &str) -> anyhow::Result<DfsMetadata> {
     let res = REQUEST_CLIENT
         .get(url)
@@ -1082,4 +1086,36 @@ async fn prefetch_batch_urls(
         }
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn plugin_prefix_needs_js() {
+        assert!(needs_js_plugin("plugin-foo+https://example.com/app.exe"));
+        assert!(needs_js_plugin(
+            "dfs2+plugin-foo+https://example.com/app.exe"
+        ));
+        let parsed = parse_source("plugin-foo+https://example.com/app.exe").unwrap();
+        assert!(matches!(
+            parsed,
+            ParsedSource::Plugin { name, .. } if name == "foo"
+        ));
+    }
+
+    #[test]
+    fn github_and_http_skip_js_plugin() {
+        assert!(!needs_js_plugin(
+            "plugin-github+https://github.com/a/b/releases/download/${version}/app.exe"
+        ));
+        assert!(!needs_js_plugin(
+            "https://github.com/a/b/releases/download/${version}/app.exe"
+        ));
+        assert!(!needs_js_plugin("https://example.com/app.exe"));
+        assert!(!needs_js_plugin(
+            "dfs2+hashed+https://example.com/meta.json"
+        ));
+    }
 }

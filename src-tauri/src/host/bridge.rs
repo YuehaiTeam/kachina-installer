@@ -54,7 +54,23 @@ async fn dispatch(
     cmd: &str,
     args: Value,
 ) -> Result<Value, TACommandError> {
+    if ctx.plugin_runtime && matches!(cmd, "start_install" | "start_uninstall" | "window_show") {
+        return Err(TACommandError::new(anyhow::anyhow!(
+            "command disabled in plugin runtime: {cmd}"
+        )));
+    }
     match cmd {
+        "plugin_host_ready" => {
+            if let Some(tx) = ctx
+                .plugin_ready
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .take()
+            {
+                let _ = tx.send(());
+            }
+            ok(())
+        }
         "get_installer_config" => {
             #[derive(Deserialize)]
             #[serde(rename_all = "camelCase")]

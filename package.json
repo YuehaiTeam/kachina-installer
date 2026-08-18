@@ -18,8 +18,9 @@
     "test:userdata-ignore": "cd tests && node userdata-ignore.mjs",
     "test:occupied-process": "cd tests && node occupied-process.mjs",
     "test:builder-extract-replace": "cd tests && node builder-extract-replace.mjs",
+    "test:plugin-stub": "cd tests && node plugin-stub.mjs",
     "test:dump-offline-install": "cd tests && node dump-offline-install.mjs",
-    "test:all": "npm run test:prepare && npm run test:offline-install && npm run test:online-install && npm run test:offline-update && npm run test:online-update && npm run test:already-latest && npm run test:uninstall && npm run test:userdata-ignore && npm run test:occupied-process && npm run test:builder-extract-replace"
+    "test:all": "npm run test:prepare && npm run test:offline-install && npm run test:online-install && npm run test:offline-update && npm run test:online-update && npm run test:already-latest && npm run test:uninstall && npm run test:userdata-ignore && npm run test:occupied-process && npm run test:builder-extract-replace && npm run test:plugin-stub"
   },
   "dependencies": {
     "@sentry/cli": "^2.46.0",

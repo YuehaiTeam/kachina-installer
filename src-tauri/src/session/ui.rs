@@ -65,6 +65,39 @@ pub trait SessionUi: Send + Sync {
 
 pub struct SilentUi;
 
+pub struct SilentPluginUi {
+    inner: SilentUi,
+    host: Arc<dyn PluginHost>,
+}
+
+impl SilentPluginUi {
+    pub fn new(window: HostHandle, plugins: Arc<PluginHub>) -> Self {
+        Self {
+            inner: SilentUi,
+            host: Arc::new(GuiPluginHost {
+                window,
+                hub: plugins,
+            }),
+        }
+    }
+}
+
+#[async_trait]
+impl SessionUi for SilentPluginUi {
+    async fn confirm(&self, kind: PromptKind, title: &str, message: &str) -> bool {
+        self.inner.confirm(kind, title, message).await
+    }
+    fn progress(&self, event: ProgressEvent) {
+        self.inner.progress(event);
+    }
+    fn insight(&self, url: &str, event: &str, data: Option<Value>) {
+        self.inner.insight(url, event, data);
+    }
+    fn plugin_host(&self) -> Option<Arc<dyn PluginHost>> {
+        Some(self.host.clone())
+    }
+}
+
 #[async_trait]
 impl SessionUi for SilentUi {
     async fn confirm(&self, _kind: PromptKind, _title: &str, _message: &str) -> bool {

@@ -10,6 +10,8 @@ pub const NO_DOWNLOAD_NODE: &str = "没有可用的下载节点";
 pub const DFS2_SESSION: &str = "创建下载会话失败";
 pub const FILE_MISSING: &str = "无法获取所需文件，请检查网络连接或更换下载源";
 pub const PLUGIN_NO_UI: &str = "该安装源需要图形界面";
+pub const PLUGIN_NEED_WEBVIEW2: &str = "该安装源需要 WebView2";
+pub const PLUGIN_HOST_FAILED: &str = "插件宿主启动失败";
 
 pub fn plugin_not_found(name: &str) -> anyhow::Error {
     user(format!("Plugin \"{name}\" not found"))

@@ -152,6 +152,12 @@ async function createConfig() {
         name: 'Local v2',
         uri: 'http://localhost:8080/test-app-v2.exe',
       },
+      {
+        id: 'stub-v1',
+        name: 'Stub plugin v1',
+        uri: 'plugin-stub+http://localhost:8080/test-app-v1.exe',
+        hidden: true,
+      },
     ],
     appName: 'Test Application',
     publisher: 'Test Publisher',
