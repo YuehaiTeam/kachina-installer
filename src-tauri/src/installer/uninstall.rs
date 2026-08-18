@@ -72,12 +72,12 @@ pub async fn clear_empty_dirs(key: String) -> anyhow::Result<()> {
 
 #[derive(serde::Deserialize, serde::Serialize, Clone, Debug)]
 pub struct RunUninstallArgs {
-    source: String,
-    files: Vec<String>,
-    user_data_path: Vec<String>,
-    extra_uninstall_path: Vec<String>,
-    reg_name: String,
-    uninstall_name: String,
+    pub source: String,
+    pub files: Vec<String>,
+    pub user_data_path: Vec<String>,
+    pub extra_uninstall_path: Vec<String>,
+    pub reg_name: String,
+    pub uninstall_name: String,
 }
 pub async fn run_uninstall_with_args(args: RunUninstallArgs) -> TAResult<Vec<String>> {
     run_uninstall(
@@ -208,9 +208,9 @@ pub fn delete_self_on_exit() {
 
 #[derive(serde::Deserialize, serde::Serialize, Clone, Debug)]
 pub struct CreateUninstallerArgs {
-    source: String,
-    uninstaller_name: String,
-    updater_name: String,
+    pub source: String,
+    pub uninstaller_name: String,
+    pub updater_name: String,
 }
 pub async fn create_uninstaller_with_args(args: CreateUninstallerArgs) -> TAResult<()> {
     create_uninstaller(args.source, args.uninstaller_name, args.updater_name).await

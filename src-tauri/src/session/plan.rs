@@ -45,7 +45,7 @@ pub struct LocalFile {
     pub unwritable: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct PlanInput {
     pub install_path: String,
     pub is_update: bool,
@@ -66,7 +66,8 @@ pub struct PlanInput {
     pub app_name: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[cfg_attr(debug_assertions, derive(Serialize))]
 #[serde(rename_all = "snake_case")]
 pub enum SkipReason {
     Unchanged,
@@ -74,27 +75,30 @@ pub enum SkipReason {
     IgnoreFolder,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[cfg_attr(debug_assertions, derive(Serialize))]
 #[serde(rename_all = "snake_case")]
 pub enum PlanAction {
     Skip,
     Install,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[cfg_attr(debug_assertions, derive(Serialize))]
 pub struct PlanFile {
     pub file_name: String,
     pub action: PlanAction,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(debug_assertions, serde(skip_serializing_if = "Option::is_none"))]
     pub skip_reason: Option<SkipReason>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(debug_assertions, serde(skip_serializing_if = "Option::is_none"))]
     pub old_hash: Option<String>,
     pub unwritable: bool,
     pub has_patch: bool,
     pub has_lpatch: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[cfg_attr(debug_assertions, derive(Serialize))]
 pub struct InstallPlan {
     pub files: Vec<PlanFile>,
     pub deletes: Vec<String>,

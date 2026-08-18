@@ -2,12 +2,13 @@ use anyhow::{Context, Result};
 use windows::Win32::System::Threading::CREATE_NO_WINDOW;
 
 use crate::fs::{create_http_stream, create_local_stream, create_target_file, progressed_copy};
+use crate::ipc::ProgressNotify;
 
 pub async fn install_runtime(
     tag: String,
     offset: Option<usize>,
     size: Option<usize>,
-    notify: impl Fn(serde_json::Value) + std::marker::Send + 'static,
+    notify: ProgressNotify,
 ) -> Result<String> {
     // if tag startswith Microsoft.DotNet, install .NET runtime
     if tag.starts_with("Microsoft.DotNet") {
@@ -31,7 +32,7 @@ pub async fn install_dotnet(
     tag: String,
     offset: Option<usize>,
     size: Option<usize>,
-    notify: impl Fn(serde_json::Value) + std::marker::Send + 'static,
+    notify: ProgressNotify,
 ) -> Result<String> {
     let tag_without_version = tag.split('.').take(3).collect::<Vec<&str>>().join(".");
     let runtime = match tag_without_version.as_str() {
@@ -118,7 +119,7 @@ pub async fn install_dotnet(
     let progress_noti = move |downloaded: usize| {
         notify(serde_json::json!((downloaded, len)));
     };
-    progressed_copy(&mut stream, &mut target, progress_noti).await?;
+    progressed_copy(stream.as_mut(), &mut target, &progress_noti).await?;
     // close streams
     drop(stream);
     drop(target);
@@ -154,7 +155,7 @@ pub async fn install_vcredist(
     tag: String,
     offset: Option<usize>,
     size: Option<usize>,
-    notify: impl Fn(serde_json::Value) + std::marker::Send + 'static,
+    notify: ProgressNotify,
 ) -> Result<String> {
     let x64_prefix = "SOFTWARE\\Microsoft\\VisualStudio\\14.0\\VC\\Runtimes\\";
     let x86_prefix = "SOFTWARE\\Wow6432Node\\Microsoft\\VisualStudio\\14.0\\VC\\Runtimes\\";
@@ -204,7 +205,7 @@ pub async fn install_vcredist(
     let progress_noti = move |downloaded: usize| {
         notify(serde_json::json!((downloaded, len)));
     };
-    progressed_copy(&mut stream, &mut target, progress_noti).await?;
+    progressed_copy(stream.as_mut(), &mut target, &progress_noti).await?;
     // close streams
     drop(stream);
     drop(target);
