@@ -1,5 +1,6 @@
 use super::operation::run_opr;
 use super::operation::IpcOperation;
+use super::{progress_notify, ProgressNotify};
 use crate::utils::acl::create_security_attributes;
 use crate::utils::error::TAResult;
 use crate::utils::sentry::forward_envelope;
@@ -100,7 +101,7 @@ impl ManagedElevate {
         &self,
         ipc: IpcOperation,
         elevate: bool,
-        on_progress: impl Fn(serde_json::Value) + Send + Clone + 'static,
+        on_progress: ProgressNotify,
     ) -> TAResult<serde_json::Value> {
         if !elevate || self.already_elevated {
             return run_opr(ipc, on_progress, vec![]).await;
@@ -304,15 +305,19 @@ pub async fn uac_ipc_main(args: crate::cli::arg::UacArgs) {
                                 let id = res.id.clone();
                                 tokio::spawn(async move {
                                     let tx2 = tx.clone();
-                                    let res = run_opr(res.op, move |opr| {
-                                        let id = res.id.clone();
-                                        let tx_clone = tx.clone();
-                                        tokio::spawn(async move {
-                                            let _ = tx_clone
-                                                .send(serde_json::json!({ "id": id, "data": opr }))
-                                                .await;
-                                        });
-                                    },res.context)
+                                    let res = run_opr(
+                                        res.op,
+                                        progress_notify(move |opr| {
+                                            let id = res.id.clone();
+                                            let tx_clone = tx.clone();
+                                            tokio::spawn(async move {
+                                                let _ = tx_clone
+                                                    .send(serde_json::json!({ "id": id, "data": opr }))
+                                                    .await;
+                                            });
+                                        }),
+                                        res.context,
+                                    )
                                     .await;
                                     if let Err(err) = res.as_ref() {
                                         tracing::error!("Client: Operation failed: {:?}", err);

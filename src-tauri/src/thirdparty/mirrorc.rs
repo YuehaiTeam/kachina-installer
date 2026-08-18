@@ -5,6 +5,7 @@ use anyhow::Context;
 use crate::{
     fs::{create_http_stream, create_target_file, prepare_target, progressed_copy},
     installer::uninstall::DELETE_SELF_ON_EXIT_PATH,
+    ipc::ProgressNotify,
     utils::{
         error::{return_ta_result, IntoTAResult, TAResult},
         metadata::RepoMetadata,
@@ -24,7 +25,7 @@ pub struct MirrorcChangeset {
 pub async fn run_mirrorc_install(
     zip_path: &str,
     target_path: &str,
-    notify: impl Fn(serde_json::Value) + std::marker::Send + 'static,
+    notify: ProgressNotify,
 ) -> TAResult<(Option<RepoMetadata>, Option<MirrorcChangeset>)> {
     let zip_path = zip_path.to_string();
     let target_path = target_path.to_string();
@@ -36,7 +37,7 @@ pub async fn run_mirrorc_install(
 pub fn run_mirrorc_install_sync(
     zip_path: &str,
     target_path: &str,
-    notify: impl Fn(serde_json::Value) + std::marker::Send + 'static,
+    notify: ProgressNotify,
 ) -> TAResult<(Option<RepoMetadata>, Option<MirrorcChangeset>)> {
     let file = std::fs::File::open(zip_path).into_ta_result()?;
     let mut archive = zip::ZipArchive::new(file).into_ta_result()?;
@@ -217,16 +218,17 @@ pub async fn get_mirrorc_status(
 pub async fn run_mirrorc_download(
     zip_path: &str,
     url: &str,
-    notify: impl Fn(serde_json::Value) + std::marker::Send + 'static,
+    notify: ProgressNotify,
 ) -> TAResult<()> {
-    let (stream, len, _insight) = create_http_stream(url, 0, 0, true).await?;
+    let (mut stream, len, _insight) = create_http_stream(url, 0, 0, true).await?;
     prepare_target(zip_path).await?;
-    let target = create_target_file(zip_path).await?;
-    progressed_copy(stream, target, |downloaded| {
+    let mut target = create_target_file(zip_path).await?;
+    let on_progress = |downloaded| {
         notify(serde_json::json!({"type": "download", "downloaded": downloaded, "total": len}));
-    })
-    .await
-    .context("MIRRORC_DOWNLOAD_ERR")?;
+    };
+    progressed_copy(stream.as_mut(), &mut target, &on_progress)
+        .await
+        .context("MIRRORC_DOWNLOAD_ERR")?;
     Ok(())
 }
 
