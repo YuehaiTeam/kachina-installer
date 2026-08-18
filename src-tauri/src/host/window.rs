@@ -25,8 +25,9 @@ use windows::Win32::UI::WindowsAndMessaging::{
     SendMessageW, SetWindowLongPtrW, SetWindowPos, SetWindowTextW, ShowWindow, GWLP_USERDATA,
     GWL_STYLE, HICON, ICON_BIG, ICON_SMALL, IDC_ARROW, SM_CXSCREEN, SM_CYSCREEN, SWP_FRAMECHANGED,
     SWP_NOMOVE, SWP_NOZORDER, SW_HIDE, SW_MINIMIZE, SW_SHOW, WM_CLOSE, WM_DESTROY, WM_SETICON,
-    WM_SETTINGCHANGE, WNDCLASSEXW, WS_CAPTION, WS_EX_NOREDIRECTIONBITMAP, WS_MAXIMIZE, WS_MINIMIZE,
-    WS_MINIMIZEBOX, WS_OVERLAPPED, WS_POPUP, WS_SYSMENU, WS_VISIBLE,
+    WM_SETTINGCHANGE, WNDCLASSEXW, WS_CAPTION, WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP,
+    WS_EX_TOOLWINDOW, WS_MAXIMIZE, WS_MINIMIZE, WS_MINIMIZEBOX, WS_OVERLAPPED, WS_POPUP,
+    WS_SYSMENU, WS_VISIBLE,
 };
 
 use crate::installer::uninstall::delete_self_on_exit;
@@ -140,6 +141,40 @@ pub fn create(client_w: i32, client_h: i32, is_win11: bool) -> anyhow::Result<HW
     unsafe {
         let _ = UpdateWindow(hwnd);
     }
+    Ok(hwnd)
+}
+
+pub fn create_hidden() -> anyhow::Result<HWND> {
+    let hinstance = unsafe { GetModuleHandleW(None) }?.into();
+    let class = WNDCLASSEXW {
+        cbSize: size_of::<WNDCLASSEXW>() as u32,
+        lpfnWndProc: Some(wndproc),
+        hInstance: hinstance,
+        lpszClassName: CLASS,
+        hCursor: unsafe { LoadCursorW(None, IDC_ARROW) }?,
+        hbrBackground: HBRUSH::default(),
+        ..Default::default()
+    };
+    unsafe { RegisterClassExW(&class) };
+
+    let hwnd = unsafe {
+        CreateWindowExW(
+            WS_EX_NOREDIRECTIONBITMAP | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+            CLASS,
+            w!(" "),
+            WS_POPUP,
+            0,
+            0,
+            1,
+            1,
+            None,
+            None,
+            Some(hinstance),
+            None,
+        )
+    }
+    .context("CreateWindowExW hidden")?;
+    set_visible(hwnd, false);
     Ok(hwnd)
 }
 

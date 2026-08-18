@@ -10,7 +10,7 @@ use crate::session::ui::{GuiUi, PluginHub, PromptHub};
 use crate::session::ProjectConfig;
 use crate::utils::error::{TACommandError, TAResult};
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct SessionState {
     pub prompts: Arc<PromptHub>,
     pub plugins: Arc<PluginHub>,

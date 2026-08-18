@@ -15,6 +15,7 @@ use crate::installer::registry::read_uninstall_metadata_raw;
 use crate::ipc::manager::ManagedElevate;
 use crate::ipc::operation::IpcOperation;
 use crate::local::Embedded;
+use crate::session::commands::SessionState;
 use crate::session::dump::write_dump;
 use crate::session::merge::{dfs2_ranges, file_mode, plan_tasks, FileMode, FilePos, InstallTask};
 use crate::session::plan::{
@@ -22,14 +23,14 @@ use crate::session::plan::{
     mark_unwritable, HashInfo, HashKey, LocalFile, PlanAction, PlanInput,
 };
 use crate::session::source::{
-    cleanup_dfs2, ensure_dfs2_session, fetch_metadata, hash_of_item, parse_source,
+    cleanup_dfs2, ensure_dfs2_session, fetch_metadata, hash_of_item, needs_js_plugin, parse_source,
     prefetch_chunk_urls, resolve_file_location, resolve_range_url, FileLocation, ParsedSource,
     SourceCtx,
 };
 use crate::session::types::{
     version_gt, DfsMetadata, ProgressEvent, ProjectConfig, SessionResult, Settings, SourceField,
 };
-use crate::session::ui::{PromptKind, SessionUi};
+use crate::session::ui::{PromptKind, SessionUi, SilentPluginUi};
 use crate::thirdparty::mirrorc::get_mirrorc_status;
 use crate::utils::error::IntoAnyhow;
 
@@ -2046,8 +2047,8 @@ pub async fn silent_main(args: crate::cli::arg::InstallArgs) -> anyhow::Result<(
         }
     };
     let mut settings = crate::session::types::settings_from_cli(&args, &config, &project).await?;
-    let ui = crate::session::ui::SilentUi;
     if config.is_uninstall || args.uninstall {
+        let ui = crate::session::ui::SilentUi;
         settings.install_path = if args.target.is_some() {
             settings.install_path
         } else {
@@ -2076,13 +2077,33 @@ pub async fn silent_main(args: crate::cli::arg::InstallArgs) -> anyhow::Result<(
         }
         return Ok(());
     }
+    if needs_js_plugin(&settings.source_uri) {
+        if crate::host::webview_version().is_err() {
+            return Err(anyhow!(crate::session::error::PLUGIN_NEED_WEBVIEW2));
+        }
+        let session = SessionState::default();
+        let runtime = crate::host::spawn_plugin_runtime(args.clone(), session.clone()).await?;
+        let ui = SilentPluginUi::new(runtime.handle().clone(), session.plugins.clone());
+        let result = silent_install(&settings, &config, &project, &ui).await;
+        runtime.close();
+        return result;
+    }
+    silent_install(&settings, &config, &project, &crate::session::ui::SilentUi).await
+}
+
+async fn silent_install(
+    settings: &Settings,
+    config: &InstallerConfig,
+    project: &ProjectConfig,
+    ui: &dyn SessionUi,
+) -> anyhow::Result<()> {
     let mgr = ManagedElevate::new();
-    if let Err(err) = run_install(&settings, &config, &project, &ui, &mgr).await {
+    if let Err(err) = run_install(settings, config, project, ui, &mgr).await {
         emit_insight(
-            &ui,
-            &project,
-            &settings,
-            &config,
+            ui,
+            project,
+            settings,
+            config,
             "error",
             Some(json!({ "error": format!("{err:#}") })),
             false,
