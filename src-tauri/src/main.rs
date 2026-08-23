@@ -100,11 +100,7 @@ fn main() {
     let _ = unsafe { AttachConsole(ATTACH_PARENT_PROCESS) };
 
     let cli = cli::Cli::parse();
-    let mut command = cli.command();
-    let silent = matches!(&command, Command::Install(args) if args.silent);
-    if !silent && host::webview_version().is_err() {
-        command = Command::InstallWebview2;
-    }
+    let command = cli.command();
     let _guard = sentry_init(matches!(command, Command::HeadlessUac(_)));
     utils::sentry::sentry_set_info();
     let sentry_layer = sentry_tracing::layer().event_filter(|md| match *md.level() {
@@ -167,7 +163,39 @@ fn main() {
                 .enable_all()
                 .build()
                 .unwrap()
-                .block_on(module::wv2::install_webview2());
+                .block_on(async {
+                    if module::wv2::install_webview2().await.is_ok() {
+                        host_main(
+                            InstallArgs {
+                                target: None,
+                                non_interactive: false,
+                                silent: false,
+                                online: false,
+                                uninstall: false,
+                                source: None,
+                                dfs_extras: None,
+                                mirrorc_cdk: None,
+                                dump_dir: None,
+                            },
+                            None,
+                        );
+                    }
+                });
+        }
+        Command::NativeUi(args) => {
+            sentry::add_breadcrumb(sentry::Breadcrumb {
+                category: Some("app".into()),
+                message: Some("KachinaInstaller started (native-ui)".into()),
+                level: sentry::Level::Info,
+                ..Default::default()
+            });
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(async move {
+                    native_entry(args).await;
+                });
         }
         Command::Install(install) => {
             sentry::add_breadcrumb(sentry::Breadcrumb {
@@ -191,7 +219,7 @@ fn main() {
                             std::process::exit(1);
                         }
                     } else {
-                        host_main(install);
+                        gui_entry(install).await;
                     }
                 });
         }
@@ -207,7 +235,7 @@ fn main() {
                 .build()
                 .unwrap()
                 .block_on(async move {
-                    host_main(InstallArgs {
+                    gui_entry(InstallArgs {
                         target: None,
                         non_interactive: false,
                         silent: false,
@@ -217,14 +245,39 @@ fn main() {
                         dfs_extras: None,
                         mirrorc_cdk: None,
                         dump_dir: None,
-                    });
+                    })
+                    .await;
                 });
         }
     }
 }
 
-fn host_main(args: InstallArgs) {
-    if let Err(err) = host::run(args) {
+async fn gui_entry(args: InstallArgs) {
+    if host::webview_version().is_ok() {
+        host_main(args, None);
+        return;
+    }
+    native_entry(args).await;
+}
+
+async fn native_entry(args: InstallArgs) {
+    match host::native::run(args).await {
+        Ok(host::native::NativeOutcome::Exit) | Ok(host::native::NativeOutcome::Again) => {}
+        Ok(host::native::NativeOutcome::Web { args, preset }) => host_main(args, Some(preset)),
+        Err(err) => {
+            tracing::error!("native ui failed: {err:#}");
+            rfd::MessageDialog::new()
+                .set_title("错误")
+                .set_description(format!("{err}"))
+                .set_level(rfd::MessageLevel::Error)
+                .show();
+            std::process::exit(1);
+        }
+    }
+}
+
+fn host_main(args: InstallArgs, preset: Option<session::types::SessionInput>) {
+    if let Err(err) = host::run(args, preset) {
         tracing::error!("gui host failed: {err:#}");
         rfd::MessageDialog::new()
             .set_title("错误")

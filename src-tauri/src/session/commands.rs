@@ -65,7 +65,7 @@ pub async fn start_uninstall(
         .map_err(TACommandError::new)
 }
 
-async fn settings_from_input(
+pub(crate) async fn settings_from_input(
     input: &SessionInput,
     args: &InstallArgs,
     config: &InstallerConfig,

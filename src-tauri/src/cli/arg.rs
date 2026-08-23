@@ -40,6 +40,8 @@ pub enum Command {
     #[clap(hide = true)]
     InstallWebview2,
     #[clap(hide = true)]
+    NativeUi(InstallArgs),
+    #[clap(hide = true)]
     HeadlessUac(UacArgs),
     #[clap(external_subcommand)]
     Other(Vec<String>),

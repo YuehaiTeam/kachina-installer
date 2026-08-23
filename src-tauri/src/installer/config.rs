@@ -23,6 +23,8 @@ pub struct InstallerConfig {
     pub exe_path: String,
     pub args: crate::cli::arg::InstallArgs,
     pub elevated: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preset: Option<crate::session::types::SessionInput>,
 }
 
 pub async fn get_config_pre(
@@ -132,6 +134,7 @@ pub async fn get_config_pre(
         exe_path,
         args,
         elevated: check_elevated().unwrap_or(false),
+        preset: None,
     })
 }
 

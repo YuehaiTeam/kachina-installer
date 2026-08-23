@@ -709,6 +709,11 @@ onMounted(async () => {
     source.value = result.source;
     isUpdate.value = result.isUpdate;
     needElevate.value = result.needElevate;
+    createLnk.value = result.createLnk;
+    deleteUserData.value = result.deleteUserData;
+    if (result.mirrorcKey) {
+      mirrorcKey.value = result.mirrorcKey;
+    }
     imageSource.value = result.theme.imageSource;
     dynamicCss.value = result.theme.dynamicCss;
     useDynamicCss.value = result.theme.useDynamicCss;
