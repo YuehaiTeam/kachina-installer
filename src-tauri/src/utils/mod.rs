@@ -7,6 +7,7 @@ pub mod icon;
 pub mod metadata;
 pub mod progressed_read;
 pub mod sentry;
+pub mod taskdialog;
 pub mod uac;
 pub mod url;
 pub mod wincred;

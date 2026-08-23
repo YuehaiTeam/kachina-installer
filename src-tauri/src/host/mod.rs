@@ -1,5 +1,6 @@
 mod assets;
 mod bridge;
+pub mod native;
 mod webview;
 mod window;
 
@@ -23,6 +24,7 @@ use crate::installer::uninstall::delete_self_on_exit;
 use crate::ipc::manager::ManagedElevate;
 use crate::session::commands::SessionState;
 use crate::session::error::{self, user};
+use crate::session::types::SessionInput;
 use crate::APP_BOOT_SIGNAL;
 
 pub use window::HwndParent;
@@ -83,6 +85,7 @@ pub struct HostCtx {
     pub ui: HostHandle,
     pub plugin_runtime: bool,
     pub plugin_ready: Mutex<Option<oneshot::Sender<()>>>,
+    pub preset: Option<SessionInput>,
 }
 
 pub struct PluginRuntime {
@@ -119,7 +122,7 @@ pub fn webview_version() -> Result<String, anyhow::Error> {
     webview::available_version()
 }
 
-pub fn run(args: InstallArgs) -> anyhow::Result<()> {
+pub fn run(args: InstallArgs, preset: Option<SessionInput>) -> anyhow::Result<()> {
     unsafe {
         CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok()?;
         if SetProcessDpiAwareness(PROCESS_PER_MONITOR_DPI_AWARE).is_err() {
@@ -161,6 +164,7 @@ pub fn run(args: InstallArgs) -> anyhow::Result<()> {
         ui: handle.clone(),
         plugin_runtime: false,
         plugin_ready: Mutex::new(None),
+        preset,
     });
 
     tokio::spawn({
@@ -317,6 +321,7 @@ fn plugin_runtime_setup(
         ui: handle.clone(),
         plugin_runtime: true,
         plugin_ready: Mutex::new(Some(ready_tx)),
+        preset: None,
     });
     let start = format!("{UI_HOST}/index.html?pluginHost=1");
     let webview = webview::attach(hwnd, handle.clone(), ctx, is_win11, &start)
