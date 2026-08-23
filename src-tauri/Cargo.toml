@@ -117,9 +117,11 @@ hyper = { version = "1", features = ["client", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 http-body-util = "0.1"
 
+zstd = "0.13"
+
 [build-dependencies]
 embed-resource = "3"
-flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+zstd = "0.13"
 
 [[bin]]
 name = "kachina-installer"
