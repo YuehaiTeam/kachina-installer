@@ -17,8 +17,13 @@ jobs:
           fetch-tags: true
       - name: Override rust-toolchain for CI
         run: |
-          (Get-Content src-tauri/rust-toolchain.toml) -replace 'channel = "nightly"', 'channel = "${{ env.RUST_NIGHTLY_VERSION }}"' | Set-Content src-tauri/rust-toolchain.toml
-      - run: rustup toolchain install ${{ env.RUST_NIGHTLY_VERSION }} --profile minimal && rustup component add rust-src --toolchain ${{ env.RUST_NIGHTLY_VERSION }}
+          foreach ($f in @('rust-toolchain.toml', 'src-tauri/rust-toolchain.toml')) {
+            (Get-Content $f) -replace 'channel = "nightly"', 'channel = "${{ env.RUST_NIGHTLY_VERSION }}"' | Set-Content $f
+          }
+      - run: |
+          rustup toolchain install ${{ env.RUST_NIGHTLY_VERSION }} --profile minimal
+          rustup component add rust-src --toolchain ${{ env.RUST_NIGHTLY_VERSION }}
+          rustup default ${{ env.RUST_NIGHTLY_VERSION }}
       - uses: Swatinem/rust-cache@v2
         with:
           cache-targets: false
