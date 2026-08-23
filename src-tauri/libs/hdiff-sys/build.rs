@@ -1,6 +1,7 @@
 fn main() {
     cc::Build::new()
         .cpp(true)
+        .static_crt(true)
         .cargo_output(true)
         .file("HDiff/diff.cpp")
         .file("HDiff/match_block.cpp")

@@ -1,3 +1,6 @@
 fn main() {
-    cc::Build::new().file("HPatch/patch.c").compile("hpatch");
+    cc::Build::new()
+        .static_crt(true)
+        .file("HPatch/patch.c")
+        .compile("hpatch");
 }

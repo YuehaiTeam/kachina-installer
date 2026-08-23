@@ -1,3 +1,8 @@
+# win7 target spec does not put crt-static in CARGO_CFG_TARGET_FEATURE,
+# so cc-rs would default to /MD and clash with rcedit-sys / rustc (+crt-static).
+[env]
+STATIC_VCRUNTIME = "true"
+
 [target.'cfg(all(windows, target_env = "msvc"))']
 rustflags = [
     "-C",
