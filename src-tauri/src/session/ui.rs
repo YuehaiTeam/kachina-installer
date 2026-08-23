@@ -104,7 +104,7 @@ impl SessionUi for SilentUi {
         true
     }
     fn progress(&self, event: ProgressEvent) {
-        tracing::info!(
+        tracing::debug!(
             "progress sub={} percent={:.1} {}",
             event.sub_step,
             event.percent,

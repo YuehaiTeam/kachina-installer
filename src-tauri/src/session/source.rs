@@ -657,13 +657,20 @@ pub async fn ensure_dfs2_session(
                 }
             }
         });
-    let sid = create_dfs2_session_with_challenge(
+    let sid = match create_dfs2_session_with_challenge(
         url.clone(),
         Some(ranges),
         ctx.resource_version.clone(),
         extras_obj,
     )
-    .await?;
+    .await
+    {
+        Ok(sid) => sid,
+        Err(err) => {
+            tracing::error!("Failed to create DFS2 session: {err:#}");
+            return Err(err);
+        }
+    };
     let parsed = url::Url::parse(&url).map_err(|e| hide(error::DFS2_SESSION, e))?;
     let base_url = format!("{}://{}", parsed.scheme(), parsed.host_str().unwrap_or(""));
     let res_id = parsed
@@ -673,10 +680,11 @@ pub async fn ensure_dfs2_session(
         .to_string();
     ctx.dfs2 = Some(Dfs2Session {
         api_url: url,
-        session_id: sid,
+        session_id: sid.clone(),
         base_url,
         res_id,
     });
+    tracing::info!("DFS2 session created successfully: {sid}");
     Ok(())
 }
 
@@ -783,12 +791,15 @@ pub async fn cleanup_dfs2(ctx: &mut SourceCtx) {
         })
     };
     if let Some(session) = ctx.dfs2.take() {
+        tracing::info!("Ending DFS2 session: {}", session.session_id);
         let session_api = format!(
             "{}/session/{}/{}",
             session.base_url, session.session_id, session.res_id
         );
         if let Err(err) = end_dfs2_session(session_api, payload).await {
             tracing::warn!("end dfs2 session failed: {err}");
+        } else {
+            tracing::info!("DFS2 session ended successfully: {}", session.session_id);
         }
         let _ = session.api_url;
     }
@@ -918,12 +929,19 @@ async fn ensure_plugin_session(
     )
     .await
     {
-        Ok(PluginResult::Unimplemented) => Ok(()),
-        Ok(PluginResult::Value(_)) => {
-            ctx.plugin_session = true;
+        Ok(PluginResult::Unimplemented) => {
+            tracing::info!("Plugin session unimplemented, skip createSession");
             Ok(())
         }
-        Err(err) => Err(hide(error::DFS2_SESSION, err)),
+        Ok(PluginResult::Value(data)) => {
+            ctx.plugin_session = true;
+            tracing::info!("Plugin session created: {data}");
+            Ok(())
+        }
+        Err(err) => {
+            tracing::error!("Failed to create plugin session: {err}");
+            Err(hide(error::DFS2_SESSION, err))
+        }
     }
 }
 
