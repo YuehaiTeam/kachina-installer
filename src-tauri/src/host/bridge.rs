@@ -72,7 +72,8 @@ async fn dispatch(
         }
         "get_installer_config" => {
             let scan_exe = req_bool(&args, &["scanExe", "scan_exe"])?;
-            let cfg = crate::installer::config::get_installer_config(&ctx.args, scan_exe).await?;
+            let mut cfg = crate::installer::config::get_installer_config(&ctx.args, scan_exe).await?;
+            cfg.preset = ctx.preset.clone();
             ok(cfg)
         }
         "select_dir" => {

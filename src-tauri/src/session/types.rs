@@ -46,10 +46,16 @@ pub struct ProjectConfig {
     pub uac_strategy: String,
     pub runtimes: Option<Vec<String>>,
     pub window_borderless: Option<bool>,
+    #[serde(default = "default_true")]
+    pub need_web_view2: bool,
 }
 
 fn default_uac() -> String {
     "prefer-admin".to_string()
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl ProjectConfig {
@@ -357,5 +363,24 @@ mod tests {
         assert_eq!(version_cmp("1.0", "1.0.0"), std::cmp::Ordering::Equal);
         assert!(version_gt("1.0.1", "1.0"));
         assert!(version_gt("v2.0.0", "1.9.9"));
+    }
+
+    #[test]
+    fn need_web_view2_defaults_true() {
+        let v = serde_json::json!({
+            "source": "https://example.com/app.exe",
+            "appName": "A",
+            "publisher": "P",
+            "regName": "A",
+            "exeName": "a.exe",
+            "uninstallName": "uninst.exe",
+            "updaterName": "update.exe",
+            "programFilesPath": "A",
+            "title": "T",
+            "description": "D",
+            "windowTitle": "W"
+        });
+        let cfg = super::ProjectConfig::from_value(&v).unwrap();
+        assert!(cfg.need_web_view2);
     }
 }

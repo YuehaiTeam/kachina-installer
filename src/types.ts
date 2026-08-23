@@ -28,6 +28,7 @@ export type ProjectConfig = {
   uacStrategy: 'prefer-admin' | 'prefer-user' | 'force';
   runtimes?: string[];
   windowBorderless?: boolean;
+  needWebView2?: boolean;
 };
 
 export type InstallStat = {
@@ -239,6 +240,13 @@ export interface InstallerConfig {
     dump_dir?: string | null;
   };
   elevated: boolean;
+  preset?: {
+    install_path: string;
+    source_uri: string;
+    create_lnk: boolean;
+    delete_user_data: boolean;
+    mirrorc_cdk: string | null;
+  } | null;
 }
 
 export interface HttpGetResponse {

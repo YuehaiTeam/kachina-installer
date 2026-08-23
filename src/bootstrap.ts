@@ -20,6 +20,9 @@ export type BootstrapResult = {
   needElevate: boolean;
   theme: EmbeddedTheme;
   autoRun: 'install' | 'uninstall' | null;
+  createLnk: boolean;
+  deleteUserData: boolean;
+  mirrorcKey: string;
 };
 
 const defaultImage = () => new URL('./left.webp', import.meta.url).href;
@@ -142,14 +145,19 @@ export async function bootstrap(
   }
 
   let selectedSource = '';
-  if (!Array.isArray(xsrc)) {
+  if (installer.preset?.source_uri) {
+    selectedSource = installer.preset.source_uri;
+  } else if (!Array.isArray(xsrc)) {
     selectedSource = xsrc;
   } else if (xsrc.length > 0) {
     selectedSource =
       xsrc.find((e) => e.id === rsrc.args.source)?.uri || xsrc[0]?.uri;
   }
 
-  const source = installer.args.target || installer.install_path;
+  const source =
+    installer.preset?.install_path ||
+    installer.args.target ||
+    installer.install_path;
   let needElevate = true;
   const seldir = await invoke<InvokeSelectDirRes>('select_dir', {
     exeName: project.exeName,
@@ -246,5 +254,8 @@ export async function bootstrap(
     needElevate,
     theme: processEmbeddedImage(installer.embedded_image),
     autoRun,
+    createLnk: installer.preset?.create_lnk ?? true,
+    deleteUserData: installer.preset?.delete_user_data ?? false,
+    mirrorcKey: installer.preset?.mirrorc_cdk ?? '',
   };
 }
