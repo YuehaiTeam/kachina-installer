@@ -212,13 +212,13 @@ fn handle_resource(
         return;
     };
     let path = path.split('?').next().unwrap_or(path);
-    let Some((bytes, mime, gzip)) = assets::lookup(path) else {
-        if let Ok(resp) = make_response(env, b"not found", 404, "text/plain", false) {
+    let Some((bytes, mime)) = assets::lookup(path) else {
+        if let Ok(resp) = make_response(env, b"not found", 404, "text/plain") {
             let _ = unsafe { args.SetResponse(&resp) };
         }
         return;
     };
-    if let Ok(resp) = make_response(env, bytes, 200, mime, gzip) {
+    if let Ok(resp) = make_response(env, bytes, 200, mime) {
         let _ = unsafe { args.SetResponse(&resp) };
     }
 }
@@ -228,13 +228,11 @@ fn make_response(
     bytes: &[u8],
     status: i32,
     mime: &str,
-    gzip: bool,
 ) -> anyhow::Result<ICoreWebView2WebResourceResponse> {
     let stream = unsafe { SHCreateMemStream(Some(bytes)) }.context("SHCreateMemStream")?;
     let stream: IStream = stream;
-    let encoding = if gzip { "Content-Encoding: gzip\n" } else { "" };
     let headers = wide(&format!(
-        "{encoding}Content-Type: {mime}\nAccess-Control-Allow-Origin: *\nCache-Control: no-cache"
+        "Content-Type: {mime}\nAccess-Control-Allow-Origin: *\nCache-Control: no-cache"
     ));
     let reason = wide(if status == 200 { "OK" } else { "Not Found" });
     let response = unsafe {
