@@ -8,7 +8,6 @@ use serde_json::{json, Value};
 use tokio::sync::Semaphore;
 
 use crate::dfs::InsightItem;
-use crate::fs::is_dir_empty;
 use crate::installer::config::InstallerConfig;
 use crate::installer::lnk::get_dirs;
 use crate::installer::lnk::CreateLnkArgs;
@@ -27,7 +26,7 @@ use crate::session::dump::session_dump;
 use crate::session::merge::{dfs2_ranges, file_mode, plan_tasks, FileMode, FilePos, InstallTask};
 use crate::session::plan::{
     build_plan, collect_skip_hash, files_to_probe_writable, find_local, join_install,
-    mark_unwritable, HashInfo, HashKey, LocalFile, PlanAction, PlanInput,
+    mark_unwritable, HashInfo, HashKey, InstallPlan, LocalFile, PlanAction, PlanInput, SkipReason,
 };
 use crate::session::source::{
     cleanup_dfs2, ensure_dfs2_session, fetch_metadata, hash_of_item, needs_js_plugin, parse_source,
@@ -201,6 +200,133 @@ fn progress(ui: &dyn SessionUi, sub_step: u32, percent: f64, current: impl Into<
     });
 }
 
+fn log_session_start(
+    kind: &str,
+    settings: &Settings,
+    config: &InstallerConfig,
+    project: &ProjectConfig,
+) {
+    tracing::info!(
+        "{kind} path={} source={} update={} silent={} non_interactive={} elevate={} online={} create_lnk={} dump={}",
+        settings.install_path,
+        settings.source_uri,
+        settings.is_update,
+        settings.silent,
+        settings.non_interactive,
+        settings.elevate,
+        settings.online,
+        settings.create_lnk,
+        settings.dump_dir.is_some(),
+    );
+    let sources = config.embedded_config.as_ref().and_then(|c| c.get("source"));
+    let sources = match sources {
+        Some(Value::Array(list)) => json!(list
+            .iter()
+            .map(|e| json!({ "id": e.get("id"), "uri": e.get("uri") }))
+            .collect::<Vec<_>>()),
+        Some(other) => other.clone(),
+        None => Value::Null,
+    };
+    let mut args = serde_json::to_value(&config.args).unwrap_or(Value::Null);
+    if let Some(obj) = args.as_object_mut() {
+        if obj
+            .get("mirrorc_cdk")
+            .and_then(|v| v.as_str())
+            .is_some_and(|s| !s.is_empty())
+        {
+            obj.insert("mirrorc_cdk".into(), json!("<set>"));
+        }
+    }
+    tracing::info!(
+        "INSTALLER_CONFIG: {}",
+        json!({
+            "install_path": config.install_path,
+            "install_path_exists": config.install_path_exists,
+            "install_path_source": config.install_path_source,
+            "is_uninstall": config.is_uninstall,
+            "exe_path": config.exe_path,
+            "args": args,
+            "elevated": config.elevated,
+            "app_name": project.app_name,
+            "exe_name": project.exe_name,
+            "need_web_view2": project.need_web_view2,
+            "runtimes": project.runtimes,
+            "embedded_config": { "source": sources },
+            "embedded_files": config.embedded_files.as_ref().map(|f| f.len()),
+            "embedded_index": config.embedded_index.as_ref().map(|i| i.len()),
+            "has_metadata": config.enbedded_metadata.is_some(),
+            "has_preset": config.preset.is_some(),
+            "has_mirrorc_cdk": settings.mirrorc_cdk.as_ref().is_some_and(|s| !s.is_empty()),
+        })
+    );
+}
+
+fn log_plan_summary(plan: &InstallPlan, local: &[LocalFile]) {
+    let install = plan
+        .files
+        .iter()
+        .filter(|f| f.action == PlanAction::Install)
+        .count();
+    let skip_unchanged = plan
+        .files
+        .iter()
+        .filter(|f| f.skip_reason == Some(SkipReason::Unchanged))
+        .count();
+    let skip_userdata = plan
+        .files
+        .iter()
+        .filter(|f| f.skip_reason == Some(SkipReason::UserData))
+        .count();
+    let skip_ignore = plan
+        .files
+        .iter()
+        .filter(|f| f.skip_reason == Some(SkipReason::IgnoreFolder))
+        .count();
+    tracing::info!(
+        "plan files={} install={} skip_unchanged={} skip_userdata={} skip_ignore={} deletes={} local_scanned={}",
+        plan.files.len(),
+        install,
+        skip_unchanged,
+        skip_userdata,
+        skip_ignore,
+        plan.deletes.len(),
+        local.len(),
+    );
+}
+
+fn log_task_plan(tasks: &[InstallTask], ranges: &[String]) {
+    let mut singles = 0usize;
+    let mut merged = 0usize;
+    let mut merged_files = 0usize;
+    let mut merged_bytes = 0usize;
+    for task in tasks {
+        match task {
+            InstallTask::Single(_) => singles += 1,
+            InstallTask::Merged {
+                files,
+                download_size,
+                ..
+            } => {
+                merged += 1;
+                merged_files += files.len();
+                merged_bytes += *download_size;
+            }
+        }
+    }
+    tracing::info!(
+        "File grouping result: tasks={} singles={} merged={} merged_files={} merged_bytes={} ranges={}",
+        tasks.len(),
+        singles,
+        merged,
+        merged_files,
+        merged_bytes,
+        ranges.len(),
+    );
+    if !ranges.is_empty() {
+        tracing::info!("DFS2 ranges collected: {ranges:?}");
+    }
+}
+
 fn source_id(project: &ProjectConfig, uri: &str) -> String {
     match &project.source {
         SourceField::Single(_) => "default".to_string(),
@@ -291,6 +417,7 @@ pub async fn run_install(
     ui: &dyn SessionUi,
     mgr: &ManagedElevate,
 ) -> anyhow::Result<SessionResult> {
+    log_session_start("install", settings, config, project);
     if settings.source_uri.starts_with("mirrorc://") {
         return run_mirrorc(settings, config, project, ui, mgr).await;
     }
@@ -389,6 +516,7 @@ async fn run_dfs_install(
         false,
     );
     if !prepare_process(settings, project, ui, mgr, &latest.tag_name).await? {
+        tracing::info!("install cancelled at process-running prompt");
         return Ok(SessionResult::cancelled(settings.is_update));
     }
 
@@ -397,9 +525,18 @@ async fn run_dfs_install(
     if settings.is_update {
         for folder in &project.ignore_folder_path {
             let full = settings.expand(folder, &project.app_name);
-            let (empty, _) = is_dir_empty(full.clone(), String::new()).await;
-            if !empty {
-                ignore_nonempty.push(full);
+            match tokio::fs::read_dir(&full).await {
+                Ok(mut entries) => match entries.next_entry().await {
+                    Ok(Some(_)) => ignore_nonempty.push(full),
+                    Ok(None) => {}
+                    Err(err) => tracing::warn!(
+                        "ignoreFolderPath check failed ({folder}), skip rule: {err}"
+                    ),
+                },
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+                Err(err) => {
+                    tracing::warn!("ignoreFolderPath check failed ({folder}), skip rule: {err}")
+                }
             }
         }
     }
@@ -473,6 +610,7 @@ async fn run_dfs_install(
         mark_unwritable(&mut plan.files, &settings.install_path, &unwritable);
     }
     session_dump!(settings.dump_dir.as_deref(), "03-plan.json", plan);
+    log_plan_summary(&plan, &local);
 
     let to_install: Vec<_> = plan
         .files
@@ -487,6 +625,7 @@ async fn run_dfs_install(
             "04-install-ops.json",
             Vec::<IpcOperation>::new()
         );
+        tracing::info!("already latest, tag={}", latest.tag_name);
         finish_install(settings, config, project, Some(&latest), ui, mgr).await?;
         progress(ui, 2, 100.0, "已是最新版本");
         return Ok(SessionResult::install(true, settings.is_update));
@@ -497,8 +636,9 @@ async fn run_dfs_install(
         .filter(|f| f.unwritable && f.file_name != project.updater_name)
         .map(|f| f.file_name.clone())
         .collect();
-    if !occupied.is_empty()
-        && !ui
+    if !occupied.is_empty() {
+        tracing::info!("occupied files: {}", occupied.join(", "));
+        if !ui
             .confirm(
                 PromptKind::OccupiedFiles,
                 "提示",
@@ -508,8 +648,10 @@ async fn run_dfs_install(
                 ),
             )
             .await
-    {
-        return Ok(SessionResult::cancelled(settings.is_update));
+        {
+            tracing::info!("install cancelled at occupied-files prompt");
+            return Ok(SessionResult::cancelled(settings.is_update));
+        }
     }
 
     let install_items: Vec<InstallItem> = to_install
@@ -562,6 +704,7 @@ async fn run_dfs_install(
             detail
         ));
     }
+    log_task_plan(&tasks, &ranges);
     prefetch_chunk_urls(&source_ctx, ranges).await;
 
     progress(ui, 2, 20.0, "准备下载……");
@@ -580,6 +723,11 @@ async fn run_dfs_install(
     cleanup_dfs2(&mut source_ctx).await;
     #[cfg_attr(not(debug_assertions), allow(unused_variables))]
     let ops = ops?;
+    tracing::info!(
+        "All tasks completed successfully: files={} ops={}",
+        to_install.len(),
+        ops.len()
+    );
     session_dump!(settings.dump_dir.as_deref(), "04-install-ops.json", ops);
 
     if !plan.deletes.is_empty() {
@@ -625,13 +773,25 @@ async fn pick_metadata(
                 .map(|e| format!("\n{}", crate::session::error::friendly(&e)))
                 .unwrap_or_else(|| "：未知错误，请检查日志".to_string())
         )),
-        (None, Some(online)) => Ok((online, true)),
-        (Some(local), None) => Ok((local, false)),
+        (None, Some(online)) => {
+            tracing::info!("Local meta not found, use online meta");
+            Ok((online, true))
+        }
+        (Some(local), None) => {
+            tracing::info!("Local meta found, use local meta");
+            Ok((local, false))
+        }
         (Some(local), Some(online)) => {
             if settings.online {
+                tracing::info!("Force online meta, tag={}", online.tag_name);
                 return Ok((online, true));
             }
             if online.tag_name != local.tag_name && version_gt(&online.tag_name, &local.tag_name) {
+                tracing::info!(
+                    "Version update detected local={} online={}",
+                    local.tag_name,
+                    online.tag_name
+                );
                 let no_index = config
                     .embedded_index
                     .as_ref()
@@ -650,8 +810,12 @@ async fn pick_metadata(
                             .await
                 };
                 if take_online {
+                    tracing::info!("use online meta, tag={}", online.tag_name);
                     return Ok((online, true));
                 }
+                tracing::info!("Has version update but use local meta");
+            } else {
+                tracing::info!("Local meta found, use local meta");
             }
             Ok((local, false))
         }
@@ -1057,6 +1221,11 @@ async fn install_files(
     let local_sem = Arc::new(Semaphore::new(16));
     let large_sem = Arc::new(Semaphore::new(5));
     let small_sem = Arc::new(Semaphore::new(11));
+    tracing::info!(
+        "TaskManager initialized: threshold={}MB large=5 small=11 local=16 total={}",
+        (threshold as f64 / 1024.0 / 1024.0).round(),
+        tasks.len()
+    );
 
     let mut file_cursor = 0usize;
     let mut futs = Vec::new();
@@ -1632,8 +1801,10 @@ async fn install_runtimes(
     let Some(runtimes) = project.runtimes.as_ref() else {
         return Ok(());
     };
+    tracing::info!("latest_meta.runtimes {runtimes:?}");
     progress(ui, 3, 96.0, "安装运行库……");
     for tag in runtimes {
+        tracing::info!("Installing runtime: {tag}");
         let embed = config
             .embedded_files
             .as_ref()
@@ -1682,7 +1853,10 @@ async fn install_runtimes(
                     last_err = None;
                     break;
                 }
-                Err(err) => last_err = Some(err),
+                Err(err) => {
+                    tracing::info!("安装{name}失败: {err:#}，重试中");
+                    last_err = Some(err);
+                }
             }
         }
         if let Some(err) = last_err {
@@ -1846,7 +2020,14 @@ async fn run_mirrorc(
         .and_then(|v| v.as_str())
         .unwrap_or_default()
         .to_string();
+    tracing::info!("Mirrorc source version {current_version}");
+    tracing::info!("Mirrorc target version {version_name}");
+    tracing::info!(
+        "Mirrorc update mode {:?}",
+        status.pointer("/data/update_type")
+    );
     if version_name == current_version {
+        tracing::info!("already latest, tag={version_name}");
         finish_install(settings, config, project, None, ui, mgr).await?;
         return Ok(SessionResult::install(true, settings.is_update));
     }
@@ -1872,6 +2053,7 @@ async fn run_mirrorc(
         .pointer("/data/url")
         .and_then(|v| v.as_str())
         .ok_or_else(|| anyhow!("从Mirror酱获取更新失败: 下载地址为空，请联系Mirror酱客服"))?;
+    tracing::info!("Mirrorc URL {url}");
     let sha256 = status
         .pointer("/data/sha256")
         .and_then(|v| v.as_str())
@@ -1987,11 +2169,13 @@ pub async fn run_uninstall(
     ui: &dyn SessionUi,
     mgr: &ManagedElevate,
 ) -> anyhow::Result<SessionResult> {
+    log_session_start("uninstall", settings, config, project);
     progress(ui, 0, 10.0, "准备卸载……");
     let meta = read_uninstall_metadata_raw(&project.reg_name, Some(settings.install_path.as_str()))
         .map_err(|e| {
             crate::session::error::hide(crate::session::error::UNINSTALL_META_MISSING, e)
         })?;
+    tracing::info!("UNINSTALL_METADATA: {meta}");
     let hashed: Vec<HashInfo> = meta
         .get("hashed")
         .and_then(|v| v.as_array())
