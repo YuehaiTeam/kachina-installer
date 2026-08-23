@@ -7,7 +7,7 @@ env:
   RUST_NIGHTLY_VERSION: nightly
 jobs:
   build:
-    runs-on: windows-latest
+    runs-on: windows-2022
     outputs:
       version: ${{ steps.update_meta.outputs.version }}
     steps:
@@ -60,7 +60,7 @@ jobs:
             src-tauri/target/x86_64-win7-windows-msvc/release/*.pdb
   release:
     needs: [build, test]
-    runs-on: windows-latest
+    runs-on: windows-2022
     if: startsWith(github.ref, 'refs/tags/')
     steps:
       - uses: actions/checkout@v4
@@ -104,7 +104,7 @@ jobs:
 
   test:
     needs: build
-    runs-on: windows-latest
+    runs-on: windows-2022
     strategy:
       matrix:
         test: [offline-install, online-install, offline-update, online-update, already-latest, uninstall, userdata-ignore, occupied-process, builder-extract-replace, plugin-stub]
