@@ -23,7 +23,7 @@ use crate::ipc::{progress_noop, progress_notify, ProgressNotify};
 use crate::local::Embedded;
 use crate::session::commands::SessionState;
 use crate::session::dump::session_dump;
-use crate::session::i18n::tr;
+use crate::session::i18n::{self, tr, Lang};
 use crate::trf;
 use crate::session::merge::{dfs2_ranges, file_mode, plan_tasks, FileMode, FilePos, InstallTask};
 use crate::session::plan::{
@@ -1884,6 +1884,13 @@ async fn install_runtimes(
     Ok(())
 }
 
+fn uninstall_lnk_path(program: &str, app: &str, lang: Lang) -> String {
+    match lang {
+        Lang::En => format!("{program}\\{app}\\Uninstall {app}.lnk"),
+        Lang::Zh => format!("{program}\\{app}\\卸载{app}.lnk"),
+    }
+}
+
 async fn finish_install(
     settings: &Settings,
     config: &InstallerConfig,
@@ -1901,11 +1908,7 @@ async fn finish_install(
     let desktop_lnk = format!("{}\\{}.lnk", desktop, project.app_name);
     // The uninstall shortcut file name follows the UI language; also compute the
     // other language's name so we can clean up a stale leftover below.
-    let uninstall_word = tr(
-        &format!("卸载{}", project.app_name),
-        &format!("Uninstall {}", project.app_name),
-    );
-    let uninstall_lnk = format!("{}\\{}\\{}.lnk", program, project.app_name, uninstall_word);
+    let uninstall_lnk = uninstall_lnk_path(&program, &project.app_name, i18n::current());
     if settings.create_lnk && !settings.is_update {
         let _ = run_op(
             mgr,
@@ -1955,11 +1958,14 @@ async fn finish_install(
             .await;
         }
         // remove an uninstall shortcut left over from the other UI language
-        let other_word = tr(
-            &format!("Uninstall {}", project.app_name),
-            &format!("卸载{}", project.app_name),
+        let other_lnk = uninstall_lnk_path(
+            &program,
+            &project.app_name,
+            match i18n::current() {
+                Lang::En => Lang::Zh,
+                Lang::Zh => Lang::En,
+            },
         );
-        let other_lnk = format!("{}\\{}\\{}.lnk", program, project.app_name, other_word);
         if !other_lnk.eq_ignore_ascii_case(&uninstall_lnk) {
             let _ = run_op(
                 mgr,
