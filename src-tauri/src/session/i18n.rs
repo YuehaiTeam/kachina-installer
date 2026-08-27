@@ -53,7 +53,7 @@ fn set_from_system() {
 }
 
 /// Pick a string by the current language.
-pub fn tr(zh: &str, en: &str) -> &str {
+pub fn tr<'a>(zh: &'a str, en: &'a str) -> &'a str {
     match current() {
         Lang::Zh => zh,
         Lang::En => en,
