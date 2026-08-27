@@ -23,6 +23,7 @@ use crate::ipc::{progress_noop, progress_notify, ProgressNotify};
 use crate::local::Embedded;
 use crate::session::commands::SessionState;
 use crate::session::dump::session_dump;
+use crate::session::i18n::tr;
 use crate::session::merge::{dfs2_ranges, file_mode, plan_tasks, FileMode, FilePos, InstallTask};
 use crate::session::plan::{
     build_plan, collect_skip_hash, files_to_probe_writable, find_local, join_install,
@@ -431,7 +432,7 @@ async fn run_dfs_install(
     ui: &dyn SessionUi,
     mgr: &ManagedElevate,
 ) -> anyhow::Result<SessionResult> {
-    progress(ui, 0, 1.0, "获取最新版本");
+    progress(ui, 0, 1.0, tr("获取最新版本", "Checking for the latest version"));
     session_dump!(
         settings.dump_dir.as_deref(),
         "01-settings.json",
@@ -540,7 +541,7 @@ async fn run_dfs_install(
             }
         }
     }
-    progress(ui, 1, 5.0, "校验本地文件……");
+    progress(ui, 1, 5.0, tr("校验本地文件……", "Verifying local files..."));
     let local = scan_local(
         settings,
         project,
@@ -627,7 +628,7 @@ async fn run_dfs_install(
         );
         tracing::info!("already latest, tag={}", latest.tag_name);
         finish_install(settings, config, project, Some(&latest), ui, mgr).await?;
-        progress(ui, 2, 100.0, "已是最新版本");
+        progress(ui, 2, 100.0, tr("已是最新版本", "Already up to date"));
         return Ok(SessionResult::install(true, settings.is_update));
     }
 
@@ -641,10 +642,11 @@ async fn run_dfs_install(
         if !ui
             .confirm(
                 PromptKind::OccupiedFiles,
-                "提示",
-                &format!(
-                    "检测到部分文件被占用，继续安装可能无法成功，是否继续？\n\n被占用的文件列表：{}",
-                    occupied.join("\n")
+                tr("提示", "Notice"),
+                &trf!(
+                    "检测到部分文件被占用，继续安装可能无法成功，是否继续？\n\n被占用的文件列表：{files}",
+                    "Some files are in use, installation may fail if you continue. Continue anyway?\n\nLocked files:{files}",
+                    "files" = format!("\n{}", occupied.join("\n"))
                 ),
             )
             .await
@@ -693,21 +695,21 @@ async fn run_dfs_install(
     {
         cleanup_dfs2(&mut source_ctx).await;
         let detail = crate::session::error::friendly(&err);
-        if detail == crate::session::error::DFS2_SESSION
-            || detail.starts_with(crate::session::error::DFS2_SESSION)
+        if detail == crate::session::error::dfs2_session()
+            || detail.starts_with(crate::session::error::dfs2_session())
         {
             return Err(err);
         }
         return Err(anyhow!(
             "{}: {}",
-            crate::session::error::DFS2_SESSION,
+            crate::session::error::dfs2_session(),
             detail
         ));
     }
     log_task_plan(&tasks, &ranges);
     prefetch_chunk_urls(&source_ctx, ranges).await;
 
-    progress(ui, 2, 20.0, "准备下载……");
+    progress(ui, 2, 20.0, tr("准备下载……", "Preparing to download..."));
     let ops = install_files(
         settings,
         config,
@@ -731,7 +733,7 @@ async fn run_dfs_install(
     session_dump!(settings.dump_dir.as_deref(), "04-install-ops.json", ops);
 
     if !plan.deletes.is_empty() {
-        progress(ui, 2, 95.0, "删除旧版残留文件……");
+        progress(ui, 2, 95.0, tr("删除旧版残留文件……", "Removing leftover files from the old version..."));
         let list: Vec<String> = plan
             .deletes
             .iter()
@@ -747,9 +749,9 @@ async fn run_dfs_install(
     }
 
     install_runtimes(settings, config, project, ui, mgr).await?;
-    progress(ui, 3, 98.0, "很快就好……");
+    progress(ui, 3, 98.0, tr("很快就好……", "Almost done..."));
     finish_install(settings, config, project, Some(&latest), ui, mgr).await?;
-    progress(ui, 3, 100.0, "安装完成");
+    progress(ui, 3, 100.0, tr("安装完成", "Installation complete"));
     Ok(SessionResult::install(false, settings.is_update))
 }
 
@@ -768,10 +770,10 @@ async fn pick_metadata(
     match (local, online) {
         (None, None) => Err(anyhow!(
             "{}{}",
-            crate::session::error::META_FAILED,
+            crate::session::error::meta_failed(),
             online_err
                 .map(|e| format!("\n{}", crate::session::error::friendly(&e)))
-                .unwrap_or_else(|| "：未知错误，请检查日志".to_string())
+                .unwrap_or_else(|| tr("：未知错误，请检查日志", ": unknown error, please check the log").to_string())
         )),
         (None, Some(online)) => {
             tracing::info!("Local meta not found, use online meta");
@@ -804,8 +806,11 @@ async fn pick_metadata(
                         || ui
                             .confirm(
                                 PromptKind::VersionMismatch,
-                                "提示",
-                                "当前安装包不是最新版本，是否直接安装最新版本？",
+                                tr("提示", "Notice"),
+                                tr(
+                                    "当前安装包不是最新版本，是否直接安装最新版本？",
+                                    "This package is not the latest version. Install the latest version directly?",
+                                ),
                             )
                             .await
                 };
@@ -853,10 +858,11 @@ async fn prepare_process(
     if !ui
         .confirm(
             PromptKind::ProcessRunning,
-            "提示",
-            &format!(
-                "检测到{}正在运行，是否结束进程并继续安装？",
-                project.app_name
+            tr("提示", "Notice"),
+            &trf!(
+                "检测到{app}正在运行，是否结束进程并继续安装？",
+                "{app} is running. Close it and continue with the installation?",
+                "app" = project.app_name
             ),
         )
         .await
@@ -880,7 +886,7 @@ async fn prepare_process(
                 progress_noop(),
             )
             .await
-            .context("结束进程失败")?;
+            .context(tr("结束进程失败", "Failed to close the process"))?;
         }
     }
     Ok(true)
@@ -931,7 +937,7 @@ async fn scan_local(
             res = &mut op_fut => break res?,
         }
     };
-    progress(ui, 1, 20.0, "校验本地文件……");
+    progress(ui, 1, 20.0, tr("校验本地文件……", "Verifying local files..."));
     let scanned = raw.as_array().cloned().unwrap_or_default();
     Ok(scanned
         .into_iter()
@@ -1529,7 +1535,7 @@ async fn install_one(
             Err(err) => last_err = Some(err),
         }
     }
-    let err = last_err.unwrap_or_else(|| anyhow!("安装失败，请重试"));
+    let err = last_err.unwrap_or_else(|| anyhow!(tr("安装失败，请重试", "Installation failed. Please retry")));
     log_task(
         "direct",
         item.size,
@@ -1657,7 +1663,7 @@ async fn build_install_op(
 ) -> anyhow::Result<IpcOperation> {
     let target = join_install(&settings.install_path, &item.file_name);
     let hash =
-        hash_of_item(item, hash_key).ok_or_else(|| anyhow!(crate::session::error::HASH_INVALID))?;
+        hash_of_item(item, hash_key).ok_or_else(|| anyhow!(crate::session::error::hash_invalid()))?;
     let installer = item.installer.unwrap_or(false);
     if !skip_patch {
         if let Some(local) = local_files.iter().find(|l| l.name == hash) {
@@ -1802,7 +1808,7 @@ async fn install_runtimes(
         return Ok(());
     };
     tracing::info!("latest_meta.runtimes {runtimes:?}");
-    progress(ui, 3, 96.0, "安装运行库……");
+    progress(ui, 3, 96.0, tr("安装运行库……", "Installing runtimes..."));
     for tag in runtimes {
         tracing::info!("Installing runtime: {tag}");
         let embed = config
@@ -1810,7 +1816,7 @@ async fn install_runtimes(
             .as_ref()
             .and_then(|files| files.iter().find(|e| e.name == *tag));
         let name = runtime_name(tag);
-        progress(ui, 3, 96.0, format!("安装{name}……"));
+        progress(ui, 3, 96.0, trf!("安装{name}……", "Installing {name}...", "name" = name));
         let mut last_err = None;
         for _ in 0..3 {
             let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Value>();
@@ -1836,13 +1842,14 @@ async fn install_runtimes(
                                 3,
                                 96.0,
                                 format!(
-                                    "下载 {name} ……<br>{} / {}",
+                                    "{}<br>{} / {}",
+                                    trf!("下载 {name} ……", "Downloading {name}...", "name" = name),
                                     format_size(cur),
                                     format_size(total)
                                 ),
                             );
                         } else {
-                            progress(ui, 3, 96.0, format!("安装 {name} ……"));
+                            progress(ui, 3, 96.0, trf!("安装 {name} ……", "Installing {name}...", "name" = name));
                         }
                     }
                     res = &mut op_fut => break res,
@@ -1861,8 +1868,16 @@ async fn install_runtimes(
         }
         if let Some(err) = last_err {
             tracing::error!("安装{name}失败: {err:#}，请手动安装");
-            ui.alert("出错了", &format!("安装{name}失败: {err}，请手动安装"))
-                .await;
+            ui.alert(
+                tr("出错了", "Error"),
+                &trf!(
+                    "安装{name}失败: {err}，请手动安装",
+                    "Failed to install {name}: {err}. Please install it manually",
+                    "name" = name,
+                    "err" = err
+                ),
+            )
+            .await;
         }
     }
     Ok(())
@@ -1883,10 +1898,13 @@ async fn finish_install(
         program, project.app_name, project.app_name
     );
     let desktop_lnk = format!("{}\\{}.lnk", desktop, project.app_name);
-    let uninstall_lnk = format!(
-        "{}\\{}\\卸载{}.lnk",
-        program, project.app_name, project.app_name
+    // The uninstall shortcut file name follows the UI language; also compute the
+    // other language's name so we can clean up a stale leftover below.
+    let uninstall_word = tr(
+        &format!("卸载{}", project.app_name),
+        &format!("Uninstall {}", project.app_name),
     );
+    let uninstall_lnk = format!("{}\\{}\\{}.lnk", program, project.app_name, uninstall_word);
     if settings.create_lnk && !settings.is_update {
         let _ = run_op(
             mgr,
@@ -1925,8 +1943,32 @@ async fn finish_install(
         .await
         {
             tracing::warn!("create uninstaller failed: {err:#}");
-            ui.alert("出错了", &format!("创建卸载程序失败: {err}"))
-                .await;
+            ui.alert(
+                tr("出错了", "Error"),
+                &trf!(
+                    "创建卸载程序失败: {err}",
+                    "Failed to create the uninstaller: {err}",
+                    "err" = err
+                ),
+            )
+            .await;
+        }
+        // remove an uninstall shortcut left over from the other UI language
+        let other_word = tr(
+            &format!("Uninstall {}", project.app_name),
+            &format!("卸载{}", project.app_name),
+        );
+        let other_lnk = format!("{}\\{}\\{}.lnk", program, project.app_name, other_word);
+        if !other_lnk.eq_ignore_ascii_case(&uninstall_lnk) {
+            let _ = run_op(
+                mgr,
+                settings.elevate,
+                IpcOperation::RmList {
+                    list: vec![other_lnk],
+                },
+                progress_noop(),
+            )
+            .await;
         }
         let _ = run_op(
             mgr,
@@ -1960,7 +2002,15 @@ async fn finish_install(
         .await
         {
             tracing::warn!("write registry failed: {err:#}");
-            ui.alert("出错了", &format!("写入注册表失败: {err}")).await;
+            ui.alert(
+                tr("出错了", "Error"),
+                &trf!(
+                    "写入注册表失败: {err}",
+                    "Failed to write to the registry: {err}",
+                    "err" = err
+                ),
+            )
+            .await;
         }
     }
     emit_insight(ui, project, settings, config, "finish", None, false);
@@ -1978,7 +2028,7 @@ async fn run_mirrorc(
         .mirrorc_cdk
         .as_deref()
         .filter(|s| !s.is_empty())
-        .ok_or_else(|| anyhow!("需要 Mirror酱 CDK"))?; // GUI already prompts for CDK before start
+        .ok_or_else(|| anyhow!(tr("需要 Mirror酱 CDK", "A MirrorChyan CDK is required")))?; // GUI already prompts for CDK before start
     let parsed = parse_source(&settings.source_uri)?;
     let ParsedSource::Mirrorc {
         resource_id,
@@ -1987,12 +2037,13 @@ async fn run_mirrorc(
         os,
     } = parsed
     else {
-        return Err(anyhow!(format!(
-            "无法获取Mirror酱数据，安装包可能已经损坏：{}",
-            settings.source_uri
+        return Err(anyhow!(trf!(
+            "无法获取Mirror酱数据，安装包可能已经损坏：{url}",
+            "Cannot fetch MirrorChyan data, the package may be corrupted: {url}",
+            "url" = settings.source_uri
         )));
     };
-    progress(ui, 0, 2.0, "从 Mirror酱 获取最新版本");
+    progress(ui, 0, 2.0, tr("从 Mirror酱 获取最新版本", "Checking MirrorChyan for the latest version"));
     let current_version = win32_version_info::VersionInfo::from_file(join_install(
         &settings.install_path,
         &project.exe_name,
@@ -2052,17 +2103,17 @@ async fn run_mirrorc(
     let url = status
         .pointer("/data/url")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| anyhow!("从Mirror酱获取更新失败: 下载地址为空，请联系Mirror酱客服"))?;
+        .ok_or_else(|| anyhow!(tr("从Mirror酱获取更新失败: 下载地址为空，请联系Mirror酱客服", "Failed to fetch update from MirrorChyan: the download URL is empty. Please contact MirrorChyan support")))?;
     tracing::info!("Mirrorc URL {url}");
     let sha256 = status
         .pointer("/data/sha256")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| anyhow!("从Mirror酱获取更新失败: 校验数据为空，请联系Mirror酱客服"))?;
+        .ok_or_else(|| anyhow!(tr("从Mirror酱获取更新失败: 校验数据为空，请联系Mirror酱客服", "Failed to fetch update from MirrorChyan: the checksum is empty. Please contact MirrorChyan support")))?;
     let zip_path = join_install(
         &settings.install_path,
         &format!("KachinaInstaller_Mirrorc_{sha256}.zip"),
     );
-    progress(ui, 1, 5.0, "准备从Mirror酱下载……");
+    progress(ui, 1, 5.0, tr("准备从Mirror酱下载……", "Preparing to download from MirrorChyan..."));
     run_op_with_ui(
         mgr,
         settings.elevate,
@@ -2085,7 +2136,7 @@ async fn run_mirrorc(
         },
     )
     .await?;
-    progress(ui, 2, 70.0, "检查压缩包……");
+    progress(ui, 2, 70.0, tr("检查压缩包……", "Verifying archive..."));
     let installed = run_op_with_ui(
         mgr,
         settings.elevate,
@@ -2103,7 +2154,7 @@ async fn run_mirrorc(
                     ui,
                     2,
                     70.0 + (count as f64 / total as f64) * 25.0,
-                    format!("<div class=\"d-single-stat\">解压 {file}</div>"),
+                    format!("<div class=\"d-single-stat\">{}</div>", trf!("解压 {file}", "Extracting {file}", "file" = file)),
                 );
             }
             Some("delete") => {
@@ -2112,7 +2163,7 @@ async fn run_mirrorc(
                     ui,
                     2,
                     97.0,
-                    format!("<div class=\"d-single-stat\">删除 {file}</div>"),
+                    format!("<div class=\"d-single-stat\">{}</div>", trf!("删除 {file}", "Deleting {file}", "file" = file)),
                 );
             }
             _ => {}
@@ -2125,7 +2176,7 @@ async fn run_mirrorc(
         .and_then(|v| serde_json::from_value::<DfsMetadata>(v.clone()).ok());
     install_runtimes(settings, config, project, ui, mgr).await?;
     finish_install(settings, config, project, meta.as_ref(), ui, mgr).await?;
-    progress(ui, 3, 100.0, "安装完成");
+    progress(ui, 3, 100.0, tr("安装完成", "Installation complete"));
     Ok(SessionResult::install(false, settings.is_update))
 }
 
@@ -2135,26 +2186,63 @@ fn mirrorc_error(status: &Value) -> Option<(String, bool)> {
         return None;
     }
     let (msg, reopen) = match code {
-        1001 | 8002 | 8003 | 8004 => ("Mirror酱参数错误，请检查打包配置", false),
-        8001 => ("从Mirror酱获取更新失败，请检查打包配置", false),
-        7001 => ("Mirror酱 CDK 已过期", true),
-        7002 => ("Mirror酱 CDK 错误，请检查设置的 CDK 是否正确", true),
+        1001 | 8002 | 8003 | 8004 => (
+            tr(
+                "Mirror酱参数错误，请检查打包配置",
+                "MirrorChyan parameter error. Please check the packaging configuration",
+            ),
+            false,
+        ),
+        8001 => (
+            tr(
+                "从Mirror酱获取更新失败，请检查打包配置",
+                "Failed to fetch update from MirrorChyan. Please check the packaging configuration",
+            ),
+            false,
+        ),
+        7001 => (
+            tr("Mirror酱 CDK 已过期", "The MirrorChyan CDK has expired"),
+            true,
+        ),
+        7002 => (
+            tr(
+                "Mirror酱 CDK 错误，请检查设置的 CDK 是否正确",
+                "Invalid MirrorChyan CDK. Please check that the CDK is correct",
+            ),
+            true,
+        ),
         7003 => (
-            "Mirror酱 CDK 今日下载次数已达上限，请更换 CDK 或明天再试",
+            tr(
+                "Mirror酱 CDK 今日下载次数已达上限，请更换 CDK 或明天再试",
+                "The MirrorChyan CDK has reached its daily download limit. Please use another CDK or try again tomorrow",
+            ),
             false,
         ),
         7004 => (
-            "Mirror酱 CDK 类型和待下载的资源不匹配，请检查设置的 CDK 是否正确",
+            tr(
+                "Mirror酱 CDK 类型和待下载的资源不匹配，请检查设置的 CDK 是否正确",
+                "The MirrorChyan CDK type does not match this resource. Please check that the CDK is correct",
+            ),
             true,
         ),
-        7005 => ("Mirror酱 CDK 已被封禁，请更换 CDK", true),
+        7005 => (
+            tr(
+                "Mirror酱 CDK 已被封禁，请更换 CDK",
+                "The MirrorChyan CDK has been banned. Please use another CDK",
+            ),
+            true,
+        ),
         _ => {
             let detail = status
                 .get("msg")
                 .and_then(|v| v.as_str())
-                .unwrap_or("未知错误");
+                .unwrap_or(tr("未知错误", "unknown error"));
             return Some((
-                format!("从Mirror酱获取更新失败: {detail}，请联系Mirror酱客服"),
+                trf!(
+                    "从Mirror酱获取更新失败: {detail}，请联系Mirror酱客服",
+                    "Failed to fetch update from MirrorChyan: {detail}. Please contact MirrorChyan support",
+                    "detail" = detail
+                ),
                 false,
             ));
         }
@@ -2170,10 +2258,10 @@ pub async fn run_uninstall(
     mgr: &ManagedElevate,
 ) -> anyhow::Result<SessionResult> {
     log_session_start("uninstall", settings, config, project);
-    progress(ui, 0, 10.0, "准备卸载……");
+    progress(ui, 0, 10.0, tr("准备卸载……", "Preparing to uninstall..."));
     let meta = read_uninstall_metadata_raw(&project.reg_name, Some(settings.install_path.as_str()))
         .map_err(|e| {
-            crate::session::error::hide(crate::session::error::UNINSTALL_META_MISSING, e)
+            crate::session::error::hide(crate::session::error::uninstall_meta_missing(), e)
         })?;
     tracing::info!("UNINSTALL_METADATA: {meta}");
     let hashed: Vec<HashInfo> = meta
@@ -2215,7 +2303,7 @@ pub async fn run_uninstall(
     if settings.elevate {
         let _ = run_op(mgr, true, IpcOperation::Ping, progress_noop()).await;
     }
-    progress(ui, 1, 40.0, "正在卸载……");
+    progress(ui, 1, 40.0, tr("正在卸载……", "Uninstalling..."));
     run_op(
         mgr,
         settings.elevate,
@@ -2230,7 +2318,7 @@ pub async fn run_uninstall(
         progress_noop(),
     )
     .await?;
-    progress(ui, 2, 100.0, "卸载完成");
+    progress(ui, 2, 100.0, tr("卸载完成", "Uninstall complete"));
     let _ = config;
     Ok(SessionResult::uninstall())
 }
@@ -2238,7 +2326,7 @@ pub async fn run_uninstall(
 pub async fn silent_main(args: crate::cli::arg::InstallArgs) -> anyhow::Result<()> {
     let temp_dir = std::env::temp_dir();
     if std::env::set_current_dir(&temp_dir).is_err() {
-        return Err(anyhow!(crate::session::error::TEMP_DIR));
+        return Err(anyhow!(crate::session::error::temp_dir()));
     }
     let config = crate::installer::config::resolve_installer_config(args.clone(), true).await?;
     if let Some(language) = config
@@ -2255,7 +2343,7 @@ pub async fn silent_main(args: crate::cli::arg::InstallArgs) -> anyhow::Result<(
                 "embedded config missing (embedded_files={})",
                 config.embedded_files.as_ref().map(|f| f.len()).unwrap_or(0)
             );
-            return Err(anyhow!(crate::session::error::PKG_BROKEN));
+            return Err(anyhow!(crate::session::error::pkg_broken()));
         }
     };
     let mut settings = crate::session::types::settings_from_cli(&args, &config, &project).await?;
@@ -2291,7 +2379,7 @@ pub async fn silent_main(args: crate::cli::arg::InstallArgs) -> anyhow::Result<(
     }
     if needs_js_plugin(&settings.source_uri) {
         if crate::host::webview_version().is_err() {
-            return Err(anyhow!(crate::session::error::PLUGIN_NEED_WEBVIEW2));
+            return Err(anyhow!(crate::session::error::plugin_need_webview2()));
         }
         let session = SessionState::default();
         let runtime = crate::host::spawn_plugin_runtime(args.clone(), session.clone()).await?;

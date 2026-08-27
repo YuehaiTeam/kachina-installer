@@ -7,6 +7,7 @@ use serde_json::Value;
 use tokio::sync::{oneshot, Mutex};
 
 use crate::host::HostHandle;
+use crate::session::i18n::tr;
 
 use super::types::{PluginEvent, ProgressEvent, PromptEvent};
 
@@ -219,7 +220,7 @@ impl PluginHub {
             id: String::new(),
             ok: false,
             data: None,
-            error: Some("插件无响应".to_string()),
+            error: Some(tr("插件无响应", "Plugin not responding").to_string()),
             unimplemented: false,
         })
     }
@@ -263,7 +264,7 @@ impl PluginHost for GuiPluginHost {
             let msg = reply
                 .error
                 .filter(|s| !s.is_empty())
-                .unwrap_or_else(|| "插件执行失败".to_string());
+                .unwrap_or_else(|| tr("插件执行失败", "Plugin execution failed").to_string());
             return Err(crate::session::error::user(msg));
         }
         Ok(PluginResult::Value(reply.data.unwrap_or(Value::Null)))

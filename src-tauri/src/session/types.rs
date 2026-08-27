@@ -61,7 +61,7 @@ fn default_true() -> bool {
 impl ProjectConfig {
     pub fn from_value(value: &serde_json::Value) -> anyhow::Result<Self> {
         serde_json::from_value(value.clone())
-            .map_err(|e| crate::session::error::hide(crate::session::error::PKG_BROKEN, e))
+            .map_err(|e| crate::session::error::hide(crate::session::error::pkg_broken(), e))
     }
 
     pub fn source_uri(&self, override_id: Option<&str>) -> anyhow::Result<String> {
@@ -75,7 +75,7 @@ impl ProjectConfig {
                 }
                 list.first()
                     .map(|s| s.uri.clone())
-                    .ok_or_else(|| anyhow::anyhow!(crate::session::error::PKG_BROKEN))
+                    .ok_or_else(|| anyhow::anyhow!(crate::session::error::pkg_broken()))
             }
         }
     }
@@ -106,7 +106,7 @@ impl DfsMetadata {
         } else if self.hashed.iter().all(|e| e.xxh.is_some()) {
             Ok(HashKey::Xxh)
         } else {
-            Err(anyhow::anyhow!(crate::session::error::HASH_INVALID))
+            Err(anyhow::anyhow!(crate::session::error::hash_invalid()))
         }
     }
 
@@ -164,7 +164,7 @@ pub async fn settings_from_cli(
     let source_uri = project.source_uri(args.source.as_deref())?;
     let inspected = crate::installer::inspect_dir(install_path.clone(), project.exe_name.clone())
         .await
-        .ok_or_else(|| anyhow::anyhow!(crate::session::error::PATH_INVALID))?;
+        .ok_or_else(|| anyhow::anyhow!(crate::session::error::path_invalid()))?;
     Ok(Settings {
         install_path,
         source_uri,

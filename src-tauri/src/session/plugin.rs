@@ -112,7 +112,7 @@ fn parse_github_url(url: &str) -> anyhow::Result<GitHubUrl> {
     let mut cache_time = None;
     if let Some(params) = params {
         let parsed = url::Url::parse(&format!("https://dummy.local/?{params}"))
-            .map_err(|e| hide(error::META_FAILED, e))?;
+            .map_err(|e| hide(error::meta_failed(), e))?;
         for (k, v) in parsed.query_pairs() {
             match k.as_ref() {
                 "versionRegex" => version_regex = Some(v.into_owned()),
@@ -129,11 +129,11 @@ fn parse_github_url(url: &str) -> anyhow::Result<GitHubUrl> {
     }
     let releases_index = base_url
         .find("/releases/")
-        .ok_or_else(|| hide(error::META_FAILED, "URL must contain /releases/"))?;
+        .ok_or_else(|| hide(error::meta_failed(), "URL must contain /releases/"))?;
     let releases_prefix = format!("{}{}", &base_url[..releases_index], "/releases");
     let releases_latest_url = format!("{releases_prefix}/latest");
     let (owner, repo) = owner_repo_from_releases_url(&base_url)
-        .ok_or_else(|| hide(error::META_FAILED, "Invalid releases URL format"))?;
+        .ok_or_else(|| hide(error::meta_failed(), "Invalid releases URL format"))?;
     let host_ok = url::Url::parse(&base_url)
         .ok()
         .and_then(|u| u.host_str().map(|h| h == "github.com"))
@@ -154,7 +154,7 @@ async fn resolve_version(
 ) -> anyhow::Result<String> {
     let response = http_get_request(releases_latest_url.to_string(), Some(true), None, None)
         .await
-        .map_err(|e| hide(error::META_FAILED, e))?;
+        .map_err(|e| hide(error::meta_failed(), e))?;
     let redirect = if !response.final_url.is_empty() {
         response.final_url
     } else {
@@ -166,21 +166,21 @@ async fn resolve_version(
     };
     if redirect.is_empty() {
         return Err(hide(
-            error::META_FAILED,
+            error::meta_failed(),
             "No redirect found for GitHub latest release",
         ));
     }
     if let Some(custom) = version_regex {
         return capture_first_group(custom, &redirect).ok_or_else(|| {
             hide(
-                error::META_FAILED,
+                error::meta_failed(),
                 format!("Failed to extract version from {redirect}"),
             )
         });
     }
     tag_from_releases_redirect(&redirect).ok_or_else(|| {
         hide(
-            error::META_FAILED,
+            error::meta_failed(),
             format!("Failed to extract tag from {redirect}"),
         )
     })
@@ -256,7 +256,7 @@ async fn resolve_direct_url(original_url: &str, cache_time: Option<u64>) -> anyh
     }
     let response = http_get_request(original_url.to_string(), Some(true), None, None)
         .await
-        .map_err(|e| hide(error::META_FAILED, e))?;
+        .map_err(|e| hide(error::meta_failed(), e))?;
     let mut redirect = response
         .headers
         .get("location")
