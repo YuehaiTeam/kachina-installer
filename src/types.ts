@@ -29,6 +29,8 @@ export type ProjectConfig = {
   runtimes?: string[];
   windowBorderless?: boolean;
   needWebView2?: boolean;
+  // 安装器界面语言，auto（默认，跟随系统）、zh（中文）、en（英文）
+  language?: 'auto' | 'zh' | 'en';
 };
 
 export type InstallStat = {

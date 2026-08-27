@@ -2241,6 +2241,13 @@ pub async fn silent_main(args: crate::cli::arg::InstallArgs) -> anyhow::Result<(
         return Err(anyhow!(crate::session::error::TEMP_DIR));
     }
     let config = crate::installer::config::resolve_installer_config(args.clone(), true).await?;
+    if let Some(language) = config
+        .embedded_config
+        .as_ref()
+        .and_then(|v| v["language"].as_str())
+    {
+        crate::session::i18n::set_from_config(language);
+    }
     let project = match config.embedded_config.as_ref() {
         Some(value) => ProjectConfig::from_value(value)?,
         None => {

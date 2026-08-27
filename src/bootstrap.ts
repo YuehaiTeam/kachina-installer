@@ -1,6 +1,7 @@
 import { getCurrentWindow, invoke } from './tauri';
 import { error, log, sendInsight, warn } from './api/ipc';
 import { dialogError, insightBase, uacNeeded } from './ui';
+import { getLanguage, setLanguage } from './i18n';
 import type {
   InstallerConfig,
   InvokeSelectDirRes,
@@ -111,6 +112,8 @@ export async function bootstrap(
 
   if (installer.embedded_config) {
     Object.assign(project, installer.embedded_config);
+    setLanguage(project.language ?? 'auto');
+    await invoke('set_language', { language: getLanguage() }).catch(log);
     if (
       process.env.NODE_ENV === 'development' &&
       installer.embedded_files &&
