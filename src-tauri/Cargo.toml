@@ -57,7 +57,8 @@ windows = { version = "0.62", features = [
     "Win32_UI_HiDpi",
     "Win32_Graphics_Gdi",
     "Win32_Graphics_Dwm",
-    "Win32_UI_Shell"
+    "Win32_UI_Shell",
+    "Win32_Globalization"
 ] }
 
 rfd = { version = "0.15", default-features = false, features = [
