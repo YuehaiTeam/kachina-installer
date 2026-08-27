@@ -1,4 +1,5 @@
 use super::i18n::tr;
+use crate::trf;
 
 pub const PKG_BROKEN: &str = "安装包损坏，请重新下载";
 pub const META_FAILED: &str = "获取更新信息失败，请检查网络连接";

@@ -13,6 +13,7 @@ use crate::dfs::{
 use crate::local::Embedded;
 use crate::session::error::{self, hide, user};
 use crate::session::i18n::tr;
+use crate::trf;
 use crate::session::plan::HashKey;
 use crate::session::plugin::{
     clean_plugin_url, forced_plugin_name, is_github_source, resolve_github_file_url,

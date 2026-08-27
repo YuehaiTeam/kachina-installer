@@ -24,6 +24,7 @@ use crate::local::Embedded;
 use crate::session::commands::SessionState;
 use crate::session::dump::session_dump;
 use crate::session::i18n::tr;
+use crate::trf;
 use crate::session::merge::{dfs2_ranges, file_mode, plan_tasks, FileMode, FilePos, InstallTask};
 use crate::session::plan::{
     build_plan, collect_skip_hash, files_to_probe_writable, find_local, join_install,
