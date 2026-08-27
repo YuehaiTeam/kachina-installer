@@ -48,6 +48,8 @@
   "description": "快速多功能的安装器",
   // 窗口标题
   "windowTitle": "Kachina Installer 安装程序",
+  // 安装器界面语言，auto（默认，跟随系统语言）、zh（中文）、en（英文）
+  "language": "auto",
   // 卸载时需要删除的用户数据目录或文件
   "userDataPath": ["${INSTALL_PATH}/User"],
   // 更新时如果文件夹已存在且非空则跳过的目录
