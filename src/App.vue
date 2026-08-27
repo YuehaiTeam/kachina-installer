@@ -31,16 +31,16 @@
         <div v-if="step === 1" class="actions">
           <div v-if="!isUpdate && !INSTALLER_CONFIG.is_uninstall" class="lnk">
             <Checkbox v-model="createLnk" />
-            创建桌面快捷方式
+            {{ t('step1.createShortcut') }}
           </div>
           <div v-if="!isUpdate && !INSTALLER_CONFIG.is_uninstall" class="read">
             <Checkbox v-model="acceptEula" />
-            我已阅读并同意
-            <a> 用户协议 </a>
+            {{ t('step1.eulaRead') }}
+            <a> {{ t('step1.eula') }} </a>
           </div>
           <div v-if="INSTALLER_CONFIG.is_uninstall" class="read">
             <Checkbox v-model="deleteUserData" />
-            同时删除用户数据
+            {{ t('step1.deleteUserData') }}
           </div>
           <div class="more">
             <span>
@@ -52,29 +52,34 @@
                   !INSTALLER_CONFIG.embedded_index?.length
                 "
               >
-                <span>从 </span>
-                <a @click="dialog = 'source'" title="点击切换安装源">
+                <span>{{ t('common.from') }} </span>
+                <a
+                  @click="dialog = 'source'"
+                  :title="t('step1.clickSwitchSource')"
+                >
                   {{
                     PROJECT_CONFIG.source.find((e) => e.uri === selectedSource)
                       ?.name
                   }}<template v-if="installMode === 'mirrorc'"
-                    >({{ mirrorcKey ? markedKey : '无CDK' }})</template
+                    >({{ mirrorcKey ? markedKey : t('step1.noCdk') }})</template
                   >
                   <IconEdit />
                 </a>
               </template>
               <span v-if="!isUpdate && !INSTALLER_CONFIG.is_uninstall">
-                安装到
+                {{ t('common.installTo') }}
               </span>
               <span v-if="isUpdate && !INSTALLER_CONFIG.is_uninstall">
-                更新到
+                {{ t('common.updateTo') }}
               </span>
-              <span v-if="INSTALLER_CONFIG.is_uninstall"> 卸载自 </span>
+              <span v-if="INSTALLER_CONFIG.is_uninstall">
+                {{ t('common.uninstallFrom') }}
+              </span>
             </span>
             <a
               v-if="!INSTALLER_CONFIG.is_uninstall"
               @click="changeSource"
-              title="点击修改安装路径"
+              :title="t('step1.clickChangePath')"
               >{{ source }}<IconEdit
             /></a>
             <a v-else>{{ source }}</a>
@@ -94,7 +99,7 @@
               "
               v-if="needElevate || INSTALLER_CONFIG.elevated"
             />
-            {{ isUpdate ? '更新' : '安装' }}
+            {{ isUpdate ? t('common.update') : t('common.install') }}
           </button>
           <button
             v-if="INSTALLER_CONFIG.is_uninstall"
@@ -110,7 +115,7 @@
               "
               v-if="needElevate || INSTALLER_CONFIG.elevated"
             />
-            卸载
+            {{ t('common.uninstall') }}
           </button>
         </div>
         <div class="progress" v-if="step === 2">
@@ -139,16 +144,20 @@
         <div class="finish" v-if="step === 3">
           <div class="finish-text">
             <CircleSuccess />
-            {{ isUpdate ? '更新' : '安装' }}完成
+            {{ isUpdate ? t('finish.updated') : t('finish.installed') }}
           </div>
-          <button class="btn btn-install" @click="launch">启动</button>
+          <button class="btn btn-install" @click="launch">
+            {{ t('common.launch') }}
+          </button>
         </div>
         <div class="finish" v-if="step === 4">
           <div class="finish-text">
             <CircleSuccess />
-            您已安装最新版本
+            {{ t('finish.alreadyLatest') }}
           </div>
-          <button class="btn btn-install" @click="launch">启动</button>
+          <button class="btn btn-install" @click="launch">
+            {{ t('common.launch') }}
+          </button>
         </div>
         <div class="uninstall" v-if="step === 5">
           <button class="btn btn-install" disabled>
@@ -158,15 +167,17 @@
             >
               <span class="fui-Spinner__spinnerTail"></span>
             </span>
-            卸载中
+            {{ t('finish.uninstalling') }}
           </button>
         </div>
         <div class="finish" v-if="step === 6">
           <div class="finish-text">
             <CircleSuccess />
-            卸载成功
+            {{ t('finish.uninstallDone') }}
           </div>
-          <button class="btn btn-install" @click="exit">关闭</button>
+          <button class="btn btn-install" @click="exit">
+            {{ t('common.close') }}
+          </button>
         </div>
       </div>
     </div>
@@ -524,21 +535,22 @@ import {
 import { InstallerConfig, InvokeSelectDirRes, ProjectConfig } from './types.ts';
 import IconMinimize from './IconMinimize.vue';
 import IconClose from './IconClose.vue';
+import { t } from './i18n';
 
 const init = ref(0);
 
-const subStepList: ReadonlyArray<string> = [
-  '获取最新版本',
-  '校验更新内容',
-  '下载和解压文件',
-  '准备运行环境',
-];
-const subStepListMirrorc: ReadonlyArray<string> = [
-  '从 Mirror酱 获取最新版本',
-  '下载数据包',
-  '解压文件',
-  '准备运行环境',
-];
+const subStepList = computed<ReadonlyArray<string>>(() => [
+  t('substep.getLatest'),
+  t('substep.verify'),
+  t('substep.download'),
+  t('substep.env'),
+]);
+const subStepListMirrorc = computed<ReadonlyArray<string>>(() => [
+  t('substep.mirrorcGetLatest'),
+  t('substep.mirrorcDownload'),
+  t('substep.mirrorcExtract'),
+  t('substep.env'),
+]);
 
 const isUpdate = ref(false);
 const acceptEula = ref(true);
@@ -675,7 +687,7 @@ async function install(): Promise<void> {
     });
     await dialogError(
       stringifyError(e),
-      '出错了',
+      t('common.error'),
       INSTALLER_CONFIG.args.silent,
     );
     resetProgress();
@@ -691,7 +703,7 @@ async function uninstall() {
   } catch (e) {
     error(e);
     const errstr = stringifyErrorLog(e);
-    await dialogError(errstr, '出错了', INSTALLER_CONFIG.args.silent);
+    await dialogError(errstr, t('common.error'), INSTALLER_CONFIG.args.silent);
     await sendInsight(insightBase(INSTALLER_CONFIG, PROJECT_CONFIG), 'error', {
       error: errstr,
     });
@@ -727,7 +739,7 @@ onMounted(async () => {
     error(e);
     await dialogError(
       stringifyErrorLog(e),
-      '安装程序初始化失败',
+      t('err.initFailed'),
       INSTALLER_CONFIG.args.silent,
     );
     if (process.env.NODE_ENV !== 'development') {
@@ -762,8 +774,8 @@ async function changeSource() {
       const confirmRes =
         isDriveRoot ||
         (await confirmDialog(
-          '您选择的目录不为空，是否创建新文件夹再安装？选【否】将可能影响原有数据。',
-          '提示',
+          t('confirm.dirNotEmpty'),
+          t('common.notice'),
         ));
       if (confirmRes) {
         source.value =
@@ -780,7 +792,7 @@ async function changeSource() {
   } catch (e) {
     await dialogError(
       stringifyErrorLog(e),
-      '出错了',
+      t('common.error'),
       INSTALLER_CONFIG.args.silent,
     );
     throw e;

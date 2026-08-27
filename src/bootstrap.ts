@@ -1,7 +1,7 @@
 import { getCurrentWindow, invoke } from './tauri';
 import { error, log, sendInsight, warn } from './api/ipc';
 import { dialogError, insightBase, uacNeeded } from './ui';
-import { getLanguage, setLanguage } from './i18n';
+import { getLanguage, setLanguage, t } from './i18n';
 import type {
   InstallerConfig,
   InvokeSelectDirRes,
@@ -121,21 +121,21 @@ export async function bootstrap(
       !installer.embedded_files.find((e) => e.name === '\0CONFIG')
     ) {
       dialogError(
-        '打包错误，请确保配置文件被正确打包',
-        '出错了',
+        t('err.packConfigMissing'),
+        t('common.error'),
         installer.args.silent,
       );
     }
   } else if (process.env.NODE_ENV === 'development') {
     dialogError(
-      '未找到配置文件，请将配置文件放在exe同目录下',
-      '出错了',
+      t('err.configNotFoundDev'),
+      t('common.error'),
       installer.args.silent,
     );
   } else {
     await dialogError(
-      '安装包损坏，请重新下载',
-      '出错了',
+      t('err.packBroken'),
+      t('common.error'),
       installer.args.silent,
     );
     win.close();
@@ -144,7 +144,7 @@ export async function bootstrap(
 
   const xsrc = rsrc.embedded_config?.source;
   if (!xsrc) {
-    throw new Error('打包错误，请确保配置文件被正确打包');
+    throw new Error(t('err.packConfigMissing'));
   }
 
   let selectedSource = '';
@@ -188,14 +188,14 @@ export async function bootstrap(
     if (hasWrongIndex) {
       if (process.env.NODE_ENV === 'development') {
         dialogError(
-          '打包错误，请确保索引文件正确',
-          '出错了',
+          t('err.packIndexWrong'),
+          t('common.error'),
           installer.args.silent,
         );
       } else {
         await dialogError(
-          '安装包损坏，请重新下载',
-          '出错了',
+          t('err.packBroken'),
+          t('common.error'),
           installer.args.silent,
         );
         win.close();
@@ -217,8 +217,8 @@ export async function bootstrap(
     log('UNINSTALL_METADATA: ', uninstallConfig);
     if (!uninstallConfig) {
       await dialogError(
-        '未找到卸载配置文件，请重新安装后再卸载',
-        '出错了',
+        t('err.uninstallMetaMissing'),
+        t('common.error'),
         installer.args.silent,
       );
       if (process.env.NODE_ENV !== 'development') {

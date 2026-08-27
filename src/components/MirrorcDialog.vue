@@ -1,21 +1,22 @@
 <template>
   <Dialog>
-    <template #title><div class="title">设置 Mirror酱 CDK</div></template>
+    <template #title>
+      <div class="title">{{ t('dialog.mirrorcTitle') }}</div>
+    </template>
     <template #desc>
-      <div class="desc">
-        Mirror酱是独立的第三方软件下载平台，提供付费的软件下载加速服务。<br />
-        如果你有 Mirror酱的 CDK，可以在这里输入。
-      </div>
+      <div class="desc" v-html="t('dialog.mirrorcDesc')"></div>
     </template>
     <template #body>
       <FInput
         class="cdk-input"
         v-model="tempKey"
         type="text"
-        placeholder="请输入 Mirror酱 CDK"
+        :placeholder="t('dialog.mirrorcPlaceholder')"
       />
       <div class="desc">
-        <a style="cursor: pointer" @click="openMirrorc">获取 CDK</a>
+        <a style="cursor: pointer" @click="openMirrorc">{{
+          t('dialog.getCdk')
+        }}</a>
       </div>
     </template>
     <template #footer>
@@ -23,7 +24,7 @@
         class="btn btn-install btn-install-2rd neutral"
         @click="$emit('cancel')"
       >
-        取消
+        {{ t('common.cancel') }}
       </button>
       <button class="btn btn-install" :disabled="checking" @click="apply">
         <span
@@ -33,7 +34,7 @@
         >
           <span class="fui-Spinner__spinnerTail"></span>
         </span>
-        确定
+        {{ t('common.confirm') }}
       </button>
     </template>
   </Dialog>
@@ -47,6 +48,7 @@ import { invoke } from '../tauri';
 import { type MirrorcUpdate } from '../api/ipc';
 import { processMirrorcError } from '../mirrorc-errors';
 import { dialogError } from '../ui';
+import { t } from '../i18n';
 
 const props = defineProps<{
   appName: string;
@@ -94,8 +96,8 @@ async function apply() {
   const sourceUrl = new URL(props.sourceUrl);
   if (!sourceUrl.hostname) {
     await dialogError(
-      '无法获取Mirror酱数据，安装包可能已经损坏：' + props.sourceUrl,
-      '出错了',
+      t('err.mirrorcBadSource', { url: props.sourceUrl }),
+      t('common.error'),
     );
     checking.value = false;
     return;
@@ -110,7 +112,7 @@ async function apply() {
   });
   const errorResult = processMirrorcError(status, 'cdk-validation');
   if (errorResult) {
-    await dialogError(errorResult.message, '出错了');
+    await dialogError(errorResult.message, t('common.error'));
     checking.value = false;
     return;
   }

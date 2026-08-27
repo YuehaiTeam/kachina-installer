@@ -1,4 +1,5 @@
 import { error } from './api/ipc';
+import { t, type I18nKey } from './i18n';
 
 /**
  * Mirror酱错误码对应表
@@ -9,50 +10,43 @@ export interface MirrorcErrorInfo {
   showSourceDialog?: boolean;
 }
 
-export const MIRRORC_ERROR_CODES: Record<number, MirrorcErrorInfo> = {
+export const MIRRORC_ERROR_CODES: Record<
+  number,
+  { key: I18nKey; showSourceDialog?: boolean }
+> = {
   1001: {
-    code: 1001,
-    message: 'Mirror酱参数错误，请检查打包配置',
+    key: 'mirrorcErr.1001',
   },
   7001: {
-    code: 7001,
-    message: 'Mirror酱 CDK 已过期',
+    key: 'mirrorcErr.7001',
     showSourceDialog: true,
   },
   7002: {
-    code: 7002,
-    message: 'Mirror酱 CDK 错误，请检查设置的 CDK 是否正确',
+    key: 'mirrorcErr.7002',
     showSourceDialog: true,
   },
   7003: {
-    code: 7003,
-    message: 'Mirror酱 CDK 今日下载次数已达上限，请更换 CDK 或明天再试',
+    key: 'mirrorcErr.7003',
   },
   7004: {
-    code: 7004,
-    message: 'Mirror酱 CDK 类型和待下载的资源不匹配，请检查设置的 CDK 是否正确',
+    key: 'mirrorcErr.7004',
     showSourceDialog: true,
   },
   7005: {
-    code: 7005,
-    message: 'Mirror酱 CDK 已被封禁，请更换 CDK',
+    key: 'mirrorcErr.7005',
     showSourceDialog: true,
   },
   8001: {
-    code: 8001,
-    message: '从Mirror酱获取更新失败，请检查打包配置',
+    key: 'mirrorcErr.8001',
   },
   8002: {
-    code: 8002,
-    message: 'Mirror酱参数错误，请检查打包配置',
+    key: 'mirrorcErr.1001',
   },
   8003: {
-    code: 8003,
-    message: 'Mirror酱参数错误，请检查打包配置',
+    key: 'mirrorcErr.1001',
   },
   8004: {
-    code: 8004,
-    message: 'Mirror酱参数错误，请检查打包配置',
+    key: 'mirrorcErr.1001',
   },
 };
 
@@ -62,7 +56,13 @@ export const MIRRORC_ERROR_CODES: Record<number, MirrorcErrorInfo> = {
  * @returns 错误信息，如果不是已知错误码则返回null
  */
 export function getMirrorcErrorInfo(code: number): MirrorcErrorInfo | null {
-  return MIRRORC_ERROR_CODES[code] || null;
+  const info = MIRRORC_ERROR_CODES[code];
+  if (!info) return null;
+  return {
+    code,
+    message: t(info.key),
+    showSourceDialog: info.showSourceDialog,
+  };
 }
 
 /**
@@ -87,9 +87,9 @@ export function processMirrorcError(
   const errorInfo = getMirrorcErrorInfo(mirrorcStatus.code);
 
   if (errorInfo) {
-    // 记录已知错误码
+    // 记录已知错误码（日志不跟随界面语言，只记错误码和原始 msg）
     error(
-      `Mirror酱${contextType === 'cdk-validation' ? 'CDK验证' : ''}错误 [${mirrorcStatus.code}]: ${errorInfo.message}`,
+      `Mirror酱${contextType === 'cdk-validation' ? 'CDK验证' : ''}错误 [${mirrorcStatus.code}]: ${mirrorcStatus.msg || '无详细信息'}`,
     );
 
     return {
@@ -100,10 +100,12 @@ export function processMirrorcError(
     };
   } else {
     // 处理未知错误码
-    const unknownMessage =
+    const unknownMessage = t(
       contextType === 'cdk-validation'
-        ? `从Mirror酱获取CDK状态失败: ${mirrorcStatus.msg || '未知错误'}，请联系Mirror酱客服`
-        : `从Mirror酱获取更新失败: ${mirrorcStatus.msg || '未知错误'}，请联系Mirror酱客服`;
+        ? 'mirrorcErr.unknownCdk'
+        : 'mirrorcErr.unknown',
+      { msg: mirrorcStatus.msg || t('mirrorcErr.unknownMsg') },
+    );
 
     // 记录未知错误码
     error(
