@@ -76,6 +76,11 @@ async fn dispatch(
             cfg.preset = ctx.preset.clone();
             ok(cfg)
         }
+        "set_language" => {
+            let language = req_str(&args, &["language"])?;
+            crate::session::i18n::set_from_config(&language);
+            ok(())
+        }
         "select_dir" => {
             let path = req_str(&args, &["path"])?;
             let exe_name = req_str(&args, &["exeName", "exe_name"])?;

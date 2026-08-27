@@ -11,7 +11,7 @@
     <input
       class="input-inner"
       v-model="model"
-      v-bind="propsWithoutClass"
+      v-bind="inputProps"
       @focus="isFocus = true"
       @blur="isFocus = false"
     />
@@ -20,12 +20,13 @@
 
 <script setup lang="ts">
 import { computed, ref } from 'vue';
+import { t } from './i18n';
 const isFocus = ref(false);
 const model = defineModel<string>();
 const props = defineProps({
   placeholder: {
     type: String,
-    default: '请输入内容',
+    default: '',
   },
   disabled: {
     type: Boolean,
@@ -40,9 +41,9 @@ const props = defineProps({
     default: '',
   },
 });
-const propsWithoutClass = computed(() => {
-  const { class: _, ...rest } = props;
-  return rest;
+const inputProps = computed(() => {
+  const { class: _, placeholder, ...rest } = props;
+  return { ...rest, placeholder: placeholder || t('input.placeholder') };
 });
 </script>
 

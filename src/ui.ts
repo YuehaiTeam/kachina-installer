@@ -1,9 +1,10 @@
 import { getCurrentWindow, invoke } from './tauri';
 import type { InstallerConfig, ProjectConfig } from './types';
+import { t } from './i18n';
 
 export async function dialogError(
   message: string,
-  title = '出错了',
+  title = t('common.error'),
   closeOnSilent = false,
 ): Promise<void> {
   await invoke('error_dialog', {
@@ -17,7 +18,7 @@ export async function dialogError(
 
 export async function confirmDialog(
   message: string,
-  title = '提示',
+  title = t('common.notice'),
 ): Promise<boolean> {
   return await invoke<boolean>('confirm_dialog', { message, title });
 }

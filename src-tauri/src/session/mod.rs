@@ -1,3 +1,4 @@
+pub mod i18n;
 pub mod commands;
 pub mod dump;
 pub mod error;

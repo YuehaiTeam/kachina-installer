@@ -137,6 +137,11 @@ fn main() {
     // Initialize H3/QUIC probe early — before any client is created
     capabilities::init();
 
+    // Pick the UI language from the system before any user-visible string
+    // can appear (native fallback UI, WebView2 bootstrap). Later overridden
+    // by the config `language` field once it is available.
+    session::i18n::init_from_system();
+
     // command is not  Command::Install, can be anything
     match command {
         Command::HeadlessUac(args) => {

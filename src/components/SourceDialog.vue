@@ -1,10 +1,12 @@
 <template>
   <Dialog @keydown="handleKeyDown">
     <template #title>
-      <div class="title">选择安装源</div>
+      <div class="title">{{ t('dialog.selectSource') }}</div>
     </template>
     <template #desc>
-      <div class="desc">{{ title }}支持多种在线安装方式。</div>
+      <div class="desc">
+        {{ t('dialog.selectSourceDesc', { title }) }}
+      </div>
     </template>
     <template #body>
       <div class="card-container">
@@ -35,6 +37,7 @@ import Cloud from '../Cloud.vue';
 import CloudPaid from '../CloudPaid.vue';
 import Feedback from '../Feedback.vue';
 import SafeIcon from './SafeIcon.vue';
+import { t } from '../i18n';
 import type { SourceItem } from '../types';
 
 const props = defineProps<{
