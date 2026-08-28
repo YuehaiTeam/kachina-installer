@@ -440,6 +440,10 @@ async fn native_session(
         }
         Err(err) => {
             let _ = reopen;
+            // native 路径不经过 TACommandError::serialize，在此上报
+            if crate::session::error::classify(&err).report {
+                crate::utils::sentry::capture_anyhow(&err);
+            }
             rfd::MessageDialog::new()
                 .set_title("出错了")
                 .set_description(format!("{err}"))

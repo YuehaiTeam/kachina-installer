@@ -14,10 +14,8 @@ pub mod session;
 pub mod thirdparty;
 pub mod utils;
 use cli::arg::{Command, InstallArgs};
-use sentry_tracing::EventFilter;
 use std::{sync::atomic::AtomicBool, time::Duration};
 use tracing_subscriber::prelude::*;
-use utils::sentry::sentry_init;
 
 pub(crate) fn windows_text_scale_factor() -> f64 {
     // Read TextScaleFactor from registry: HKEY_CURRENT_USER\Software\Microsoft\Accessibility\TextScaleFactor
@@ -99,13 +97,19 @@ fn main() {
     let _ = unsafe { AttachConsole(ATTACH_PARENT_PROCESS) };
 
     let command = cli::parse();
-    let _guard = sentry_init(matches!(command, Command::HeadlessUac(_)));
-    utils::sentry::sentry_set_info();
-    let sentry_layer = sentry_tracing::layer().event_filter(|md| match *md.level() {
-        tracing::Level::TRACE => EventFilter::Ignore,
-        tracing::Level::DEBUG => EventFilter::Ignore,
-        _ => EventFilter::Breadcrumb,
-    });
+    // 崩溃提示进程只弹框，不初始化遥测与网络探测
+    if let Command::CrashDialog { event_id } = &command {
+        crash_dialog(event_id.as_deref());
+        return;
+    }
+    utils::sentry::init(matches!(command, Command::HeadlessUac(_)));
+    utils::sentry::set_app_info();
+    let show_crash_dialog = match &command {
+        Command::Install(a) => !a.silent,
+        _ => true,
+    };
+    utils::sentry::install_panic_hook(show_crash_dialog);
+    let sentry_layer = utils::sentry::BreadcrumbLayer;
     let info_filter = utils::sentry::InfoFilter {};
 
     // Create log file in temp directory, ignore failures
@@ -138,12 +142,11 @@ fn main() {
     // command is not  Command::Install, can be anything
     match command {
         Command::HeadlessUac(args) => {
-            sentry::add_breadcrumb(sentry::Breadcrumb {
-                category: Some("app".into()),
-                message: Some("KachinaInstaller started as UAC Thread".into()),
-                level: sentry::Level::Info,
-                ..Default::default()
-            });
+            utils::sentry::add_breadcrumb(
+                "app",
+                "info",
+                "KachinaInstaller started as UAC Thread".into(),
+            );
             tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
                 .build()
@@ -151,12 +154,11 @@ fn main() {
                 .block_on(ipc::manager::uac_ipc_main(args));
         }
         Command::InstallWebview2 => {
-            sentry::add_breadcrumb(sentry::Breadcrumb {
-                category: Some("app".into()),
-                message: Some("KachinaInstaller started as Webview2 Installer".into()),
-                level: sentry::Level::Info,
-                ..Default::default()
-            });
+            utils::sentry::add_breadcrumb(
+                "app",
+                "info",
+                "KachinaInstaller started as Webview2 Installer".into(),
+            );
             tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
                 .build()
@@ -168,12 +170,7 @@ fn main() {
                 });
         }
         Command::NativeUi(args) => {
-            sentry::add_breadcrumb(sentry::Breadcrumb {
-                category: Some("app".into()),
-                message: Some("KachinaInstaller started (native-ui)".into()),
-                level: sentry::Level::Info,
-                ..Default::default()
-            });
+            utils::sentry::add_breadcrumb("app", "info", "KachinaInstaller started (native-ui)".into());
             tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
                 .build()
@@ -182,17 +179,17 @@ fn main() {
                     native_entry(args).await;
                 });
         }
+        Command::CrashDialog { .. } => unreachable!("handled before telemetry init"),
         Command::Install(install) => {
-            sentry::add_breadcrumb(sentry::Breadcrumb {
-                category: Some("app".into()),
-                message: Some(if install.silent {
+            utils::sentry::add_breadcrumb(
+                "app",
+                "info",
+                if install.silent {
                     "KachinaInstaller started (silent)".into()
                 } else {
                     "KachinaInstaller started".into()
-                }),
-                level: sentry::Level::Info,
-                ..Default::default()
-            });
+                },
+            );
             tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
                 .build()
@@ -201,6 +198,10 @@ fn main() {
                     if install.silent {
                         if let Err(err) = session::run::silent_main(install).await {
                             tracing::error!("silent install failed: {err:#}");
+                            if session::error::classify(&err).report {
+                                utils::sentry::capture_anyhow(&err);
+                            }
+                            utils::sentry::flush(Duration::from_secs(3));
                             std::process::exit(1);
                         }
                     } else {
@@ -209,6 +210,17 @@ fn main() {
                 });
         }
     }
+}
+
+fn crash_dialog(event_id: Option<&str>) {
+    rfd::MessageDialog::new()
+        .set_title("出错了")
+        .set_level(rfd::MessageLevel::Error)
+        .set_description(format!(
+            "安装程序发生内部错误，已终止运行。\n\n请重新运行安装程序；若问题持续出现，请凭以下编号反馈：\n{}",
+            event_id.unwrap_or("未知")
+        ))
+        .show();
 }
 
 async fn gui_entry(args: InstallArgs) {
