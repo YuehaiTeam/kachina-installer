@@ -302,8 +302,7 @@ fn help_text() -> String {
 
 fn help_and_exit() -> ! {
     let text = help_text();
-    let has_console =
-        !unsafe { windows::Win32::System::Console::GetConsoleWindow() }.is_invalid();
+    let has_console = !unsafe { windows::Win32::System::Console::GetConsoleWindow() }.is_invalid();
     if has_console {
         println!("{text}");
     } else {
@@ -512,7 +511,10 @@ mod tests {
         let argv = os(&["-D", r"C:\Explicit"]);
         match parse_from(&argv, Some(PathBuf::from(r"C:\FromTail"))) {
             Command::Install(a) => {
-                assert_eq!(a.target.as_deref(), Some(std::path::Path::new(r"C:\Explicit")))
+                assert_eq!(
+                    a.target.as_deref(),
+                    Some(std::path::Path::new(r"C:\Explicit"))
+                )
             }
             other => panic!("{other:?}"),
         }
@@ -520,7 +522,10 @@ mod tests {
         match parse_from(&argv, Some(PathBuf::from(r"C:\FromTail"))) {
             Command::Install(a) => {
                 assert!(a.silent);
-                assert_eq!(a.target.as_deref(), Some(std::path::Path::new(r"C:\FromTail")))
+                assert_eq!(
+                    a.target.as_deref(),
+                    Some(std::path::Path::new(r"C:\FromTail"))
+                )
             }
             other => panic!("{other:?}"),
         }

@@ -1,39 +1,12 @@
 use serde::{Deserialize, Serialize};
 
+use crate::utils::metadata::{FileMeta, PatchInfo, PatchSide};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum HashKey {
     Md5,
     Xxh,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct HashInfo {
-    pub file_name: String,
-    pub size: u64,
-    #[serde(default)]
-    pub md5: Option<String>,
-    #[serde(default)]
-    pub xxh: Option<String>,
-    #[serde(default)]
-    pub installer: Option<bool>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PatchSide {
-    pub size: u64,
-    #[serde(default)]
-    pub md5: Option<String>,
-    #[serde(default)]
-    pub xxh: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PatchInfo {
-    pub file_name: String,
-    pub size: u64,
-    pub from: PatchSide,
-    pub to: PatchSide,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -50,7 +23,7 @@ pub struct PlanInput {
     pub install_path: String,
     pub is_update: bool,
     pub hash_key: HashKey,
-    pub hashed: Vec<HashInfo>,
+    pub hashed: Vec<FileMeta>,
     #[serde(default)]
     pub patches: Vec<PatchInfo>,
     #[serde(default)]
@@ -134,7 +107,7 @@ pub fn is_under(file: &str, dir: &str) -> bool {
     file == dir || file.starts_with(&format!("{dir}\\"))
 }
 
-fn hash_of(info: &HashInfo, key: HashKey) -> Option<&str> {
+fn hash_of(info: &FileMeta, key: HashKey) -> Option<&str> {
     match key {
         HashKey::Md5 => info.md5.as_deref(),
         HashKey::Xxh => info.xxh.as_deref(),
@@ -168,7 +141,7 @@ pub struct SettingsDump {
 #[derive(Debug, Clone, Deserialize)]
 pub struct MetaScanDump {
     pub hash_key: HashKey,
-    pub hashed: Vec<HashInfo>,
+    pub hashed: Vec<FileMeta>,
     #[serde(default)]
     pub patches: Vec<PatchInfo>,
     #[serde(default)]
@@ -296,7 +269,7 @@ pub fn build_plan(input: &PlanInput) -> InstallPlan {
 }
 
 pub fn collect_skip_hash(
-    hashed: &[HashInfo],
+    hashed: &[FileMeta],
     install_path: &str,
     app_name: &str,
     user_data_path: &[String],
@@ -343,8 +316,8 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
-    fn hash_info(name: &str, md5: &str) -> HashInfo {
-        HashInfo {
+    fn hash_info(name: &str, md5: &str) -> FileMeta {
+        FileMeta {
             file_name: name.to_string(),
             size: 1,
             md5: Some(md5.to_string()),

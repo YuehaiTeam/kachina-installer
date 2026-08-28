@@ -4,7 +4,7 @@ use crate::{
         create_http_stream, create_local_stream, create_multi_http_stream, create_target_file,
         prepare_target, progressed_copy, progressed_hpatch, verify_hash,
     },
-    ipc::{progress_notify, ProgressNotify},
+    ipc::{progress_notify, IpcError, Progress, ProgressNotify},
     utils::error::{IntoTAResult, TAResult},
 };
 
@@ -23,7 +23,7 @@ fn default_as_false() -> bool {
 // Helper function to check if decompression should be performed based on InstallFileArgs
 fn should_decompress_chunk(args: &InstallFileArgs) -> bool {
     match &args.mode {
-        InstallFileMode::Direct { source } => match source {
+        InstallFileMode::Direct(source) => match source {
             InstallFileSource::Url {
                 skip_decompress, ..
             } => !skip_decompress,
@@ -50,10 +50,16 @@ fn should_decompress_chunk(args: &InstallFileArgs) -> bool {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct InstallResult {
     pub bytes_transferred: usize,
     pub insight: Option<InsightItem>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct MultichunkResult {
+    pub results: Vec<Result<usize, IpcError>>,
+    pub insight: InsightItem,
 }
 
 #[derive(serde::Deserialize, serde::Serialize, Clone, Debug)]
@@ -77,9 +83,7 @@ pub enum InstallFileSource {
 
 #[derive(serde::Deserialize, serde::Serialize, Clone, Debug)]
 pub enum InstallFileMode {
-    Direct {
-        source: InstallFileSource,
-    },
+    Direct(InstallFileSource),
     Patch {
         source: InstallFileSource,
         diff_size: usize,
@@ -193,14 +197,14 @@ async fn create_stream_by_source(
 pub async fn ipc_install_file(
     args: InstallFileArgs,
     notify: ProgressNotify,
-) -> TAResult<serde_json::Value> {
+) -> TAResult<InstallResult> {
     let target = args.target;
     let override_old_path = prepare_target(&target).await?;
     let progress_noti = move |downloaded: usize| {
-        notify(serde_json::json!(downloaded));
+        notify(Progress::Bytes(downloaded as u64));
     };
     match args.mode {
-        InstallFileMode::Direct { source } => {
+        InstallFileMode::Direct(source) => {
             let (mut stream, insight_handle) = create_stream_by_source(source).await?;
             let mut target_fs = create_target_file(&target).await?;
             let bytes_transferred =
@@ -230,11 +234,10 @@ pub async fn ipc_install_file(
                 verify_hash_keep_insight(&target, args.md5, args.xxh, &insight_handle).await?;
             }
 
-            let result = InstallResult {
+            Ok(InstallResult {
                 bytes_transferred,
                 insight: final_insight,
-            };
-            serde_json::to_value(result).into_ta_result()
+            })
         }
         InstallFileMode::Patch { source, diff_size } => {
             let is_self_update = override_old_path.is_some();
@@ -272,11 +275,10 @@ pub async fn ipc_install_file(
                 verify_hash_keep_insight(&target, args.md5, args.xxh, &insight_handle).await?;
             }
 
-            let result = InstallResult {
+            Ok(InstallResult {
                 bytes_transferred,
                 insight: final_insight,
-            };
-            serde_json::to_value(result).into_ta_result()
+            })
         }
         InstallFileMode::HybridPatch { diff, source } => {
             // first extract source (local file, no insight needed)
@@ -291,19 +293,13 @@ pub async fn ipc_install_file(
                 InstallFileSource::Local { size, .. } => size,
             };
             let (diff_stream, insight_handle) = create_stream_by_source(diff).await?;
-            let (diff_bytes, _) = match progressed_hpatch(
-                diff_stream,
-                &target,
-                size,
-                Box::new(|_| {}),
-                None,
-                None,
-            )
-            .await
-            {
-                Ok(v) => v,
-                Err(e) => return Err(fail_with_insight(e, &insight_handle)),
-            };
+            let (diff_bytes, _) =
+                match progressed_hpatch(diff_stream, &target, size, Box::new(|_| {}), None, None)
+                    .await
+                {
+                    Ok(v) => v,
+                    Err(e) => return Err(fail_with_insight(e, &insight_handle)),
+                };
 
             let final_insight = snapshot_insight(&insight_handle);
 
@@ -324,11 +320,10 @@ pub async fn ipc_install_file(
                 verify_hash_keep_insight(&target, args.md5, args.xxh, &insight_handle).await?;
             }
 
-            let result = InstallResult {
-                bytes_transferred: diff_bytes, // 只统计diff文件的网络传输
-                insight: final_insight,        // 只统计diff文件的网络统计
-            };
-            serde_json::to_value(result).into_ta_result()
+            Ok(InstallResult {
+                bytes_transferred: diff_bytes,
+                insight: final_insight,
+            })
         }
     }
 }
@@ -337,14 +332,14 @@ pub async fn install_file_by_reader(
     args: InstallFileArgs,
     reader: &mut (dyn tokio::io::AsyncRead + Unpin + Send),
     notify: ProgressNotify,
-) -> Result<serde_json::Value> {
+) -> Result<usize> {
     let target = args.target;
     let override_old_path = prepare_target(&target).await?;
     let progress_noti = move |downloaded: usize| {
-        notify(serde_json::json!(downloaded));
+        notify(Progress::Bytes(downloaded as u64));
     };
     match args.mode {
-        InstallFileMode::Direct { .. } => {
+        InstallFileMode::Direct(..) => {
             let mut target_fs = create_target_file(&target).await?;
             let res = progressed_copy(reader, &mut target_fs, &progress_noti).await?;
             if args.md5.is_some() || args.xxh.is_some() {
@@ -363,7 +358,7 @@ pub async fn install_file_by_reader(
                 }
                 verify_hash(&target, args.md5, args.xxh).await?;
             }
-            Ok(serde_json::json!(res))
+            Ok(res)
         }
         InstallFileMode::Patch { diff_size, .. } => {
             // copy to local buffer using progressed_copy
@@ -397,7 +392,7 @@ pub async fn install_file_by_reader(
                 }
                 verify_hash(&target, args.md5, args.xxh).await?;
             }
-            Ok(serde_json::json!(res))
+            Ok(res)
         }
         InstallFileMode::HybridPatch { .. } => {
             // Hybrid patch is not supported in this function
@@ -417,7 +412,7 @@ pub struct InstallMultiStreamArgs {
 // Helper function to extract chunk size from InstallFileArgs
 fn get_chunk_size(args: &InstallFileArgs) -> usize {
     match &args.mode {
-        InstallFileMode::Direct { source } => match source {
+        InstallFileMode::Direct(source) => match source {
             InstallFileSource::Url { size, .. } | InstallFileSource::Local { size, .. } => *size,
         },
         InstallFileMode::Patch { diff_size, .. } => *diff_size,
@@ -430,7 +425,7 @@ fn get_chunk_size(args: &InstallFileArgs) -> usize {
 // Helper function to extract chunk position from InstallFileArgs
 fn get_chunk_position(args: &InstallFileArgs) -> usize {
     match &args.mode {
-        InstallFileMode::Direct { source } => match source {
+        InstallFileMode::Direct(source) => match source {
             InstallFileSource::Url { offset, .. } | InstallFileSource::Local { offset, .. } => {
                 *offset
             }
@@ -457,7 +452,7 @@ struct ChunkWithPosition {
 pub async fn ipc_install_multichunk_stream(
     args: InstallMultiStreamArgs,
     notify: ProgressNotify,
-) -> TAResult<serde_json::Value> {
+) -> TAResult<MultichunkResult> {
     // Extract chunk positions from InstallFileArgs
     let mut chunks_with_positions: Vec<ChunkWithPosition> = Vec::new();
 
@@ -472,7 +467,7 @@ pub async fn ipc_install_multichunk_stream(
     // Sort chunks by position to ensure proper streaming order
     chunks_with_positions.sort_by_key(|chunk| chunk.position);
 
-    let mut results: Vec<TAResult<serde_json::Value>> = Vec::new();
+    let mut results: Vec<Result<usize, IpcError>> = Vec::new();
     let mut stream_position = 0usize;
     let (insight_stream, _content_length, _content_type, insight_handle) =
         create_multi_http_stream(&args.url, &args.range).await?;
@@ -486,16 +481,13 @@ pub async fn ipc_install_multichunk_stream(
         let chunk_offset = chunk_info.position;
 
         // Create enhanced notification callback with chunk info
-        let chunk_range = format!("{}-{}", chunk_offset, chunk_offset + chunk_size - 1);
         let chunk_notify = {
             let notify = notify.clone();
-            let chunk_range = chunk_range.clone();
-            progress_notify(move |progress: serde_json::Value| {
-                notify(serde_json::json!({
-                    "progress": progress,
-                    "chunk_index": chunk_index,
-                    "chunk_range": chunk_range
-                }));
+            let chunk_index = chunk_index as u32;
+            progress_notify(move |progress| {
+                if let Progress::Bytes(bytes) = progress {
+                    notify(Progress::Chunk(chunk_index, bytes));
+                }
             })
         };
 
@@ -572,7 +564,10 @@ pub async fn ipc_install_multichunk_stream(
             }
         });
 
-        results.push(final_result);
+        results.push(match final_result {
+            Ok(n) => Ok(n),
+            Err(e) => Err(IpcError::from_ta(&e)),
+        });
         stream_position += chunk_size;
     }
 
@@ -591,9 +586,8 @@ pub async fn ipc_install_multichunk_stream(
         }
     };
 
-    let response = serde_json::json!({
-        "results": results,
-        "insight": final_insight
-    });
-    Ok(response)
+    Ok(MultichunkResult {
+        results,
+        insight: final_insight,
+    })
 }

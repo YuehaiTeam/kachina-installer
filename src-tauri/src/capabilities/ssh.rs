@@ -330,7 +330,12 @@ impl SshMiddleware {
             &parts.fingerprint,
         )
         .await
-        .map_err(|e| mw_err_fmt(format_args!("SSH connect to {} failed: {e}", parts.ssh_target())))?;
+        .map_err(|e| {
+            mw_err_fmt(format_args!(
+                "SSH connect to {} failed: {e}",
+                parts.ssh_target()
+            ))
+        })?;
 
         let channel = tokio::time::timeout(
             SSH_CHANNEL_TIMEOUT,

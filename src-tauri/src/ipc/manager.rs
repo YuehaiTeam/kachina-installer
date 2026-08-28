@@ -1,6 +1,6 @@
 use super::operation::run_opr;
 use super::operation::IpcOperation;
-use super::{progress_notify, ProgressNotify};
+use super::{progress_notify, IpcError, IpcResult, PipeMsg, ProgressNotify};
 use crate::utils::acl::create_security_attributes;
 use crate::utils::error::TAResult;
 use crate::utils::uac::check_elevated;
@@ -31,7 +31,7 @@ pub struct ManagedElevate {
     process: tokio::sync::RwLock<Option<SendableHandle>>,
     mpsc_tx: tokio::sync::mpsc::Sender<IpcInner>,
     mpsc_rx: tokio::sync::RwLock<Option<tokio::sync::mpsc::Receiver<IpcInner>>>,
-    broadcast_tx: tokio::sync::broadcast::Sender<serde_json::Value>,
+    broadcast_tx: tokio::sync::broadcast::Sender<PipeMsg>,
     pipe_id: String,
     already_elevated: bool,
 }
@@ -99,7 +99,7 @@ impl ManagedElevate {
         ipc: IpcOperation,
         elevate: bool,
         on_progress: ProgressNotify,
-    ) -> TAResult<serde_json::Value> {
+    ) -> TAResult<IpcResult> {
         if !elevate || self.already_elevated {
             return run_opr(ipc, on_progress).await;
         }
@@ -118,22 +118,16 @@ impl ManagedElevate {
             .await;
         let mut rx = self.broadcast_tx.subscribe();
         while let Ok(v) = rx.recv().await {
-            let msgid = v["id"].as_str();
-            if let Some(msgid) = msgid {
-                if msgid == id {
-                    if let Some(done) = v["done"].as_bool() {
-                        if done {
-                            return Ok(v["data"].clone());
-                        }
-                    }
-                    on_progress(v["data"].clone());
+            match v {
+                PipeMsg::Progress(msgid, data) if msgid == id => on_progress(data),
+                PipeMsg::Ok(msgid, data) if msgid == id => return Ok(data),
+                PipeMsg::Err(msgid, error) if msgid == id => return Err(error.into_ta()),
+                PipeMsg::Disconnect(pipeerr) => {
+                    return Err(anyhow::anyhow!("Elevate process disconnected: {}", pipeerr)
+                        .context("IPC_ERR")
+                        .into());
                 }
-            }
-            let pipeerr = v["PipeErr"].as_str();
-            if let Some(pipeerr) = pipeerr {
-                return Err(anyhow::anyhow!("Elevate process disconnected: {}", pipeerr)
-                    .context("IPC_ERR")
-                    .into());
+                _ => {}
             }
         }
         Err(
@@ -154,7 +148,7 @@ pub async fn wait_conn(server: &mut NamedPipeServer) -> bool {
 }
 pub async fn handle_pipe(
     server: NamedPipeServer,
-    tx: tokio::sync::broadcast::Sender<serde_json::Value>,
+    tx: tokio::sync::broadcast::Sender<PipeMsg>,
     mut rx: tokio::sync::mpsc::Receiver<IpcInner>,
 ) {
     // let mut rx = mgr.mpsc_rx.write().await.take().unwrap();
@@ -171,20 +165,24 @@ pub async fn handle_pipe(
                             buf.clear();
                             continue;
                         }
-                        let res = serde_json::from_str::<serde_json::Value>(&buf);
+                        let res = serde_json::from_str::<PipeMsg>(&buf);
                         if let Ok(res) = res {
-                            if let Some(envelope) = res["envelope"].as_str() {
-                                crate::utils::sentry::forward_raw_envelope(envelope.to_string());
+                            match res {
+                                PipeMsg::Envelope(envelope) => {
+                                    crate::utils::sentry::forward_raw_envelope(envelope);
+                                }
+                                PipeMsg::Breadcrumb(crumb) => {
+                                    crate::utils::sentry::add_breadcrumb_value(crumb);
+                                }
+                                other => {
+                                    let _ = tx.send(other);
+                                }
                             }
-                            if res["breadcrumb"].is_object() {
-                                crate::utils::sentry::add_breadcrumb_value(res["breadcrumb"].clone());
-                            }
-                            let _ = tx.send(res);
                         }else{
                             fail_times += 1;
                             if fail_times > 30 {
                                 tracing::error!("Failed to parse message too many times, closing pipe");
-                                let _ = tx.send(serde_json::json!({ "PipeErr": "PIPE_DISCONNECT_ERR" }));
+                                let _ = tx.send(PipeMsg::Disconnect("PIPE_DISCONNECT_ERR".into()));
                                 break;
                             }
                         }
@@ -246,7 +244,7 @@ pub async fn uac_ipc_main(args: crate::cli::arg::UacArgs) {
     let (clientrx, mut clienttx) = tokio::io::split(client);
     let mut clientrx = tokio::io::BufReader::with_capacity(PIPE_BUFFER_SIZE, clientrx);
 
-    let (tx, mut rx) = tokio::sync::mpsc::channel(500);
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<PipeMsg>(500);
     let mut sentry_rx = crate::utils::sentry::PIPE_OUTBOX.rx.write().await;
     let mut buf = String::new();
 
@@ -289,7 +287,7 @@ pub async fn uac_ipc_main(args: crate::cli::arg::UacArgs) {
                                             let tx_clone = tx.clone();
                                             tokio::spawn(async move {
                                                 let _ = tx_clone
-                                                    .send(serde_json::json!({ "id": id, "data": opr }))
+                                                    .send(PipeMsg::Progress(id, opr))
                                                     .await;
                                             });
                                         }),
@@ -298,9 +296,11 @@ pub async fn uac_ipc_main(args: crate::cli::arg::UacArgs) {
                                     if let Err(err) = res.as_ref() {
                                         tracing::error!("Client: Operation failed: {:?}", err);
                                     }
-                                    let _ = tx2
-                                        .send(serde_json::json!({ "id": id, "data": res, "done": true }))
-                                        .await;
+                                    let msg = match res {
+                                        Ok(data) => PipeMsg::Ok(id, data),
+                                        Err(err) => PipeMsg::Err(id, IpcError::from_ta(&err)),
+                                    };
+                                    let _ = tx2.send(msg).await;
                                 });
                             } else {
                                 tracing::warn!("Client: Failed to parse message: {:?} {:?}", res.err(), buf);

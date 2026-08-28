@@ -21,9 +21,7 @@ use reqwest_middleware::{Middleware, Next};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::{debug, warn};
 
-use super::ssh::{
-    mw_err_fmt, normalize_hex, percent_decode, ssh_connect, SSH_CHANNEL_TIMEOUT,
-};
+use super::ssh::{mw_err_fmt, normalize_hex, percent_decode, ssh_connect, SSH_CHANNEL_TIMEOUT};
 
 // ====================================================================
 // URL parsing
@@ -329,18 +327,13 @@ impl SftpMiddleware {
             &parts.fingerprint,
         )
         .await?;
-        let channel = tokio::time::timeout(
-            SSH_CHANNEL_TIMEOUT,
-            session_handle.channel_open_session(),
-        )
-        .await
-        .map_err(|_| anyhow::anyhow!("SFTP: session channel timeout"))??;
-        tokio::time::timeout(
-            SSH_CHANNEL_TIMEOUT,
-            channel.request_subsystem(true, "sftp"),
-        )
-        .await
-        .map_err(|_| anyhow::anyhow!("SFTP: subsystem request timeout"))??;
+        let channel =
+            tokio::time::timeout(SSH_CHANNEL_TIMEOUT, session_handle.channel_open_session())
+                .await
+                .map_err(|_| anyhow::anyhow!("SFTP: session channel timeout"))??;
+        tokio::time::timeout(SSH_CHANNEL_TIMEOUT, channel.request_subsystem(true, "sftp"))
+            .await
+            .map_err(|_| anyhow::anyhow!("SFTP: subsystem request timeout"))??;
 
         let mut sftp = SftpClient::new(channel.into_stream());
         sftp.init().await?;
@@ -598,8 +591,9 @@ mod tests {
                 .chars()
                 .map(|c| if c == 'a' { 'b' } else { 'a' })
                 .collect();
-            let bad_url =
-                format!("sftp://127.0.0.1:{port}/e2e.bin#user=test&pass=pass123&fingerprint={bad_fp}");
+            let bad_url = format!(
+                "sftp://127.0.0.1:{port}/e2e.bin#user=test&pass=pass123&fingerprint={bad_fp}"
+            );
             assert!(client.get(&bad_url).send().await.is_err());
 
             // 并发突发：8 路并行 Range 下载，各自独立连接

@@ -25,5 +25,7 @@ pub enum Command {
     NativeUi(InstallArgs),
     HeadlessUac(UacArgs),
     /// panic hook 拉起的独立崩溃提示进程，本体 abort 后仍存活
-    CrashDialog { event_id: Option<String> },
+    CrashDialog {
+        event_id: Option<String>,
+    },
 }
