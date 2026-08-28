@@ -19,12 +19,12 @@ use std::{
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader, ReadBuf};
 
 use crate::{
-    dfs::InsightItem,
+    dfs::{apply_insight_error, short_insight_code, InsightItem},
     installer::uninstall::DELETE_SELF_ON_EXIT_PATH,
     ipc::ProgressNotify,
     local::mmap,
     utils::{
-        error::{TAResult, DOWNLOAD_STALLED, DOWNLOAD_TOO_SLOW},
+        error::{TACommandError, TAResult, DOWNLOAD_STALLED, DOWNLOAD_TOO_SLOW},
         hash::run_hash,
         progressed_read::ReadWithCallback,
         url::HttpContextExt,
@@ -248,7 +248,7 @@ impl<S: AsyncRead + Unpin> AsyncRead for NetworkInsightStream<S> {
                 } else {
                     // 非网络错误：更新insight，然后保持原始错误传播
                     if let Ok(mut insight) = self.insight.try_lock() {
-                        insight.error = Some(e.to_string());
+                        apply_insight_error(&mut insight, &e.to_string());
                         insight.time = self.response_received_time.elapsed().as_millis() as u32;
                         insight.size = self.network_bytes.load(Ordering::Relaxed) as u32;
                     }
@@ -314,7 +314,7 @@ where
                         };
                         insight.error = Some(context.to_string());
                     } else {
-                        insight.error = Some(io_error.to_string());
+                        apply_insight_error(&mut insight, &io_error.to_string());
                     }
                     insight.time = self.response_received_time.elapsed().as_millis() as u32;
                     insight.size = self.network_bytes.load(Ordering::Relaxed) as u32;
@@ -652,16 +652,15 @@ pub async fn create_http_stream(
     offset: usize,
     size: usize,
     skip_decompress: bool,
-) -> Result<
-    (
-        Box<dyn AsyncRead + Unpin + Send>,
-        u64,
-        Arc<Mutex<InsightItem>>,
-    ),
-    anyhow::Error,
-> {
+    request_range: Option<&str>,
+) -> TAResult<(
+    Box<dyn AsyncRead + Unpin + Send>,
+    u64,
+    Arc<Mutex<InsightItem>>,
+)> {
     let request_start_time = Instant::now();
     let has_range = size > 0;
+    let insight_range = insight_range_vec(request_range, offset, size);
 
     // 构建HTTP请求
     let mut builder = DOWNLOAD_CLIENT.get(url);
@@ -685,15 +684,11 @@ pub async fn create_http_stream(
                 ttfb: request_start_time.elapsed().as_millis() as u32,
                 time: 0,
                 size: 0,
-                error: Some(format!("{:#}", e)),
-                range: if has_range {
-                    vec![(offset as u32, (offset + size - 1) as u32)]
-                } else {
-                    vec![]
-                },
+                error: Some(short_insight_code(&format!("{e:#}"))),
+                range: insight_range.clone(),
                 mode: None,
             }));
-            return Err(crate::utils::error::TACommandError::with_insight_handle(e, insight).error);
+            return Err(TACommandError::with_insight_handle(e, insight));
         }
     };
 
@@ -705,12 +700,8 @@ pub async fn create_http_stream(
             ttfb: request_start_time.elapsed().as_millis() as u32,
             time: 0,
             size: 0,
-            error: Some(format!("HTTP status error: {}", code)),
-            range: if has_range {
-                vec![(offset as u32, (offset + size - 1) as u32)]
-            } else {
-                vec![]
-            },
+            error: Some("HTTP_STATUS_ERR".to_string()),
+            range: insight_range.clone(),
             mode: None,
         }));
         let error = anyhow::Error::new(std::io::Error::other(format!(
@@ -723,7 +714,7 @@ pub async fn create_http_stream(
             url,
             "HTTP_STATUS_ERR",
         ));
-        return Err(crate::utils::error::TACommandError::with_insight_handle(error, insight).error);
+        return Err(TACommandError::with_insight_handle(error, insight));
     }
 
     let content_length = res.content_length().unwrap_or(0);
@@ -734,11 +725,7 @@ pub async fn create_http_stream(
     let insight_stream = NetworkInsightStream::new_with_detection(
         reader,
         crate::utils::url::sanitize_url_for_logging(url),
-        if has_range {
-            vec![(offset as u32, (offset + size - 1) as u32)]
-        } else {
-            vec![]
-        },
+        insight_range,
         request_start_time,
         response_received_time,
         Some(content_length),
@@ -761,12 +748,29 @@ fn parse_range_string(range: &str) -> Vec<(u32, u32)> {
     range
         .split(',')
         .filter_map(|part| {
-            let mut split = part.trim().split('-');
-            let start = split.next()?.parse::<u32>().ok()?;
-            let end = split.next()?.parse::<u32>().ok()?;
-            Some((start, end))
+            let (start, end) = part.trim().split_once('-')?;
+            let start = start.parse::<u32>().ok()?;
+            if end.is_empty() {
+                Some((start, u32::MAX))
+            } else {
+                Some((start, end.parse::<u32>().ok()?))
+            }
         })
         .collect()
+}
+
+fn insight_range_vec(request_range: Option<&str>, offset: usize, size: usize) -> Vec<(u32, u32)> {
+    if let Some(range) = request_range {
+        let parsed = parse_range_string(range);
+        if !parsed.is_empty() {
+            return parsed;
+        }
+    }
+    if size > 0 {
+        vec![(offset as u32, (offset + size - 1) as u32)]
+    } else {
+        vec![]
+    }
 }
 
 pub async fn create_multi_http_stream(
@@ -797,8 +801,8 @@ pub async fn create_multi_http_stream(
                 ttfb: request_start_time.elapsed().as_millis() as u32,
                 time: 0,
                 size: 0,
-                error: Some(format!("{:#}", e)),
-                range: range_info,
+                error: Some(short_insight_code(&format!("{e:#}"))),
+                range: range_info.clone(),
                 mode: None,
             }));
             return Err(crate::utils::error::TACommandError::with_insight_handle(
@@ -815,7 +819,7 @@ pub async fn create_multi_http_stream(
             ttfb: request_start_time.elapsed().as_millis() as u32,
             time: 0,
             size: 0,
-            error: Some(format!("HTTP status error: {}", code)),
+            error: Some("HTTP_STATUS_ERR".to_string()),
             range: range_info,
             mode: None,
         }));
@@ -1222,5 +1226,16 @@ mod tests {
         assert!(unwritable.iter().any(|p| p.ends_with("locked.dll")));
         drop(_hold);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn parse_range_keeps_open_end() {
+        assert_eq!(parse_range_string("0-"), vec![(0, u32::MAX)]);
+        assert_eq!(parse_range_string("100-200"), vec![(100, 200)]);
+        assert_eq!(
+            insight_range_vec(Some("10-14"), 0, 5),
+            vec![(10, 14)]
+        );
+        assert_eq!(insight_range_vec(None, 10, 5), vec![(10, 14)]);
     }
 }

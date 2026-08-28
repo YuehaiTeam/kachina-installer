@@ -135,9 +135,13 @@ fn take_insight(value: &Value) -> Option<InsightItem> {
 }
 
 fn collect_insight(ctx: &SourceCtx, insight: Option<InsightItem>, mode: Option<&str>) {
-    if let (Some(insight), Some(mode)) = (insight, mode) {
-        ctx.add_insight(insight, mode);
+    let Some(insight) = insight else {
+        return;
+    };
+    if !crate::dfs::is_remote_insight_url(&insight.url) {
+        return;
     }
+    ctx.add_insight(insight, mode);
 }
 
 fn mode_from_op(op: &IpcOperation) -> Option<&'static str> {
@@ -1575,6 +1579,7 @@ async fn install_merged(
                     offset: file.offset.saturating_sub(start),
                     size: file.size,
                     skip_decompress: false,
+                    request_range: Some(range.to_string()),
                 },
             },
             target: join_install(&settings.install_path, &file.item.file_name),
@@ -1742,6 +1747,7 @@ fn file_source(loc: FileLocation) -> InstallFileSource {
             offset: loc.offset,
             size: loc.size,
             skip_decompress: loc.skip_decompress,
+            request_range: loc.request_range,
         }
     } else {
         InstallFileSource::Local {
