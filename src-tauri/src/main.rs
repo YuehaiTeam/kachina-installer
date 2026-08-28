@@ -15,7 +15,6 @@ pub mod thirdparty;
 pub mod utils;
 use cli::arg::{Command, InstallArgs};
 use std::{sync::atomic::AtomicBool, time::Duration};
-use tracing_subscriber::prelude::*;
 
 pub(crate) fn windows_text_scale_factor() -> f64 {
     // Read TextScaleFactor from registry: HKEY_CURRENT_USER\Software\Microsoft\Accessibility\TextScaleFactor
@@ -104,32 +103,9 @@ fn main() {
         _ => true,
     };
     utils::sentry::install_panic_hook(show_crash_dialog);
-    let sentry_layer = utils::sentry::BreadcrumbLayer;
-    let info_filter = utils::sentry::InfoFilter {};
 
-    // Create log file in temp directory, ignore failures
-    let temp_dir = std::env::temp_dir();
-    let log_file = temp_dir.join("KachinaInstaller.log");
-
-    let console_layer = tracing_subscriber::fmt::layer().with_filter(utils::sentry::InfoFilter {});
-
-    let registry = tracing_subscriber::registry()
-        .with(sentry_layer)
-        .with(console_layer);
-
-    if let Ok(file) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&log_file)
-    {
-        let file_layer = tracing_subscriber::fmt::layer()
-            .with_writer(file)
-            .with_ansi(false)
-            .with_filter(info_filter);
-        registry.with(file_layer).init();
-    } else {
-        registry.init();
-    }
+    // 日志：控制台 + %TEMP%\KachinaInstaller.log + Sentry 面包屑，INFO 级全局过滤
+    utils::log::init(&std::env::temp_dir().join("KachinaInstaller.log"));
 
     // Initialize H3/QUIC probe early — before any client is created
     capabilities::init();

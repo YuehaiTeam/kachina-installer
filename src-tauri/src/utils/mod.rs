@@ -4,6 +4,7 @@ pub mod error;
 pub mod gui;
 pub mod hash;
 pub mod icon;
+pub mod log;
 pub mod metadata;
 pub mod progressed_read;
 pub mod sentry;
