@@ -31,7 +31,7 @@ sentry SDK 栈是发布 stub 中最大的可移除体积：符号名含 `sentry_
 | 判据 | 结果 |
 |---|---|
 | `cargo tree` 无 sentry 系 crate；bloat filter 为空 | PASS：`cargo tree -i sentry(-types)` 无匹配；`cargo bloat --filter "sentry"` 仅剩本项目 `utils::sentry` 模块（约 50KiB 含 tracing 单态化） |
-| 同测量条件下 `.text` 减少 ≥ 300KiB | PASS：release 二进制 5,041,664 → 4,494,336 字节（−534KiB，本机 msvc、opt-level=s + LTO，基线为去 clap/h2 后构建）。CI 侧参照：去 clap/h2 使 CI 产物 5,009,408 → 4,632,064，sentry 变更的 CI 体积待下次构建核对 |
+| 同测量条件下 `.text` 减少 ≥ 300KiB | PASS：release 二进制 5,041,664 → 4,494,336 字节（−534KiB，本机 msvc、opt-level=s + LTO，基线为去 clap/h2 后构建）；CI 产物 4,632,064 → 4,090,368（−529KiB，基线为去 clap/h2 提交） |
 | 主进程与提权进程的测试错误事件在后端可见、分组正常、release 关联正确 | 未验证：待实际触发后在后端核对 |
 | 面包屑随事件到达、时序与 tracing 日志一致 | 部分：环形缓冲行为有单测；端到端待后端核对 |
 | 会话事务按 name 聚合、阶段子 span 可见、单文件下载不产生 span | 部分：span 结构有代码保证（仅五个阶段调用点）；后端聚合待核对 |
