@@ -71,17 +71,12 @@ lazy_static::lazy_static! {
             }
         }
 
-        // Shared SSH connection pool for both SSH tunnel and SFTP middlewares
-        let ssh_pool = std::sync::Arc::new(
-            capabilities::ssh::SshPoolInner::new(Duration::from_secs(300)),
-        );
-
         // SSH tunnel middleware — routes ssh+http:// URLs through SSH direct-tcpip channels
-        builder = builder.with(capabilities::ssh::SshMiddleware::with_pool(ssh_pool.clone()));
+        builder = builder.with(capabilities::ssh::SshMiddleware);
         tracing::info!("[SSH] SshMiddleware enabled");
 
         // SFTP download middleware — routes sftp:// URLs through SSH SFTP subsystem
-        builder = builder.with(capabilities::sftp::SftpMiddleware::new(ssh_pool));
+        builder = builder.with(capabilities::sftp::SftpMiddleware);
         tracing::info!("[SFTP] SftpMiddleware enabled");
 
         builder.build()

@@ -21,7 +21,7 @@ multipart 下载路径整体移除：`IpcOperation::InstallMultipartStream` 变�
 |---|---|
 | `multer` 出依赖树 | PASS：`cargo tree -i multer` 无匹配 |
 | 无引用残留 | PASS：全仓 grep 无 multipart 引用（除 `create_multi_http_stream` 命名），前端与 e2e 测试本就不引用 |
-| 体积 | PASS：release 二进制 −50,688 字节（本机 msvc、opt-level=s + LTO） |
+| 体积 | PASS：release 二进制 −50,688 字节（本机 msvc、opt-level=s + LTO）；与外部标签改造合并的提交使 CI 产物 4,090,368 → 3,844,608 |
 | 现有下载模式不受影响 | 单测全过；multichunk/direct 路径未改动，e2e 由 CI 覆盖 |
 
 ## Consequences
