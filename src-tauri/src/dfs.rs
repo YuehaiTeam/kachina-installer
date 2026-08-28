@@ -112,6 +112,68 @@ pub struct InsightItem {
     pub mode: Option<String>, // 安装模式
 }
 
+const SHORT_INSIGHT_CODES: &[&str] = &[
+    "HASH_MISMATCH_ERR",
+    "HASH_CHECK_ERR",
+    "HTTP_STATUS_ERR",
+    "HTTP_REQUEST_ERR",
+    "ERR_CONNECTION_RESET",
+    "ERR_CONNECTION_TIMEOUT",
+    "ERR_STREAM_ERROR",
+    "ERR_DNS_RESOLUTION_FAILED",
+    "ERR_TLS_HANDSHAKE_ERROR",
+    "ERR_HTTP_PROTOCOL_ERROR",
+    "ERR_NETWORK_UNREACHABLE",
+    "ERR_REQUEST_TIMEOUT",
+    "ERR_RESPONSE_BODY_ERROR",
+    "ERR_DOWNLOAD_STALLED",
+    "ERR_DOWNLOAD_TOO_SLOW",
+    "ERR_NETWORK_OTHER",
+];
+
+pub fn is_remote_insight_url(url: &str) -> bool {
+    let lower = url.trim().to_ascii_lowercase();
+    lower.starts_with("http://")
+        || lower.starts_with("https://")
+        || lower.starts_with("http3://")
+        || lower.starts_with("h3://")
+        || lower.starts_with("h3wt://")
+        || lower.starts_with("sftp://")
+}
+
+pub fn is_short_insight_code(code: &str) -> bool {
+    SHORT_INSIGHT_CODES.contains(&code)
+}
+
+pub fn short_insight_code(err: &str) -> String {
+    for code in SHORT_INSIGHT_CODES {
+        if err.contains(code) {
+            return (*code).to_string();
+        }
+    }
+    if err.contains("DOWNLOAD_TOO_SLOW") {
+        return "ERR_DOWNLOAD_TOO_SLOW".to_string();
+    }
+    if err.contains("DOWNLOAD_STALLED") {
+        return "ERR_DOWNLOAD_STALLED".to_string();
+    }
+    if err.to_ascii_lowercase().contains("http status") {
+        return "HTTP_STATUS_ERR".to_string();
+    }
+    "ERR_NETWORK_OTHER".to_string()
+}
+
+pub fn apply_insight_error(insight: &mut InsightItem, err: &str) {
+    if insight
+        .error
+        .as_deref()
+        .is_some_and(is_short_insight_code)
+    {
+        return;
+    }
+    insight.error = Some(short_insight_code(err));
+}
+
 #[derive(Deserialize, Serialize, Debug)]
 pub struct Dfs2SessionInsights {
     pub servers: Vec<InsightItem>,
@@ -562,4 +624,47 @@ pub async fn http_get_request(
         body,
         final_url,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn remote_url_gate_rejects_local_paths() {
+        assert!(is_remote_insight_url("https://cdn.example.com/file"));
+        assert!(is_remote_insight_url("http://127.0.0.1/a"));
+        assert!(is_remote_insight_url("h3wt://node.example/path"));
+        assert!(!is_remote_insight_url(""));
+        assert!(!is_remote_insight_url("unknown"));
+        assert!(!is_remote_insight_url("file:///C:/pack.bin"));
+        assert!(!is_remote_insight_url("C:\\pack.bin"));
+    }
+
+    #[test]
+    fn short_codes_stay_short() {
+        assert_eq!(
+            short_insight_code("ERR_DOWNLOAD_TOO_SLOW [https://x]: DOWNLOAD_TOO_SLOW"),
+            "ERR_DOWNLOAD_TOO_SLOW"
+        );
+        assert_eq!(
+            short_insight_code("HTTP_STATUS_ERR in create_http_stream: https://x"),
+            "HTTP_STATUS_ERR"
+        );
+        assert_eq!(
+            short_insight_code("HASH_MISMATCH_ERR: File a hash mismatch"),
+            "HASH_MISMATCH_ERR"
+        );
+        let mut item = InsightItem {
+            url: "https://x".to_string(),
+            ttfb: 1,
+            time: 1,
+            size: 1,
+            error: Some("ERR_DOWNLOAD_TOO_SLOW".to_string()),
+            range: vec![],
+            mode: None,
+        };
+        apply_insight_error(&mut item, "some longer io error");
+        assert_eq!(item.error.as_deref(), Some("ERR_DOWNLOAD_TOO_SLOW"));
+    }
 }

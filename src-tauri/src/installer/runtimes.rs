@@ -111,8 +111,9 @@ pub async fn install_dotnet(
         }
         // get real download url
         let url = runtime.1.replace("$", &vernum);
-        let (stream, len, _insight) = create_http_stream(&url, 0, 0, true)
+        let (stream, len, _insight) = create_http_stream(&url, 0, 0, true, None)
             .await
+            .map_err(|e| e.error)
             .context("RUNTIME_DOWNLOAD_ERR")?;
         (stream, len.try_into().unwrap_or(0))
     };
@@ -194,8 +195,9 @@ pub async fn install_vcredist(
         );
         (stream, size.unwrap())
     } else {
-        let (stream, len, _insight) = create_http_stream(url, 0, 0, true)
+        let (stream, len, _insight) = create_http_stream(url, 0, 0, true, None)
             .await
+            .map_err(|e| e.error)
             .context("RUNTIME_DOWNLOAD_ERR")?;
         (stream, len.try_into().unwrap_or(0))
     };
