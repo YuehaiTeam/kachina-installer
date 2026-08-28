@@ -21,7 +21,7 @@ Status: implemented
 |---|---|
 | `Content` 机制出图 | PASS：filter 体积 75.1KiB → 2.8KiB（残余为 `SourceField`） |
 | `encoding_rs` 出图 | PASS：crate 榜单不再出现（原 20.5KiB） |
-| 体积 | PASS：release 二进制 −195,584 字节（本机，含 charset 移除） |
+| 体积 | PASS：release 二进制 −195,584 字节（本机，含 charset 移除）；与 multipart 移除合并的提交使 CI 产物 4,090,368 → 3,844,608 |
 | 协议兼容 | 管道两端为同一二进制，无跨版本兼容问题；e2e 测试与前端不引用这些 JSON 形状 |
 
 ## Consequences
