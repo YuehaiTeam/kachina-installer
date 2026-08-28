@@ -2,9 +2,9 @@ use std::path::{Path, PathBuf};
 
 use futures::StreamExt;
 
-use crate::utils::{hash::run_hash, metadata::Metadata};
+use crate::utils::{hash::run_hash, metadata::FileMeta};
 
-pub async fn deep_generate_metadata(source: &PathBuf) -> Result<Vec<Metadata>, String> {
+pub async fn deep_generate_metadata(source: &PathBuf) -> Result<Vec<FileMeta>, String> {
     let path = Path::new(&source);
     if !path.exists() {
         return Ok(Vec::new());
@@ -32,11 +32,12 @@ pub async fn deep_generate_metadata(source: &PathBuf) -> Result<Vec<Metadata>, S
                         1,
                     );
                     let size = entry.metadata().await.unwrap().len();
-                    files.push(Metadata {
+                    files.push(FileMeta {
                         file_name: fin_path,
                         md5: None,
                         xxh: None,
                         size,
+                        installer: None,
                     });
                 }
             }

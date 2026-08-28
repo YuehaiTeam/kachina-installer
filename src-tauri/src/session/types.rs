@@ -2,7 +2,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::cli::arg::InstallArgs;
 use crate::installer::{config::InstallerConfig, DirState};
-use crate::session::plan::{expand_template, HashInfo, HashKey, PatchInfo};
+use crate::session::plan::{expand_template, HashKey};
+use crate::utils::metadata::{FileMeta, RepoMetadata};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -81,25 +82,8 @@ impl ProjectConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DfsMetadata {
-    pub tag_name: String,
-    pub hashed: Vec<HashInfo>,
-    #[serde(default)]
-    pub patches: Vec<PatchInfo>,
-    pub installer: Option<InstallerMeta>,
-    #[serde(default)]
-    pub deletes: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct InstallerMeta {
-    pub size: u64,
-    pub md5: Option<String>,
-    pub xxh: Option<String>,
-}
-
-impl DfsMetadata {
+impl RepoMetadata {
+    /// 安装器会话用。不放进 `utils/metadata.rs`：该文件经 `#[path]` 编入 builder，builder 没有 session。
     pub fn hash_key(&self) -> anyhow::Result<HashKey> {
         if self.hashed.iter().all(|e| e.md5.is_some()) {
             Ok(HashKey::Md5)
@@ -110,7 +94,7 @@ impl DfsMetadata {
         }
     }
 
-    pub fn item_hash<'a>(&'a self, item: &'a HashInfo, key: HashKey) -> Option<&'a str> {
+    pub fn item_hash<'a>(&'a self, item: &'a FileMeta, key: HashKey) -> Option<&'a str> {
         match key {
             HashKey::Md5 => item.md5.as_deref(),
             HashKey::Xxh => item.xxh.as_deref(),

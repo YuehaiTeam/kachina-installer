@@ -122,24 +122,17 @@ fn classify_file_type(name: &str) -> FileType {
 fn build_hash_to_name_map(metadata: &RepoMetadata) -> HashMap<String, String> {
     let mut map = HashMap::new();
 
-    // 处理普通文件
-    if let Some(hashed) = &metadata.hashed {
-        for file in hashed {
-            if let Some(hash) = preferred_file_hash(&file.md5, &file.xxh) {
-                map.insert(hash.clone(), file.file_name.clone());
-            }
+    for file in &metadata.hashed {
+        if let Some(hash) = preferred_file_hash(&file.md5, &file.xxh) {
+            map.insert(hash.clone(), file.file_name.clone());
         }
     }
-
-    // 处理补丁文件
-    if let Some(patches) = &metadata.patches {
-        for patch in patches {
-            let from_hash = preferred_file_hash(&patch.from.md5, &patch.from.xxh);
-            let to_hash = preferred_file_hash(&patch.to.md5, &patch.to.xxh);
-            if let (Some(from), Some(to)) = (from_hash, to_hash) {
-                let patch_name = format!("{}_{}", from, to);
-                map.insert(patch_name, patch.file_name.clone());
-            }
+    for patch in &metadata.patches {
+        let from_hash = preferred_file_hash(&patch.from.md5, &patch.from.xxh);
+        let to_hash = preferred_file_hash(&patch.to.md5, &patch.to.xxh);
+        if let (Some(from), Some(to)) = (from_hash, to_hash) {
+            let patch_name = format!("{}_{}", from, to);
+            map.insert(patch_name, patch.file_name.clone());
         }
     }
 
@@ -450,7 +443,7 @@ pub async fn extract_cli(args: ExtractArgs) -> Result<(), String> {
 mod tests {
     use super::*;
     use crate::cli::ExtractArgs;
-    use crate::utils::metadata::{Metadata, PatchInfo, PatchItem, RepoMetadata};
+    use crate::utils::metadata::{FileMeta, PatchInfo, PatchSide, RepoMetadata};
     use std::path::PathBuf;
 
     fn extract_args() -> ExtractArgs {
@@ -481,30 +474,30 @@ mod tests {
         let metadata = RepoMetadata {
             repo_name: "r".into(),
             tag_name: "t".into(),
-            assets: None,
-            hashed: Some(vec![Metadata {
+            hashed: vec![FileMeta {
                 file_name: "app.exe".into(),
                 size: 1,
                 md5: Some("md5hash".into()),
                 xxh: Some("xxhhash".into()),
-            }]),
-            patches: Some(vec![PatchInfo {
+                installer: None,
+            }],
+            patches: vec![PatchInfo {
                 file_name: "app.exe".into(),
                 size: 1,
-                from: PatchItem {
+                from: PatchSide {
                     size: 1,
                     md5: Some("frommd5".into()),
                     xxh: Some("fromxxh".into()),
                 },
-                to: PatchItem {
+                to: PatchSide {
                     size: 1,
                     md5: Some("tomd5".into()),
                     xxh: Some("toxxh".into()),
                 },
-            }]),
+            }],
             installer: None,
-            deletes: None,
-            packing_info: None,
+            deletes: Vec::new(),
+            packing_info: Vec::new(),
         };
         let map = build_hash_to_name_map(&metadata);
         assert_eq!(map.get("md5hash").map(String::as_str), Some("app.exe"));

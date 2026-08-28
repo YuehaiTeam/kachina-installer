@@ -18,7 +18,7 @@ pub struct InstallerConfig {
     pub embedded_files: Option<Vec<Embedded>>,
     pub embedded_index: Option<Vec<Embedded>>,
     pub embedded_config: Option<Value>,
-    pub enbedded_metadata: Option<Value>,
+    pub enbedded_metadata: Option<crate::utils::metadata::RepoMetadata>,
     pub embedded_image: Option<String>,
     pub exe_path: String,
     pub args: crate::cli::arg::InstallArgs,

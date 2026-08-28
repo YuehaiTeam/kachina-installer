@@ -38,7 +38,7 @@ pub struct Dfs2Metadata {
 #[derive(Deserialize, Serialize, Debug)]
 pub struct Dfs2Data {
     pub index: std::collections::HashMap<String, Dfs2FileInfo>,
-    pub metadata: serde_json::Value,
+    pub metadata: crate::utils::metadata::RepoMetadata,
     pub installer_end: u32,
 }
 
@@ -164,11 +164,7 @@ pub fn short_insight_code(err: &str) -> String {
 }
 
 pub fn apply_insight_error(insight: &mut InsightItem, err: &str) {
-    if insight
-        .error
-        .as_deref()
-        .is_some_and(is_short_insight_code)
-    {
+    if insight.error.as_deref().is_some_and(is_short_insight_code) {
         return;
     }
     insight.error = Some(short_insight_code(err));

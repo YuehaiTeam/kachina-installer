@@ -88,8 +88,8 @@ pub async fn pack_cli(args: PackArgs) {
     let mut files = vec![];
     if let Some(data_dir) = data_dir {
         if let Some(metadata) = metadata.as_ref() {
-            if let Some(hashed) = metadata.hashed.as_ref() {
-                for file in hashed.iter() {
+            if !metadata.hashed.is_empty() {
+                for file in metadata.hashed.iter() {
                     let Some(hash) = preferred_file_hash(&file.md5, &file.xxh) else {
                         eprintln!("No hash found for file: {:?}", file.file_name);
                         return;
@@ -112,8 +112,8 @@ pub async fn pack_cli(args: PackArgs) {
                     });
                 }
             }
-            if let Some(patches) = metadata.patches.as_ref() {
-                for patch in patches.iter() {
+            if !metadata.patches.is_empty() {
+                for patch in metadata.patches.iter() {
                     let Some(from_hash) = preferred_file_hash(&patch.from.md5, &patch.from.xxh)
                     else {
                         eprintln!("No hash found for patch: {:?}", patch.file_name);
@@ -239,20 +239,16 @@ pub async fn pack(
     // remove tmp file
     tokio::fs::remove_file(tmppath).await.unwrap();
 
-    // 先克隆 packing_info 用于排序
+    // packing_info 为空时不参与分类排序（避免按 [0]..=[4] 打印时越界）。
     let packing_info_clone = config
         .metadata
         .as_ref()
-        .and_then(|m| m.packing_info.clone());
+        .map(|m| m.packing_info.clone())
+        .filter(|p| !p.is_empty());
 
-    let metadata_bytes = if let Some(mut metadata) = config.metadata {
+    let metadata_bytes = if let Some(metadata) = config.metadata {
         println!("Writing metadata...");
-        // 排除 packing_info，这些信息只用于打包阶段
-        metadata.packing_info = None;
-        let mut metadata = serde_json::json!(metadata);
-        metadata.sort_all_objects();
-        let metadata_bytes = serde_json::to_string(&metadata).unwrap();
-        Some(metadata_bytes.as_bytes().to_vec())
+        Some(embed_metadata_bytes(metadata))
     } else {
         None
     };
@@ -470,6 +466,14 @@ pub async fn write_file(
     Ok(())
 }
 
+/// 嵌入安装包的元数据：去掉 packing_info 后按键排序再序列化。
+fn embed_metadata_bytes(mut metadata: RepoMetadata) -> Vec<u8> {
+    metadata.packing_info.clear();
+    let mut metadata = serde_json::json!(metadata);
+    metadata.sort_all_objects();
+    serde_json::to_string(&metadata).unwrap().into_bytes()
+}
+
 fn get_file_pack_priority(
     file_name: &str,
     packing_info: Option<&Vec<Vec<String>>>,
@@ -485,4 +489,179 @@ fn get_file_pack_priority(
 
     // 未分类的文件放在最后，使用原有的字母排序
     (5, file_name.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::embed_metadata_bytes;
+    use crate::utils::metadata::{FileMeta, InstallerInfo, PatchInfo, PatchSide, RepoMetadata};
+    use serde::Serialize;
+
+    /// 合并前写出镜像的 serde 属性（`Option` 字段、`assets`），对照嵌入 JSON 字节。
+    #[derive(Serialize)]
+    struct LegacyFile {
+        file_name: String,
+        size: u64,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        md5: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        xxh: Option<String>,
+    }
+
+    #[derive(Serialize)]
+    struct LegacyPatchSide {
+        size: u64,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        md5: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        xxh: Option<String>,
+    }
+
+    #[derive(Serialize)]
+    struct LegacyPatch {
+        file_name: String,
+        size: u64,
+        from: LegacyPatchSide,
+        to: LegacyPatchSide,
+    }
+
+    #[derive(Serialize)]
+    struct LegacyInstaller {
+        size: u64,
+        md5: Option<String>,
+        xxh: Option<String>,
+    }
+
+    #[derive(Serialize)]
+    struct LegacyRepo {
+        repo_name: String,
+        tag_name: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        assets: Option<Vec<LegacyFile>>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        hashed: Option<Vec<LegacyFile>>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        patches: Option<Vec<LegacyPatch>>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        installer: Option<LegacyInstaller>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        deletes: Option<Vec<String>>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        packing_info: Option<Vec<Vec<String>>>,
+    }
+
+    fn legacy_embed(mut metadata: LegacyRepo) -> Vec<u8> {
+        metadata.packing_info = None;
+        let mut metadata = serde_json::json!(metadata);
+        metadata.sort_all_objects();
+        serde_json::to_string(&metadata).unwrap().into_bytes()
+    }
+
+    fn file(name: &str, size: u64, xxh: &str) -> (FileMeta, LegacyFile) {
+        (
+            FileMeta {
+                file_name: name.into(),
+                size,
+                md5: None,
+                xxh: Some(xxh.into()),
+                installer: None,
+            },
+            LegacyFile {
+                file_name: name.into(),
+                size,
+                md5: None,
+                xxh: Some(xxh.into()),
+            },
+        )
+    }
+
+    #[test]
+    fn pack_embed_matches_legacy_after_strip() {
+        let (hashed, legacy_hashed) = file("app.exe", 12, "abcd");
+        let new_bytes = embed_metadata_bytes(RepoMetadata {
+            tag_name: "v1.0.0".into(),
+            hashed: vec![hashed],
+            patches: Vec::new(),
+            installer: None,
+            deletes: Vec::new(),
+            repo_name: "demo".into(),
+            packing_info: vec![vec!["abcd".into()], vec![], vec![], vec![], vec![]],
+        });
+        let old_bytes = legacy_embed(LegacyRepo {
+            repo_name: "demo".into(),
+            tag_name: "v1.0.0".into(),
+            assets: None,
+            hashed: Some(vec![legacy_hashed]),
+            patches: None,
+            installer: None,
+            deletes: None,
+            packing_info: Some(vec![vec!["abcd".into()], vec![], vec![], vec![], vec![]]),
+        });
+        assert_eq!(
+            String::from_utf8_lossy(&new_bytes),
+            String::from_utf8_lossy(&old_bytes)
+        );
+    }
+
+    #[test]
+    fn pack_embed_matches_legacy_with_patches_and_installer() {
+        let (hashed, legacy_hashed) = file("app.exe", 12, "abcd");
+        let new_bytes = embed_metadata_bytes(RepoMetadata {
+            tag_name: "v2".into(),
+            hashed: vec![hashed],
+            patches: vec![PatchInfo {
+                file_name: "app.exe".into(),
+                size: 4,
+                from: PatchSide {
+                    size: 10,
+                    md5: None,
+                    xxh: Some("from".into()),
+                },
+                to: PatchSide {
+                    size: 12,
+                    md5: None,
+                    xxh: Some("abcd".into()),
+                },
+            }],
+            installer: Some(InstallerInfo {
+                size: 8,
+                md5: None,
+                xxh: Some("upd".into()),
+            }),
+            deletes: vec!["old.txt".into()],
+            repo_name: "demo".into(),
+            packing_info: vec![vec![], vec![], vec![], vec!["p".into()], vec![]],
+        });
+        let old_bytes = legacy_embed(LegacyRepo {
+            repo_name: "demo".into(),
+            tag_name: "v2".into(),
+            assets: None,
+            hashed: Some(vec![legacy_hashed]),
+            patches: Some(vec![LegacyPatch {
+                file_name: "app.exe".into(),
+                size: 4,
+                from: LegacyPatchSide {
+                    size: 10,
+                    md5: None,
+                    xxh: Some("from".into()),
+                },
+                to: LegacyPatchSide {
+                    size: 12,
+                    md5: None,
+                    xxh: Some("abcd".into()),
+                },
+            }]),
+            installer: Some(LegacyInstaller {
+                size: 8,
+                md5: None,
+                xxh: Some("upd".into()),
+            }),
+            deletes: Some(vec!["old.txt".into()]),
+            packing_info: Some(vec![vec![], vec![], vec![], vec!["p".into()], vec![]]),
+        });
+        assert_eq!(
+            String::from_utf8_lossy(&new_bytes),
+            String::from_utf8_lossy(&old_bytes)
+        );
+    }
 }

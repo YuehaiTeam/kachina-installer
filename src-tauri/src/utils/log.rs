@@ -1,4 +1,4 @@
-//! 最小 tracing 后端，替代 tracing-subscriber 的 registry + fmt 栈。
+//! 最小 tracing 后端：直接实现 `tracing::Subscriber`，不依赖 tracing-subscriber。
 //!
 //! 单个全局 Subscriber 同时完成三件事：INFO 级别过滤、控制台/日志文件输出、
 //! Sentry 面包屑写入。仓库内没有任何 span 使用，span 相关方法均为空实现。
