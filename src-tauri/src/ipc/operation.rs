@@ -45,11 +45,7 @@ pub enum IpcOperation {
     },
 }
 
-pub async fn run_opr(
-    op: IpcOperation,
-    notify: ProgressNotify,
-    context: Vec<(String, String)>,
-) -> TAResult<serde_json::Value> {
+pub async fn run_opr(op: IpcOperation, notify: ProgressNotify) -> TAResult<serde_json::Value> {
     let op_name = match &op {
         IpcOperation::Ping => "Ping",
         IpcOperation::InstallFile(_) => "InstallFile",
@@ -69,13 +65,7 @@ pub async fn run_opr(
         IpcOperation::RunMirrorcInstall { .. } => "RunMirrorcInstall",
     };
     tracing::info!("IPC operation: {}", op_name);
-    let ctx_str = context
-        .iter()
-        .map(|(k, v)| (k.as_str(), v.as_str()))
-        .collect::<Vec<_>>();
-    let tx_ctx = sentry::TransactionContext::continue_from_headers(op_name, op_name, ctx_str);
-    let transaction = sentry::start_transaction(tx_ctx);
-    let ret = match op {
+    match op {
         IpcOperation::Ping => Ok(serde_json::value::Value::Null),
         IpcOperation::InstallFile(args) => {
             super::install_file::ipc_install_file(args, notify).await
@@ -139,7 +129,5 @@ pub async fn run_opr(
             crate::thirdparty::mirrorc::run_mirrorc_install(&zip_path, &target_path, notify)
                 .await?
         )),
-    };
-    transaction.finish();
-    ret
+    }
 }

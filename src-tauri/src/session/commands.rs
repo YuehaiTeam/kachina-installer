@@ -73,12 +73,12 @@ pub(crate) async fn settings_from_input(
     let project = config
         .embedded_config
         .as_ref()
-        .ok_or_else(|| anyhow::anyhow!("安装包损坏，请重新下载"))
+        .ok_or_else(|| crate::session::error::user(crate::session::error::PKG_BROKEN))
         .and_then(ProjectConfig::from_value)?;
     let inspected =
         crate::installer::inspect_dir(input.install_path.clone(), project.exe_name.clone())
             .await
-            .ok_or_else(|| anyhow::anyhow!(crate::session::error::PATH_INVALID))?;
+            .ok_or_else(|| crate::session::error::user(crate::session::error::PATH_INVALID))?;
     Ok((
         Settings {
             install_path: input.install_path.clone(),

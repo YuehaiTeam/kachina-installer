@@ -116,6 +116,9 @@ fn parse_from(argv: &[OsString], d_tail: Option<PathBuf>) -> Command {
         Some("native-ui") => Command::NativeUi(parse_install(&argv[1..], d_tail)),
         Some("install-webview2") => Command::InstallWebview2,
         Some("headless-uac") => Command::HeadlessUac(parse_uac(&argv[1..])),
+        Some("crash-dialog") => Command::CrashDialog {
+            event_id: argv.get(1).and_then(|s| s.to_str()).map(String::from),
+        },
         _ => Command::Install(parse_install(argv, d_tail)),
     }
 }
@@ -460,6 +463,14 @@ mod tests {
             Command::HeadlessUac(u) => assert_eq!(u.pipe_id, "pipe-123"),
             other => panic!("expected HeadlessUac, got {other:?}"),
         }
+        match parse_from(&os(&["crash-dialog", "abc123"]), None) {
+            Command::CrashDialog { event_id } => assert_eq!(event_id.as_deref(), Some("abc123")),
+            other => panic!("expected CrashDialog, got {other:?}"),
+        }
+        assert!(matches!(
+            parse_from(&os(&["crash-dialog"]), None),
+            Command::CrashDialog { event_id: None }
+        ));
     }
 
     // ---- slash 开关（clap 无此能力，期望值测试） ----

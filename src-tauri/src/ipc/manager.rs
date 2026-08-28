@@ -3,8 +3,6 @@ use super::operation::IpcOperation;
 use super::{progress_notify, ProgressNotify};
 use crate::utils::acl::create_security_attributes;
 use crate::utils::error::TAResult;
-use crate::utils::sentry::forward_envelope;
-use crate::utils::sentry::AUTO_TRANSPORT;
 use crate::utils::uac::check_elevated;
 use crate::utils::uac::run_elevated;
 use crate::utils::uac::SendableHandle;
@@ -26,7 +24,6 @@ static PIPE_BUFFER_SIZE: usize = 1024 * 1024;
 pub struct IpcInner {
     op: IpcOperation,
     id: String,
-    context: Vec<(String, String)>,
 }
 
 #[derive(Debug)]
@@ -104,18 +101,12 @@ impl ManagedElevate {
         on_progress: ProgressNotify,
     ) -> TAResult<serde_json::Value> {
         if !elevate || self.already_elevated {
-            return run_opr(ipc, on_progress, vec![]).await;
+            return run_opr(ipc, on_progress).await;
         }
         if self.process.read().await.is_none() {
             tracing::info!("Elevate process not started, starting...");
             self.start().await?;
             tracing::info!("Elevate process started");
-        }
-        let mut context = vec![];
-        if let Some(span) = sentry::configure_scope(|scope| scope.get_span()) {
-            for (k, v) in span.iter_headers() {
-                context.push((k.to_string(), v.to_string()));
-            }
         }
         let id = uuid::Uuid::new_v4().to_string();
         let _ = self
@@ -123,7 +114,6 @@ impl ManagedElevate {
             .send(IpcInner {
                 op: ipc,
                 id: id.clone(),
-                context,
             })
             .await;
         let mut rx = self.broadcast_tx.subscribe();
@@ -183,24 +173,11 @@ pub async fn handle_pipe(
                         }
                         let res = serde_json::from_str::<serde_json::Value>(&buf);
                         if let Ok(res) = res {
-                            // sentry envelope
                             if let Some(envelope) = res["envelope"].as_str() {
-                                let envelope = sentry::Envelope::from_slice(envelope.as_bytes());
-                                match envelope {
-                                    Ok(envelope) => {
-                                        forward_envelope(envelope);
-                                    }
-                                    Err(err) => {
-                                        tracing::warn!("Failed to parse envelope: {:?}", err);
-                                    }
-                                }
+                                crate::utils::sentry::forward_raw_envelope(envelope.to_string());
                             }
-                            // sentry breadcrumb
                             if res["breadcrumb"].is_object() {
-                                let breadcrumb = res["breadcrumb"].clone();
-                                if let Ok(breadcrumb) = serde_json::from_value::<sentry::Breadcrumb>(breadcrumb) {
-                                    sentry::add_breadcrumb(breadcrumb);
-                                }
+                                crate::utils::sentry::add_breadcrumb_value(res["breadcrumb"].clone());
                             }
                             let _ = tx.send(res);
                         }else{
@@ -270,7 +247,7 @@ pub async fn uac_ipc_main(args: crate::cli::arg::UacArgs) {
     let mut clientrx = tokio::io::BufReader::with_capacity(PIPE_BUFFER_SIZE, clientrx);
 
     let (tx, mut rx) = tokio::sync::mpsc::channel(500);
-    let mut sentry_rx = AUTO_TRANSPORT.mpsc_rx.write().await;
+    let mut sentry_rx = crate::utils::sentry::PIPE_OUTBOX.rx.write().await;
     let mut buf = String::new();
 
     // 创建一个取消通知器
@@ -316,7 +293,6 @@ pub async fn uac_ipc_main(args: crate::cli::arg::UacArgs) {
                                                     .await;
                                             });
                                         }),
-                                        res.context,
                                     )
                                     .await;
                                     if let Err(err) = res.as_ref() {
@@ -373,18 +349,8 @@ pub async fn uac_ipc_main(args: crate::cli::arg::UacArgs) {
                         }
                     }
                     v = sentry_rx.recv() => {
-                        if let Some(v) = v {
-                            match v {
-                                crate::utils::sentry::SentryData::Breadcrumb(b) => {
-                                    let _ = tx.send(serde_json::json!({ "breadcrumb": b })).await;
-                                },
-                                crate::utils::sentry::SentryData::Envelope(v) => {
-                                    let mut vec = Vec::new();
-                                    v.to_writer(&mut vec).unwrap();
-                                    let str = String::from_utf8_lossy(&vec).to_string();
-                                    let _ = tx.send(serde_json::json!({ "envelope": str })).await;
-                                }
-                            }
+                        if let Some(msg) = v {
+                            let _ = tx.send(msg).await;
                         }
                     }
                 }

@@ -82,15 +82,7 @@ indicatif = { version = "0.17.9", features = ["tokio"] }
 console = "0.15.10"
 rcedit = { version = "0.1.0", git = "https://github.com/Devolutions/rcedit-rs.git" }
 windows-registry = "0.5"
-sentry = { version = "0.37.0", features = [
-    "contexts",
-    "contexts",
-    "transport",
-    "reqwest",
-    "native-tls",
-], default-features = false }
 tracing-subscriber = { version = "0.3", features = ["fmt", "registry"] }
-sentry-tracing = "0.37"
 zip = { git = "https://github.com/xytoki/zip2.git", default-features = false, features = [
     "deflate",
     "deflate64",

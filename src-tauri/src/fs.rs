@@ -1118,13 +1118,8 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     fn temp_dir() -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "kachina-fs-{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        // 不能用时间戳命名：Windows 时钟粗化到 15.6ms 节拍，并行测试会取到相同值而共用目录
+        let dir = std::env::temp_dir().join(format!("kachina-fs-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         dir
     }

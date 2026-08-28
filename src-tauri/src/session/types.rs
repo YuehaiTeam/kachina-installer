@@ -75,7 +75,7 @@ impl ProjectConfig {
                 }
                 list.first()
                     .map(|s| s.uri.clone())
-                    .ok_or_else(|| anyhow::anyhow!(crate::session::error::PKG_BROKEN))
+                    .ok_or_else(|| crate::session::error::user(crate::session::error::PKG_BROKEN))
             }
         }
     }
@@ -164,7 +164,7 @@ pub async fn settings_from_cli(
     let source_uri = project.source_uri(args.source.as_deref())?;
     let inspected = crate::installer::inspect_dir(install_path.clone(), project.exe_name.clone())
         .await
-        .ok_or_else(|| anyhow::anyhow!(crate::session::error::PATH_INVALID))?;
+        .ok_or_else(|| crate::session::error::user(crate::session::error::PATH_INVALID))?;
     Ok(Settings {
         install_path,
         source_uri,

@@ -7,7 +7,7 @@ use crate::{
 use anyhow::Context;
 use serde::Serialize;
 use serde_json::Value;
-use std::{collections::BTreeMap, path::Path};
+use std::path::Path;
 
 #[derive(Serialize, Debug, Clone)]
 pub struct InstallerConfig {
@@ -92,34 +92,20 @@ pub async fn get_config_pre(
             .as_ref()
             .and_then(|c| c["source"].as_str())
             .unwrap_or("Unknown");
-        sentry::configure_scope(|scope| {
-            scope.set_context(
-                "config",
-                sentry::protocol::Context::Other(BTreeMap::from([
-                    ("Name".to_string(), embed_name.into()),
-                    ("Source".to_string(), embed_source.into()),
-                    (
-                        "HasMetadata".to_string(),
-                        enbedded_metadata.is_some().into(),
-                    ),
-                    ("HasFiles".to_string(), embedded_files.is_some().into()),
-                    ("HasIndex".to_string(), embedded_index.is_some().into()),
-                    (
-                        "IsUninstall".to_string(),
-                        format!("{}", args.uninstall).into(),
-                    ),
-                    (
-                        "OverrideSource".to_string(),
-                        format!("{:?}", args.source).into(),
-                    ),
-                    (
-                        "NonInteractive".to_string(),
-                        format!("{}", args.non_interactive).into(),
-                    ),
-                    ("Silent".to_string(), format!("{}", args.silent).into()),
-                ])),
-            );
-        });
+        crate::utils::sentry::set_context(
+            "config",
+            serde_json::json!({
+                "Name": embed_name,
+                "Source": embed_source,
+                "HasMetadata": enbedded_metadata.is_some(),
+                "HasFiles": embedded_files.is_some(),
+                "HasIndex": embedded_index.is_some(),
+                "IsUninstall": args.uninstall,
+                "OverrideSource": format!("{:?}", args.source),
+                "NonInteractive": args.non_interactive,
+                "Silent": args.silent,
+            }),
+        );
     }
     Ok(InstallerConfig {
         install_path: "".to_string(),
