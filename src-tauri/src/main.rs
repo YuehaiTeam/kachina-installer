@@ -13,7 +13,6 @@ pub mod module;
 pub mod session;
 pub mod thirdparty;
 pub mod utils;
-use clap::Parser;
 use cli::arg::{Command, InstallArgs};
 use sentry_tracing::EventFilter;
 use std::{sync::atomic::AtomicBool, time::Duration};
@@ -99,8 +98,7 @@ fn main() {
     use windows::Win32::System::Console::{AttachConsole, ATTACH_PARENT_PROCESS};
     let _ = unsafe { AttachConsole(ATTACH_PARENT_PROCESS) };
 
-    let cli = cli::Cli::parse();
-    let command = cli.command();
+    let command = cli::parse();
     let _guard = sentry_init(matches!(command, Command::HeadlessUac(_)));
     utils::sentry::sentry_set_info();
     let sentry_layer = sentry_tracing::layer().event_filter(|md| match *md.level() {
@@ -165,20 +163,7 @@ fn main() {
                 .unwrap()
                 .block_on(async {
                     if module::wv2::install_webview2().await.is_ok() {
-                        host_main(
-                            InstallArgs {
-                                target: None,
-                                non_interactive: false,
-                                silent: false,
-                                online: false,
-                                uninstall: false,
-                                source: None,
-                                dfs_extras: None,
-                                mirrorc_cdk: None,
-                                dump_dir: None,
-                            },
-                            None,
-                        );
+                        host_main(InstallArgs::default(), None);
                     }
                 });
         }
@@ -221,32 +206,6 @@ fn main() {
                     } else {
                         gui_entry(install).await;
                     }
-                });
-        }
-        Command::Other(_str) => {
-            sentry::add_breadcrumb(sentry::Breadcrumb {
-                category: Some("app".into()),
-                message: Some("KachinaInstaller started".into()),
-                level: sentry::Level::Info,
-                ..Default::default()
-            });
-            tokio::runtime::Builder::new_multi_thread()
-                .enable_all()
-                .build()
-                .unwrap()
-                .block_on(async move {
-                    gui_entry(InstallArgs {
-                        target: None,
-                        non_interactive: false,
-                        silent: false,
-                        online: false,
-                        uninstall: false,
-                        source: None,
-                        dfs_extras: None,
-                        mirrorc_cdk: None,
-                        dump_dir: None,
-                    })
-                    .await;
                 });
         }
     }

@@ -2,7 +2,7 @@ import {
   verifyFiles,
   cleanupTestDir,
   getTestDir,
-  FLAGS,
+  FLAGS_SLASH,
   runInstaller,
   assertExitOk,
 } from './utils.mjs';
@@ -23,7 +23,7 @@ async function test() {
     console.log('Running offline installation...');
     const result = await runInstaller(
       installerPath,
-      [FLAGS, '-D', testDir],
+      [FLAGS_SLASH, '-D', testDir],
       'Offline installation',
     );
     assertExitOk(result, 'Offline installation');

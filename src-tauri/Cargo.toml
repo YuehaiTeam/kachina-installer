@@ -26,7 +26,6 @@ tokio = { version = "1", features = [
 chksum-md5 = { version = "0.1", features = ["async-runtime-tokio"] }
 sha2 = "0.10"
 reqwest = { version = "0.12", default-features = false, features = [
-    "http2",
     "json",
     "native-tls",
     "native-tls-alpn",
@@ -57,7 +56,8 @@ windows = { version = "0.62", features = [
     "Win32_UI_HiDpi",
     "Win32_Graphics_Gdi",
     "Win32_Graphics_Dwm",
-    "Win32_UI_Shell"
+    "Win32_UI_Shell",
+    "Win32_System_Environment"
 ] }
 
 rfd = { version = "0.15", default-features = false, features = [
@@ -118,6 +118,7 @@ hyper-util = { version = "0.1", features = ["tokio"] }
 http-body-util = "0.1"
 
 zstd = "0.13"
+regex-lite = "0.1.9"
 
 [build-dependencies]
 embed-resource = "3"
