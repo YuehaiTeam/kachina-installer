@@ -1,11 +1,11 @@
 use crate::ipc::ProgressNotify;
 use crate::utils::error::TAResult;
+// 外部标签（serde 默认）：内部标签/untagged 会拉进 serde 的 Content 缓冲机制，
+// 单态化体积大；此协议仅在同一二进制的两个进程间使用，形状可自由选择
 #[derive(serde::Deserialize, serde::Serialize, Clone, Debug)]
-#[serde(tag = "type")]
 pub enum IpcOperation {
     Ping,
     InstallFile(super::install_file::InstallFileArgs),
-    InstallMultipartStream(super::install_file::InstallMultiStreamArgs),
     InstallMultichunkStream(super::install_file::InstallMultiStreamArgs),
     CreateLnk(crate::installer::lnk::CreateLnkArgs),
     WriteRegistry(crate::installer::registry::WriteRegistryParams),
@@ -49,7 +49,6 @@ pub async fn run_opr(op: IpcOperation, notify: ProgressNotify) -> TAResult<serde
     let op_name = match &op {
         IpcOperation::Ping => "Ping",
         IpcOperation::InstallFile(_) => "InstallFile",
-        IpcOperation::InstallMultipartStream(_) => "InstallMultipartStream",
         IpcOperation::InstallMultichunkStream(_) => "InstallMultichunkStream",
         IpcOperation::CreateLnk(_) => "CreateLnk",
         IpcOperation::WriteRegistry(_) => "WriteRegistry",
@@ -69,9 +68,6 @@ pub async fn run_opr(op: IpcOperation, notify: ProgressNotify) -> TAResult<serde
         IpcOperation::Ping => Ok(serde_json::value::Value::Null),
         IpcOperation::InstallFile(args) => {
             super::install_file::ipc_install_file(args, notify).await
-        }
-        IpcOperation::InstallMultipartStream(args) => {
-            super::install_file::ipc_install_multipart_stream(args, notify).await
         }
         IpcOperation::InstallMultichunkStream(args) => {
             super::install_file::ipc_install_multichunk_stream(args, notify).await
