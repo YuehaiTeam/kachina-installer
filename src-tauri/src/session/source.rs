@@ -63,6 +63,33 @@ pub struct FileLocation {
     pub offset: usize,
     pub size: usize,
     pub skip_decompress: bool,
+    pub request_range: Option<String>,
+}
+
+fn range_key(offset: usize, size: usize) -> String {
+    if size == 0 {
+        format!("{offset}-")
+    } else {
+        format!("{}-{}", offset, offset + size - 1)
+    }
+}
+
+impl FileLocation {
+    fn remote(
+        url: String,
+        offset: usize,
+        size: usize,
+        skip_decompress: bool,
+        request_range: Option<String>,
+    ) -> Self {
+        Self {
+            url: Some(url),
+            offset,
+            size,
+            skip_decompress,
+            request_range: Some(request_range.unwrap_or_else(|| range_key(offset, size))),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -113,8 +140,10 @@ impl SourceCtx {
         self.index.get(name)
     }
 
-    pub fn add_insight(&self, mut item: InsightItem, mode: &str) {
-        item.mode = Some(mode.to_string());
+    pub fn add_insight(&self, mut item: InsightItem, mode: Option<&str>) {
+        if let Some(mode) = mode {
+            item.mode = Some(mode.to_string());
+        }
         if let Ok(mut items) = self.insights.lock() {
             items.push(item);
         }
@@ -458,27 +487,30 @@ pub async fn resolve_file_location(
         ParsedSource::GitHub { raw, storage } => {
             let file_url = resolve_github_file_url(raw).await?;
             match storage {
-                StorageKind::Hashed => Ok(FileLocation {
-                    url: Some(hashed_file_url(&file_url, hash)),
-                    offset: 0,
-                    size: 0,
-                    skip_decompress: false,
-                }),
+                StorageKind::Hashed => Ok(FileLocation::remote(
+                    hashed_file_url(&file_url, hash),
+                    0,
+                    0,
+                    false,
+                    Some("0-".to_string()),
+                )),
                 StorageKind::Packed => {
                     if let Some(file) = ctx.find(hash) {
-                        Ok(FileLocation {
-                            url: Some(file_url),
-                            offset: file.offset,
-                            size: file.size,
-                            skip_decompress: false,
-                        })
+                        Ok(FileLocation::remote(
+                            file_url,
+                            file.offset,
+                            file.size,
+                            false,
+                            None,
+                        ))
                     } else if installer {
-                        Ok(FileLocation {
-                            url: Some(file_url),
-                            offset: 0,
-                            size: ctx.installer_end,
-                            skip_decompress: true,
-                        })
+                        Ok(FileLocation::remote(
+                            file_url,
+                            0,
+                            ctx.installer_end,
+                            true,
+                            None,
+                        ))
                     } else {
                         Err(hide(error::FILE_MISSING, "no file in remote binary"))
                     }
@@ -498,12 +530,13 @@ pub async fn resolve_file_location(
                     } else {
                         resolve_dfs_file_url(&hashed_file_url(url, hash), extras, None, 0).await?
                     };
-                    Ok(FileLocation {
-                        url: Some(file_url),
-                        offset: 0,
-                        size: 0,
-                        skip_decompress: false,
-                    })
+                    Ok(FileLocation::remote(
+                        file_url,
+                        0,
+                        0,
+                        false,
+                        Some("0-".to_string()),
+                    ))
                 }
                 StorageKind::Packed => {
                     if let Some(file) = ctx.find(hash) {
@@ -512,24 +545,14 @@ pub async fn resolve_file_location(
                         } else {
                             resolve_dfs_file_url(url, extras, Some(file.size), file.offset).await?
                         };
-                        Ok(FileLocation {
-                            url: Some(full),
-                            offset: file.offset,
-                            size: file.size,
-                            skip_decompress: false,
-                        })
+                        Ok(FileLocation::remote(full, file.offset, file.size, false, None))
                     } else if installer {
                         let full = if *remote == RemoteKind::Direct {
                             url.clone()
                         } else {
                             resolve_dfs_file_url(url, extras, Some(ctx.installer_end), 0).await?
                         };
-                        Ok(FileLocation {
-                            url: Some(full),
-                            offset: 0,
-                            size: ctx.installer_end,
-                            skip_decompress: true,
-                        })
+                        Ok(FileLocation::remote(full, 0, ctx.installer_end, true, None))
                     } else {
                         Err(hide(error::FILE_MISSING, "no file in remote binary"))
                     }
@@ -559,22 +582,24 @@ async fn resolve_dfs2_location(
             file.offset + file.size.saturating_sub(1)
         );
         let url = dfs2_chunk_url(ctx, &session_api, &range).await?;
-        Ok(FileLocation {
-            url: Some(url),
-            offset: file.offset,
-            size: file.size,
-            skip_decompress: false,
-        })
+        Ok(FileLocation::remote(
+            url,
+            file.offset,
+            file.size,
+            false,
+            Some(range),
+        ))
     } else if installer {
         let end = ctx.installer_end.max(1);
         let range = format!("0-{}", end - 1);
         let url = dfs2_chunk_url(ctx, &session_api, &range).await?;
-        Ok(FileLocation {
-            url: Some(url),
-            offset: 0,
-            size: ctx.installer_end,
-            skip_decompress: true,
-        })
+        Ok(FileLocation::remote(
+            url,
+            0,
+            ctx.installer_end,
+            true,
+            Some(range),
+        ))
     } else {
         Err(hide(error::FILE_MISSING, "no file in dfs2 index"))
     }
@@ -886,22 +911,26 @@ async fn resolve_plugin_location(
 ) -> anyhow::Result<FileLocation> {
     if let Some(file) = ctx.find(hash) {
         let end = file.offset + file.size.saturating_sub(1);
-        let url = plugin_chunk_url(ctx, name, raw, &format!("{}-{end}", file.offset)).await?;
-        Ok(FileLocation {
-            url: Some(url),
-            offset: file.offset,
-            size: file.size,
-            skip_decompress: false,
-        })
+        let range = format!("{}-{end}", file.offset);
+        let url = plugin_chunk_url(ctx, name, raw, &range).await?;
+        Ok(FileLocation::remote(
+            url,
+            file.offset,
+            file.size,
+            false,
+            Some(range),
+        ))
     } else if installer {
         let end = ctx.installer_end.max(1);
-        let url = plugin_chunk_url(ctx, name, raw, &format!("0-{}", end - 1)).await?;
-        Ok(FileLocation {
-            url: Some(url),
-            offset: 0,
-            size: ctx.installer_end,
-            skip_decompress: true,
-        })
+        let range = format!("0-{}", end - 1);
+        let url = plugin_chunk_url(ctx, name, raw, &range).await?;
+        Ok(FileLocation::remote(
+            url,
+            0,
+            ctx.installer_end,
+            true,
+            Some(range),
+        ))
     } else {
         Err(hide(error::FILE_MISSING, "no file in remote binary"))
     }
@@ -1109,6 +1138,20 @@ async fn prefetch_batch_urls(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn remote_location_keeps_request_range() {
+        let loc = FileLocation::remote(
+            "https://x.example/file".to_string(),
+            10,
+            5,
+            false,
+            Some("10-14".to_string()),
+        );
+        assert_eq!(loc.request_range.as_deref(), Some("10-14"));
+        let hashed = FileLocation::remote("https://x.example/a".to_string(), 0, 0, false, None);
+        assert_eq!(hashed.request_range.as_deref(), Some("0-"));
+    }
 
     #[test]
     fn plugin_prefix_needs_js() {

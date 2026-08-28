@@ -1,5 +1,5 @@
 use crate::{
-    dfs::InsightItem,
+    dfs::{apply_insight_error, InsightItem},
     fs::{
         create_http_stream, create_local_stream, create_multi_http_stream, create_target_file,
         prepare_target, progressed_copy, progressed_hpatch, verify_hash,
@@ -65,6 +65,8 @@ pub enum InstallFileSource {
         size: usize,
         #[serde(default = "default_as_false")]
         skip_decompress: bool,
+        #[serde(default)]
+        request_range: Option<String>,
     },
     Local {
         offset: usize,
@@ -98,9 +100,67 @@ pub struct InstallFileArgs {
     pub xxh: Option<String>,
     pub clear_installer_index_mark: Option<bool>,
 }
+fn snapshot_insight(handle: &Option<Arc<Mutex<InsightItem>>>) -> Option<InsightItem> {
+    handle
+        .as_ref()
+        .and_then(|h| h.lock().ok().map(|insight| insight.clone()))
+}
+
+fn fail_with_insight(
+    err: anyhow::Error,
+    handle: &Option<Arc<Mutex<InsightItem>>>,
+) -> crate::utils::error::TACommandError {
+    if let Some(handle) = handle {
+        if let Ok(mut insight) = handle.lock() {
+            apply_insight_error(&mut insight, &err.to_string());
+        }
+        crate::utils::error::TACommandError::with_insight_handle(err, handle.clone())
+    } else {
+        crate::utils::error::TACommandError::new(err)
+    }
+}
+
+fn attach_insight(
+    mut err: crate::utils::error::TACommandError,
+    handle: &Option<Arc<Mutex<InsightItem>>>,
+) -> crate::utils::error::TACommandError {
+    if err.insight.is_none() {
+        err.insight = snapshot_insight(handle);
+    }
+    err
+}
+
+async fn verify_hash_keep_insight(
+    target: &str,
+    md5: Option<String>,
+    xxh: Option<String>,
+    handle: &Option<Arc<Mutex<InsightItem>>>,
+) -> TAResult<()> {
+    match verify_hash(target, md5, xxh).await {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            if let Some(handle) = handle {
+                if let Ok(mut insight) = handle.lock() {
+                    let code = crate::dfs::short_insight_code(&format!("{e:#}"));
+                    insight.error = Some(if code == "ERR_NETWORK_OTHER" {
+                        "HASH_MISMATCH_ERR".to_string()
+                    } else {
+                        code
+                    });
+                }
+                return Err(crate::utils::error::TACommandError::with_insight_handle(
+                    e,
+                    handle.clone(),
+                ));
+            }
+            Err(crate::utils::error::TACommandError::new(e))
+        }
+    }
+}
+
 async fn create_stream_by_source(
     source: InstallFileSource,
-) -> Result<(
+) -> TAResult<(
     Box<dyn tokio::io::AsyncRead + Unpin + std::marker::Send>,
     Option<Arc<Mutex<InsightItem>>>,
 )> {
@@ -110,9 +170,16 @@ async fn create_stream_by_source(
             offset,
             size,
             skip_decompress,
+            request_range,
         } => {
-            let (stream, _content_length, insight_handle) =
-                create_http_stream(&url, offset, size, skip_decompress).await?;
+            let (stream, _content_length, insight_handle) = create_http_stream(
+                &url,
+                offset,
+                size,
+                skip_decompress,
+                request_range.as_deref(),
+            )
+            .await?;
             Ok((stream, Some(insight_handle)))
         }
         InstallFileSource::Local {
@@ -143,34 +210,12 @@ pub async fn ipc_install_file(
                     .await
                 {
                     Ok(bytes) => bytes,
-                    Err(e) => {
-                        if let Some(handle) = &insight_handle {
-                            if let Ok(mut insight) = handle.lock() {
-                                insight.error = Some(e.to_string());
-                            }
-                            return Err(crate::utils::error::TACommandError::with_insight_handle(
-                                e,
-                                handle.clone(),
-                            ));
-                        } else {
-                            return Err(crate::utils::error::TACommandError::new(e));
-                        }
-                    }
+                    Err(e) => return Err(fail_with_insight(e, &insight_handle)),
                 };
 
-            // 获取最终的insight
-            let final_insight = if let Some(handle) = insight_handle {
-                if let Ok(insight) = handle.lock() {
-                    Some(insight.clone())
-                } else {
-                    None
-                }
-            } else {
-                None
-            };
+            let final_insight = snapshot_insight(&insight_handle);
 
             if args.md5.is_some() || args.xxh.is_some() {
-                // 如果需要清理installer索引标记，先清理再进行hash校验
                 if args.clear_installer_index_mark.unwrap_or(false) || override_old_path.is_some() {
                     info!("Clearing installer index mark for: {}", target);
                     if let Err(e) = crate::installer::uninstall::clear_index_mark(
@@ -180,11 +225,11 @@ pub async fn ipc_install_file(
                     .into_ta_result()
                     {
                         warn!("Failed to clear index mark: {:?}", e);
-                        return Err(e);
+                        return Err(attach_insight(e, &insight_handle));
                     }
                     info!("Index mark cleared successfully");
                 }
-                verify_hash(&target, args.md5, args.xxh).await?;
+                verify_hash_keep_insight(&target, args.md5, args.xxh, &insight_handle).await?;
             }
 
             let result = InstallResult {
@@ -196,29 +241,23 @@ pub async fn ipc_install_file(
         InstallFileMode::Patch { source, diff_size } => {
             let is_self_update = override_old_path.is_some();
             let (stream, insight_handle) = create_stream_by_source(source).await?;
-            let (bytes_transferred, _) = progressed_hpatch(
+            let (bytes_transferred, _) = match progressed_hpatch(
                 stream,
                 &target,
                 diff_size,
                 Box::new(progress_noti),
                 override_old_path,
-                None, // 传入None，因为现在insight由handle管理
+                None,
             )
-            .await?;
-
-            // 获取最终的insight
-            let final_insight = if let Some(handle) = insight_handle {
-                if let Ok(insight) = handle.lock() {
-                    Some(insight.clone())
-                } else {
-                    None
-                }
-            } else {
-                None
+            .await
+            {
+                Ok(v) => v,
+                Err(e) => return Err(fail_with_insight(e, &insight_handle)),
             };
 
+            let final_insight = snapshot_insight(&insight_handle);
+
             if args.md5.is_some() || args.xxh.is_some() {
-                // 如果需要清理installer索引标记，先清理再进行hash校验
                 if args.clear_installer_index_mark.unwrap_or(false) || is_self_update {
                     info!("Clearing installer index mark for: {}", target);
                     if let Err(e) = crate::installer::uninstall::clear_index_mark(
@@ -228,11 +267,11 @@ pub async fn ipc_install_file(
                     .into_ta_result()
                     {
                         warn!("Failed to clear index mark: {:?}", e);
-                        return Err(e);
+                        return Err(attach_insight(e, &insight_handle));
                     }
                     info!("Index mark cleared successfully");
                 }
-                verify_hash(&target, args.md5, args.xxh).await?;
+                verify_hash_keep_insight(&target, args.md5, args.xxh, &insight_handle).await?;
             }
 
             let result = InstallResult {
@@ -254,22 +293,23 @@ pub async fn ipc_install_file(
                 InstallFileSource::Local { size, .. } => size,
             };
             let (diff_stream, insight_handle) = create_stream_by_source(diff).await?;
-            let (diff_bytes, _) =
-                progressed_hpatch(diff_stream, &target, size, Box::new(|_| {}), None, None).await?;
-
-            // 获取最终的insight
-            let final_insight = if let Some(handle) = insight_handle {
-                if let Ok(insight) = handle.lock() {
-                    Some(insight.clone())
-                } else {
-                    None
-                }
-            } else {
-                None
+            let (diff_bytes, _) = match progressed_hpatch(
+                diff_stream,
+                &target,
+                size,
+                Box::new(|_| {}),
+                None,
+                None,
+            )
+            .await
+            {
+                Ok(v) => v,
+                Err(e) => return Err(fail_with_insight(e, &insight_handle)),
             };
 
+            let final_insight = snapshot_insight(&insight_handle);
+
             if args.md5.is_some() || args.xxh.is_some() {
-                // 如果需要清理installer索引标记，先清理再进行hash校验
                 if args.clear_installer_index_mark.unwrap_or(false) || override_old_path.is_some() {
                     info!("Clearing installer index mark for: {}", target);
                     if let Err(e) = crate::installer::uninstall::clear_index_mark(
@@ -279,11 +319,11 @@ pub async fn ipc_install_file(
                     .into_ta_result()
                     {
                         warn!("Failed to clear index mark: {:?}", e);
-                        return Err(e);
+                        return Err(attach_insight(e, &insight_handle));
                     }
                     info!("Index mark cleared successfully");
                 }
-                verify_hash(&target, args.md5, args.xxh).await?;
+                verify_hash_keep_insight(&target, args.md5, args.xxh, &insight_handle).await?;
             }
 
             let result = InstallResult {
@@ -494,7 +534,7 @@ pub async fn ipc_install_multipart_stream(
             let mut field_data = Vec::new();
             while let Some(chunk_bytes) = field.chunk().await.map_err(|e| {
                 if let Ok(mut insight) = insight_handle.lock() {
-                    insight.error = Some(e.to_string());
+                    apply_insight_error(&mut insight, &e.to_string());
                 }
                 crate::utils::error::TACommandError::with_insight_handle(
                     anyhow::anyhow!("Field chunk read error: {}", e),
@@ -717,7 +757,7 @@ pub async fn ipc_install_multichunk_stream(
                 let to_read = std::cmp::min(buffer.len(), remaining);
                 let bytes_read = reader.read(&mut buffer[..to_read]).await.map_err(|e| {
                     if let Ok(mut insight) = insight_handle.lock() {
-                        insight.error = Some(e.to_string());
+                        apply_insight_error(&mut insight, &e.to_string());
                     }
                     crate::utils::error::TACommandError::with_insight_handle(
                         anyhow::anyhow!("Failed to skip bytes: {}", e),
@@ -745,7 +785,7 @@ pub async fn ipc_install_multichunk_stream(
         let mut chunk_buffer = vec![0u8; chunk_size];
         reader.read_exact(&mut chunk_buffer).await.map_err(|e| {
             if let Ok(mut insight) = insight_handle.lock() {
-                insight.error = Some(e.to_string());
+                apply_insight_error(&mut insight, &e.to_string());
             }
             crate::utils::error::TACommandError::with_insight_handle(
                 anyhow::anyhow!("Failed to read chunk data: {}", e),
@@ -776,7 +816,7 @@ pub async fn ipc_install_multichunk_stream(
         // Handle chunk result and update insight if there's an error
         let final_result = chunk_result.inspect_err(|e| {
             if let Ok(mut insight) = insight_handle.lock() {
-                insight.error = Some(e.to_string());
+                apply_insight_error(&mut insight, &e.to_string());
             }
         });
 
