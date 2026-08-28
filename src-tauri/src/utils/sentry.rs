@@ -1,7 +1,7 @@
 //! 最小 Sentry 协议客户端，手拼 JSON、不依赖 SDK（设计见 docs/notes 手写最小 Sentry 协议客户端）。
 //!
 //! - 错误事件：`capture_anyhow` 按 anyhow 链拼 exception.values，附面包屑快照与 contexts。
-//! - 面包屑：[`BreadcrumbLayer`] 从 tracing 事件写入环形缓冲。
+//! - 面包屑：由 `utils::log::LogSubscriber` 从 tracing 事件调用 [`add_breadcrumb`] 写入环形缓冲。
 //! - 提权进程：面包屑与 envelope 经管道交主进程，主进程不解析。
 //! - 性能：会话级 [`Transaction`] + 一层阶段 span + measurements。
 
@@ -209,7 +209,7 @@ fn envelope(event_id: &str, item_type: &str, payload: &Value) -> String {
 }
 
 /// RFC3339 UTC 时间戳，不引入 chrono——envelope header 的 sent_at 只需秒级精度。
-fn rfc3339(secs: u64) -> String {
+pub(crate) fn rfc3339(secs: u64) -> String {
     let days = secs / 86400;
     let (h, m, s) = ((secs / 3600) % 24, (secs / 60) % 60, secs % 60);
     // civil_from_days (Howard Hinnant 算法)
@@ -326,57 +326,6 @@ pub fn install_panic_hook(show_dialog: bool) {
         capture_panic(&event_id, format!("panic at {location}: {message}"));
         prev(info);
     }));
-}
-
-// ---- tracing 过滤与面包屑 ----
-
-pub struct InfoFilter {}
-
-impl<S> tracing_subscriber::layer::Filter<S> for InfoFilter {
-    fn enabled(
-        &self,
-        metadata: &tracing::Metadata<'_>,
-        _: &tracing_subscriber::layer::Context<'_, S>,
-    ) -> bool {
-        metadata.level() <= &tracing::Level::INFO
-    }
-}
-
-pub struct BreadcrumbLayer;
-
-struct MessageVisitor {
-    message: String,
-}
-
-impl tracing::field::Visit for MessageVisitor {
-    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
-        if field.name() == "message" {
-            self.message = format!("{value:?}");
-        }
-    }
-}
-
-impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for BreadcrumbLayer {
-    fn on_event(
-        &self,
-        event: &tracing::Event<'_>,
-        _ctx: tracing_subscriber::layer::Context<'_, S>,
-    ) {
-        let level = *event.metadata().level();
-        if level > tracing::Level::INFO {
-            return;
-        }
-        let mut visitor = MessageVisitor {
-            message: String::new(),
-        };
-        event.record(&mut visitor);
-        let level_str = match level {
-            tracing::Level::ERROR => "error",
-            tracing::Level::WARN => "warning",
-            _ => "info",
-        };
-        add_breadcrumb(event.metadata().target(), level_str, visitor.message);
-    }
 }
 
 // ---- 会话级性能事务 ----

@@ -11,7 +11,7 @@ default-run = "kachina-installer"
 webview2-com = "0.39"
 raw-window-handle = "0.6"
 serde = { version = "1", features = ["derive"] }
-serde_json = { version = "1", features = ["preserve_order"] }
+serde_json = { version = "1" }
 async-compression = { version = "0.4", features = ["tokio", "zstd", "zstdmt"] }
 tokio = { version = "1", features = [
     "rt",
@@ -81,11 +81,8 @@ indicatif = { version = "0.17.9", features = ["tokio"] }
 console = "0.15.10"
 rcedit = { version = "0.1.0", git = "https://github.com/Devolutions/rcedit-rs.git" }
 windows-registry = "0.5"
-tracing-subscriber = { version = "0.3", features = ["fmt", "registry"] }
 zip = { git = "https://github.com/xytoki/zip2.git", default-features = false, features = [
     "deflate",
-    "deflate64",
-    "zstd",
 ] }
 anyhow = "1.0"
 reqwest-middleware = { version = "0.4", features = ["json"] }
