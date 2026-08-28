@@ -10,13 +10,13 @@
 //!      &internal_port=<tunnel target port, default 80>
 //! ```
 //!
-//! Non-`ssh+http` requests are passed through to the next middleware unchanged.
+//! 连接模型：每请求一条 SSH 连接，不复用（见 docs/notes SSH/SFTP 栈整体瘦身）。
+//! 弱网对抗依赖 TCP 多连接，复用与之相悖；连接随响应流结束而关闭。
 
 use std::collections::HashMap;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -83,16 +83,6 @@ pub(crate) struct SshUrlParts {
 }
 
 impl SshUrlParts {
-    /// Build the canonical pool key (host lowercased, fingerprint normalised).
-    fn pool_key(&self) -> PoolKey {
-        PoolKey {
-            host: self.ssh_host.to_ascii_lowercase(),
-            port: self.ssh_port,
-            user: self.ssh_user.clone(),
-            fingerprint: normalize_hex(&self.fingerprint),
-        }
-    }
-
     /// HTTP `Host` header value.
     fn http_host_header(&self) -> String {
         let host_part = if self.internal_host.contains(':') {
@@ -223,15 +213,12 @@ pub(crate) fn percent_decode(input: &str) -> anyhow::Result<String> {
 }
 
 // ====================================================================
-// Connection pool types
+// SSH connect
 // ====================================================================
-
-pub(crate) const MAX_POOL_SIZE: usize = 16;
-pub(crate) const MAX_STREAMS_PER_SESSION: usize = 4;
 
 const SSH_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 const SSH_AUTH_TIMEOUT: Duration = Duration::from_secs(15);
-const SSH_CHANNEL_TIMEOUT: Duration = Duration::from_secs(15);
+pub(crate) const SSH_CHANNEL_TIMEOUT: Duration = Duration::from_secs(15);
 const HTTP_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(15);
 const HTTP_SEND_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -248,30 +235,6 @@ const HOP_BY_HOP_HEADERS: &[&str] = &[
     "upgrade",
 ];
 
-#[derive(Clone, Eq, Hash, PartialEq)]
-pub(crate) struct PoolKey {
-    pub(crate) host: String, // lowercased
-    pub(crate) port: u16,
-    pub(crate) user: String,
-    pub(crate) fingerprint: String, // normalised hex
-}
-
-pub(crate) struct SshConnEntry {
-    pub(crate) handle: Arc<russh::client::Handle<SshHandler>>,
-    pub(crate) last_used: Instant,
-    pub(crate) active_streams: Arc<AtomicUsize>,
-}
-
-/// RAII guard — decrements active-stream count on drop.
-pub(crate) struct ActiveStreamGuard {
-    pub(crate) counter: Arc<AtomicUsize>,
-}
-impl Drop for ActiveStreamGuard {
-    fn drop(&mut self) {
-        self.counter.fetch_sub(1, Ordering::Relaxed);
-    }
-}
-
 /// RAII guard — aborts a spawned task on drop.
 struct AbortOnDrop(AbortHandle);
 impl Drop for AbortOnDrop {
@@ -279,24 +242,6 @@ impl Drop for AbortOnDrop {
         self.0.abort();
     }
 }
-
-pub(crate) struct SshPoolInner {
-    pub(crate) pool: tokio::sync::Mutex<HashMap<PoolKey, SshConnEntry>>,
-    pub(crate) idle_timeout: Duration,
-}
-
-impl SshPoolInner {
-    pub(crate) fn new(idle_timeout: Duration) -> Self {
-        Self {
-            pool: tokio::sync::Mutex::new(HashMap::new()),
-            idle_timeout,
-        }
-    }
-}
-
-// ====================================================================
-// SSH connect helper
-// ====================================================================
 
 pub(crate) async fn ssh_connect(
     host: &str,
@@ -340,254 +285,21 @@ pub(crate) async fn ssh_connect(
     Ok(session)
 }
 
-/// Conservative check: only known "session is dead" errors trigger
-/// reconnection.  Everything else (policy rejection, auth failure, …)
-/// is treated as permanent.
-pub(crate) fn is_recoverable_ssh_error(err: &russh::Error) -> bool {
-    matches!(
-        err,
-        russh::Error::Disconnect | russh::Error::SendError | russh::Error::IO(_)
-    )
+/// 冷路径错误构造：格式化在函数体内完成，调用点只生成 `format_args!`，
+/// 避免每个错误分支在巨型 async 状态机里各自展开一套 fmt 机器。
+#[cold]
+#[inline(never)]
+pub(crate) fn mw_err_fmt(args: std::fmt::Arguments<'_>) -> reqwest_middleware::Error {
+    reqwest_middleware::Error::Middleware(anyhow::anyhow!("{args}"))
 }
 
 // ====================================================================
 // SshMiddleware
 // ====================================================================
 
-pub struct SshMiddleware {
-    inner: Arc<SshPoolInner>,
-}
+pub struct SshMiddleware;
 
 impl SshMiddleware {
-    #[allow(dead_code)]
-    pub fn new(idle_timeout: Duration) -> Self {
-        Self {
-            inner: Arc::new(SshPoolInner::new(idle_timeout)),
-        }
-    }
-
-    /// Create a middleware sharing an existing SSH connection pool.
-    pub(crate) fn with_pool(pool: Arc<SshPoolInner>) -> Self {
-        Self { inner: pool }
-    }
-
-    // ---- pool helpers ------------------------------------------------
-
-    /// Evict idle entries.  **Never** evicts entries with `active_streams > 0`.
-    pub(crate) fn sweep(pool: &mut HashMap<PoolKey, SshConnEntry>, idle_timeout: Duration) {
-        let now = Instant::now();
-        pool.retain(|_, e| {
-            let idle = now.duration_since(e.last_used) > idle_timeout;
-            let active = e.active_streams.load(Ordering::Relaxed);
-            !(idle && active == 0)
-        });
-    }
-
-    /// Enforce MAX_POOL_SIZE by evicting LRU entries **with zero active
-    /// streams**.  If all entries are active, the pool is allowed to
-    /// temporarily exceed the limit (hard cap enforced at insert time).
-    pub(crate) fn enforce_size(pool: &mut HashMap<PoolKey, SshConnEntry>) {
-        while pool.len() >= MAX_POOL_SIZE {
-            let victim = pool
-                .iter()
-                .filter(|(_, e)| e.active_streams.load(Ordering::Relaxed) == 0)
-                .min_by_key(|(_, e)| e.last_used)
-                .map(|(k, _)| k.clone());
-            match victim {
-                Some(k) => {
-                    pool.remove(&k);
-                }
-                None => break,
-            }
-        }
-    }
-
-    /// Best-effort eviction of a single key (non-blocking).
-    pub(crate) fn evict(&self, key: &PoolKey) {
-        if let Ok(mut pool) = self.inner.pool.try_lock() {
-            pool.remove(key);
-        }
-    }
-
-    /// Get a pooled session or create a new one.
-    ///
-    /// When a connection's active streams reach [`MAX_STREAMS_PER_SESSION`],
-    /// a new SSH connection is opened to spread load across connections.
-    pub(crate) async fn get_session(
-        &self,
-        parts: &SshUrlParts,
-    ) -> Result<
-        (Arc<russh::client::Handle<SshHandler>>, ActiveStreamGuard),
-        reqwest_middleware::Error,
-    > {
-        let key = parts.pool_key();
-
-        // ── fast path: pool hit ──
-        {
-            let mut pool = self.inner.pool.lock().await;
-            Self::sweep(&mut pool, self.inner.idle_timeout);
-
-            if let Some(entry) = pool.get_mut(&key) {
-                let active = entry.active_streams.load(Ordering::Relaxed);
-                if active < MAX_STREAMS_PER_SESSION {
-                    entry.last_used = Instant::now();
-                    entry.active_streams.fetch_add(1, Ordering::Relaxed);
-                    return Ok((
-                        Arc::clone(&entry.handle),
-                        ActiveStreamGuard {
-                            counter: Arc::clone(&entry.active_streams),
-                        },
-                    ));
-                }
-                debug!(
-                    target = %parts.ssh_target(),
-                    active,
-                    "SSH session at max streams, creating new connection"
-                );
-            }
-        }
-
-        // ── slow path: new connection ──
-        let handle = ssh_connect(
-            &parts.ssh_host,
-            parts.ssh_port,
-            &parts.ssh_user,
-            &parts.ssh_pass,
-            &parts.fingerprint,
-        )
-        .await
-        .map_err(|e| {
-            reqwest_middleware::Error::Middleware(anyhow::anyhow!(
-                "SSH connect to {} failed: {e}",
-                parts.ssh_target()
-            ))
-        })?;
-
-        let handle = Arc::new(handle);
-        let active = Arc::new(AtomicUsize::new(1));
-        let guard = ActiveStreamGuard {
-            counter: Arc::clone(&active),
-        };
-
-        // Race-safe insert
-        {
-            let mut pool = self.inner.pool.lock().await;
-
-            if let Some(existing) = pool.get_mut(&key) {
-                let n = existing.active_streams.load(Ordering::Relaxed);
-                if n < MAX_STREAMS_PER_SESSION {
-                    existing.last_used = Instant::now();
-                    existing.active_streams.fetch_add(1, Ordering::Relaxed);
-                    return Ok((
-                        Arc::clone(&existing.handle),
-                        ActiveStreamGuard {
-                            counter: Arc::clone(&existing.active_streams),
-                        },
-                    ));
-                }
-            }
-
-            Self::enforce_size(&mut pool);
-            if pool.len() >= MAX_POOL_SIZE {
-                debug!("SSH pool at hard cap ({MAX_POOL_SIZE}), connection will not be pooled");
-            } else {
-                pool.insert(
-                    key,
-                    SshConnEntry {
-                        handle: Arc::clone(&handle),
-                        last_used: Instant::now(),
-                        active_streams: active,
-                    },
-                );
-            }
-        }
-
-        Ok((handle, guard))
-    }
-
-    /// Open a direct-tcpip channel, reconnecting **once** if the session
-    /// appears dead.
-    async fn open_channel(
-        &self,
-        parts: &SshUrlParts,
-    ) -> Result<
-        (
-            russh::Channel<russh::client::Msg>,
-            ActiveStreamGuard,
-            Arc<russh::client::Handle<SshHandler>>,
-        ),
-        reqwest_middleware::Error,
-    > {
-        let (handle, guard) = self.get_session(parts).await?;
-
-        let ch_result = tokio::time::timeout(
-            SSH_CHANNEL_TIMEOUT,
-            handle.channel_open_direct_tcpip(
-                parts.internal_host.as_str(),
-                parts.internal_port as u32,
-                "127.0.0.1",
-                0u32,
-            ),
-        )
-        .await;
-
-        match ch_result {
-            Ok(Ok(ch)) => return Ok((ch, guard, handle)),
-            Ok(Err(ref err)) if !is_recoverable_ssh_error(err) => {
-                return Err(reqwest_middleware::Error::Middleware(anyhow::anyhow!(
-                    "SSH channel to {}:{} via {} rejected: {err}",
-                    parts.internal_host,
-                    parts.internal_port,
-                    parts.ssh_target()
-                )));
-            }
-            Ok(Err(err)) => {
-                debug!(err = %err, target = %parts.ssh_target(),
-                       "SSH channel failed (recoverable), reconnecting");
-            }
-            Err(_) => {
-                debug!(target = %parts.ssh_target(), "SSH channel open timed out, reconnecting");
-            }
-        }
-
-        // ── reconnect once ──
-        drop(guard);
-        self.evict(&parts.pool_key());
-
-        let (handle, guard) = self.get_session(parts).await?;
-        let ch = tokio::time::timeout(
-            SSH_CHANNEL_TIMEOUT,
-            handle.channel_open_direct_tcpip(
-                parts.internal_host.as_str(),
-                parts.internal_port as u32,
-                "127.0.0.1",
-                0u32,
-            ),
-        )
-        .await
-        .map_err(|_| {
-            reqwest_middleware::Error::Middleware(anyhow::anyhow!(
-                "SSH channel to {}:{} via {} timed out after reconnect",
-                parts.internal_host,
-                parts.internal_port,
-                parts.ssh_target()
-            ))
-        })?
-        .map_err(|e| {
-            self.evict(&parts.pool_key());
-            reqwest_middleware::Error::Middleware(anyhow::anyhow!(
-                "SSH channel to {}:{} via {} failed after reconnect: {e}",
-                parts.internal_host,
-                parts.internal_port,
-                parts.ssh_target()
-            ))
-        })?;
-
-        Ok((ch, guard, handle))
-    }
-
-    // ---- HTTP-over-SSH -----------------------------------------------
-
     async fn ssh_request(
         &self,
         req: reqwest::Request,
@@ -601,7 +313,7 @@ impl SshMiddleware {
             Some(b) => match b.as_bytes() {
                 Some(slice) => Bytes::copy_from_slice(slice),
                 None => {
-                    return Err(reqwest_middleware::Error::Middleware(anyhow::anyhow!(
+                    return Err(mw_err_fmt(format_args!(
                         "SSH tunnel to {} does not support streaming request bodies",
                         parts.ssh_target()
                     )));
@@ -609,10 +321,43 @@ impl SshMiddleware {
             },
         };
 
-        let key = parts.pool_key();
+        // 1. Fresh SSH connection + direct-tcpip channel
+        let session_handle = ssh_connect(
+            &parts.ssh_host,
+            parts.ssh_port,
+            &parts.ssh_user,
+            &parts.ssh_pass,
+            &parts.fingerprint,
+        )
+        .await
+        .map_err(|e| mw_err_fmt(format_args!("SSH connect to {} failed: {e}", parts.ssh_target())))?;
 
-        // 1. Open SSH channel
-        let (channel, stream_guard, session_handle) = self.open_channel(&parts).await?;
+        let channel = tokio::time::timeout(
+            SSH_CHANNEL_TIMEOUT,
+            session_handle.channel_open_direct_tcpip(
+                parts.internal_host.as_str(),
+                parts.internal_port as u32,
+                "127.0.0.1",
+                0u32,
+            ),
+        )
+        .await
+        .map_err(|_| {
+            mw_err_fmt(format_args!(
+                "SSH channel to {}:{} via {} timed out",
+                parts.internal_host,
+                parts.internal_port,
+                parts.ssh_target()
+            ))
+        })?
+        .map_err(|e| {
+            mw_err_fmt(format_args!(
+                "SSH channel to {}:{} via {} failed: {e}",
+                parts.internal_host,
+                parts.internal_port,
+                parts.ssh_target()
+            ))
+        })?;
         let io = TokioIo::new(channel.into_stream());
 
         // 2. HTTP/1.1 handshake
@@ -622,15 +367,13 @@ impl SshMiddleware {
         )
         .await
         .map_err(|_| {
-            self.evict(&key);
-            mw_err(format!(
+            mw_err_fmt(format_args!(
                 "HTTP/1.1 handshake timeout over SSH to {}",
                 parts.ssh_target()
             ))
         })?
         .map_err(|e| {
-            self.evict(&key);
-            mw_err(format!(
+            mw_err_fmt(format_args!(
                 "HTTP/1.1 handshake over SSH to {} failed: {e}",
                 parts.ssh_target()
             ))
@@ -660,22 +403,20 @@ impl SshMiddleware {
 
         let hyper_req = builder
             .body(http_body_util::Full::new(body_bytes))
-            .map_err(|e| mw_err(format!("failed to build HTTP request: {e}")))?;
+            .map_err(|e| mw_err_fmt(format_args!("failed to build HTTP request: {e}")))?;
 
         // 4. Send request
         let hyper_resp = tokio::time::timeout(HTTP_SEND_TIMEOUT, sender.send_request(hyper_req))
             .await
             .map_err(|_| {
-                self.evict(&key);
-                mw_err(format!(
+                mw_err_fmt(format_args!(
                     "HTTP send timeout over SSH to {}{}",
                     parts.ssh_target(),
                     parts.http_path_and_query
                 ))
             })?
             .map_err(|e| {
-                self.evict(&key);
-                mw_err(format!(
+                mw_err_fmt(format_args!(
                     "HTTP send over SSH to {}{} failed: {e}",
                     parts.ssh_target(),
                     parts.http_path_and_query
@@ -684,12 +425,11 @@ impl SshMiddleware {
 
         let (resp_parts, body) = hyper_resp.into_parts();
 
-        // 5. Stream response body — captures keep the SSH session, pool
-        //    guard, and conn driver alive until the body is fully consumed
-        //    or dropped.
+        // 5. Stream response body — captures keep the SSH session and conn
+        //    driver alive until the body is fully consumed or dropped; the
+        //    connection dies with the stream.
         let byte_stream: Pin<Box<dyn Stream<Item = Result<Bytes, std::io::Error>> + Send>> =
             Box::pin(async_stream::try_stream! {
-                let _guard = stream_guard;
                 let _abort = abort_guard;
                 let _session = session_handle;
 
@@ -713,14 +453,10 @@ impl SshMiddleware {
         }
         let http_resp = resp_builder
             .body(reqwest::Body::wrap_stream(byte_stream))
-            .map_err(|e| mw_err(format!("failed to build response: {e}")))?;
+            .map_err(|e| mw_err_fmt(format_args!("failed to build response: {e}")))?;
 
         Ok(http_resp.into())
     }
-}
-
-pub(crate) fn mw_err(msg: String) -> reqwest_middleware::Error {
-    reqwest_middleware::Error::Middleware(anyhow::anyhow!(msg))
 }
 
 #[async_trait]
