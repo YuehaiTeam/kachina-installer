@@ -40,7 +40,9 @@ SSH 下载源（`ssh+http://` 隧道与 `sftp://`）在现网调度概率仅 2-3
 | 并发突发（≥8 路并行下载）成功，产生独立 TCP 连接 | PASS：e2e 中 8 路并行 Range 下载，各自独立连接 |
 | 大文件下载途中 rekey 成功不断流 | 未覆盖：测试 server 未调低 rekey 阈值 |
 
-russh crate `.text` 由 122.3KiB 降至 108.7KiB。自身中间件（`capabilities::(ssh|sftp)` 过滤）为 106.0KiB。发布二进制（x86_64-win7-windows-msvc + build-std + optimize_for_size）在启用 `ssh-key/ecdsa` 前后为 3710464 → 3726848 字节。
+russh crate `.text` 由 122.3KiB 降至 108.7KiB。自身中间件（`capabilities::(ssh|sftp)` 过滤）为 106.0KiB。
+
+CI 产物（x86_64-win7-windows-msvc + build-std + optimize_for_size）3,844,608 → 3,692,544 字节，本轮减少 152,064。本机同 target 构建在启用 `ssh-key/ecdsa` 前后为 3,710,464 → 3,726,848 字节，即 ECDSA 主机密钥支持的代价为 16,384 字节。
 
 单测 58 项通过。
 
