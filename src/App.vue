@@ -669,10 +669,8 @@ async function install(): Promise<void> {
     percent.value = 100;
     step.value = result.already_latest ? 4 : 3;
   } catch (e) {
+    // fail counter 由 Rust 侧 run_install 统一发射（经 session-insight 转发）
     error(e);
-    sendInsight(insightBase(INSTALLER_CONFIG, PROJECT_CONFIG), 'error', {
-      error: stringifyErrorLog(e),
-    });
     await dialogError(
       stringifyError(e),
       '出错了',
@@ -692,9 +690,6 @@ async function uninstall() {
     error(e);
     const errstr = stringifyErrorLog(e);
     await dialogError(errstr, '出错了', INSTALLER_CONFIG.args.silent);
-    await sendInsight(insightBase(INSTALLER_CONFIG, PROJECT_CONFIG), 'error', {
-      error: errstr,
-    });
     step.value = 1;
   }
 }

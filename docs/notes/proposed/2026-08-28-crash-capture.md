@@ -10,7 +10,7 @@ Status: proposed
 
 两级捕获，panic hook 先行：
 
-1. panic hook（`std::panic::set_hook`，abort 前执行）：采集 panic 消息、location 与面包屑环形缓冲快照，作为错误事件经 [最小客户端](./2026-08-28-sentry-minimal-client.md) 上报；可选 `RtlCaptureStackBackTrace` 采裸地址 + `EnumProcessModules` 拼 `debug_meta`，由后端配合已上传的 PDB 做符号化。
+1. panic hook（已实施，随 [最小客户端](../implemented/2026-08-28-sentry-minimal-client.md) 落地）：`utils/sentry.rs` 的 `install_panic_hook` 采集 panic 消息、location 与面包屑快照，先拉起独立崩溃提示进程展示事件编号，再于 abort 前同步发送 fatal 事件（5 秒上限）。可选增强：`RtlCaptureStackBackTrace` 采裸地址 + `EnumProcessModules` 拼 `debug_meta`，由后端配合已上传的 PDB 做符号化。
 2. SEH minidump：`SetUnhandledExceptionFilter` + dbghelp `MiniDumpWriteDump`（`MiniDumpNormal` 或加 `WithIndirectlyReferencedMemory`，几十 KiB 量级）写入 `%TEMP%`，下次启动时 multipart 上传后端 minidump 端点，服务端符号化。提权子进程安装同一套 hook。
 
 ## Alternatives considered

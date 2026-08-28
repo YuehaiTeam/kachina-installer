@@ -398,6 +398,14 @@ fn prepare_event(
     }
 }
 
+fn txn_status(result: &anyhow::Result<SessionResult>) -> &'static str {
+    match result {
+        Ok(r) if r.cancelled => "cancelled",
+        Ok(_) => "ok",
+        Err(_) => "internal_error",
+    }
+}
+
 fn emit_insight(
     ui: &dyn SessionUi,
     project: &ProjectConfig,
@@ -422,10 +430,29 @@ pub async fn run_install(
     mgr: &ManagedElevate,
 ) -> anyhow::Result<SessionResult> {
     log_session_start("install", settings, config, project);
-    if settings.source_uri.starts_with("mirrorc://") {
-        return run_mirrorc(settings, config, project, ui, mgr).await;
+    let txn = crate::utils::sentry::Transaction::start(
+        if settings.is_update { "update" } else { "install" },
+        "session",
+    );
+    let result = if settings.source_uri.starts_with("mirrorc://") {
+        run_mirrorc(settings, config, project, ui, mgr).await
+    } else {
+        run_dfs_install(settings, config, project, ui, mgr, &txn).await
+    };
+    txn.finish(txn_status(&result));
+    if let Err(err) = &result {
+        // fail counter：低基数分类维度，不携带自由文本（见遥测通道职责收敛）
+        emit_insight(
+            ui,
+            project,
+            settings,
+            config,
+            "fail",
+            Some(json!({ "kind": crate::session::error::classify(err).kind.as_str() })),
+            false,
+        );
     }
-    run_dfs_install(settings, config, project, ui, mgr).await
+    result
 }
 
 async fn run_dfs_install(
@@ -434,6 +461,7 @@ async fn run_dfs_install(
     project: &ProjectConfig,
     ui: &dyn SessionUi,
     mgr: &ManagedElevate,
+    txn: &crate::utils::sentry::Transaction,
 ) -> anyhow::Result<SessionResult> {
     progress(ui, 0, 1.0, "获取最新版本");
     session_dump!(
@@ -459,21 +487,26 @@ async fn run_dfs_install(
         .and_then(|v| serde_json::from_value::<DfsMetadata>(v.clone()).ok());
     let mut source_ctx = SourceCtx::from_embedded(config.embedded_files.as_deref().unwrap_or(&[]));
     source_ctx.attach_plugin(ui.plugin_host());
+    // span 只包网络部分；pick_metadata 可能弹版本选择框，用户等待不计入
     let mut online_err = None;
-    let online_meta = match fetch_metadata(
-        &settings.source_uri,
-        settings.dfs_extras.as_deref(),
-        &mut source_ctx,
-    )
-    .await
-    {
-        Ok(meta) => Some(meta),
-        Err(err) => {
-            tracing::warn!("online metadata failed: {err:#}");
-            online_err = Some(crate::session::error::friendly(&err));
-            None
-        }
-    };
+    let online_meta = txn
+        .timed("metadata", async {
+            match fetch_metadata(
+                &settings.source_uri,
+                settings.dfs_extras.as_deref(),
+                &mut source_ctx,
+            )
+            .await
+            {
+                Ok(meta) => Some(meta),
+                Err(err) => {
+                    tracing::warn!("online metadata failed: {err:#}");
+                    online_err = Some(crate::session::error::friendly(&err));
+                    None
+                }
+            }
+        })
+        .await;
 
     let (mut latest, used_online) =
         pick_metadata(settings, config, ui, embedded_meta, online_meta, online_err).await?;
@@ -545,16 +578,26 @@ async fn run_dfs_install(
         }
     }
     progress(ui, 1, 5.0, "校验本地文件……");
-    let local = scan_local(
-        settings,
-        project,
-        &latest,
-        hash_key,
-        &ignore_nonempty,
-        ui,
-        mgr,
-    )
-    .await?;
+    let local = txn
+        .timed(
+            "hash-scan",
+            scan_local(
+                settings,
+                project,
+                &latest,
+                hash_key,
+                &ignore_nonempty,
+                ui,
+                mgr,
+            ),
+        )
+        .await?;
+    txn.set_measurement("hash_scan_files", local.len() as f64, "none");
+    txn.set_measurement(
+        "hash_scan_bytes",
+        local.iter().map(|f| f.size).sum::<u64>() as f64,
+        "byte",
+    );
 
     let plan = build_plan(&PlanInput {
         install_path: settings.install_path.clone(),
@@ -630,7 +673,11 @@ async fn run_dfs_install(
             Vec::<IpcOperation>::new()
         );
         tracing::info!("already latest, tag={}", latest.tag_name);
-        finish_install(settings, config, project, Some(&latest), ui, mgr).await?;
+        txn.timed(
+            "finalize",
+            finish_install(settings, config, project, Some(&latest), ui, mgr),
+        )
+        .await?;
         progress(ui, 2, 100.0, "已是最新版本");
         return Ok(SessionResult::install(true, settings.is_update));
     }
@@ -669,6 +716,12 @@ async fn run_dfs_install(
             Some(InstallItem { item })
         })
         .collect();
+    txn.set_measurement("download_files", install_items.len() as f64, "none");
+    txn.set_measurement(
+        "download_bytes",
+        install_items.iter().map(|i| i.item.size as f64).sum(),
+        "byte",
+    );
 
     let tasks = plan_tasks(
         &install_items
@@ -712,18 +765,22 @@ async fn run_dfs_install(
     prefetch_chunk_urls(&source_ctx, ranges).await;
 
     progress(ui, 2, 20.0, "准备下载……");
-    let ops = install_files(
-        settings,
-        config,
-        &latest,
-        hash_key,
-        &tasks,
-        &local,
-        &source_ctx,
-        ui,
-        mgr,
-    )
-    .await;
+    let ops = txn
+        .timed(
+            "download",
+            install_files(
+                settings,
+                config,
+                &latest,
+                hash_key,
+                &tasks,
+                &local,
+                &source_ctx,
+                ui,
+                mgr,
+            ),
+        )
+        .await;
     cleanup_dfs2(&mut source_ctx).await;
     #[cfg_attr(not(debug_assertions), allow(unused_variables))]
     let ops = ops?;
@@ -750,9 +807,17 @@ async fn run_dfs_install(
         .await;
     }
 
-    install_runtimes(settings, config, project, ui, mgr).await?;
+    txn.timed(
+        "runtimes",
+        install_runtimes(settings, config, project, ui, mgr),
+    )
+    .await?;
     progress(ui, 3, 98.0, "很快就好……");
-    finish_install(settings, config, project, Some(&latest), ui, mgr).await?;
+    txn.timed(
+        "finalize",
+        finish_install(settings, config, project, Some(&latest), ui, mgr),
+    )
+    .await?;
     progress(ui, 3, 100.0, "安装完成");
     Ok(SessionResult::install(false, settings.is_update))
 }
@@ -2175,6 +2240,30 @@ pub async fn run_uninstall(
     ui: &dyn SessionUi,
     mgr: &ManagedElevate,
 ) -> anyhow::Result<SessionResult> {
+    let txn = crate::utils::sentry::Transaction::start("uninstall", "session");
+    let result = run_uninstall_inner(settings, config, project, ui, mgr).await;
+    txn.finish(txn_status(&result));
+    if let Err(err) = &result {
+        emit_insight(
+            ui,
+            project,
+            settings,
+            config,
+            "fail",
+            Some(json!({ "kind": crate::session::error::classify(err).kind.as_str() })),
+            true,
+        );
+    }
+    result
+}
+
+async fn run_uninstall_inner(
+    settings: &Settings,
+    config: &InstallerConfig,
+    project: &ProjectConfig,
+    ui: &dyn SessionUi,
+    mgr: &ManagedElevate,
+) -> anyhow::Result<SessionResult> {
     log_session_start("uninstall", settings, config, project);
     progress(ui, 0, 10.0, "准备卸载……");
     let meta = read_uninstall_metadata_raw(&project.reg_name, Some(settings.install_path.as_str()))
@@ -2244,7 +2333,10 @@ pub async fn run_uninstall(
 pub async fn silent_main(args: crate::cli::arg::InstallArgs) -> anyhow::Result<()> {
     let temp_dir = std::env::temp_dir();
     if std::env::set_current_dir(&temp_dir).is_err() {
-        return Err(anyhow!(crate::session::error::TEMP_DIR));
+        return Err(crate::session::error::expected(
+            crate::session::error::FailKind::Disk,
+            crate::session::error::TEMP_DIR,
+        ));
     }
     let config = crate::installer::config::resolve_installer_config(args.clone(), true).await?;
     let project = match config.embedded_config.as_ref() {
@@ -2254,7 +2346,7 @@ pub async fn silent_main(args: crate::cli::arg::InstallArgs) -> anyhow::Result<(
                 "embedded config missing (embedded_files={})",
                 config.embedded_files.as_ref().map(|f| f.len()).unwrap_or(0)
             );
-            return Err(anyhow!(crate::session::error::PKG_BROKEN));
+            return Err(crate::session::error::user(crate::session::error::PKG_BROKEN));
         }
     };
     let mut settings = crate::session::types::settings_from_cli(&args, &config, &project).await?;
@@ -2274,23 +2366,15 @@ pub async fn silent_main(args: crate::cli::arg::InstallArgs) -> anyhow::Result<(
         }
         let mgr = ManagedElevate::new();
         emit_insight(&ui, &project, &settings, &config, "uninstall", None, true);
-        if let Err(err) = run_uninstall(&settings, &config, &project, &ui, &mgr).await {
-            emit_insight(
-                &ui,
-                &project,
-                &settings,
-                &config,
-                "error",
-                Some(json!({ "error": format!("{err:#}") })),
-                true,
-            );
-            return Err(err);
-        }
-        return Ok(());
+        return run_uninstall(&settings, &config, &project, &ui, &mgr)
+            .await
+            .map(|_| ());
     }
     if needs_js_plugin(&settings.source_uri) {
         if crate::host::webview_version().is_err() {
-            return Err(anyhow!(crate::session::error::PLUGIN_NEED_WEBVIEW2));
+            return Err(crate::session::error::user(
+                crate::session::error::PLUGIN_NEED_WEBVIEW2,
+            ));
         }
         let session = SessionState::default();
         let runtime = crate::host::spawn_plugin_runtime(args.clone(), session.clone()).await?;
@@ -2309,17 +2393,7 @@ async fn silent_install(
     ui: &dyn SessionUi,
 ) -> anyhow::Result<()> {
     let mgr = ManagedElevate::new();
-    if let Err(err) = run_install(settings, config, project, ui, &mgr).await {
-        emit_insight(
-            ui,
-            project,
-            settings,
-            config,
-            "error",
-            Some(json!({ "error": format!("{err:#}") })),
-            false,
-        );
-        return Err(err);
-    }
-    Ok(())
+    run_install(settings, config, project, ui, &mgr)
+        .await
+        .map(|_| ())
 }
