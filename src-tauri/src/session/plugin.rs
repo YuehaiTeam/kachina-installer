@@ -171,12 +171,7 @@ async fn resolve_version(
         ));
     }
     if let Some(custom) = version_regex {
-        return capture_first_group(custom, &redirect).ok_or_else(|| {
-            hide(
-                error::META_FAILED,
-                format!("Failed to extract version from {redirect}"),
-            )
-        });
+        return capture_version(custom, &redirect);
     }
     tag_from_releases_redirect(&redirect).ok_or_else(|| {
         hide(
@@ -210,39 +205,29 @@ fn tag_from_releases_redirect(url: &str) -> Option<String> {
     }
 }
 
-/// Single capturing group, enough for plugin `versionRegex`. No `regex` crate.
-fn capture_first_group(pattern: &str, text: &str) -> Option<String> {
-    let open = pattern.find('(')?;
-    let close = pattern[open + 1..].find(')')? + open + 1;
-    let prefix = &pattern[..open];
-    let class = &pattern[open + 1..close];
-    let suffix = &pattern[close + 1..];
-    let start = text.find(prefix)? + prefix.len();
-    let rest = &text[start..];
-    let taken = match class {
-        "[^/?#]+" => rest.split(['/', '?', '#']).next().unwrap_or(""),
-        "[^/]+" => rest.split('/').next().unwrap_or(""),
-        "[^?#]+" => rest.split(['?', '#']).next().unwrap_or(""),
-        ".+" | ".*" => {
-            if suffix.is_empty() {
-                rest
-            } else {
-                rest.split(suffix).next().unwrap_or("")
-            }
-        }
-        _ => return None,
-    };
-    if class == ".+" && taken.is_empty() {
-        return None;
+/// Extract version via plugin `versionRegex`. Group 1 wins; a pattern
+/// without groups falls back to the whole match.
+fn capture_version(pattern: &str, text: &str) -> anyhow::Result<String> {
+    let re = regex_lite::Regex::new(pattern).map_err(|e| {
+        hide(
+            error::META_FAILED,
+            format!("Invalid versionRegex {pattern:?}: {e}"),
+        )
+    })?;
+    let caps = re.captures(text).ok_or_else(|| {
+        hide(
+            error::META_FAILED,
+            format!("versionRegex {pattern:?} did not match {text}"),
+        )
+    })?;
+    let m = caps.get(1).unwrap_or_else(|| caps.get(0).unwrap());
+    if m.is_empty() {
+        return Err(hide(
+            error::META_FAILED,
+            format!("versionRegex {pattern:?} matched empty version in {text}"),
+        ));
     }
-    if !suffix.is_empty() && !rest[taken.len()..].starts_with(suffix) {
-        return None;
-    }
-    if taken.is_empty() && class != ".*" {
-        None
-    } else {
-        Some(taken.to_string())
-    }
+    Ok(m.as_str().to_string())
 }
 
 async fn resolve_direct_url(original_url: &str, cache_time: Option<u64>) -> anyhow::Result<String> {
@@ -336,16 +321,46 @@ mod tests {
     #[test]
     fn custom_version_group() {
         assert_eq!(
-            capture_first_group(
+            capture_version(
                 r"/releases/tag/([^/?#]+)",
                 "https://github.com/a/b/releases/tag/2.0.0"
             )
-            .as_deref(),
-            Some("2.0.0")
+            .unwrap(),
+            "2.0.0"
         );
         assert_eq!(
-            capture_first_group(r"/releases/tag/v(.+)", "https://x/releases/tag/v3.1.4").as_deref(),
-            Some("3.1.4")
+            capture_version(r"/releases/tag/v(.+)", "https://x/releases/tag/v3.1.4").unwrap(),
+            "3.1.4"
         );
+    }
+
+    #[test]
+    fn custom_version_full_regex_syntax() {
+        assert_eq!(
+            capture_version(r"/tag/v?([\d.]+)", "https://x/releases/tag/v3.1.4").unwrap(),
+            "3.1.4"
+        );
+        assert_eq!(
+            capture_version(
+                r"tag/(?:release-)?(\d+\.\d+\.\d+)",
+                "https://x/releases/tag/release-1.2.3"
+            )
+            .unwrap(),
+            "1.2.3"
+        );
+        // No capture group: whole match is the version.
+        assert_eq!(
+            capture_version(r"\d+\.\d+\.\d+", "https://x/releases/tag/v3.1.4").unwrap(),
+            "3.1.4"
+        );
+    }
+
+    #[test]
+    fn custom_version_bad_pattern_or_no_match_errors() {
+        // 详细原因（invalid pattern / no match）走 hide() 进日志，
+        // 用户侧统一收 META_FAILED。
+        assert!(capture_version(r"v([0-9.+", "https://x/releases/tag/v1").is_err());
+        assert!(capture_version(r"/zzz/(\d+)", "https://x/releases/tag/v1").is_err());
+        assert!(capture_version(r"(x*)", "https://x/releases/tag/v1").is_err());
     }
 }
