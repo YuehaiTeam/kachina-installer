@@ -72,7 +72,8 @@ async fn dispatch(
         }
         "get_installer_config" => {
             let scan_exe = req_bool(&args, &["scanExe", "scan_exe"])?;
-            let mut cfg = crate::installer::config::get_installer_config(&ctx.args, scan_exe).await?;
+            let mut cfg =
+                crate::installer::config::get_installer_config(&ctx.args, scan_exe).await?;
             cfg.preset = ctx.preset.clone();
             ok(cfg)
         }
@@ -118,7 +119,7 @@ async fn dispatch(
             .answer(crate::session::ui::PluginAnswer {
                 id: req_str(&args, &["id"])?,
                 ok: req_bool(&args, &["ok"])?,
-                data: args.get("data").cloned(),
+                data: opt_str(&args, &["data"]),
                 error: opt_str(&args, &["error"]),
                 unimplemented: opt_bool(&args, &["unimplemented"]).unwrap_or(false),
             })

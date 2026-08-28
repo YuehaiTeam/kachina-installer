@@ -10,7 +10,7 @@ use crate::{
     metadata::{deep_generate_metadata, deep_get_filelist},
     utils::{
         hash::run_hash,
-        metadata::{InstallerInfo, Metadata, PatchInfo, PatchItem, RepoMetadata},
+        metadata::{FileMeta, InstallerInfo, PatchInfo, PatchSide, RepoMetadata},
         progressed_read::ReadWithCallback,
     },
 };
@@ -55,12 +55,11 @@ pub async fn gen_cli(args: GenArgs) {
     let mut repometa = RepoMetadata {
         repo_name: args.repo,
         tag_name: args.tag,
-        assets: None,
-        hashed: Some(metadata.clone()),
-        patches: None,
+        hashed: metadata.clone(),
+        patches: Vec::new(),
         installer,
-        deletes: None,
-        packing_info: None,
+        deletes: Vec::new(),
+        packing_info: Vec::new(),
     };
     let metadata_str = serde_json::to_string(&repometa).expect("failed to serialize metadata");
     tokio::fs::write(&args.output_metadata, metadata_str)
@@ -196,7 +195,7 @@ pub async fn gen_cli(args: GenArgs) {
     if let Some(diff_vers) = args.diff_vers {
         let mut metadata_with_installer = metadata.clone();
         if let Some(installer) = repometa.installer.as_ref() {
-            metadata_with_installer.push(Metadata {
+            metadata_with_installer.push(FileMeta {
                 file_name: if let Some(name) = args.updater_name.as_ref() {
                     name.clone()
                 } else if let Some(name) = args.updater.as_ref().unwrap().file_name() {
@@ -207,6 +206,7 @@ pub async fn gen_cli(args: GenArgs) {
                 size: installer.size,
                 md5: installer.md5.clone(),
                 xxh: installer.xxh.clone(),
+                installer: None,
             });
         }
         if !diff_vers.is_empty() {
@@ -350,12 +350,12 @@ pub async fn gen_cli(args: GenArgs) {
                         Some(PatchInfo {
                             file_name: file.file_name.clone(),
                             size: diff_original_size,
-                            from: PatchItem {
+                            from: PatchSide {
                                 md5: None,
                                 xxh: Some(old_hash.clone()),
                                 size: old_size,
                             },
-                            to: PatchItem {
+                            to: PatchSide {
                                 md5: None,
                                 xxh: Some(file.xxh.clone().unwrap()),
                                 size: file.size,
@@ -394,15 +394,15 @@ pub async fn gen_cli(args: GenArgs) {
                     }
                 }
             }
-            repometa.deletes = Some(deletes);
+            repometa.deletes = deletes;
             // 生成打包优化信息（在移动 diffs 之前）
             let diff_vers_pathbuf: Vec<std::path::PathBuf> =
                 diff_vers.iter().map(std::path::PathBuf::from).collect();
             let packing_info =
                 generate_packing_info(&metadata_with_installer, &diffs, &diff_vers_pathbuf).await;
 
-            repometa.patches = Some(diffs);
-            repometa.packing_info = Some(packing_info);
+            repometa.patches = diffs;
+            repometa.packing_info = packing_info;
 
             // write metadata again
             let metadata_str =
@@ -416,7 +416,7 @@ pub async fn gen_cli(args: GenArgs) {
         println!("Generating packing info for first release...");
         let mut metadata_with_installer = metadata.clone();
         if let Some(installer) = repometa.installer.as_ref() {
-            metadata_with_installer.push(Metadata {
+            metadata_with_installer.push(FileMeta {
                 file_name: if let Some(name) = args.updater_name.as_ref() {
                     name.clone()
                 } else if let Some(name) = args.updater.as_ref().unwrap().file_name() {
@@ -427,6 +427,7 @@ pub async fn gen_cli(args: GenArgs) {
                 size: installer.size,
                 md5: installer.md5.clone(),
                 xxh: installer.xxh.clone(),
+                installer: None,
             });
         }
 
@@ -434,7 +435,7 @@ pub async fn gen_cli(args: GenArgs) {
         let empty_diff_vers = Vec::new();
         let packing_info =
             generate_packing_info(&metadata_with_installer, &empty_diffs, &empty_diff_vers).await;
-        repometa.packing_info = Some(packing_info);
+        repometa.packing_info = packing_info;
 
         // write metadata again
         let metadata_str = serde_json::to_string(&repometa).expect("failed to serialize metadata");
@@ -446,7 +447,7 @@ pub async fn gen_cli(args: GenArgs) {
 }
 
 async fn generate_packing_info(
-    metadata_with_installer: &[Metadata],
+    metadata_with_installer: &[FileMeta],
     patches: &[PatchInfo],
     diff_vers: &[std::path::PathBuf],
 ) -> Vec<Vec<String>> {

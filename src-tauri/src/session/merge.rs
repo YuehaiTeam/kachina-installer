@@ -1,6 +1,7 @@
 use crate::local::Embedded;
-use crate::session::plan::{find_local, HashInfo, HashKey, LocalFile, PatchInfo};
+use crate::session::plan::{find_local, HashKey, LocalFile};
 use crate::session::source::{hash_of_item, SourceCtx};
+use crate::utils::metadata::{FileMeta, PatchInfo, PatchSide};
 
 const SMALL_FILE: u64 = 500 * 1024;
 const MAX_GROUP: usize = 10 * 1024 * 1024;
@@ -16,14 +17,14 @@ pub enum FileMode {
 
 #[derive(Debug, Clone)]
 pub struct FilePos {
-    pub item: HashInfo,
+    pub item: FileMeta,
     pub offset: usize,
     pub size: usize,
 }
 
 #[derive(Debug, Clone)]
 pub enum InstallTask {
-    Single(HashInfo),
+    Single(FileMeta),
     Merged {
         files: Vec<FilePos>,
         range: String,
@@ -33,7 +34,7 @@ pub enum InstallTask {
 }
 
 pub fn file_mode(
-    item: &HashInfo,
+    item: &FileMeta,
     hash_key: HashKey,
     local: &[Embedded],
     patches: &[PatchInfo],
@@ -61,19 +62,19 @@ pub fn file_mode(
     FileMode::Direct
 }
 
-fn side_hash(side: &crate::session::plan::PatchSide, key: HashKey) -> Option<&str> {
+fn side_hash(side: &PatchSide, key: HashKey) -> Option<&str> {
     match key {
         HashKey::Md5 => side.md5.as_deref(),
         HashKey::Xxh => side.xxh.as_deref(),
     }
 }
 
-fn side_eq(side: &crate::session::plan::PatchSide, key: HashKey, hash: &str) -> bool {
+fn side_eq(side: &PatchSide, key: HashKey, hash: &str) -> bool {
     side_hash(side, key) == Some(hash)
 }
 
 pub fn plan_tasks(
-    items: &[HashInfo],
+    items: &[FileMeta],
     hash_key: HashKey,
     local: &[Embedded],
     patches: &[PatchInfo],
@@ -179,7 +180,7 @@ fn can_merge(group: &[FilePos], new: &FilePos) -> bool {
     waste <= MAX_WASTE
 }
 
-fn push_group(group: Vec<FilePos>, singles: &mut Vec<HashInfo>, merged: &mut Vec<InstallTask>) {
+fn push_group(group: Vec<FilePos>, singles: &mut Vec<FileMeta>, merged: &mut Vec<InstallTask>) {
     if group.is_empty() {
         return;
     }
@@ -236,7 +237,7 @@ pub fn dfs2_ranges(
 
 fn add_file_ranges(
     ranges: &mut Vec<String>,
-    item: &HashInfo,
+    item: &FileMeta,
     ctx: &SourceCtx,
     hash_key: HashKey,
     embedded: &[Embedded],
@@ -286,7 +287,7 @@ fn add_index_range(ranges: &mut Vec<String>, ctx: &SourceCtx, hash: &str) {
     }
 }
 
-fn add_installer_range(ranges: &mut Vec<String>, item: &HashInfo, ctx: &SourceCtx) {
+fn add_installer_range(ranges: &mut Vec<String>, item: &FileMeta, ctx: &SourceCtx) {
     if item.installer.unwrap_or(false) && ctx.installer_end > 0 {
         ranges.push(format!("0-{}", ctx.installer_end.saturating_sub(1)));
     }
@@ -295,7 +296,7 @@ fn add_installer_range(ranges: &mut Vec<String>, item: &HashInfo, ctx: &SourceCt
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::session::plan::{LocalFile, PatchInfo, PatchSide};
+    use crate::session::plan::LocalFile;
 
     fn emb(name: &str, offset: usize, size: usize) -> Embedded {
         Embedded {
@@ -306,8 +307,8 @@ mod tests {
         }
     }
 
-    fn item(name: &str, hash: &str, installer: bool) -> HashInfo {
-        HashInfo {
+    fn item(name: &str, hash: &str, installer: bool) -> FileMeta {
+        FileMeta {
             file_name: name.to_string(),
             size: 10,
             md5: Some(hash.to_string()),

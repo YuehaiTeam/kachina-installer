@@ -21,7 +21,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
     PostQuitMessage, RegisterClassExW, SendMessageW, SetForegroundWindow, SetWindowLongPtrW,
     SetWindowTextW, ShowWindow, TranslateMessage, BS_DEFPUSHBUTTON, CW_USEDEFAULT, ES_AUTOHSCROLL,
     GWLP_USERDATA, HICON, IDCANCEL, IDC_ARROW, IDOK, SW_SHOW, WINDOW_STYLE, WM_CLOSE, WM_COMMAND,
-    WM_CREATE, WM_DESTROY, WNDCLASSEXW, WS_CHILD, WS_OVERLAPPED, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
+    WM_CREATE, WM_DESTROY, WNDCLASSEXW, WS_CHILD, WS_OVERLAPPED, WS_SYSMENU, WS_TABSTOP,
+    WS_VISIBLE,
 };
 
 pub const ID_INSTALL: i32 = 101;
@@ -175,8 +176,13 @@ pub fn show_ready(spec: ReadySpec) -> anyhow::Result<ReadyResult> {
     let mut radio = 0i32;
     let mut verified = BOOL(0);
     unsafe {
-        TaskDialogIndirect(&config, Some(&mut button), Some(&mut radio), Some(&mut verified))
-            .context("TaskDialogIndirect")?;
+        TaskDialogIndirect(
+            &config,
+            Some(&mut button),
+            Some(&mut radio),
+            Some(&mut verified),
+        )
+        .context("TaskDialogIndirect")?;
     }
     Ok(ReadyResult {
         button,
@@ -198,7 +204,12 @@ pub struct ProgressDialog {
 }
 
 impl ProgressDialog {
-    pub async fn show(title: &str, heading: &str, content: &str, marquee: bool) -> anyhow::Result<Self> {
+    pub async fn show(
+        title: &str,
+        heading: &str,
+        content: &str,
+        marquee: bool,
+    ) -> anyhow::Result<Self> {
         let title = title.to_string();
         let heading = heading.to_string();
         let content = content.to_string();
@@ -531,7 +542,9 @@ unsafe extern "system" fn prompt_wndproc(
                     80,
                     28,
                     Some(hwnd),
-                    Some(windows::Win32::UI::WindowsAndMessaging::HMENU(IDOK.0 as *mut _)),
+                    Some(windows::Win32::UI::WindowsAndMessaging::HMENU(
+                        IDOK.0 as *mut _,
+                    )),
                     Some(hinstance),
                     None,
                 )

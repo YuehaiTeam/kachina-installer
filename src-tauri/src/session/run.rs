@@ -2,7 +2,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use anyhow::{anyhow, Context};
+use anyhow::{anyhow, bail, Context};
 use futures::future::join_all;
 use serde_json::{json, Value};
 use tokio::sync::Semaphore;
@@ -19,14 +19,14 @@ use crate::ipc::install_file::{
 };
 use crate::ipc::manager::ManagedElevate;
 use crate::ipc::operation::IpcOperation;
-use crate::ipc::{progress_noop, progress_notify, ProgressNotify};
+use crate::ipc::{progress_noop, progress_notify, IpcResult, Progress, ProgressNotify};
 use crate::local::Embedded;
 use crate::session::commands::SessionState;
 use crate::session::dump::session_dump;
 use crate::session::merge::{dfs2_ranges, file_mode, plan_tasks, FileMode, FilePos, InstallTask};
 use crate::session::plan::{
     build_plan, collect_skip_hash, files_to_probe_writable, find_local, join_install,
-    mark_unwritable, HashInfo, HashKey, InstallPlan, LocalFile, PlanAction, PlanInput, SkipReason,
+    mark_unwritable, HashKey, InstallPlan, LocalFile, PlanAction, PlanInput, SkipReason,
 };
 use crate::session::source::{
     cleanup_dfs2, ensure_dfs2_session, fetch_metadata, hash_of_item, needs_js_plugin, parse_source,
@@ -34,20 +34,20 @@ use crate::session::source::{
     SourceCtx,
 };
 use crate::session::types::{
-    version_gt, DfsMetadata, ProgressEvent, ProjectConfig, SessionResult, Settings, SourceField,
+    version_gt, ProgressEvent, ProjectConfig, SessionResult, Settings, SourceField,
 };
 use crate::session::ui::{PromptKind, SessionUi, SilentPluginUi};
 use crate::thirdparty::mirrorc::get_mirrorc_status;
 use crate::utils::error::IntoAnyhow;
+use crate::utils::metadata::{FileMeta, RepoMetadata};
 
 pub async fn run_op(
     mgr: &ManagedElevate,
     elevate: bool,
     op: IpcOperation,
     on_progress: ProgressNotify,
-) -> anyhow::Result<Value> {
-    let value = mgr.run(op, elevate, on_progress).await.into_anyhow()?;
-    unwrap_ipc(value)
+) -> anyhow::Result<IpcResult> {
+    mgr.run(op, elevate, on_progress).await.into_anyhow()
 }
 
 async fn run_op_with_ui(
@@ -55,9 +55,9 @@ async fn run_op_with_ui(
     elevate: bool,
     op: IpcOperation,
     ui: &dyn SessionUi,
-    mut on_ui: impl FnMut(&dyn SessionUi, &Value),
-) -> anyhow::Result<Value> {
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Value>();
+    mut on_ui: impl FnMut(&dyn SessionUi, &Progress),
+) -> anyhow::Result<IpcResult> {
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Progress>();
     let mut op_fut = Box::pin(run_op(
         mgr,
         elevate,
@@ -89,49 +89,18 @@ async fn run_download_op(
     ctx: &SourceCtx,
     mode: Option<&str>,
     on_progress: ProgressNotify,
-) -> anyhow::Result<(Value, Option<InsightItem>)> {
+) -> anyhow::Result<(IpcResult, Option<InsightItem>)> {
     match mgr.run(op, elevate, on_progress).await {
-        Ok(value) => {
-            let insight = take_insight(&value);
-            match unwrap_ipc(value) {
-                Ok(v) => {
-                    let insight = insight.or_else(|| take_insight(&v));
-                    collect_insight(ctx, insight.clone(), mode);
-                    Ok((v, insight))
-                }
-                Err(err) => {
-                    collect_insight(ctx, insight, mode);
-                    Err(err)
-                }
-            }
+        Ok(result) => {
+            let insight = result.insight();
+            collect_insight(ctx, insight.clone(), mode);
+            Ok((result, insight))
         }
         Err(ta) => {
             collect_insight(ctx, ta.insight, mode);
             Err(ta.error)
         }
     }
-}
-
-fn take_insight(value: &Value) -> Option<InsightItem> {
-    for key in ["insight"] {
-        if let Some(v) = value.get(key) {
-            if !v.is_null() {
-                if let Ok(item) = serde_json::from_value::<InsightItem>(v.clone()) {
-                    return Some(item);
-                }
-            }
-        }
-    }
-    for path in ["/Ok/insight", "/Err/insight"] {
-        if let Some(v) = value.pointer(path) {
-            if !v.is_null() {
-                if let Ok(item) = serde_json::from_value::<InsightItem>(v.clone()) {
-                    return Some(item);
-                }
-            }
-        }
-    }
-    None
 }
 
 fn collect_insight(ctx: &SourceCtx, insight: Option<InsightItem>, mode: Option<&str>) {
@@ -149,9 +118,7 @@ fn mode_from_op(op: &IpcOperation) -> Option<&'static str> {
         IpcOperation::InstallFile(args) => match &args.mode {
             InstallFileMode::HybridPatch { .. } => Some("hybridpatch"),
             InstallFileMode::Patch { .. } => Some("patch"),
-            InstallFileMode::Direct {
-                source: InstallFileSource::Url { .. },
-            } => Some("direct"),
+            InstallFileMode::Direct(InstallFileSource::Url { .. }) => Some("direct"),
             _ => None,
         },
         _ => None,
@@ -161,7 +128,7 @@ fn mode_from_op(op: &IpcOperation) -> Option<&'static str> {
 fn merged_mode(
     files: &[FilePos],
     local: &[Embedded],
-    patches: &[crate::session::plan::PatchInfo],
+    patches: &[crate::utils::metadata::PatchInfo],
     hash_key: HashKey,
 ) -> &'static str {
     let mut direct = false;
@@ -178,22 +145,6 @@ fn merged_mode(
         (false, true) => "merged-patch",
         _ => "merged-direct",
     }
-}
-
-fn unwrap_ipc(value: Value) -> anyhow::Result<Value> {
-    if let Some(err) = value.get("Err") {
-        if let Some(msg) = err.as_str() {
-            return Err(anyhow!(msg.to_string()));
-        }
-        if let Some(msg) = err.get("message").and_then(|m| m.as_str()) {
-            return Err(anyhow!(msg.to_string()));
-        }
-        return Err(anyhow!(err.to_string()));
-    }
-    if let Some(ok) = value.get("Ok") {
-        return Ok(ok.clone());
-    }
-    Ok(value)
 }
 
 fn progress(ui: &dyn SessionUi, sub_step: u32, percent: f64, current: impl Into<String>) {
@@ -222,7 +173,10 @@ fn log_session_start(
         settings.create_lnk,
         settings.dump_dir.is_some(),
     );
-    let sources = config.embedded_config.as_ref().and_then(|c| c.get("source"));
+    let sources = config
+        .embedded_config
+        .as_ref()
+        .and_then(|c| c.get("source"));
     let sources = match sources {
         Some(Value::Array(list)) => json!(list
             .iter()
@@ -431,7 +385,11 @@ pub async fn run_install(
 ) -> anyhow::Result<SessionResult> {
     log_session_start("install", settings, config, project);
     let txn = crate::utils::sentry::Transaction::start(
-        if settings.is_update { "update" } else { "install" },
+        if settings.is_update {
+            "update"
+        } else {
+            "install"
+        },
         "session",
     );
     let result = if settings.source_uri.starts_with("mirrorc://") {
@@ -481,10 +439,7 @@ async fn run_dfs_install(
         })
     );
 
-    let embedded_meta = config
-        .enbedded_metadata
-        .as_ref()
-        .and_then(|v| serde_json::from_value::<DfsMetadata>(v.clone()).ok());
+    let embedded_meta = config.enbedded_metadata.clone();
     let mut source_ctx = SourceCtx::from_embedded(config.embedded_files.as_deref().unwrap_or(&[]));
     source_ctx.attach_plugin(ui.plugin_host());
     // span 只包网络部分；pick_metadata 可能弹版本选择框，用户等待不计入
@@ -524,7 +479,7 @@ async fn run_dfs_install(
             .any(|e| e.file_name == project.updater_name)
         {
             let installer = latest.installer.clone().unwrap();
-            latest.hashed.push(HashInfo {
+            latest.hashed.push(FileMeta {
                 file_name: project.updater_name.clone(),
                 size: installer.size,
                 md5: installer.md5,
@@ -566,9 +521,9 @@ async fn run_dfs_install(
                 Ok(mut entries) => match entries.next_entry().await {
                     Ok(Some(_)) => ignore_nonempty.push(full),
                     Ok(None) => {}
-                    Err(err) => tracing::warn!(
-                        "ignoreFolderPath check failed ({folder}), skip rule: {err}"
-                    ),
+                    Err(err) => {
+                        tracing::warn!("ignoreFolderPath check failed ({folder}), skip rule: {err}")
+                    }
                 },
                 Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
                 Err(err) => {
@@ -642,18 +597,13 @@ async fn run_dfs_install(
         let raw = run_op(
             mgr,
             settings.elevate,
-            IpcOperation::ProbeWritable { file_list: paths },
+            IpcOperation::ProbeWritable(paths),
             progress_noop(),
         )
         .await?;
-        let unwritable: Vec<String> = raw
-            .as_array()
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                    .collect()
-            })
-            .unwrap_or_default();
+        let IpcResult::ProbeWritable(unwritable) = raw else {
+            bail!("IPC_SHAPE_ERR");
+        };
         mark_unwritable(&mut plan.files, &settings.install_path, &unwritable);
     }
     session_dump!(settings.dump_dir.as_deref(), "03-plan.json", plan);
@@ -801,7 +751,7 @@ async fn run_dfs_install(
         let _ = run_op(
             mgr,
             settings.elevate,
-            IpcOperation::RmList { list },
+            IpcOperation::RmList(list),
             progress_noop(),
         )
         .await;
@@ -823,17 +773,17 @@ async fn run_dfs_install(
 }
 
 struct InstallItem {
-    item: HashInfo,
+    item: FileMeta,
 }
 
 async fn pick_metadata(
     settings: &Settings,
     config: &InstallerConfig,
     ui: &dyn SessionUi,
-    local: Option<DfsMetadata>,
-    online: Option<DfsMetadata>,
+    local: Option<RepoMetadata>,
+    online: Option<RepoMetadata>,
     online_err: Option<String>,
-) -> anyhow::Result<(DfsMetadata, bool)> {
+) -> anyhow::Result<(RepoMetadata, bool)> {
     match (local, online) {
         (None, None) => Err(anyhow!(
             "{}{}",
@@ -901,14 +851,14 @@ async fn prepare_process(
     let found = run_op(
         mgr,
         false,
-        IpcOperation::FindProcessByName {
-            name: project.exe_name.clone(),
-        },
+        IpcOperation::FindProcessByName(project.exe_name.clone()),
         progress_noop(),
     )
     .await
-    .unwrap_or(json!([]));
-    let procs: Vec<(u32, String)> = serde_json::from_value(found).unwrap_or_default();
+    .unwrap_or(IpcResult::FindProcessByName(Vec::new()));
+    let IpcResult::FindProcessByName(procs) = found else {
+        bail!("IPC_SHAPE_ERR");
+    };
     let target = join_install(&settings.install_path, &project.exe_name)
         .replace('\\', "/")
         .to_lowercase();
@@ -936,20 +886,15 @@ async fn prepare_process(
         if run_op(
             mgr,
             settings.elevate,
-            IpcOperation::KillProcess { pid: *pid },
+            IpcOperation::KillProcess(*pid),
             progress_noop(),
         )
         .await
         .is_err()
         {
-            run_op(
-                mgr,
-                true,
-                IpcOperation::KillProcess { pid: *pid },
-                progress_noop(),
-            )
-            .await
-            .context("结束进程失败")?;
+            run_op(mgr, true, IpcOperation::KillProcess(*pid), progress_noop())
+                .await
+                .context("结束进程失败")?;
         }
     }
     Ok(true)
@@ -958,7 +903,7 @@ async fn prepare_process(
 async fn scan_local(
     settings: &Settings,
     project: &ProjectConfig,
-    latest: &DfsMetadata,
+    latest: &RepoMetadata,
     hash_key: HashKey,
     ignore_nonempty: &[String],
     ui: &dyn SessionUi,
@@ -976,7 +921,7 @@ async fn scan_local(
         &project.user_data_path,
         ignore_nonempty,
     );
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Value>();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Progress>();
     let mut op_fut = Box::pin(run_op(
         mgr,
         settings.elevate,
@@ -993,7 +938,9 @@ async fn scan_local(
     let raw = loop {
         tokio::select! {
             Some(p) = rx.recv() => {
-                let (cur, total) = scan_progress_pair(&p);
+                let Progress::CountOf { done: cur, total } = p else {
+                    continue;
+                };
                 let total = total.max(1);
                 progress(ui, 1, 5.0 + (cur as f64 / total as f64) * 15.0, format!("{cur} / {total}"));
             }
@@ -1001,29 +948,22 @@ async fn scan_local(
         }
     };
     progress(ui, 1, 20.0, "校验本地文件……");
-    let scanned = raw.as_array().cloned().unwrap_or_default();
+    let IpcResult::CheckLocalFiles(scanned) = raw else {
+        bail!("IPC_SHAPE_ERR");
+    };
     Ok(scanned
         .into_iter()
         .map(|e| {
             let file_name = e
-                .get("file_name")
-                .and_then(|v| v.as_str())
-                .unwrap_or_default()
+                .file_name
                 .trim_start_matches(&settings.install_path)
                 .trim_start_matches(['\\', '/'])
                 .to_string();
             LocalFile {
                 file_name,
-                hash: e
-                    .get("hash")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or_default()
-                    .to_string(),
-                size: e.get("size").and_then(|v| v.as_u64()).unwrap_or(0),
-                unwritable: e
-                    .get("unwritable")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false),
+                hash: e.hash,
+                size: e.size,
+                unwritable: e.unwritable,
             }
         })
         .collect())
@@ -1162,24 +1102,11 @@ impl ProgressHandle {
     }
 }
 
-fn apply_ipc_progress(handle: &ProgressHandle, p: &Value) {
-    if let Some(idx) = p.get("chunk_index").and_then(|v| v.as_u64()) {
-        let n = p
-            .get("progress")
-            .and_then(|v| v.as_u64())
-            .or_else(|| p.get("payload").and_then(|v| v.as_u64()))
-            .unwrap_or(0);
-        handle.set(idx as usize, n);
-        return;
-    }
-    if let Some(n) = p.as_u64().or_else(|| p.as_f64().map(|f| f as u64)) {
-        handle.set(0, n);
-        return;
-    }
-    if let Some(arr) = p.as_array() {
-        if let Some(n) = arr.first().and_then(|v| v.as_u64()) {
-            handle.set(0, n);
-        }
+fn apply_ipc_progress(handle: &ProgressHandle, p: &Progress) {
+    match p {
+        Progress::Chunk(index, bytes) => handle.set(*index as usize, *bytes),
+        Progress::Bytes(n) => handle.set(0, *n),
+        _ => {}
     }
 }
 
@@ -1193,7 +1120,7 @@ fn task_bytes(task: &InstallTask) -> u64 {
 fn is_local_task(
     task: &InstallTask,
     local_files: &[Embedded],
-    patches: &[crate::session::plan::PatchInfo],
+    patches: &[crate::utils::metadata::PatchInfo],
     hash_key: HashKey,
 ) -> bool {
     match task {
@@ -1229,25 +1156,6 @@ fn basename(path: &str) -> &str {
     path.rsplit(['\\', '/']).next().unwrap_or(path)
 }
 
-fn scan_progress_pair(p: &Value) -> (u64, u64) {
-    if let Some(arr) = p.as_array() {
-        return (
-            arr.first().and_then(|v| v.as_u64()).unwrap_or(0),
-            arr.get(1).and_then(|v| v.as_u64()).unwrap_or(1),
-        );
-    }
-    (
-        p.get(0)
-            .or_else(|| p.get("0"))
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0),
-        p.get(1)
-            .or_else(|| p.get("1"))
-            .and_then(|v| v.as_u64())
-            .unwrap_or(1),
-    )
-}
-
 fn log_task(
     mode: &str,
     size: u64,
@@ -1273,7 +1181,7 @@ fn log_task(
 async fn install_files(
     settings: &Settings,
     config: &InstallerConfig,
-    latest: &DfsMetadata,
+    latest: &RepoMetadata,
     hash_key: HashKey,
     tasks: &[InstallTask],
     disk_files: &[LocalFile],
@@ -1492,7 +1400,7 @@ async fn fallback_merged_files(
     settings: &Settings,
     local_files: &[Embedded],
     disk_files: &[LocalFile],
-    latest: &DfsMetadata,
+    latest: &RepoMetadata,
     hash_key: HashKey,
     files: &[FilePos],
     failed: &[usize],
@@ -1532,9 +1440,9 @@ async fn install_one(
     settings: &Settings,
     local_files: &[Embedded],
     disk_files: &[LocalFile],
-    latest: &DfsMetadata,
+    latest: &RepoMetadata,
     hash_key: HashKey,
-    item: &HashInfo,
+    item: &FileMeta,
     source_ctx: &SourceCtx,
     mgr: &ManagedElevate,
     skip_patch_first: bool,
@@ -1618,7 +1526,7 @@ struct MergedResult {
 async fn install_merged(
     settings: &Settings,
     local_files: &[Embedded],
-    latest: &DfsMetadata,
+    latest: &RepoMetadata,
     hash_key: HashKey,
     files: &[FilePos],
     range: &str,
@@ -1638,15 +1546,13 @@ async fn install_merged(
     let chunks: Vec<InstallFileArgs> = files
         .iter()
         .map(|file| InstallFileArgs {
-            mode: InstallFileMode::Direct {
-                source: InstallFileSource::Url {
-                    url: url.clone(),
-                    offset: file.offset.saturating_sub(start),
-                    size: file.size,
-                    skip_decompress: false,
-                    request_range: Some(range.to_string()),
-                },
-            },
+            mode: InstallFileMode::Direct(InstallFileSource::Url {
+                url: url.clone(),
+                offset: file.offset.saturating_sub(start),
+                size: file.size,
+                skip_decompress: false,
+                request_range: Some(range.to_string()),
+            }),
             target: join_install(&settings.install_path, &file.item.file_name),
             md5: file.item.md5.clone(),
             xxh: file.item.xxh.clone(),
@@ -1680,12 +1586,13 @@ async fn install_merged(
         )
         .await?
     };
+    let IpcResult::InstallMultichunkStream(multi) = value else {
+        bail!("IPC_SHAPE_ERR");
+    };
     let mut failed = Vec::new();
-    if let Some(results) = value.get("results").and_then(|v| v.as_array()) {
-        for (i, res) in results.iter().enumerate() {
-            if res.get("Err").is_some() || res.get("error").is_some() {
-                failed.push(i);
-            }
+    for (i, res) in multi.results.iter().enumerate() {
+        if res.is_err() {
+            failed.push(i);
         }
     }
     let names = files
@@ -1719,9 +1626,9 @@ async fn build_install_op(
     settings: &Settings,
     local_files: &[Embedded],
     disk_files: &[LocalFile],
-    latest: &DfsMetadata,
+    latest: &RepoMetadata,
     hash_key: HashKey,
-    item: &HashInfo,
+    item: &FileMeta,
     source_ctx: &SourceCtx,
     skip_patch: bool,
 ) -> anyhow::Result<IpcOperation> {
@@ -1732,13 +1639,11 @@ async fn build_install_op(
     if !skip_patch {
         if let Some(local) = local_files.iter().find(|l| l.name == hash) {
             return Ok(IpcOperation::InstallFile(InstallFileArgs {
-                mode: InstallFileMode::Direct {
-                    source: InstallFileSource::Local {
-                        offset: local.offset,
-                        size: local.size,
-                        skip_decompress: false,
-                    },
-                },
+                mode: InstallFileMode::Direct(InstallFileSource::Local {
+                    offset: local.offset,
+                    size: local.size,
+                    skip_decompress: false,
+                }),
                 target,
                 md5: item.md5.clone(),
                 xxh: item.xxh.clone(),
@@ -1798,7 +1703,7 @@ async fn build_install_op(
     Ok(url_op(loc, &target, item, None, installer))
 }
 
-fn side_hash(side: &crate::session::plan::PatchSide, key: HashKey) -> Option<&str> {
+fn side_hash(side: &crate::utils::metadata::PatchSide, key: HashKey) -> Option<&str> {
     match key {
         HashKey::Md5 => side.md5.as_deref(),
         HashKey::Xxh => side.xxh.as_deref(),
@@ -1826,7 +1731,7 @@ fn file_source(loc: FileLocation) -> InstallFileSource {
 fn url_op(
     loc: FileLocation,
     target: &str,
-    item: &HashInfo,
+    item: &FileMeta,
     diff_size: Option<usize>,
     installer: bool,
 ) -> IpcOperation {
@@ -1834,7 +1739,7 @@ fn url_op(
     let mode = if let Some(diff_size) = diff_size {
         InstallFileMode::Patch { source, diff_size }
     } else {
-        InstallFileMode::Direct { source }
+        InstallFileMode::Direct(source)
     };
     IpcOperation::InstallFile(InstallFileArgs {
         mode,
@@ -1845,7 +1750,7 @@ fn url_op(
     })
 }
 
-fn hybrid_op(local: &Embedded, loc: FileLocation, target: &str, item: &HashInfo) -> IpcOperation {
+fn hybrid_op(local: &Embedded, loc: FileLocation, target: &str, item: &FileMeta) -> IpcOperation {
     IpcOperation::InstallFile(InstallFileArgs {
         mode: InstallFileMode::HybridPatch {
             diff: file_source(loc),
@@ -1884,7 +1789,7 @@ async fn install_runtimes(
         progress(ui, 3, 96.0, format!("安装{name}……"));
         let mut last_err = None;
         for _ in 0..3 {
-            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Value>();
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Progress>();
             let mut op_fut = Box::pin(run_op(
                 mgr,
                 settings.elevate,
@@ -1900,7 +1805,9 @@ async fn install_runtimes(
             let res = loop {
                 tokio::select! {
                     Some(p) = rx.recv() => {
-                        let (cur, total) = scan_progress_pair(&p);
+                        let Progress::BytesOf { done: cur, total } = p else {
+                            continue;
+                        };
                         if total > 0 && cur + 1 < total {
                             progress(
                                 ui,
@@ -1943,7 +1850,7 @@ async fn finish_install(
     settings: &Settings,
     config: &InstallerConfig,
     project: &ProjectConfig,
-    latest: Option<&DfsMetadata>,
+    latest: Option<&RepoMetadata>,
     ui: &dyn SessionUi,
     mgr: &ManagedElevate,
 ) -> anyhow::Result<()> {
@@ -2143,14 +2050,17 @@ async fn run_mirrorc(
         },
         ui,
         |ui, p| {
-            if p.get("type").and_then(|v| v.as_str()) == Some("download") {
-                let downloaded = p.get("downloaded").and_then(|v| v.as_u64()).unwrap_or(0);
-                let total = p.get("total").and_then(|v| v.as_u64()).unwrap_or(1).max(1);
+            if let Progress::BytesOf {
+                done: downloaded,
+                total,
+            } = p
+            {
+                let total = (*total).max(1);
                 progress(
                     ui,
                     1,
-                    5.0 + (downloaded as f64 / total as f64) * 65.0,
-                    format!("{} / {}", format_size(downloaded), format_size(total)),
+                    5.0 + (*downloaded as f64 / total as f64) * 65.0,
+                    format!("{} / {}", format_size(*downloaded), format_size(total)),
                 );
             }
         },
@@ -2165,20 +2075,21 @@ async fn run_mirrorc(
             target_path: settings.install_path.clone(),
         },
         ui,
-        |ui, p| match p.get("type").and_then(|v| v.as_str()) {
-            Some("extract") => {
-                let file = p.get("file").and_then(|v| v.as_str()).unwrap_or("");
-                let count = p.get("count").and_then(|v| v.as_u64()).unwrap_or(0);
-                let total = p.get("total").and_then(|v| v.as_u64()).unwrap_or(1).max(1);
+        |ui, p| match p {
+            Progress::Extract {
+                file,
+                done: count,
+                total,
+            } => {
+                let total = (*total).max(1);
                 progress(
                     ui,
                     2,
-                    70.0 + (count as f64 / total as f64) * 25.0,
+                    70.0 + (*count as f64 / total as f64) * 25.0,
                     format!("<div class=\"d-single-stat\">解压 {file}</div>"),
                 );
             }
-            Some("delete") => {
-                let file = p.get("file").and_then(|v| v.as_str()).unwrap_or("");
+            Progress::Delete(file) => {
                 progress(
                     ui,
                     2,
@@ -2190,10 +2101,9 @@ async fn run_mirrorc(
         },
     )
     .await?;
-    let meta = installed
-        .as_array()
-        .and_then(|a| a.first())
-        .and_then(|v| serde_json::from_value::<DfsMetadata>(v.clone()).ok());
+    let IpcResult::RunMirrorcInstall(meta, _) = installed else {
+        bail!("IPC_SHAPE_ERR");
+    };
     install_runtimes(settings, config, project, ui, mgr).await?;
     finish_install(settings, config, project, meta.as_ref(), ui, mgr).await?;
     progress(ui, 3, 100.0, "安装完成");
@@ -2257,6 +2167,17 @@ pub async fn run_uninstall(
     result
 }
 
+/// 卸载只需要注册表元数据里的这两个字段，用窄投影而非直接解 `RepoMetadata`：后者的
+/// `tag_name`/`hashed` 是必填的，缺字段即整体报错，而卸载是最不该硬失败的路径——
+/// 旧版或被手工改过的注册表项也应当至少能删掉 updater。
+#[derive(serde::Deserialize, Default)]
+struct UninstallMeta {
+    #[serde(default)]
+    hashed: Vec<FileMeta>,
+    #[serde(default)]
+    deletes: Vec<String>,
+}
+
 async fn run_uninstall_inner(
     settings: &Settings,
     config: &InstallerConfig,
@@ -2271,21 +2192,9 @@ async fn run_uninstall_inner(
             crate::session::error::hide(crate::session::error::UNINSTALL_META_MISSING, e)
         })?;
     tracing::info!("UNINSTALL_METADATA: {meta}");
-    let hashed: Vec<HashInfo> = meta
-        .get("hashed")
-        .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|item| serde_json::from_value::<HashInfo>(item.clone()).ok())
-                .collect()
-        })
-        .unwrap_or_default();
-    let deletes: Vec<String> = meta
-        .get("deletes")
-        .and_then(|v| serde_json::from_value(v.clone()).ok())
-        .unwrap_or_default();
-    let mut files: Vec<String> = hashed.into_iter().map(|e| e.file_name).collect();
-    files.extend(deletes);
+    let meta: UninstallMeta = serde_json::from_str(&meta).unwrap_or_default();
+    let mut files: Vec<String> = meta.hashed.into_iter().map(|e| e.file_name).collect();
+    files.extend(meta.deletes);
     files.push(project.updater_name.clone());
     files.sort();
     files.dedup();
@@ -2346,7 +2255,9 @@ pub async fn silent_main(args: crate::cli::arg::InstallArgs) -> anyhow::Result<(
                 "embedded config missing (embedded_files={})",
                 config.embedded_files.as_ref().map(|f| f.len()).unwrap_or(0)
             );
-            return Err(crate::session::error::user(crate::session::error::PKG_BROKEN));
+            return Err(crate::session::error::user(
+                crate::session::error::PKG_BROKEN,
+            ));
         }
     };
     let mut settings = crate::session::types::settings_from_cli(&args, &config, &project).await?;

@@ -96,10 +96,15 @@ pub async fn write_registry_raw(
 }
 
 pub async fn read_uninstall_metadata(reg_name: String) -> TAResult<Value> {
-    read_uninstall_metadata_raw(&reg_name, None).into_ta_result()
+    read_uninstall_metadata_raw(&reg_name, None)
+        .and_then(|raw| Ok(serde_json::from_str::<Value>(&raw)?))
+        .into_ta_result()
 }
 
-pub fn read_uninstall_metadata_raw(reg_name: &str, install_path: Option<&str>) -> Result<Value> {
+/// 返回注册表里 `InstallerMeta` 的原始 JSON 文本，只校验它是合法 JSON（`IgnoredAny`
+/// 不建树）。不在这里解成 `Value`：调用方各自 `from_str` 成自己要的类型，经 Value
+/// 中转会为每个目标类型多留一整棵反序列化副本。
+pub fn read_uninstall_metadata_raw(reg_name: &str, install_path: Option<&str>) -> Result<String> {
     let key_path = format!("SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\{reg_name}");
     let hives = [
         windows_registry::LOCAL_MACHINE,
@@ -113,9 +118,9 @@ pub fn read_uninstall_metadata_raw(reg_name: &str, install_path: Option<&str>) -
         let Ok(metadata) = key.get_string("InstallerMeta") else {
             continue;
         };
-        let Ok(parsed) = serde_json::from_str::<Value>(&metadata) else {
+        if serde_json::from_str::<serde::de::IgnoredAny>(&metadata).is_err() {
             continue;
-        };
+        }
         if let Some(want) = install_path {
             let location = key.get_string("InstallLocation").unwrap_or_default();
             if !location.is_empty()
@@ -123,11 +128,11 @@ pub fn read_uninstall_metadata_raw(reg_name: &str, install_path: Option<&str>) -
                     .trim_end_matches(['\\', '/'])
                     .eq_ignore_ascii_case(want.trim_end_matches(['\\', '/']))
             {
-                return Ok(parsed);
+                return Ok(metadata);
             }
         }
         if fallback.is_none() {
-            fallback = Some(parsed);
+            fallback = Some(metadata);
         }
     }
     fallback.context("GET_INSTALLMETA_ERR")

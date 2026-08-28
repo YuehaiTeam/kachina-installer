@@ -299,10 +299,12 @@ async fn show_ready_page(
             ID_INSTALL => return Ok(Some(ReadyAction::Install)),
             ID_ADVANCED => return Ok(Some(ReadyAction::Advanced)),
             ID_CHANGE_PATH => {
-                if let Some(path) = pick_path(&state.path, &project.exe_name, &project.app_name).await
+                if let Some(path) =
+                    pick_path(&state.path, &project.exe_name, &project.app_name).await
                 {
                     state.path = path;
-                    if let Some(dir) = inspect_dir(state.path.clone(), project.exe_name.clone()).await
+                    if let Some(dir) =
+                        inspect_dir(state.path.clone(), project.exe_name.clone()).await
                     {
                         state.is_update = dir.upgrade;
                     }
@@ -315,13 +317,7 @@ async fn show_ready_page(
 
 async fn pick_path(current: &str, exe_name: &str, app_name: &str) -> Option<String> {
     let parent = HwndParent::from_hwnd(unsafe { GetDesktopWindow() });
-    let seldir = select_dir(
-        current.to_string(),
-        exe_name.to_string(),
-        false,
-        parent,
-    )
-    .await?;
+    let seldir = select_dir(current.to_string(), exe_name.to_string(), false, parent).await?;
     apply_path_choice(seldir, app_name).await
 }
 
@@ -340,7 +336,10 @@ async fn apply_path_choice(seldir: SelectDirRes, app_name: &str) -> Option<Strin
             )
             .await;
         if nest {
-            return Some(format!("{}\\{app_name}", seldir.path.trim_end_matches(['\\', '/'])));
+            return Some(format!(
+                "{}\\{app_name}",
+                seldir.path.trim_end_matches(['\\', '/'])
+            ));
         }
     }
     Some(seldir.path)
@@ -352,16 +351,13 @@ fn mirrorc_target(app_name: &str) -> String {
 
 async fn ensure_mirrorc_cdk(project: &ProjectConfig, state: &mut ReadyState) -> bool {
     if state.mirrorc_cdk.as_deref().unwrap_or("").is_empty() {
-        state.mirrorc_cdk = crate::utils::wincred::wincred_read(&mirrorc_target(&project.app_name)).ok();
+        state.mirrorc_cdk =
+            crate::utils::wincred::wincred_read(&mirrorc_target(&project.app_name)).ok();
     }
     if state.mirrorc_cdk.as_deref().unwrap_or("").is_empty() {
         let app = project.app_name.clone();
         let key = tokio::task::spawn_blocking(move || {
-            prompt_text(
-                "Mirror酱",
-                &format!("请输入 {app} 的 Mirror酱 CDK"),
-                "",
-            )
+            prompt_text("Mirror酱", &format!("请输入 {app} 的 Mirror酱 CDK"), "")
         })
         .await
         .ok()
@@ -516,7 +512,11 @@ impl NativeUi {
     }
 
     fn parent(&self) -> HwndParent {
-        HwndParent::from_hwnd(self.hwnd.get().unwrap_or_else(|| unsafe { GetDesktopWindow() }))
+        HwndParent::from_hwnd(
+            self.hwnd
+                .get()
+                .unwrap_or_else(|| unsafe { GetDesktopWindow() }),
+        )
     }
 }
 
@@ -529,7 +529,8 @@ fn plain_progress(s: &str) -> String {
 #[async_trait]
 impl SessionUi for NativeUi {
     async fn confirm(&self, _kind: PromptKind, title: &str, message: &str) -> bool {
-        crate::installer::confirm_dialog(title.to_string(), message.to_string(), self.parent()).await
+        crate::installer::confirm_dialog(title.to_string(), message.to_string(), self.parent())
+            .await
     }
 
     fn progress(&self, event: crate::session::types::ProgressEvent) {
@@ -557,8 +558,10 @@ impl SessionUi for NativeUi {
 }
 
 fn set_progress_hwnd(hwnd: HWND, percent: f64, text: &str) {
-    use windows::Win32::UI::Controls::{TDE_CONTENT, TDM_SET_PROGRESS_BAR_POS, TDM_UPDATE_ELEMENT_TEXT};
     use windows::Win32::Foundation::{LPARAM, WPARAM};
+    use windows::Win32::UI::Controls::{
+        TDE_CONTENT, TDM_SET_PROGRESS_BAR_POS, TDM_UPDATE_ELEMENT_TEXT,
+    };
     let wide: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
     let pos = percent.round().clamp(0.0, 100.0) as usize;
     unsafe {

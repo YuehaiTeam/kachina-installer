@@ -38,7 +38,10 @@ pub struct PluginArgs {
 }
 
 pub enum PluginResult {
-    Value(Value),
+    /// 插件回复的原始 JSON 文本。不解成 `Value`：消费端各自 `from_str` 成自己的
+    /// 类型，反序列化按 Deserializer 类型单态化，经 Value 中转会为每个目标类型
+    /// 多留一整棵副本（`Dfs2Data` 里的 `RepoMetadata` 就是一棵 15KiB 的）。
+    Value(String),
     Unimplemented,
 }
 
@@ -200,7 +203,7 @@ impl PromptHub {
 pub struct PluginAnswer {
     pub id: String,
     pub ok: bool,
-    pub data: Option<Value>,
+    pub data: Option<String>,
     pub error: Option<String>,
     #[serde(default)]
     pub unimplemented: bool,
@@ -266,7 +269,9 @@ impl PluginHost for GuiPluginHost {
                 .unwrap_or_else(|| "插件执行失败".to_string());
             return Err(crate::session::error::user(msg));
         }
-        Ok(PluginResult::Value(reply.data.unwrap_or(Value::Null)))
+        Ok(PluginResult::Value(
+            reply.data.unwrap_or_else(|| "null".to_string()),
+        ))
     }
 }
 

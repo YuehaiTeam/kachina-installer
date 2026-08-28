@@ -108,7 +108,9 @@ fn kind_from_text(text: &str) -> Option<FailKind> {
     if text.contains("cancelled") {
         return Some(FailKind::Cancelled);
     }
-    if text.contains("Access is denied") || text.contains("拒绝访问") || text.contains("(os error 5)")
+    if text.contains("Access is denied")
+        || text.contains("拒绝访问")
+        || text.contains("(os error 5)")
     {
         return Some(FailKind::Permission);
     }
@@ -206,7 +208,10 @@ pub fn file_release(file_name: &str, err: &impl std::fmt::Display) -> anyhow::Er
             FailKind::Other
         },
     );
-    expected(kind, format!("释放文件 {file_name} 失败：\n{}", friendly(err)))
+    expected(
+        kind,
+        format!("释放文件 {file_name} 失败：\n{}", friendly(err)),
+    )
 }
 
 #[cfg(test)]

@@ -7,6 +7,7 @@ use tokio::io::AsyncReadExt;
 use tokio::sync::OnceCell;
 
 use crate::utils::error::return_anyhow_result;
+use crate::utils::metadata::RepoMetadata;
 static MMAP_SELF: OnceCell<AsyncMmapFile> = OnceCell::const_new();
 static EMBEDDED_FILES: OnceCell<Vec<Embedded>> = OnceCell::const_new();
 static PARSED_PACK: OnceCell<ParsedPack> = OnceCell::const_new();
@@ -14,7 +15,7 @@ static PARSED_PACK: OnceCell<ParsedPack> = OnceCell::const_new();
 #[derive(Clone)]
 struct ParsedPack {
     config: Option<Value>,
-    metadata: Option<Value>,
+    metadata: Option<RepoMetadata>,
     index: Option<Vec<Embedded>>,
     image: Option<String>,
 }
@@ -161,7 +162,7 @@ pub async fn get_config_from_embedded(
     embedded: &[Embedded],
 ) -> anyhow::Result<(
     Option<Value>,
-    Option<Value>,
+    Option<RepoMetadata>,
     Option<Vec<Embedded>>,
     Option<String>,
 )> {

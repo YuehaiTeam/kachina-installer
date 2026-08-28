@@ -18,7 +18,7 @@ export async function handleSessionPlugin(
   answer: (payload: {
     id: string;
     ok: boolean;
-    data?: unknown;
+    data?: string;
     error?: string;
     unimplemented?: boolean;
   }) => Promise<unknown>,
@@ -40,7 +40,7 @@ export async function handleSessionPlugin(
           return;
         }
         const data = await plugin.getMetadata(req.url);
-        await answer({ id: req.id, ok: true, data });
+        await answer({ id: req.id, ok: true, data: JSON.stringify(data ?? null) });
         return;
       }
       case 'createSession': {
@@ -49,12 +49,12 @@ export async function handleSessionPlugin(
           return;
         }
         const data = await plugin.createSession(req.url, req.diffchunks || []);
-        await answer({ id: req.id, ok: true, data });
+        await answer({ id: req.id, ok: true, data: JSON.stringify(data ?? null) });
         return;
       }
       case 'getChunkUrl': {
         const data = await plugin.getChunkUrl(req.url, req.range || '');
-        await answer({ id: req.id, ok: true, data });
+        await answer({ id: req.id, ok: true, data: JSON.stringify(data ?? null) });
         return;
       }
       case 'endSession': {
@@ -63,7 +63,7 @@ export async function handleSessionPlugin(
           return;
         }
         await plugin.endSession(req.url, req.insights);
-        await answer({ id: req.id, ok: true, data: null });
+        await answer({ id: req.id, ok: true, data: 'null' });
         return;
       }
       default:

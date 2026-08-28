@@ -12,10 +12,11 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde_json::{json, Value};
 
+use crate::ipc::PipeMsg;
+
 const DSN: &str =
     "http://f68ff71bf7fee106fb09fbae79031502@steambird.cocogoat.cn/insight/kachina-installer/0";
-const ENVELOPE_URL: &str =
-    "http://steambird.cocogoat.cn/insight/kachina-installer/api/0/envelope/";
+const ENVELOPE_URL: &str = "http://steambird.cocogoat.cn/insight/kachina-installer/api/0/envelope/";
 const SENTRY_KEY: &str = "f68ff71bf7fee106fb09fbae79031502";
 const RELEASE: &str = concat!(env!("CARGO_PKG_NAME"), "@", env!("CARGO_PKG_VERSION"));
 /// X-Sentry-Auth 的 sentry_client 与 sdk 字段要求 `name/version` 格式。
@@ -35,8 +36,8 @@ struct State {
 }
 
 pub struct PipeOutbox {
-    tx: tokio::sync::mpsc::Sender<Value>,
-    pub rx: Arc<tokio::sync::RwLock<tokio::sync::mpsc::Receiver<Value>>>,
+    tx: tokio::sync::mpsc::Sender<PipeMsg>,
+    pub rx: Arc<tokio::sync::RwLock<tokio::sync::mpsc::Receiver<PipeMsg>>>,
 }
 
 lazy_static::lazy_static! {
@@ -46,7 +47,7 @@ lazy_static::lazy_static! {
         user: Mutex::new(Value::Null),
         use_pipe: AtomicBool::new(false),
     };
-    /// 提权进程的出站队列（`{"envelope": …}` / `{"breadcrumb": …}`），
+    /// 提权进程的出站队列（`PipeMsg::Envelope` / `PipeMsg::Breadcrumb`），
     /// 由 `uac_ipc_main` 消费后原样写入管道。
     pub static ref PIPE_OUTBOX: PipeOutbox = {
         let (tx, rx) = tokio::sync::mpsc::channel(256);
@@ -81,7 +82,7 @@ pub fn is_pipe_mode() -> bool {
 }
 
 /// 丢弃时只记 DEBUG——WARN 会进面包屑层再次触发转发，形成反馈环。
-fn pipe_send(msg: Value, kind: &str) {
+fn pipe_send(msg: PipeMsg, kind: &str) {
     if let Err(e) = PIPE_OUTBOX.tx.try_send(msg) {
         tracing::debug!("sentry pipe outbox drop ({kind}): {e}");
     }
@@ -126,7 +127,7 @@ pub fn add_breadcrumb(category: &str, level: &str, message: String) {
     });
     // 提权进程本地留一份（panic 事件用），同时转发主进程合并出完整时间线
     if is_pipe_mode() {
-        pipe_send(json!({ "breadcrumb": crumb }), "breadcrumb");
+        pipe_send(PipeMsg::Breadcrumb(crumb.clone()), "breadcrumb");
     }
     add_breadcrumb_value(crumb);
 }
@@ -151,16 +152,8 @@ fn breadcrumbs_snapshot() -> Value {
 }
 
 fn base_event(event_id: &str) -> Value {
-    let contexts = STATE
-        .contexts
-        .lock()
-        .map(|c| c.clone())
-        .unwrap_or_default();
-    let user = STATE
-        .user
-        .lock()
-        .map(|u| u.clone())
-        .unwrap_or(Value::Null);
+    let contexts = STATE.contexts.lock().map(|c| c.clone()).unwrap_or_default();
+    let user = STATE.user.lock().map(|u| u.clone()).unwrap_or(Value::Null);
     json!({
         "event_id": event_id,
         "timestamp": now_f64(),
@@ -262,7 +255,7 @@ fn dispatch(body: String, blocking: bool) {
         return;
     }
     if is_pipe_mode() {
-        pipe_send(json!({ "envelope": body }), "envelope");
+        pipe_send(PipeMsg::Envelope(body), "envelope");
         return;
     }
     INFLIGHT.fetch_add(1, Ordering::SeqCst);
@@ -420,7 +413,9 @@ mod tests {
 
     #[test]
     fn exception_chain_order_root_cause_first() {
-        let err = anyhow::anyhow!("root cause").context("mid").context("outer");
+        let err = anyhow::anyhow!("root cause")
+            .context("mid")
+            .context("outer");
         let values: Vec<String> = err.chain().map(|c| c.to_string()).collect();
         // anyhow chain 自外向内；capture_anyhow reverse 后 root cause 在前
         assert_eq!(values, vec!["outer", "mid", "root cause"]);
@@ -442,6 +437,9 @@ mod tests {
         }
         let crumbs = STATE.breadcrumbs.lock().unwrap();
         assert_eq!(crumbs.len(), MAX_BREADCRUMBS);
-        assert_eq!(crumbs.back().unwrap()["message"], format!("crumb {}", MAX_BREADCRUMBS + 9));
+        assert_eq!(
+            crumbs.back().unwrap()["message"],
+            format!("crumb {}", MAX_BREADCRUMBS + 9)
+        );
     }
 }

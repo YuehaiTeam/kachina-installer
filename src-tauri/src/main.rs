@@ -141,7 +141,11 @@ fn main() {
                 });
         }
         Command::NativeUi(args) => {
-            utils::sentry::add_breadcrumb("app", "info", "KachinaInstaller started (native-ui)".into());
+            utils::sentry::add_breadcrumb(
+                "app",
+                "info",
+                "KachinaInstaller started (native-ui)".into(),
+            );
             tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
                 .build()

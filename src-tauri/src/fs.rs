@@ -3,7 +3,7 @@ use bytes::Bytes;
 use fmmap::tokio::AsyncMmapFileExt;
 use futures::Stream;
 use futures::TryStreamExt;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::{
     collections::HashSet,
     os::windows::fs::MetadataExt,
@@ -21,7 +21,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader, R
 use crate::{
     dfs::{apply_insight_error, short_insight_code, InsightItem},
     installer::uninstall::DELETE_SELF_ON_EXIT_PATH,
-    ipc::ProgressNotify,
+    ipc::{Progress, ProgressNotify},
     local::mmap,
     utils::{
         error::{TACommandError, TAResult, DOWNLOAD_STALLED, DOWNLOAD_TOO_SLOW},
@@ -480,7 +480,7 @@ impl<S> NetworkInsightStream<S> {
     }
 }
 
-#[derive(Serialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Metadata {
     pub file_name: String,
     pub hash: String,
@@ -552,12 +552,18 @@ pub async fn check_local_files(
 
     files.sort_by(|a, b| b.size.cmp(&a.size));
     let len = files.len() + stated.len();
-    notify(serde_json::json!((0, len)));
+    notify(Progress::CountOf {
+        done: 0,
+        total: len as u64,
+    });
     if len == 0 {
         return Ok(Vec::new());
     }
     if files.is_empty() {
-        notify(serde_json::json!((len, len)));
+        notify(Progress::CountOf {
+            done: len as u64,
+            total: len as u64,
+        });
         return Ok(stated);
     }
 
@@ -594,7 +600,10 @@ pub async fn check_local_files(
         finished += 1;
         finished_hashes.push(res);
         if finished == len || last_notify.elapsed() >= PROGRESS_FRAME {
-            notify(serde_json::json!((finished, len)));
+            notify(Progress::CountOf {
+                done: finished as u64,
+                total: len as u64,
+            });
             last_notify = Instant::now();
         }
     }
@@ -1160,8 +1169,14 @@ mod tests {
         assert!(!scanned[0].unwritable);
         assert_eq!(scanned[0].hash, "5d41402abc4b2a76b9719d911017c592");
         let reports = reports.lock().unwrap();
-        assert_eq!(reports.first(), Some(&serde_json::json!((0, 1))));
-        assert_eq!(reports.last(), Some(&serde_json::json!((1, 1))));
+        assert_eq!(
+            reports.first(),
+            Some(&Progress::CountOf { done: 0, total: 1 })
+        );
+        assert_eq!(
+            reports.last(),
+            Some(&Progress::CountOf { done: 1, total: 1 })
+        );
 
         let mut perms = std::fs::metadata(&path).unwrap().permissions();
         perms.set_readonly(false);
@@ -1227,10 +1242,7 @@ mod tests {
     fn parse_range_keeps_open_end() {
         assert_eq!(parse_range_string("0-"), vec![(0, u32::MAX)]);
         assert_eq!(parse_range_string("100-200"), vec![(100, 200)]);
-        assert_eq!(
-            insight_range_vec(Some("10-14"), 0, 5),
-            vec![(10, 14)]
-        );
+        assert_eq!(insight_range_vec(Some("10-14"), 0, 5), vec![(10, 14)]);
         assert_eq!(insight_range_vec(None, 10, 5), vec![(10, 14)]);
     }
 }

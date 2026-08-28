@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use windows::Win32::System::Threading::CREATE_NO_WINDOW;
 
 use crate::fs::{create_http_stream, create_local_stream, create_target_file, progressed_copy};
-use crate::ipc::ProgressNotify;
+use crate::ipc::{Progress, ProgressNotify};
 
 pub async fn install_runtime(
     tag: String,
@@ -118,7 +118,10 @@ pub async fn install_dotnet(
         (stream, len.try_into().unwrap_or(0))
     };
     let progress_noti = move |downloaded: usize| {
-        notify(serde_json::json!((downloaded, len)));
+        notify(Progress::BytesOf {
+            done: downloaded as u64,
+            total: len as u64,
+        });
     };
     progressed_copy(stream.as_mut(), &mut target, &progress_noti).await?;
     // close streams
@@ -205,7 +208,10 @@ pub async fn install_vcredist(
         .await
         .context("CREATE_TARGET_FILE_ERR")?;
     let progress_noti = move |downloaded: usize| {
-        notify(serde_json::json!((downloaded, len)));
+        notify(Progress::BytesOf {
+            done: downloaded as u64,
+            total: len as u64,
+        });
     };
     progressed_copy(stream.as_mut(), &mut target, &progress_noti).await?;
     // close streams

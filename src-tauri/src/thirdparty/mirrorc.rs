@@ -5,7 +5,7 @@ use anyhow::Context;
 use crate::{
     fs::{create_http_stream, create_target_file, prepare_target, progressed_copy},
     installer::uninstall::DELETE_SELF_ON_EXIT_PATH,
-    ipc::ProgressNotify,
+    ipc::{Progress, ProgressNotify},
     utils::{
         error::{return_ta_result, IntoTAResult, TAResult},
         metadata::RepoMetadata,
@@ -141,9 +141,11 @@ pub fn run_mirrorc_install_sync(
         std::io::copy(&mut file, &mut out_file)
             .into_ta_result()
             .context(format!("WRITE_FILE_ERR: {}", out_path.display()))?;
-        notify(
-            serde_json::json!({"type": "extract", "file": file_name, "count": i, "total": total_len}),
-        );
+        notify(Progress::Extract {
+            file: file_name,
+            done: i as u64,
+            total: total_len as u64,
+        });
     }
 
     // delete files in target_path that are not in the changeset
@@ -155,20 +157,20 @@ pub fn run_mirrorc_install_sync(
                 out_path.push(strip_path);
                 if out_path.exists() {
                     std::fs::remove_file(out_path).into_ta_result()?;
-                    notify(serde_json::json!({"type": "delete", "file": strip_path}));
+                    notify(Progress::Delete(strip_path.to_string()));
                 }
             }
         }
     }
     if let Some(metadata) = metadata.as_ref() {
         // delete files in target_path that are not in the metadata
-        if let Some(deletes) = metadata.deletes.as_ref() {
-            for file in deletes {
+        if !metadata.deletes.is_empty() {
+            for file in &metadata.deletes {
                 let mut out_path = std::path::PathBuf::from(target_path);
                 out_path.push(file.clone());
                 if out_path.exists() {
                     std::fs::remove_file(out_path).into_ta_result()?;
-                    notify(serde_json::json!({"type": "delete", "file": file}));
+                    notify(Progress::Delete(file.clone()));
                 }
             }
         }
@@ -224,7 +226,10 @@ pub async fn run_mirrorc_download(
     prepare_target(zip_path).await?;
     let mut target = create_target_file(zip_path).await?;
     let on_progress = |downloaded| {
-        notify(serde_json::json!({"type": "download", "downloaded": downloaded, "total": len}));
+        notify(Progress::BytesOf {
+            done: downloaded as u64,
+            total: len as u64,
+        });
     };
     progressed_copy(stream.as_mut(), &mut target, &on_progress)
         .await

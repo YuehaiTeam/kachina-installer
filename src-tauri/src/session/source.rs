@@ -16,9 +16,9 @@ use crate::session::plan::HashKey;
 use crate::session::plugin::{
     clean_plugin_url, forced_plugin_name, is_github_source, resolve_github_file_url,
 };
-use crate::session::types::DfsMetadata;
 use crate::session::ui::{PluginArgs, PluginHost, PluginResult};
 use crate::utils::error::IntoAnyhow;
+use crate::utils::metadata::{FileMeta, RepoMetadata};
 use crate::REQUEST_CLIENT;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -287,7 +287,7 @@ pub fn needs_js_plugin(source: &str) -> bool {
     matches!(parse_source(source), Ok(ParsedSource::Plugin { .. }))
 }
 
-async fn fetch_hashed_metadata(url: &str) -> anyhow::Result<DfsMetadata> {
+async fn fetch_hashed_metadata(url: &str) -> anyhow::Result<RepoMetadata> {
     let res = REQUEST_CLIENT
         .get(url)
         .send()
@@ -303,7 +303,7 @@ async fn fetch_hashed_metadata(url: &str) -> anyhow::Result<DfsMetadata> {
     serde_json::from_str(&body).map_err(|e| hide(error::META_FAILED, e))
 }
 
-async fn fetch_dfs2_metadata(api_url: &str, ctx: &mut SourceCtx) -> anyhow::Result<DfsMetadata> {
+async fn fetch_dfs2_metadata(api_url: &str, ctx: &mut SourceCtx) -> anyhow::Result<RepoMetadata> {
     let dfs2 = get_dfs2_metadata(api_url.to_string())
         .await
         .map_err(|e| hide(error::META_FAILED, e))?;
@@ -324,7 +324,7 @@ async fn fetch_dfs2_metadata(api_url: &str, ctx: &mut SourceCtx) -> anyhow::Resu
     }
     ctx.installer_end = data.installer_end as usize;
     ctx.resource_version = Some(dfs2.resource_version);
-    serde_json::from_value(data.metadata).map_err(|e| hide(error::META_FAILED, e))
+    Ok(data.metadata)
 }
 
 async fn refresh_packed_index(
@@ -333,7 +333,7 @@ async fn refresh_packed_index(
     remote: RemoteKind,
     extras: Option<&str>,
     ctx: &mut SourceCtx,
-) -> anyhow::Result<DfsMetadata> {
+) -> anyhow::Result<RepoMetadata> {
     let binurl = if remote == RemoteKind::Direct {
         apiurl.to_string()
     } else {
@@ -382,8 +382,11 @@ async fn refresh_packed_index(
         offset += size;
         match name.as_str() {
             "\0META" => {
+                // 走 from_str：RepoMetadata 的反序列化按 Deserializer 类型单态化，
+                // 只用 StrRead 一种可省掉整棵 SliceRead 副本。
+                let text = std::str::from_utf8(data).map_err(|e| hide(error::META_FAILED, e))?;
                 metadata = Some(
-                    serde_json::from_slice::<DfsMetadata>(data)
+                    serde_json::from_str::<RepoMetadata>(text)
                         .map_err(|e| hide(error::META_FAILED, e))?,
                 );
             }
@@ -432,7 +435,7 @@ pub async fn fetch_metadata(
     source: &str,
     extras: Option<&str>,
     ctx: &mut SourceCtx,
-) -> anyhow::Result<DfsMetadata> {
+) -> anyhow::Result<RepoMetadata> {
     let parsed = parse_source(source)?;
     ctx.parsed = Some(parsed.clone());
     match parsed {
@@ -545,7 +548,13 @@ pub async fn resolve_file_location(
                         } else {
                             resolve_dfs_file_url(url, extras, Some(file.size), file.offset).await?
                         };
-                        Ok(FileLocation::remote(full, file.offset, file.size, false, None))
+                        Ok(FileLocation::remote(
+                            full,
+                            file.offset,
+                            file.size,
+                            false,
+                            None,
+                        ))
                     } else if installer {
                         let full = if *remote == RemoteKind::Direct {
                             url.clone()
@@ -861,7 +870,7 @@ async fn fetch_plugin_metadata(
     raw: &str,
     extras: Option<&str>,
     ctx: &mut SourceCtx,
-) -> anyhow::Result<DfsMetadata> {
+) -> anyhow::Result<RepoMetadata> {
     let clean = clean_plugin_url(raw);
     match plugin_call(
         ctx,
@@ -876,7 +885,9 @@ async fn fetch_plugin_metadata(
     )
     .await?
     {
-        PluginResult::Value(data) if !data.is_null() => apply_plugin_metadata(ctx, data),
+        PluginResult::Value(data) if data != "null" && !data.is_empty() => {
+            apply_plugin_metadata(ctx, data)
+        }
         PluginResult::Unimplemented | PluginResult::Value(_) => {
             let url = plugin_chunk_url(ctx, name, raw, "").await?;
             refresh_packed_index(raw, &url, RemoteKind::Direct, extras, ctx).await
@@ -884,8 +895,8 @@ async fn fetch_plugin_metadata(
     }
 }
 
-fn apply_plugin_metadata(ctx: &mut SourceCtx, data: Value) -> anyhow::Result<DfsMetadata> {
-    let data: Dfs2Data = serde_json::from_value(data).map_err(|e| hide(error::META_FAILED, e))?;
+fn apply_plugin_metadata(ctx: &mut SourceCtx, data: String) -> anyhow::Result<RepoMetadata> {
+    let data: Dfs2Data = serde_json::from_str(&data).map_err(|e| hide(error::META_FAILED, e))?;
     ctx.index.clear();
     for (name, info) in data.index {
         ctx.index.insert(
@@ -899,7 +910,7 @@ fn apply_plugin_metadata(ctx: &mut SourceCtx, data: Value) -> anyhow::Result<Dfs
         );
     }
     ctx.installer_end = data.installer_end as usize;
-    serde_json::from_value(data.metadata).map_err(|e| hide(error::META_FAILED, e))
+    Ok(data.metadata)
 }
 
 async fn resolve_plugin_location(
@@ -974,6 +985,11 @@ async fn ensure_plugin_session(
     }
 }
 
+#[derive(serde::Deserialize)]
+struct PluginChunkUrl {
+    url: String,
+}
+
 async fn plugin_chunk_url(
     ctx: &SourceCtx,
     name: &str,
@@ -994,11 +1010,10 @@ async fn plugin_chunk_url(
     .await?
     {
         PluginResult::Unimplemented => Err(error::plugin_not_found(name)),
-        PluginResult::Value(data) => data
-            .get("url")
-            .and_then(|v| v.as_str())
+        PluginResult::Value(data) => serde_json::from_str::<PluginChunkUrl>(&data)
+            .ok()
+            .map(|c| c.url)
             .filter(|s| !s.is_empty())
-            .map(|s| s.to_string())
             .ok_or_else(|| {
                 hide(
                     error::NO_DOWNLOAD_NODE,
@@ -1015,7 +1030,7 @@ async fn plugin_call(ctx: &SourceCtx, args: PluginArgs) -> anyhow::Result<Plugin
     host.call(args).await
 }
 
-pub fn hash_of_item(item: &crate::session::plan::HashInfo, key: HashKey) -> Option<String> {
+pub fn hash_of_item(item: &FileMeta, key: HashKey) -> Option<String> {
     match key {
         HashKey::Md5 => item.md5.clone(),
         HashKey::Xxh => item.xxh.clone(),
