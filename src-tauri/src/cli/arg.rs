@@ -1,48 +1,27 @@
 use std::path::PathBuf;
 
-use clap::Subcommand;
-
-#[derive(Debug, Clone, clap::Args, serde::Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize)]
 pub struct InstallArgs {
-    #[clap(short = 'D', help = "Install directory")]
     pub target: Option<PathBuf>,
-    #[clap(short = 'I', help = "Non-interactive install")]
     pub non_interactive: bool,
-    #[clap(short = 'S', help = "Silent install")]
     pub silent: bool,
-    #[clap(short = 'O', help = "Force online install")]
     pub online: bool,
-    #[clap(short = 'U', help = "Uninstall")]
     pub uninstall: bool,
-    // override install source
-    #[clap(long, hide = true)]
     pub source: Option<String>,
-    // dfs extra data
-    #[clap(long, hide = true)]
     pub dfs_extras: Option<String>,
-    // override mirrorc cdk
-    #[clap(long, hide = true)]
     pub mirrorc_cdk: Option<String>,
-    /// Write session dump JSON here (dev / tests only)
-    #[clap(long, hide = true)]
     pub dump_dir: Option<PathBuf>,
 }
 
-#[derive(Debug, Clone, clap::Args)]
+#[derive(Debug, Clone)]
 pub struct UacArgs {
     pub pipe_id: String,
 }
 
-#[derive(Subcommand, Clone, Debug)]
+#[derive(Debug, Clone)]
 pub enum Command {
-    #[clap(hide = true)]
     Install(InstallArgs),
-    #[clap(hide = true)]
     InstallWebview2,
-    #[clap(hide = true)]
     NativeUi(InstallArgs),
-    #[clap(hide = true)]
     HeadlessUac(UacArgs),
-    #[clap(external_subcommand)]
-    Other(Vec<String>),
 }

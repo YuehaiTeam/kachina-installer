@@ -5,6 +5,8 @@ import os from 'os';
 
 export const dev = !!process.env.DEV;
 export const FLAGS = dev ? '-I' : '-S';
+// NSIS-style switch; keeps the slash-alias path covered end-to-end
+export const FLAGS_SLASH = dev ? '-I' : '/S';
 
 export function getTestDir(name) {
   return path.join(os.tmpdir(), `kachina-test-${name}-${Date.now()}`);
