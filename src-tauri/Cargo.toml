@@ -29,7 +29,6 @@ reqwest = { version = "0.12", default-features = false, features = [
     "json",
     "native-tls",
     "native-tls-alpn",
-    "charset",
     "gzip",
     "zstd",
     "stream",
@@ -93,7 +92,6 @@ reqwest-middleware = { version = "0.4", features = ["json"] }
 tracing = "0.1"
 whoami = "1.6.0"
 win32-version-info = "0.2.0"
-multer = "3.1.0"
 bytes = "1.10.1"
 url = "2.5"
 base64 = "0.22.1"
