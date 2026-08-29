@@ -24,10 +24,10 @@ use windows::Win32::UI::WindowsAndMessaging::{
     GetSystemMetrics, GetWindowLongPtrW, LoadCursorW, PostQuitMessage, RegisterClassExW,
     SendMessageW, SetWindowLongPtrW, SetWindowPos, SetWindowTextW, ShowWindow, GWLP_USERDATA,
     GWL_STYLE, HICON, ICON_BIG, ICON_SMALL, IDC_ARROW, SM_CXSCREEN, SM_CYSCREEN, SWP_FRAMECHANGED,
-    SWP_NOMOVE, SWP_NOZORDER, SW_HIDE, SW_MINIMIZE, SW_SHOW, WM_CLOSE, WM_DESTROY, WM_SETICON,
-    WM_SETTINGCHANGE, WNDCLASSEXW, WS_CAPTION, WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP,
-    WS_EX_TOOLWINDOW, WS_MAXIMIZE, WS_MINIMIZE, WS_MINIMIZEBOX, WS_OVERLAPPED, WS_POPUP,
-    WS_SYSMENU, WS_VISIBLE,
+    SWP_NOMOVE, SWP_NOZORDER, SW_HIDE, SW_MINIMIZE, SW_SHOW, SW_SHOWNA, WM_CLOSE, WM_DESTROY,
+    WM_SETICON, WM_SETTINGCHANGE, WNDCLASSEXW, WS_CAPTION, WS_EX_NOACTIVATE,
+    WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_MAXIMIZE, WS_MINIMIZE, WS_MINIMIZEBOX,
+    WS_OVERLAPPED, WS_POPUP, WS_SYSMENU, WS_VISIBLE,
 };
 
 use crate::installer::uninstall::delete_self_on_exit;
@@ -68,6 +68,7 @@ impl HasDisplayHandle for HwndParent {
 use std::num::NonZeroIsize;
 
 const CLASS: PCWSTR = w!("KachinaInstaller");
+const PLUGIN_CLASS: PCWSTR = w!("KachinaPluginHost");
 
 pub fn primary_dpi() -> u32 {
     unsafe {
