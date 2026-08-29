@@ -103,7 +103,7 @@ hyper = { version = "1", features = ["client", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 http-body-util = "0.1"
 
-zstd = "0.13"
+zstd = { version = "0.13", default-features = false }
 regex-lite = "0.1.9"
 
 [build-dependencies]
