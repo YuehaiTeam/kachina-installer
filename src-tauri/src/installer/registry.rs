@@ -70,13 +70,30 @@ pub async fn write_registry_raw(
     publisher: String,
 ) -> Result<()> {
     let elevated = check_elevated().unwrap_or(false);
-    let hive = if elevated {
+
+    let key_path = format!("SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\{reg_name}");
+
+    // If the key already exists (e.g. installed by an earlier version), update it
+    // in place so updates never leave a stale or duplicate entry in the other hive.
+    let hive = if windows_registry::LOCAL_MACHINE
+        .options()
+        .read()
+        .open(&key_path)
+        .is_ok()
+    {
+        windows_registry::LOCAL_MACHINE
+    } else if windows_registry::CURRENT_USER
+        .options()
+        .read()
+        .open(&key_path)
+        .is_ok()
+    {
+        windows_registry::CURRENT_USER
+    } else if elevated {
         windows_registry::LOCAL_MACHINE
     } else {
         windows_registry::CURRENT_USER
     };
-
-    let key_path = format!("SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\{reg_name}");
 
     let key = hive.create(&key_path).context("OPEN_REG_ERR")?;
     {

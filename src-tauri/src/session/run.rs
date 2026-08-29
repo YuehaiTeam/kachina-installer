@@ -1938,7 +1938,12 @@ async fn finish_install(
         .await
         {
             tracing::warn!("write registry failed: {err:#}");
-            ui.alert("出错了", &format!("写入注册表失败: {err}")).await;
+            // Installers and REG-located updates keep the error dialog (previous
+            // behavior); an updater run from the install dir only logs, since the
+            // failure is not actionable there (e.g. stale HKLM key without elevation).
+            if !settings.is_update || config.install_path_source.starts_with("REG") {
+                ui.alert("出错了", &format!("写入注册表失败: {err}")).await;
+            }
         }
     }
     emit_insight(ui, project, settings, config, "finish", None, false);
