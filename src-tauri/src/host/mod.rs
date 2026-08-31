@@ -16,7 +16,7 @@ use windows::Win32::System::Threading::GetCurrentThreadId;
 use windows::Win32::UI::HiDpi::{SetProcessDpiAwareness, PROCESS_PER_MONITOR_DPI_AWARE};
 use windows::Win32::UI::WindowsAndMessaging::{
     DispatchMessageW, GetMessageW, IsWindow, PostThreadMessageW, TranslateMessage, MSG, WM_APP,
-    WM_QUIT,
+    WM_QUIT, WM_SETTINGCHANGE,
 };
 
 use crate::cli::arg::InstallArgs;
@@ -169,7 +169,7 @@ pub fn run(args: InstallArgs, preset: Option<SessionInput>) -> anyhow::Result<()
 
     tokio::spawn({
         async move {
-            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
             if APP_BOOT_SIGNAL.load(std::sync::atomic::Ordering::SeqCst) {
                 tracing::info!("Webview2 is alive");
                 return;
@@ -224,6 +224,12 @@ pub fn run(args: InstallArgs, preset: Option<SessionInput>) -> anyhow::Result<()
                 if msg.message == WM_QUIT {
                     delete_self_on_exit();
                     break Ok(());
+                }
+                if msg.message == WM_SETTINGCHANGE && window::is_color_theme_change(msg.lParam) {
+                    let dark = crate::utils::gui::is_dark_mode().unwrap_or(false);
+                    if let Err(err) = webview.apply(hwnd, UiAction::SetBackground { dark }) {
+                        tracing::warn!("ui action failed: {err}");
+                    }
                 }
                 if msg.message != WM_APP {
                     unsafe {
@@ -326,7 +332,6 @@ fn plugin_runtime_setup(
     let start = format!("{UI_HOST}/index.html?pluginHost=1");
     let webview = webview::attach(hwnd, handle.clone(), ctx, is_win11, &start)
         .context("attach hidden plugin webview")?;
-    window::set_visible(hwnd, false);
     Ok((handle, rx, hwnd, webview))
 }
 
@@ -353,6 +358,12 @@ fn plugin_runtime_loop(
             _ => {
                 if msg.message == WM_QUIT {
                     break;
+                }
+                if msg.message == WM_SETTINGCHANGE && window::is_color_theme_change(msg.lParam) {
+                    let dark = crate::utils::gui::is_dark_mode().unwrap_or(false);
+                    if let Err(err) = webview.apply(hwnd, UiAction::SetBackground { dark }) {
+                        tracing::warn!("plugin host ui action failed: {err}");
+                    }
                 }
                 if msg.message != WM_APP {
                     unsafe {
