@@ -20,6 +20,7 @@ use crate::utils::gui::is_dark_mode;
 pub struct WebViewHost {
     controller: ICoreWebView2Controller,
     webview: ICoreWebView2,
+    mica: bool,
 }
 
 impl WebViewHost {
@@ -59,7 +60,7 @@ impl WebViewHost {
                 resize_controller(&self.controller, hwnd)?;
             }
             UiAction::SetBackground { dark } => {
-                set_background(&self.controller, false, dark)?;
+                set_background(&self.controller, self.mica, dark)?;
             }
         }
         Ok(())
@@ -193,6 +194,7 @@ pub fn attach(
     Ok(WebViewHost {
         controller,
         webview,
+        mica: is_win11,
     })
 }
 

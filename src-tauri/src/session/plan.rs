@@ -107,6 +107,21 @@ pub fn is_under(file: &str, dir: &str) -> bool {
     file == dir || file.starts_with(&format!("{dir}\\"))
 }
 
+/// Strip install_path from a scanned full path, ignoring case and slash style.
+pub fn strip_install_prefix(path: &str, install_path: &str) -> String {
+    let file = normalize_full(path);
+    let dir = normalize_full(install_path);
+    if file == dir {
+        return String::new();
+    }
+    if let Some(rest) = file.strip_prefix(&format!("{dir}\\")) {
+        return rest.replace('\\', "/");
+    }
+    path.replace('\\', "/")
+        .trim_start_matches('/')
+        .to_string()
+}
+
 fn hash_of(info: &FileMeta, key: HashKey) -> Option<&str> {
     match key {
         HashKey::Md5 => info.md5.as_deref(),
@@ -577,5 +592,23 @@ mod tests {
             .unwrap();
         assert!(app.unwritable);
         assert!(!data.unwritable);
+    }
+
+    #[test]
+    fn strip_install_prefix_ignores_case_and_slashes() {
+        assert_eq!(
+            strip_install_prefix(r"C:\App\foo.exe", r"c:\app"),
+            "foo.exe",
+        );
+        assert_eq!(
+            strip_install_prefix(r"C:\App\Sub\a.dll", r"c:/app"),
+            "sub/a.dll",
+        );
+        assert_eq!(
+            strip_install_prefix(r"C:\App\foo.exe", "C:\\App\\"),
+            "foo.exe",
+        );
+        assert_eq!(strip_install_prefix(r"C:\App", r"C:\App"), "");
+        assert_eq!(strip_install_prefix("foo.exe", r"C:\App"), "foo.exe");
     }
 }

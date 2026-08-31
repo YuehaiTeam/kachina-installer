@@ -109,6 +109,7 @@ impl ManagedElevate {
             tracing::info!("Elevate process started");
         }
         let id = uuid::Uuid::new_v4().to_string();
+        let mut rx = self.broadcast_tx.subscribe();
         let _ = self
             .mpsc_tx
             .send(IpcInner {
@@ -116,7 +117,6 @@ impl ManagedElevate {
                 id: id.clone(),
             })
             .await;
-        let mut rx = self.broadcast_tx.subscribe();
         while let Ok(v) = rx.recv().await {
             match v {
                 PipeMsg::Progress(msgid, data) if msgid == id => on_progress(data),
