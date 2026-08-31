@@ -39,6 +39,8 @@ pub struct InstallerInfo {
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct RepoMetadata {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub repo_name: String,
     pub tag_name: String,
     pub hashed: Vec<FileMeta>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -47,8 +49,6 @@ pub struct RepoMetadata {
     pub installer: Option<InstallerInfo>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub deletes: Vec<String>,
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub repo_name: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub packing_info: Vec<Vec<String>>,
 }

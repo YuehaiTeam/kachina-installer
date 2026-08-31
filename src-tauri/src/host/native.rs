@@ -29,7 +29,7 @@ use crate::utils::taskdialog::{
 
 pub enum NativeOutcome {
     Exit,
-    Again,
+    Again { reopen_source: bool },
     Web {
         args: InstallArgs,
         preset: SessionInput,
@@ -94,7 +94,7 @@ pub async fn run(args: InstallArgs) -> anyhow::Result<NativeOutcome> {
         )
         .await?
         {
-            NativeOutcome::Again => Ok(NativeOutcome::Exit),
+            NativeOutcome::Again { .. } => Ok(NativeOutcome::Exit),
             other => Ok(other),
         };
     }
@@ -123,14 +123,19 @@ pub async fn run(args: InstallArgs) -> anyhow::Result<NativeOutcome> {
             && state.source_uri.starts_with("mirrorc://")
             && state.mirrorc_cdk.as_deref().unwrap_or("").is_empty()
         {
-            if !ensure_mirrorc_cdk(&project, &mut state).await {
+            if !ensure_mirrorc_cdk(&project, &mut state, false).await {
                 continue;
             }
         }
 
         let input = state_to_input(&state);
         match finish_action(action, input, args.clone(), &config, &project).await? {
-            NativeOutcome::Again => continue,
+            NativeOutcome::Again { reopen_source } => {
+                if reopen_source {
+                    let _ = ensure_mirrorc_cdk(&project, &mut state, true).await;
+                }
+                continue;
+            }
             other => return Ok(other),
         }
     }
@@ -176,7 +181,7 @@ fn visible_sources(project: &ProjectConfig, current_uri: &str) -> Vec<SourceItem
         SourceField::Single(_) => Vec::new(),
         SourceField::List(list) => list
             .iter()
-            .filter(|s| !s.hidden || s.uri == current_uri)
+            .filter(|s| (!s.hidden || s.uri == current_uri) && !needs_js_plugin(&s.uri))
             .cloned()
             .collect(),
     }
@@ -198,6 +203,9 @@ async fn show_ready_page(
 ) -> anyhow::Result<Option<ReadyAction>> {
     loop {
         let sources = visible_sources(project, &state.source_uri);
+        if !sources.is_empty() && !sources.iter().any(|s| s.uri == state.source_uri) {
+            state.source_uri = sources[0].uri.clone();
+        }
         let default_radio = sources
             .iter()
             .position(|s| s.uri == state.source_uri)
@@ -349,29 +357,47 @@ fn mirrorc_target(app_name: &str) -> String {
     format!("KachinaInstaller_MirrorChyanCDK_{app_name}")
 }
 
-async fn ensure_mirrorc_cdk(project: &ProjectConfig, state: &mut ReadyState) -> bool {
-    if state.mirrorc_cdk.as_deref().unwrap_or("").is_empty() {
-        state.mirrorc_cdk =
-            crate::utils::wincred::wincred_read(&mirrorc_target(&project.app_name)).ok();
+async fn ensure_mirrorc_cdk(
+    project: &ProjectConfig,
+    state: &mut ReadyState,
+    force: bool,
+) -> bool {
+    if !force {
+        if state.mirrorc_cdk.as_deref().unwrap_or("").is_empty() {
+            state.mirrorc_cdk =
+                crate::utils::wincred::wincred_read(&mirrorc_target(&project.app_name)).ok();
+        }
+        if !state.mirrorc_cdk.as_deref().unwrap_or("").is_empty() {
+            return true;
+        }
     }
-    if state.mirrorc_cdk.as_deref().unwrap_or("").is_empty() {
-        let app = project.app_name.clone();
-        let key = tokio::task::spawn_blocking(move || {
-            prompt_text("Mirror酱", &format!("请输入 {app} 的 Mirror酱 CDK"), "")
-        })
-        .await
-        .ok()
-        .flatten();
-        if let Some(key) = key {
+
+    let app = project.app_name.clone();
+    let initial = state.mirrorc_cdk.clone().unwrap_or_default();
+    let key = tokio::task::spawn_blocking(move || {
+        prompt_text("Mirror酱", &format!("请输入 {app} 的 Mirror酱 CDK"), &initial)
+    })
+    .await
+    .ok()
+    .flatten();
+
+    match key {
+        Some(key) if key.is_empty() => {
+            let _ = crate::utils::wincred::wincred_delete(&mirrorc_target(&project.app_name));
+            state.mirrorc_cdk = None;
+            false
+        }
+        Some(key) => {
             let _ = crate::utils::wincred::wincred_write(
                 &mirrorc_target(&project.app_name),
                 &key,
                 "MirrorChyan CDK",
             );
             state.mirrorc_cdk = Some(key);
+            true
         }
+        None => !state.mirrorc_cdk.as_deref().unwrap_or("").is_empty(),
     }
-    !state.mirrorc_cdk.as_deref().unwrap_or("").is_empty()
 }
 
 async fn finish_action(
@@ -429,13 +455,12 @@ async fn native_session(
     dialog.close().await;
 
     match result {
-        Ok(result) if result.cancelled => Ok(NativeOutcome::Again),
+        Ok(result) if result.cancelled => Ok(NativeOutcome::Again { reopen_source: false }),
         Ok(result) => {
             show_finish(project, &input, &result).await;
             Ok(NativeOutcome::Exit)
         }
         Err(err) => {
-            let _ = reopen;
             // native 路径不经过 TACommandError::serialize，在此上报
             if crate::session::error::classify(&err).report {
                 crate::utils::sentry::capture_anyhow(&err);
@@ -445,7 +470,7 @@ async fn native_session(
                 .set_description(format!("{err}"))
                 .set_level(rfd::MessageLevel::Error)
                 .show();
-            Ok(NativeOutcome::Again)
+            Ok(NativeOutcome::Again { reopen_source: reopen })
         }
     }
 }

@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -217,14 +218,22 @@ pub struct PluginHub {
 impl PluginHub {
     pub async fn wait(&self, id: String) -> PluginAnswer {
         let (tx, rx) = oneshot::channel();
-        self.pending.lock().await.insert(id, tx);
-        rx.await.unwrap_or(PluginAnswer {
+        self.pending.lock().await.insert(id.clone(), tx);
+        let failed = || PluginAnswer {
             id: String::new(),
             ok: false,
             data: None,
             error: Some("插件无响应".to_string()),
             unimplemented: false,
-        })
+        };
+        match tokio::time::timeout(Duration::from_secs(60), rx).await {
+            Ok(Ok(answer)) => answer,
+            Ok(Err(_)) => failed(),
+            Err(_) => {
+                self.pending.lock().await.remove(&id);
+                failed()
+            }
+        }
     }
 
     pub async fn answer(&self, reply: PluginAnswer) -> bool {
@@ -322,12 +331,18 @@ impl SessionUi for GuiUi {
     }
 
     async fn alert(&self, title: &str, message: &str) {
-        rfd::MessageDialog::new()
-            .set_title(title)
-            .set_description(message)
-            .set_level(rfd::MessageLevel::Error)
-            .set_parent(&self.window.parent())
-            .show();
+        let title = title.to_string();
+        let message = message.to_string();
+        let parent = self.window.parent();
+        let _ = tokio::task::spawn_blocking(move || {
+            rfd::MessageDialog::new()
+                .set_title(&title)
+                .set_description(&message)
+                .set_level(rfd::MessageLevel::Error)
+                .set_parent(&parent)
+                .show();
+        })
+        .await;
     }
 
     fn insight(&self, _url: &str, event: &str, data: Option<Value>) {

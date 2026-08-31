@@ -769,17 +769,16 @@ fn parse_range_string(range: &str) -> Vec<(u32, u32)> {
 }
 
 fn insight_range_vec(request_range: Option<&str>, offset: usize, size: usize) -> Vec<(u32, u32)> {
+    if size == 0 {
+        return vec![];
+    }
     if let Some(range) = request_range {
         let parsed = parse_range_string(range);
         if !parsed.is_empty() {
             return parsed;
         }
     }
-    if size > 0 {
-        vec![(offset as u32, (offset + size - 1) as u32)]
-    } else {
-        vec![]
-    }
+    vec![(offset as u32, (offset + size - 1) as u32)]
 }
 
 pub async fn create_multi_http_stream(
@@ -1244,5 +1243,7 @@ mod tests {
         assert_eq!(parse_range_string("100-200"), vec![(100, 200)]);
         assert_eq!(insight_range_vec(Some("10-14"), 0, 5), vec![(10, 14)]);
         assert_eq!(insight_range_vec(None, 10, 5), vec![(10, 14)]);
+        assert_eq!(insight_range_vec(Some("0-"), 0, 0), vec![]);
+        assert_eq!(insight_range_vec(None, 0, 0), vec![]);
     }
 }

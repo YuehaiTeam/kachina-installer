@@ -208,7 +208,7 @@ async fn gui_entry(args: InstallArgs) {
 
 async fn native_entry(args: InstallArgs) {
     match host::native::run(args).await {
-        Ok(host::native::NativeOutcome::Exit) | Ok(host::native::NativeOutcome::Again) => {}
+        Ok(host::native::NativeOutcome::Exit) | Ok(host::native::NativeOutcome::Again { .. }) => {}
         Ok(host::native::NativeOutcome::Web { args, preset }) => host_main(args, Some(preset)),
         Err(err) => {
             tracing::error!("native ui failed: {err:#}");

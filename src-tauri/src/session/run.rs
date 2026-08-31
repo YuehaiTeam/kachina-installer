@@ -26,7 +26,8 @@ use crate::session::dump::session_dump;
 use crate::session::merge::{dfs2_ranges, file_mode, plan_tasks, FileMode, FilePos, InstallTask};
 use crate::session::plan::{
     build_plan, collect_skip_hash, files_to_probe_writable, find_local, join_install,
-    mark_unwritable, HashKey, InstallPlan, LocalFile, PlanAction, PlanInput, SkipReason,
+    mark_unwritable, strip_install_prefix, HashKey, InstallPlan, LocalFile, PlanAction, PlanInput,
+    SkipReason,
 };
 use crate::session::source::{
     cleanup_dfs2, ensure_dfs2_session, fetch_metadata, hash_of_item, needs_js_plugin, parse_source,
@@ -954,11 +955,7 @@ async fn scan_local(
     Ok(scanned
         .into_iter()
         .map(|e| {
-            let file_name = e
-                .file_name
-                .trim_start_matches(&settings.install_path)
-                .trim_start_matches(['\\', '/'])
-                .to_string();
+            let file_name = strip_install_prefix(&e.file_name, &settings.install_path);
             LocalFile {
                 file_name,
                 hash: e.hash,

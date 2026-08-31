@@ -26,9 +26,6 @@ pub fn on_message(ctx: &Arc<HostCtx>, handle: &HostHandle, json: &str) {
     tokio::spawn(async move {
         let closing = msg.cmd == "window_close" || msg.cmd == "launch_and_exit";
         let result = dispatch(&ctx, &handle, &msg.cmd, msg.args).await;
-        if closing {
-            return;
-        }
         let (ok, data) = match result {
             Ok(data) => (true, data),
             Err(err) => (
@@ -44,6 +41,9 @@ pub fn on_message(ctx: &Arc<HostCtx>, handle: &HostHandle, json: &str) {
             ok,
             data,
         });
+        if closing && ok {
+            handle.close();
+        }
     });
 }
 
@@ -53,7 +53,19 @@ async fn dispatch(
     cmd: &str,
     args: Value,
 ) -> Result<Value, TACommandError> {
-    if ctx.plugin_runtime && matches!(cmd, "start_install" | "start_uninstall" | "window_show") {
+    // Plugin host is default-deny: third-party plugins run in this WebView later.
+    if ctx.plugin_runtime
+        && !matches!(
+            cmd,
+            "plugin_host_ready"
+                | "answer_session_plugin"
+                | "http_get_request"
+                | "log"
+                | "warn"
+                | "error"
+                | "launch"
+        )
+    {
         return Err(TACommandError::new(anyhow::anyhow!(
             "command disabled in plugin runtime: {cmd}"
         )));
@@ -175,12 +187,17 @@ async fn dispatch(
             ok(crate::installer::registry::read_uninstall_metadata(reg_name).await?)
         }
         "launch" => {
-            crate::installer::launch(req_str(&args, &["path"])?).await;
+            let path = req_str(&args, &["path"])?;
+            if ctx.plugin_runtime && !is_http_or_https_url(&path) {
+                return Err(TACommandError::new(anyhow::anyhow!(
+                    "command disabled in plugin runtime: {cmd} (only http(s) URLs allowed)"
+                )));
+            }
+            crate::installer::launch(path).await;
             ok(())
         }
         "launch_and_exit" => {
             crate::installer::launch(req_str(&args, &["path"])?).await;
-            handle.close();
             ok(())
         }
         "error_dialog" => {
@@ -215,7 +232,6 @@ async fn dispatch(
             ok(())
         }
         "window_close" => {
-            handle.close();
             ok(())
         }
         "window_minimize" => {
@@ -234,6 +250,11 @@ async fn dispatch(
             "unknown command: {other}"
         ))),
     }
+}
+
+fn is_http_or_https_url(path: &str) -> bool {
+    let lower = path.trim().to_ascii_lowercase();
+    lower.starts_with("http://") || lower.starts_with("https://")
 }
 
 fn parse_session_input(

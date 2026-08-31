@@ -584,10 +584,8 @@ unsafe extern "system" fn prompt_wndproc(
                         .trim_end_matches('\0')
                         .trim()
                         .to_string();
-                    if !text.is_empty() {
-                        unsafe {
-                            *(*state).out = Some(text);
-                        }
+                    unsafe {
+                        *(*state).out = Some(text);
                     }
                 }
                 unsafe {

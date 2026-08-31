@@ -149,9 +149,9 @@ pub fn create_hidden() -> anyhow::Result<HWND> {
     let hinstance = unsafe { GetModuleHandleW(None) }?.into();
     let class = WNDCLASSEXW {
         cbSize: size_of::<WNDCLASSEXW>() as u32,
-        lpfnWndProc: Some(wndproc),
+        lpfnWndProc: Some(plugin_wndproc),
         hInstance: hinstance,
-        lpszClassName: CLASS,
+        lpszClassName: PLUGIN_CLASS,
         hCursor: unsafe { LoadCursorW(None, IDC_ARROW) }?,
         hbrBackground: HBRUSH::default(),
         ..Default::default()
@@ -161,7 +161,7 @@ pub fn create_hidden() -> anyhow::Result<HWND> {
     let hwnd = unsafe {
         CreateWindowExW(
             WS_EX_NOREDIRECTIONBITMAP | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
-            CLASS,
+            PLUGIN_CLASS,
             w!(" "),
             WS_POPUP,
             0,
@@ -175,7 +175,9 @@ pub fn create_hidden() -> anyhow::Result<HWND> {
         )
     }
     .context("CreateWindowExW hidden")?;
-    set_visible(hwnd, false);
+    unsafe {
+        let _ = ShowWindow(hwnd, SW_SHOWNA);
+    }
     Ok(hwnd)
 }
 
@@ -324,6 +326,32 @@ pub fn client_size(hwnd: HWND) -> (i32, i32) {
     (rect.right - rect.left, rect.bottom - rect.top)
 }
 
+pub fn is_color_theme_change(lparam: LPARAM) -> bool {
+    if lparam.0 == 0 {
+        return false;
+    }
+    let name = PCWSTR(lparam.0 as *const u16);
+    if name.is_null() {
+        return false;
+    }
+    const MAX: usize = 64;
+    let mut buf = [0u16; MAX];
+    unsafe {
+        for i in 0..MAX {
+            let c = *name.as_ptr().add(i);
+            if c == 0 {
+                if i == 0 {
+                    return false;
+                }
+                return String::from_utf16_lossy(&buf[..i])
+                    .eq_ignore_ascii_case("ImmersiveColorSet");
+            }
+            buf[i] = c;
+        }
+    }
+    false
+}
+
 extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     match msg {
         WM_CLOSE => {
@@ -337,7 +365,34 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
             unsafe { PostQuitMessage(0) };
             LRESULT(0)
         }
-        WM_SETTINGCHANGE => LRESULT(0),
+        WM_SETTINGCHANGE => {
+            if is_color_theme_change(lparam) {
+                apply_mica(hwnd);
+            }
+            unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
+        }
+        _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
+    }
+}
+
+extern "system" fn plugin_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    match msg {
+        WM_CLOSE => {
+            unsafe {
+                let _ = DestroyWindow(hwnd);
+            }
+            LRESULT(0)
+        }
+        WM_DESTROY => {
+            unsafe { PostQuitMessage(0) };
+            LRESULT(0)
+        }
+        WM_SETTINGCHANGE => {
+            if is_color_theme_change(lparam) {
+                apply_mica(hwnd);
+            }
+            unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
+        }
         _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
     }
 }
