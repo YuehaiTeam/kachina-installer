@@ -38,7 +38,7 @@ installer 二进制中存在三块"付了钱没用上"的依赖代码：
 
 ## Consequences
 
-- DEBUG 及以下事件在 `enabled()` 全局挡掉，事件不再构造。此前也无任何消费者（fmt 层被 InfoFilter 过滤、BreadcrumbLayer 内部丢弃），语义等价但省了运行时开销；`sentry.rs` 内部的 `tracing::debug!` 自此为纯 no-op。
+- DEBUG 及以下事件在 `enabled()` 全局挡掉，事件不再构造。此前也无任何消费者（fmt 层被 InfoFilter 过滤、BreadcrumbLayer 内部丢弃），语义等价但省了运行时开销；`sentry.rs` 内部的 `tracing::debug!` 因此为纯 no-op。
 - 日志行格式从 tracing-subscriber fmt 默认样式变为固定的 `<RFC3339毫秒>Z <LEVEL> <target>: <message>`，字段以 `key=value` 追加；信息量等价，样式不再可配。
 - 未来若引入 span，`LogSubscriber` 会静默忽略（发号但不记录），需扩展它或重新评估 registry。
 - Mirror酱 若未来改用非 Deflate 压缩方法，解压在运行时以 unsupported-method 报错，需回开对应 zip feature。
