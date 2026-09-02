@@ -8,8 +8,10 @@ use serde_json::Value;
 use tokio::sync::{oneshot, Mutex};
 
 use crate::host::HostHandle;
-
-use super::types::{PluginEvent, ProgressEvent, PromptEvent};
+use crate::session::state::{Phase, Progress, Prompt, UiState};
+use crate::session::types::{PluginEvent, ProgressEvent, PromptEvent};
+use crate::utils::code::{Coded, Extracted};
+use crate::utils::i18n::{self, format_size};
 
 #[derive(Debug, Clone, Copy)]
 pub enum PromptKind {
@@ -39,9 +41,8 @@ pub struct PluginArgs {
 }
 
 pub enum PluginResult {
-    /// 插件回复的原始 JSON 文本。不解成 `Value`：消费端各自 `from_str` 成自己的
-    /// 类型，反序列化按 Deserializer 类型单态化，经 Value 中转会为每个目标类型
-    /// 多留一整棵副本（`Dfs2Data` 里的 `RepoMetadata` 就是一棵 15KiB 的）。
+    /// Plugin reply JSON text. Not decoded to `Value`: consumers `from_str`
+    /// into their own type so deserialization monomorphizes on the Deserializer.
     Value(String),
     Unimplemented,
 }
@@ -53,17 +54,33 @@ pub trait PluginHost: Send + Sync {
 
 #[async_trait]
 pub trait SessionUi: Send + Sync {
-    async fn confirm(&self, kind: PromptKind, title: &str, message: &str) -> bool;
-    fn progress(&self, event: ProgressEvent);
-    async fn alert(&self, title: &str, message: &str) {
-        tracing::error!("{title}: {message}");
-    }
-    fn insight(&self, _url: &str, event: &str, data: Option<Value>) {
-        tracing::info!("insight {event} {data:?}");
-    }
-    fn reopen_source(&self) {}
+    fn state(&self, state: &UiState);
+    async fn confirm(&self, prompt: Prompt) -> bool;
+    fn notify(&self, coded: &Coded);
     fn plugin_host(&self) -> Option<Arc<dyn PluginHost>> {
         None
+    }
+
+    /// Step-2 intermediate: `run.rs` does not hold `UiSession` yet.
+    fn progress(
+        &self,
+        sub_step: u32,
+        percent: f64,
+        stage: &'static str,
+        subject: Option<&str>,
+        done: Option<u64>,
+        total: Option<u64>,
+    ) {
+        let mut state = UiState::default();
+        state.phase = Phase::Running(Progress {
+            sub_step,
+            percent,
+            stage,
+            subject: subject.map(str::to_string),
+            done,
+            total,
+        });
+        self.state(&state);
     }
 }
 
@@ -88,14 +105,14 @@ impl SilentPluginUi {
 
 #[async_trait]
 impl SessionUi for SilentPluginUi {
-    async fn confirm(&self, kind: PromptKind, title: &str, message: &str) -> bool {
-        self.inner.confirm(kind, title, message).await
+    fn state(&self, state: &UiState) {
+        self.inner.state(state);
     }
-    fn progress(&self, event: ProgressEvent) {
-        self.inner.progress(event);
+    async fn confirm(&self, prompt: Prompt) -> bool {
+        self.inner.confirm(prompt).await
     }
-    fn insight(&self, url: &str, event: &str, data: Option<Value>) {
-        self.inner.insight(url, event, data);
+    fn notify(&self, coded: &Coded) {
+        self.inner.notify(coded);
     }
     fn plugin_host(&self) -> Option<Arc<dyn PluginHost>> {
         Some(self.host.clone())
@@ -104,23 +121,36 @@ impl SessionUi for SilentPluginUi {
 
 #[async_trait]
 impl SessionUi for SilentUi {
-    async fn confirm(&self, _kind: PromptKind, _title: &str, _message: &str) -> bool {
+    fn state(&self, state: &UiState) {
+        match &state.phase {
+            Phase::Running(p) => {
+                tracing::debug!(
+                    "progress sub={} percent={:.1} stage={} subject={:?} done={:?} total={:?}",
+                    p.sub_step,
+                    p.percent,
+                    p.stage,
+                    p.subject,
+                    p.done,
+                    p.total
+                );
+            }
+            Phase::Failed(c) => match c.detail.as_deref().filter(|d| !d.is_empty()) {
+                Some(d) => tracing::error!("{}: {d}", c.code),
+                None => tracing::error!("{}", c.code),
+            },
+            _ => {}
+        }
+    }
+
+    async fn confirm(&self, _prompt: Prompt) -> bool {
         true
     }
-    fn progress(&self, event: ProgressEvent) {
-        tracing::debug!(
-            "progress sub={} percent={:.1} {}",
-            event.sub_step,
-            event.percent,
-            event.current.replace('\n', " ")
-        );
-    }
-    fn insight(&self, url: &str, event: &str, data: Option<Value>) {
-        let url = url.to_string();
-        let event = event.to_string();
-        tokio::spawn(async move {
-            send_ev_insight(&url, &event, data).await;
-        });
+
+    fn notify(&self, coded: &Coded) {
+        match coded.detail.as_deref().filter(|d| !d.is_empty()) {
+            Some(d) => tracing::error!("{}: {d}", coded.code),
+            None => tracing::error!("{}", coded.code),
+        }
     }
 }
 
@@ -178,6 +208,68 @@ pub async fn send_ev_insight(url: &str, event: &str, data: Option<Value>) {
     }
 }
 
+pub fn notice_text(coded: &Coded) -> (String, String) {
+    let subject = coded.subject.clone().unwrap_or_default();
+    let title = i18n::t("dialog.error", &[]);
+    let body = i18n::t(coded.code, &[("subject", subject.as_str())]);
+    let message = match coded.detail.as_deref().filter(|d| !d.is_empty()) {
+        Some(d) => format!("{body}\n{d}"),
+        None => body,
+    };
+    (title, message)
+}
+
+pub fn notice_from_error(err: &anyhow::Error) -> (String, String) {
+    match crate::utils::code::extract(err) {
+        Extracted::Coded(c) => notice_text(c),
+        Extracted::Cancelled => (
+            i18n::t("dialog.error", &[]),
+            "cancelled".to_string(),
+        ),
+        Extracted::Uncoded { detail } => {
+            let body = i18n::t(crate::utils::code::INTERNAL_ERROR, &[]);
+            (
+                i18n::t("dialog.error", &[]),
+                if detail.is_empty() {
+                    body
+                } else {
+                    format!("{body}\n{detail}")
+                },
+            )
+        }
+    }
+}
+
+pub(crate) fn progress_current(p: &Progress) -> String {
+    let subject = p.subject.clone().unwrap_or_default();
+    let done = p.done.map(format_size).unwrap_or_default();
+    let total = p.total.map(format_size).unwrap_or_default();
+    i18n::t(
+        &format!("progress.{}", p.stage),
+        &[
+            ("subject", subject.as_str()),
+            ("done", done.as_str()),
+            ("total", total.as_str()),
+        ],
+    )
+}
+
+pub(crate) fn prompt_copy(prompt: &Prompt) -> (String, String) {
+    let items = prompt.items.join("\n");
+    let mut owned: Vec<(String, String)> = vec![("items".into(), items)];
+    for (k, v) in &prompt.params {
+        owned.push(((*k).to_string(), v.clone()));
+    }
+    let params: Vec<(&str, &str)> = owned
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect();
+    (
+        i18n::t(&format!("prompt.{}.title", prompt.kind), &params),
+        i18n::t(&format!("prompt.{}.message", prompt.kind), &params),
+    )
+}
+
 #[derive(Default)]
 pub struct PromptHub {
     pending: Mutex<HashMap<String, oneshot::Sender<bool>>>,
@@ -231,7 +323,7 @@ impl PluginHub {
             id: String::new(),
             ok: false,
             data: None,
-            error: Some("插件无响应".to_string()),
+            error: None,
             unimplemented: false,
         };
         match tokio::time::timeout(Duration::from_secs(60), rx).await {
@@ -286,11 +378,7 @@ impl PluginHost for GuiPluginHost {
             return Ok(PluginResult::Unimplemented);
         }
         if !reply.ok {
-            let msg = reply
-                .error
-                .filter(|s| !s.is_empty())
-                .unwrap_or_else(|| "插件执行失败".to_string());
-            return Err(crate::session::error::user(msg));
+            return Err(anyhow::Error::from(Coded::bare(crate::utils::code::PLUGIN_FAILED)));
         }
         Ok(PluginResult::Value(
             reply.data.unwrap_or_else(|| "null".to_string()),
@@ -323,31 +411,43 @@ impl GuiUi {
 
 #[async_trait]
 impl SessionUi for GuiUi {
-    async fn confirm(&self, kind: PromptKind, title: &str, message: &str) -> bool {
+    fn state(&self, state: &UiState) {
+        if let Phase::Running(p) = &state.phase {
+            self.window.emit(
+                "session-progress",
+                ProgressEvent {
+                    sub_step: p.sub_step,
+                    percent: p.percent,
+                    current: progress_current(p),
+                },
+            );
+        }
+    }
+
+    async fn confirm(&self, mut prompt: Prompt) -> bool {
         if self.auto_answer {
             return true;
         }
-        let id = uuid::Uuid::new_v4().to_string();
+        if prompt.id.is_empty() {
+            prompt.id = uuid::Uuid::new_v4().to_string();
+        }
+        let id = prompt.id.clone();
         let rx = self.hub.register(id.clone()).await;
+        let (title, message) = prompt_copy(&prompt);
         self.window.emit(
             "session-prompt",
             PromptEvent {
-                id: id.clone(),
-                kind: kind.as_str().to_string(),
-                title: title.to_string(),
-                message: message.to_string(),
+                id,
+                kind: prompt.kind.to_string(),
+                title,
+                message,
             },
         );
         rx.await.unwrap_or(false)
     }
 
-    fn progress(&self, event: ProgressEvent) {
-        self.window.emit("session-progress", event);
-    }
-
-    async fn alert(&self, title: &str, message: &str) {
-        let title = title.to_string();
-        let message = message.to_string();
+    fn notify(&self, coded: &Coded) {
+        let (title, message) = notice_text(coded);
         let parent = self.window.parent();
         let _ = tokio::task::spawn_blocking(move || {
             rfd::MessageDialog::new()
@@ -356,22 +456,7 @@ impl SessionUi for GuiUi {
                 .set_level(rfd::MessageLevel::Error)
                 .set_parent(&parent)
                 .show();
-        })
-        .await;
-    }
-
-    fn insight(&self, _url: &str, event: &str, data: Option<Value>) {
-        self.window.emit(
-            "session-insight",
-            serde_json::json!({
-                "event": event,
-                "data": data,
-            }),
-        );
-    }
-
-    fn reopen_source(&self) {
-        self.window.emit("session-reopen-source", ());
+        });
     }
 
     fn plugin_host(&self) -> Option<Arc<dyn PluginHost>> {
@@ -414,4 +499,3 @@ mod tests {
         assert_eq!(got.data.as_deref(), Some("1"));
     }
 }
-

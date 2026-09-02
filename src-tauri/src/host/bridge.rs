@@ -148,7 +148,7 @@ async fn dispatch(
                 opt_u64(&args, &["timeoutMs", "timeout_ms"]),
             )
             .await
-            .map_err(|e| TACommandError::new(anyhow::anyhow!(e)))?;
+            .map_err(TACommandError::new)?;
             ok(res)
         }
         "wincred_read" => {

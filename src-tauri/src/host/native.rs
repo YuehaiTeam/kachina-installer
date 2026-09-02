@@ -1,10 +1,8 @@
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use anyhow::Context;
 use async_trait::async_trait;
-use serde_json::Value;
 use windows::Win32::Foundation::HWND;
 use windows::Win32::UI::WindowsAndMessaging::GetDesktopWindow;
 
@@ -14,13 +12,18 @@ use crate::installer::config::{resolve_installer_config, InstallerConfig};
 use crate::installer::{inspect_dir, select_dir, SelectDirRes};
 use crate::ipc::manager::ManagedElevate;
 use crate::session::commands::settings_from_input;
-use crate::session::error;
 use crate::session::run::{run_install, run_uninstall};
 use crate::session::source::needs_js_plugin;
 use crate::session::types::{
     settings_from_cli, SessionInput, SessionResult, SourceField, SourceItem,
 };
-use crate::session::ui::{send_ev_insight, PromptKind, SessionUi};
+use crate::session::state::{Phase, Prompt, UiState};
+use crate::session::ui::{notice_from_error, notice_text, progress_current, prompt_copy, SessionUi};
+use crate::utils::code::{
+    extract, should_report_error, Coded, Extracted, MIRRORC_CDK_BANNED, MIRRORC_CDK_EXPIRED,
+    MIRRORC_CDK_INVALID, MIRRORC_CDK_MISMATCH,
+};
+use crate::utils::i18n;
 use crate::session::ProjectConfig;
 use crate::utils::taskdialog::{
     prompt_text, show_ready, CommandLink, ProgressDialog, ProgressHwnd, ReadySpec, ID_ADVANCED,
@@ -59,8 +62,8 @@ pub async fn run(args: InstallArgs) -> anyhow::Result<NativeOutcome> {
     let temp_dir = std::env::temp_dir();
     if std::env::set_current_dir(&temp_dir).is_err() {
         rfd::MessageDialog::new()
-            .set_title("错误")
-            .set_description("无法访问临时文件夹")
+        .set_title(&i18n::t("dialog.error_title", &[]))
+        .set_description(&i18n::t("dialog.temp_dir", &[]))
             .show();
         return Ok(NativeOutcome::Exit);
     }
@@ -70,8 +73,8 @@ pub async fn run(args: InstallArgs) -> anyhow::Result<NativeOutcome> {
         Some(value) => ProjectConfig::from_value(value)?,
         None => {
             rfd::MessageDialog::new()
-                .set_title("出错了")
-                .set_description(error::PKG_BROKEN)
+                .set_title(&i18n::t("dialog.error", &[]))
+                .set_description(&i18n::t(crate::utils::code::PKG_BROKEN, &[]))
                 .set_level(rfd::MessageLevel::Error)
                 .show();
             return Ok(NativeOutcome::Exit);
@@ -437,13 +440,14 @@ async fn native_session(
 ) -> anyhow::Result<NativeOutcome> {
     let (settings, _) = settings_from_input(&input, &args, config).await?;
     let heading = if uninstall {
-        "正在卸载"
+        i18n::t("ready.uninstalling", &[])
     } else if settings.is_update {
-        "正在更新"
+        i18n::t("ready.updating", &[])
     } else {
-        "正在安装"
+        i18n::t("ready.installing", &[])
     };
-    let dialog = ProgressDialog::show(&project.window_title, heading, "准备中...", false).await?;
+    let prepare = i18n::t("progress.prepare", &[]);
+    let dialog = ProgressDialog::show(&project.window_title, &heading, &prepare, false).await?;
     let ui = NativeUi::new(dialog.hwnd_arc());
     let mgr = ManagedElevate::new();
     let result = if uninstall {
@@ -451,7 +455,6 @@ async fn native_session(
     } else {
         run_install(&settings, config, project, &ui, &mgr).await
     };
-    let reopen = ui.take_reopen();
     dialog.close().await;
 
     match result {
@@ -461,16 +464,18 @@ async fn native_session(
             Ok(NativeOutcome::Exit)
         }
         Err(err) => {
-            // native 路径不经过 TACommandError::serialize，在此上报
-            if crate::session::error::classify(&err).report {
+            if should_report_error(&err) {
                 crate::utils::sentry::capture_anyhow(&err);
             }
+            let (title, message) = notice_from_error(&err);
             rfd::MessageDialog::new()
-                .set_title("出错了")
-                .set_description(format!("{err}"))
+                .set_title(&title)
+                .set_description(&message)
                 .set_level(rfd::MessageLevel::Error)
                 .show();
-            Ok(NativeOutcome::Again { reopen_source: reopen })
+            Ok(NativeOutcome::Again {
+                reopen_source: cdk_should_reopen(&err),
+            })
         }
     }
 }
@@ -521,19 +526,11 @@ async fn show_finish(project: &ProjectConfig, input: &SessionInput, result: &Ses
 
 struct NativeUi {
     hwnd: Arc<ProgressHwnd>,
-    reopen: AtomicBool,
 }
 
 impl NativeUi {
     fn new(hwnd: Arc<ProgressHwnd>) -> Self {
-        Self {
-            hwnd,
-            reopen: AtomicBool::new(false),
-        }
-    }
-
-    fn take_reopen(&self) -> bool {
-        self.reopen.swap(false, Ordering::SeqCst)
+        Self { hwnd }
     }
 
     fn parent(&self) -> HwndParent {
@@ -545,40 +542,40 @@ impl NativeUi {
     }
 }
 
-fn plain_progress(s: &str) -> String {
-    s.replace("<br />", "\n")
-        .replace("<br/>", "\n")
-        .replace("<br>", "\n")
+fn cdk_should_reopen(err: &anyhow::Error) -> bool {
+    match extract(err) {
+        Extracted::Coded(c) => matches!(
+            c.code,
+            MIRRORC_CDK_EXPIRED
+                | MIRRORC_CDK_INVALID
+                | MIRRORC_CDK_MISMATCH
+                | MIRRORC_CDK_BANNED
+        ),
+        _ => false,
+    }
 }
 
 #[async_trait]
 impl SessionUi for NativeUi {
-    async fn confirm(&self, _kind: PromptKind, title: &str, message: &str) -> bool {
-        crate::installer::confirm_dialog(title.to_string(), message.to_string(), self.parent())
-            .await
-    }
-
-    fn progress(&self, event: crate::session::types::ProgressEvent) {
-        // ProgressDialog methods need the dialog; we only have hwnd. Send directly.
-        if let Some(hwnd) = self.hwnd.get() {
-            set_progress_hwnd(hwnd, event.percent, &plain_progress(&event.current));
+    fn state(&self, state: &UiState) {
+        if let Phase::Running(p) = &state.phase {
+            if let Some(hwnd) = self.hwnd.get() {
+                set_progress_hwnd(hwnd, p.percent, &progress_current(p));
+            }
         }
     }
 
-    async fn alert(&self, title: &str, message: &str) {
-        crate::installer::error_dialog(title.to_string(), message.to_string(), self.parent()).await;
+    async fn confirm(&self, prompt: Prompt) -> bool {
+        let (title, message) = prompt_copy(&prompt);
+        crate::installer::confirm_dialog(title, message, self.parent()).await
     }
 
-    fn insight(&self, url: &str, event: &str, data: Option<Value>) {
-        let url = url.to_string();
-        let event = event.to_string();
+    fn notify(&self, coded: &Coded) {
+        let (title, message) = notice_text(coded);
+        let parent = self.parent();
         tokio::spawn(async move {
-            send_ev_insight(&url, &event, data).await;
+            crate::installer::error_dialog(title, message, parent).await;
         });
-    }
-
-    fn reopen_source(&self) {
-        self.reopen.store(true, Ordering::SeqCst);
     }
 }
 

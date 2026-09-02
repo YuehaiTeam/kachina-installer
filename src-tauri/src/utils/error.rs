@@ -35,7 +35,7 @@ impl Serialize for TACommandError {
         }
 
         let response = ErrorWithInsight {
-            message: format!("{:#}", self.error),
+            message: command_message(&self.error),
             insight: self.insight.clone(),
         };
 
@@ -191,9 +191,35 @@ impl TACommandError {
     pub fn report_if_needed(&self) {
         if !crate::utils::sentry::is_pipe_mode()
             && self.insight.is_none()
-            && crate::session::error::classify(&self.error).report
+            && crate::utils::code::should_report_error(&self.error)
         {
             super::sentry::capture_anyhow(&self.error);
         }
     }
 }
+
+fn command_message(err: &anyhow::Error) -> String {
+    use crate::utils::code::{extract, Extracted, INTERNAL_ERROR};
+    use crate::utils::i18n;
+    match extract(err) {
+        Extracted::Cancelled => "cancelled".to_string(),
+        Extracted::Coded(c) => {
+            let subject = c.subject.clone().unwrap_or_default();
+            let copy = i18n::t(c.code, &[("subject", subject.as_str())]);
+            match c.detail.as_deref().filter(|d| !d.is_empty()) {
+                Some(d) if copy != c.code => format!("{copy}\n{d}"),
+                Some(d) => d.to_string(),
+                None => copy,
+            }
+        }
+        Extracted::Uncoded { detail } => {
+            let copy = i18n::t(INTERNAL_ERROR, &[]);
+            if detail.is_empty() {
+                copy
+            } else {
+                format!("{copy}\n{detail}")
+            }
+        }
+    }
+}
+
