@@ -86,7 +86,10 @@ zip = { git = "https://github.com/xytoki/zip2.git", default-features = false, fe
 ] }
 anyhow = "1.0"
 reqwest-middleware = { version = "0.4", features = ["json"] }
-tracing = "0.1"
+# release_max_level_info：LogSubscriber 本就丢弃 INFO 以下事件，编译期直接不生成 callsite。
+# log 只为给传递依赖（schannel/mio/want/zip）设同一 feature，仓库代码不直接使用。
+tracing = { version = "0.1", features = ["release_max_level_info"] }
+log = { version = "0.4", features = ["release_max_level_info"] }
 whoami = "1.6.0"
 win32-version-info = "0.2.0"
 bytes = "1.10.1"
@@ -127,10 +130,20 @@ debug = true
 split-debuginfo = "packed"
 codegen-units = 1 # Allows LLVM to perform better optimization.
 lto = true # Enables link-time-optimizations.
-opt-level = "s" # Prioritizes small binary size. Use `3` if you prefer speed.
+# "z"：C 依赖（zstd/hpatch/msquic）经 cc-rs 在 MSVC 下 s/z 同为 /O1，不受影响；
+# Rust 侧热路径只有哈希，见下方 per-package 覆盖。
+opt-level = "z"
 panic = "abort" # Higher performance by disabling panic handlers.
 trim-paths = "all" # Removes potentially privileged information from your binaries.
 rustflags = ["-Zthreads=16"] # Better compile performance.
+
+# 哈希是安装器唯一 CPU 受限的 Rust 路径，保持 O3。
+[profile.release.package.twox-hash]
+opt-level = 3
+[profile.release.package.chksum-hash-md5]
+opt-level = 3
+[profile.release.package.chksum-md5]
+opt-level = 3
 
 [patch.crates-io]
 msquic-async = { git = "https://github.com/xytoki/msquic-async-rs.git", branch = "main" }
