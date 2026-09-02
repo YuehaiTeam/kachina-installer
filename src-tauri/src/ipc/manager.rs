@@ -1,6 +1,9 @@
 use super::operation::run_opr;
 use super::operation::IpcOperation;
-use super::{progress_notify, IpcError, IpcResult, PipeMsg, ProgressNotify};
+use super::{
+    decode_frame, encode_frame, progress_notify, read_frame, IpcError, IpcResult, PipeMsg,
+    ProgressNotify,
+};
 use crate::utils::acl::create_security_attributes;
 use crate::utils::error::TAResult;
 use crate::utils::uac::check_elevated;
@@ -9,7 +12,6 @@ use crate::utils::uac::SendableHandle;
 use anyhow::Context;
 use std::ffi::c_void;
 use std::time::Duration;
-use tokio::io::AsyncBufReadExt;
 use tokio::io::AsyncWriteExt;
 use tokio::net::windows::named_pipe::ClientOptions;
 use tokio::net::windows::named_pipe::NamedPipeServer;
@@ -17,8 +19,7 @@ use tokio::net::windows::named_pipe::ServerOptions;
 use tokio::time;
 use windows::Win32::Foundation::ERROR_PIPE_BUSY;
 
-// 1m buffer size
-static PIPE_BUFFER_SIZE: usize = 1024 * 1024;
+const PIPE_BUFFER_SIZE: usize = 64 * 1024;
 
 #[derive(serde::Deserialize, serde::Serialize, Clone, Debug)]
 pub struct IpcInner {
@@ -110,13 +111,20 @@ impl ManagedElevate {
         }
         let id = uuid::Uuid::new_v4().to_string();
         let mut rx = self.broadcast_tx.subscribe();
-        let _ = self
+        // 管道任务已退出时接收端不存在，此处不返回就会永远等不到回包
+        if self
             .mpsc_tx
             .send(IpcInner {
                 op: ipc,
                 id: id.clone(),
             })
-            .await;
+            .await
+            .is_err()
+        {
+            return Err(anyhow::anyhow!("Elevate process pipe is closed")
+                .context("IPC_ERR")
+                .into());
+        }
         while let Ok(v) = rx.recv().await {
             match v {
                 PipeMsg::Progress(msgid, data) if msgid == id => on_progress(data),
@@ -146,71 +154,63 @@ pub async fn wait_conn(server: &mut NamedPipeServer) -> bool {
     tracing::info!("Client connected to pipe");
     true
 }
+/// 读写各一个任务：`read_frame` 不可取消，不能放进与写端共用的 `select!`。
+/// 任一端结束（对端关闭、帧错位、读写错误、`ManagedElevate` 被丢弃）就停掉另一端，
+/// 让两个半边一起释放、管道真正关闭，并广播 `Disconnect` 唤醒等待中的 `run`。
 pub async fn handle_pipe(
     server: NamedPipeServer,
     tx: tokio::sync::broadcast::Sender<PipeMsg>,
     mut rx: tokio::sync::mpsc::Receiver<IpcInner>,
 ) {
-    // let mut rx = mgr.mpsc_rx.write().await.take().unwrap();
-    tokio::spawn(async move {
-        let (serverrx, mut servertx) = tokio::io::split(server);
-        let mut serverrx = tokio::io::BufReader::with_capacity(PIPE_BUFFER_SIZE, serverrx);
-        let mut fail_times = 0;
-        let mut buf = String::new();
-        loop {
-            tokio::select! {
-                v = serverrx.read_line(&mut buf) => {
-                    if v.is_ok() {
-                        if buf.trim().is_empty() {
-                            buf.clear();
-                            continue;
-                        }
-                        let res = serde_json::from_str::<PipeMsg>(&buf);
-                        if let Ok(res) = res {
-                            match res {
-                                PipeMsg::Envelope(envelope) => {
-                                    crate::utils::sentry::forward_raw_envelope(envelope);
-                                }
-                                PipeMsg::Breadcrumb(crumb) => {
-                                    crate::utils::sentry::add_breadcrumb_value(crumb);
-                                }
-                                other => {
-                                    let _ = tx.send(other);
-                                }
-                            }
-                        }else{
-                            fail_times += 1;
-                            if fail_times > 30 {
-                                tracing::error!("Failed to parse message too many times, closing pipe");
-                                let _ = tx.send(PipeMsg::Disconnect("PIPE_DISCONNECT_ERR".into()));
-                                break;
-                            }
-                        }
-                        buf.clear();
-                    }else{
-                        tracing::error!("Failed to read from pipe: {:?}", v.err());
+    let (serverrx, mut servertx) = tokio::io::split(server);
+    let mut writer = tokio::spawn(async move {
+        while let Some(v) = rx.recv().await {
+            match encode_frame(&v) {
+                Ok(frame) => {
+                    if let Err(err) = servertx.write_all(&frame).await {
+                        tracing::warn!("Failed to write to pipe: {:?}", err);
                         break;
                     }
                 }
-                v = rx.recv() => {
-                    if let Some(v) = v {
-                        let b = serde_json::to_vec(&v);
-                        if let Ok(mut b) = b {
-                            b.extend_from_slice(b"\n \n \n");
-                            let res = servertx.write_all(&b).await;
-                            if let Err(err) = res {
-                                tracing::warn!("Failed to write to pipe: {:?}", err);
-                            }
-                        }else{
-                            tracing::warn!("Failed to serialize message: {:?}", b.err());
-                        }
-                    }else{
-                        tracing::error!("Failed to receive message from channel");
-                        break;
-                    }
+                Err(err) => tracing::warn!("Failed to serialize message: {:?}", err),
+            }
+        }
+    });
+    let reader_tx = tx.clone();
+    let mut reader = tokio::spawn(async move {
+        let mut serverrx = tokio::io::BufReader::with_capacity(PIPE_BUFFER_SIZE, serverrx);
+        loop {
+            let msg = match read_frame(&mut serverrx).await {
+                Ok(Some(bytes)) => decode_frame::<PipeMsg>(&bytes),
+                Ok(None) => {
+                    tracing::warn!("Elevate process closed the pipe");
+                    break;
+                }
+                Err(err) => Err(err),
+            };
+            match msg {
+                Ok(PipeMsg::Envelope(envelope)) => {
+                    crate::utils::sentry::forward_raw_envelope(envelope);
+                }
+                Ok(PipeMsg::Breadcrumb(crumb)) => {
+                    crate::utils::sentry::add_breadcrumb_json(&crumb);
+                }
+                Ok(other) => {
+                    let _ = reader_tx.send(other);
+                }
+                Err(err) => {
+                    tracing::error!("Failed to read from pipe: {:?}", err);
+                    break;
                 }
             }
         }
+    });
+    tokio::spawn(async move {
+        tokio::select! {
+            _ = &mut reader => writer.abort(),
+            _ = &mut writer => reader.abort(),
+        }
+        let _ = tx.send(PipeMsg::Disconnect("PIPE_DISCONNECT_ERR".into()));
     });
 }
 
@@ -246,73 +246,69 @@ pub async fn uac_ipc_main(args: crate::cli::arg::UacArgs) {
 
     let (tx, mut rx) = tokio::sync::mpsc::channel::<PipeMsg>(500);
     let mut sentry_rx = crate::utils::sentry::PIPE_OUTBOX.rx.write().await;
-    let mut buf = String::new();
 
     // 创建一个取消通知器
     let (cancel_tx, cancel_rx) = tokio::sync::broadcast::channel(1);
 
-    // 第一个线程：处理客户端读取
+    // 第一个线程：处理客户端读取。取消只在帧边界之外触发，帧内被打断时本来就要退出。
     let read_handle = {
         let tx = tx.clone();
         let cancel_tx = cancel_tx.clone();
         let mut cancel_rx = cancel_rx.resubscribe();
         tokio::spawn(async move {
             loop {
-                tokio::select! {
+                let frame = tokio::select! {
                     _ = cancel_rx.recv() => {
                         tracing::info!("Read thread cancelled");
                         break;
                     }
-                    v = clientrx.read_line(&mut buf) => {
-                        if let Ok(v) = v {
-                            if v == 0 {
-                                tracing::warn!("Client: disconnected");
-                                let _ = cancel_tx.send(());
-                                break;
-                            }
-                            if buf.trim().is_empty() {
-                                buf.clear();
-                                continue;
-                            }
-                            let res = serde_json::from_str::<IpcInner>(&buf);
-                            if let Ok(res) = res {
-                                let tx = tx.clone();
-                                let id = res.id.clone();
-                                tokio::spawn(async move {
-                                    let tx2 = tx.clone();
-                                    let res = run_opr(
-                                        res.op,
-                                        progress_notify(move |opr| {
-                                            let id = res.id.clone();
-                                            let tx_clone = tx.clone();
-                                            tokio::spawn(async move {
-                                                let _ = tx_clone
-                                                    .send(PipeMsg::Progress(id, opr))
-                                                    .await;
-                                            });
-                                        }),
-                                    )
-                                    .await;
-                                    if let Err(err) = res.as_ref() {
-                                        tracing::error!("Client: Operation failed: {:?}", err);
-                                    }
-                                    let msg = match res {
-                                        Ok(data) => PipeMsg::Ok(id, data),
-                                        Err(err) => PipeMsg::Err(id, IpcError::from_ta(&err)),
-                                    };
-                                    let _ = tx2.send(msg).await;
-                                });
-                            } else {
-                                tracing::warn!("Client: Failed to parse message: {:?} {:?}", res.err(), buf);
-                            }
-                            buf.clear();
-                        } else {
-                            tracing::warn!("Client: Failed to read from pipe: {:?}", v.err());
-                            let _ = cancel_tx.send(());
-                            break;
-                        }
+                    v = read_frame(&mut clientrx) => v,
+                };
+                let bytes = match frame {
+                    Ok(Some(bytes)) => bytes,
+                    Ok(None) => {
+                        tracing::warn!("Client: disconnected");
+                        let _ = cancel_tx.send(());
+                        break;
                     }
-                }
+                    Err(err) => {
+                        tracing::warn!("Client: Failed to read from pipe: {:?}", err);
+                        let _ = cancel_tx.send(());
+                        break;
+                    }
+                };
+                let res = match decode_frame::<IpcInner>(&bytes) {
+                    Ok(res) => res,
+                    Err(err) => {
+                        tracing::error!("Client: Failed to decode frame, closing: {:?}", err);
+                        let _ = cancel_tx.send(());
+                        break;
+                    }
+                };
+                let tx = tx.clone();
+                let id = res.id.clone();
+                tokio::spawn(async move {
+                    let tx2 = tx.clone();
+                    let res = run_opr(
+                        res.op,
+                        progress_notify(move |opr| {
+                            let id = res.id.clone();
+                            let tx_clone = tx.clone();
+                            tokio::spawn(async move {
+                                let _ = tx_clone.send(PipeMsg::Progress(id, opr)).await;
+                            });
+                        }),
+                    )
+                    .await;
+                    if let Err(err) = res.as_ref() {
+                        tracing::error!("Client: Operation failed: {:?}", err);
+                    }
+                    let msg = match res {
+                        Ok(data) => PipeMsg::Ok(id, data),
+                        Err(err) => PipeMsg::Err(id, IpcError::from_ta(&err)),
+                    };
+                    let _ = tx2.send(msg).await;
+                });
             }
         })
     };
@@ -330,17 +326,17 @@ pub async fn uac_ipc_main(args: crate::cli::arg::UacArgs) {
                     }
                     v = rx.recv() => {
                         if let Some(v) = v {
-                            let b = serde_json::to_vec(&v);
-                            if let Ok(mut b) = b {
-                                b.extend_from_slice(b"\n \n \n");
-                                let res = clienttx.write_all(&b).await;
-                                if let Err(err) = res {
-                                    tracing::warn!("Client: Failed to write to pipe: {:?}", err);
-                                    let _ = cancel_tx.send(());
-                                    break;
+                            match encode_frame(&v) {
+                                Ok(frame) => {
+                                    if let Err(err) = clienttx.write_all(&frame).await {
+                                        tracing::warn!("Client: Failed to write to pipe: {:?}", err);
+                                        let _ = cancel_tx.send(());
+                                        break;
+                                    }
                                 }
-                            } else {
-                                tracing::warn!("Client: Failed to serialize message: {:?}", b.err());
+                                Err(err) => {
+                                    tracing::warn!("Client: Failed to serialize message: {:?}", err);
+                                }
                             }
                         } else {
                             tracing::warn!("Client: Failed to receive message from channel");
@@ -366,5 +362,65 @@ pub async fn uac_ipc_main(args: crate::cli::arg::UacArgs) {
         _ = write_handle => {
             tracing::info!("Write thread finished");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cli::arg::UacArgs;
+
+    /// 真实命名管道上的往返：服务端 `handle_pipe` 对接客户端 `uac_ipc_main`，
+    /// 覆盖 Ok / Err 两种回包与丢弃 `ManagedElevate` 后的断连收尾。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn pipe_roundtrip_and_disconnect() {
+        let pipe_id = uuid::Uuid::new_v4().to_string();
+        let mut server =
+            ManagedElevate::create_pipe(&format!(r"\\.\pipe\Kachina-Elevate-{pipe_id}")).unwrap();
+        let client = tokio::spawn(uac_ipc_main(UacArgs { pipe_id }));
+        server.connect().await.unwrap();
+
+        let (broadcast_tx, mut events) = tokio::sync::broadcast::channel(16);
+        let (mpsc_tx, mpsc_rx) = tokio::sync::mpsc::channel(16);
+        handle_pipe(server, broadcast_tx, mpsc_rx).await;
+
+        async fn wait(events: &mut tokio::sync::broadcast::Receiver<PipeMsg>) -> PipeMsg {
+            time::timeout(Duration::from_secs(5), events.recv())
+                .await
+                .expect("pipe reply timeout")
+                .expect("broadcast closed")
+        }
+
+        mpsc_tx
+            .send(IpcInner {
+                op: IpcOperation::Ping,
+                id: "ping".into(),
+            })
+            .await
+            .unwrap();
+        let msg = wait(&mut events).await;
+        assert!(matches!(msg, PipeMsg::Ok(id, IpcResult::Ping) if id == "ping"));
+
+        mpsc_tx
+            .send(IpcInner {
+                op: IpcOperation::KillProcess(u32::MAX),
+                id: "kill".into(),
+            })
+            .await
+            .unwrap();
+        let msg = wait(&mut events).await;
+        let PipeMsg::Err(id, err) = msg else {
+            panic!("expected Err, got {msg:?}");
+        };
+        assert_eq!(id, "kill");
+        assert!(err.message.contains("OPEN_PROCESS_ERR"), "{}", err.message);
+
+        drop(mpsc_tx);
+        let msg = wait(&mut events).await;
+        assert!(matches!(msg, PipeMsg::Disconnect(_)));
+        time::timeout(Duration::from_secs(5), client)
+            .await
+            .expect("client did not exit after server closed")
+            .unwrap();
     }
 }

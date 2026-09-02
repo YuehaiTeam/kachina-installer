@@ -22,11 +22,12 @@ pub struct MirrorcChangeset {
     pub modified: Option<Vec<String>>,
 }
 
+/// 返回归档内 `.metadata.json` 原文（若有），由会话侧解析。
 pub async fn run_mirrorc_install(
     zip_path: &str,
     target_path: &str,
     notify: ProgressNotify,
-) -> TAResult<(Option<RepoMetadata>, Option<MirrorcChangeset>)> {
+) -> TAResult<Option<String>> {
     let zip_path = zip_path.to_string();
     let target_path = target_path.to_string();
     tokio::task::spawn_blocking(move || run_mirrorc_install_sync(&zip_path, &target_path, notify))
@@ -38,7 +39,7 @@ pub fn run_mirrorc_install_sync(
     zip_path: &str,
     target_path: &str,
     notify: ProgressNotify,
-) -> TAResult<(Option<RepoMetadata>, Option<MirrorcChangeset>)> {
+) -> TAResult<Option<String>> {
     let file = std::fs::File::open(zip_path).into_ta_result()?;
     let mut archive = zip::ZipArchive::new(file).into_ta_result()?;
     let total_len = archive.len() - 1;
@@ -69,16 +70,20 @@ pub fn run_mirrorc_install_sync(
         Err(_) => None,
     };
 
-    // .metadata.json
-    let metadata: Option<RepoMetadata> = match archive.by_name(&format!("{prefix}.metadata.json")) {
+    // .metadata.json：本地只需要 deletes，原文交回会话侧解析
+    let metadata_str: Option<String> = match archive.by_name(&format!("{prefix}.metadata.json")) {
         Ok(mut metadata) => {
             let mut metadata_str = String::new();
             metadata
                 .read_to_string(&mut metadata_str)
                 .into_ta_result()?;
-            Some(serde_json::from_str(&metadata_str).into_ta_result()?)
+            Some(metadata_str)
         }
         Err(_) => None,
+    };
+    let metadata: Option<RepoMetadata> = match metadata_str.as_deref() {
+        Some(text) => Some(serde_json::from_str(text).into_ta_result()?),
+        None => None,
     };
 
     // if both changeset and metadata are None, return error
@@ -177,7 +182,7 @@ pub fn run_mirrorc_install_sync(
     }
     // delete zip file
     let _ = std::fs::remove_file(zip_path);
-    Ok((metadata, changeset))
+    Ok(metadata_str)
 }
 
 pub async fn get_mirrorc_status(
