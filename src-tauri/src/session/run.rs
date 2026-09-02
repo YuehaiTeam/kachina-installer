@@ -34,7 +34,7 @@ use crate::session::source::{
     prefetch_chunk_urls, resolve_file_location, resolve_range_url, FileLocation, ParsedSource,
     SourceCtx,
 };
-use crate::session::state::Prompt;
+use crate::session::state::{Phase, Progress as UiProgress, Prompt, UiState};
 use crate::session::types::{
     version_gt, ProjectConfig, SessionResult, Settings, SourceField,
 };
@@ -63,8 +63,8 @@ async fn run_op_with_ui(
     mgr: &ManagedElevate,
     elevate: bool,
     op: IpcOperation,
-    ui: &dyn SessionUi,
-    mut on_ui: impl FnMut(&dyn SessionUi, &Progress),
+    ui: &LiveUi<'_>,
+    mut on_ui: impl FnMut(&LiveUi<'_>, &Progress),
 ) -> anyhow::Result<IpcResult> {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Progress>();
     let mut op_fut = Box::pin(run_op(
@@ -156,8 +156,38 @@ fn merged_mode(
     }
 }
 
+struct LiveUi<'a> {
+    inner: &'a dyn SessionUi,
+    live: Mutex<UiState>,
+}
+
+impl<'a> LiveUi<'a> {
+    fn new(inner: &'a dyn SessionUi) -> Self {
+        Self {
+            inner,
+            live: Mutex::new(UiState::default()),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl SessionUi for LiveUi<'_> {
+    fn state(&self, state: &UiState) {
+        self.inner.state(state);
+    }
+    async fn confirm(&self, prompt: Prompt) -> bool {
+        self.inner.confirm(prompt).await
+    }
+    fn notify(&self, coded: &Coded) {
+        self.inner.notify(coded);
+    }
+    fn plugin_host(&self) -> Option<std::sync::Arc<dyn crate::session::ui::PluginHost>> {
+        self.inner.plugin_host()
+    }
+}
+
 fn progress(
-    ui: &dyn SessionUi,
+    ui: &LiveUi<'_>,
     sub_step: u32,
     percent: f64,
     stage: &'static str,
@@ -165,7 +195,18 @@ fn progress(
     done: Option<u64>,
     total: Option<u64>,
 ) {
-    ui.progress(sub_step, percent, stage, subject, done, total);
+    let mut state = ui.live.lock().unwrap_or_else(|e| e.into_inner());
+    state.phase = Phase::Running(UiProgress {
+        sub_step,
+        percent,
+        stage,
+        subject: subject.map(str::to_string),
+        done,
+        total,
+    });
+    let snap = state.clone();
+    drop(state);
+    ui.inner.state(&snap);
 }
 
 fn log_session_start(
@@ -397,6 +438,7 @@ pub async fn run_install(
     mgr: &ManagedElevate,
 ) -> anyhow::Result<SessionResult> {
     log_session_start("install", settings, config, project);
+    let ui = LiveUi::new(ui);
     let txn = crate::utils::sentry::Transaction::start(
         if settings.is_update {
             "update"
@@ -406,15 +448,15 @@ pub async fn run_install(
         "session",
     );
     let result = if settings.source_uri.starts_with("mirrorc://") {
-        run_mirrorc(settings, config, project, ui, mgr).await
+        run_mirrorc(settings, config, project, &ui, mgr).await
     } else {
-        run_dfs_install(settings, config, project, ui, mgr, &txn).await
+        run_dfs_install(settings, config, project, &ui, mgr, &txn).await
     };
     txn.finish(txn_status(&result));
     if let Err(err) = &result {
         // fail counter：低基数分类维度，不携带自由文本（见遥测通道职责收敛）
         emit_insight(
-            ui,
+            &ui,
             project,
             settings,
             config,
@@ -430,7 +472,7 @@ async fn run_dfs_install(
     settings: &Settings,
     config: &InstallerConfig,
     project: &ProjectConfig,
-    ui: &dyn SessionUi,
+    ui: &LiveUi<'_>,
     mgr: &ManagedElevate,
     txn: &crate::utils::sentry::Transaction,
 ) -> anyhow::Result<SessionResult> {
@@ -780,7 +822,7 @@ struct InstallItem {
 async fn pick_metadata(
     settings: &Settings,
     config: &InstallerConfig,
-    ui: &dyn SessionUi,
+    ui: &LiveUi<'_>,
     local: Option<RepoMetadata>,
     online: Option<RepoMetadata>,
     online_err: Option<anyhow::Error>,
@@ -840,7 +882,7 @@ async fn pick_metadata(
 async fn prepare_process(
     settings: &Settings,
     project: &ProjectConfig,
-    ui: &dyn SessionUi,
+    ui: &LiveUi<'_>,
     mgr: &ManagedElevate,
     _version: &str,
 ) -> anyhow::Result<bool> {
@@ -900,7 +942,7 @@ async fn scan_local(
     latest: &RepoMetadata,
     hash_key: HashKey,
     ignore_nonempty: &[String],
-    ui: &dyn SessionUi,
+    ui: &LiveUi<'_>,
     mgr: &ManagedElevate,
 ) -> anyhow::Result<Vec<LocalFile>> {
     let algo = match hash_key {
@@ -1158,7 +1200,7 @@ async fn install_files(
     tasks: &[InstallTask],
     disk_files: &[LocalFile],
     source_ctx: &SourceCtx,
-    ui: &dyn SessionUi,
+    ui: &LiveUi<'_>,
     mgr: &ManagedElevate,
 ) -> anyhow::Result<Vec<IpcOperation>> {
     let local_files = Arc::new(config.embedded_files.clone().unwrap_or_default());
@@ -1743,7 +1785,7 @@ async fn install_runtimes(
     settings: &Settings,
     config: &InstallerConfig,
     project: &ProjectConfig,
-    ui: &dyn SessionUi,
+    ui: &LiveUi<'_>,
     mgr: &ManagedElevate,
 ) -> anyhow::Result<()> {
     let Some(runtimes) = project.runtimes.as_ref() else {
@@ -1823,7 +1865,7 @@ async fn finish_install(
     config: &InstallerConfig,
     project: &ProjectConfig,
     latest: Option<&RepoMetadata>,
-    ui: &dyn SessionUi,
+    ui: &LiveUi<'_>,
     mgr: &ManagedElevate,
 ) -> anyhow::Result<()> {
     let (program, desktop) = get_dirs(settings.elevate).await.into_anyhow()?;
@@ -1833,9 +1875,13 @@ async fn finish_install(
         program, project.app_name, project.app_name
     );
     let desktop_lnk = format!("{}\\{}.lnk", desktop, project.app_name);
+    let uninstall_name = crate::utils::i18n::t(
+        "shortcut.uninstall",
+        &[("subject", project.app_name.as_str())],
+    );
     let uninstall_lnk = format!(
-        "{}\\{}\\卸载{}.lnk",
-        program, project.app_name, project.app_name
+        "{}\\{}\\{}.lnk",
+        program, project.app_name, uninstall_name
     );
     if settings.create_lnk && !settings.is_update {
         let _ = run_op(
@@ -1924,7 +1970,7 @@ async fn run_mirrorc(
     settings: &Settings,
     config: &InstallerConfig,
     project: &ProjectConfig,
-    ui: &dyn SessionUi,
+    ui: &LiveUi<'_>,
     mgr: &ManagedElevate,
 ) -> anyhow::Result<SessionResult> {
     let cdk = settings
@@ -2116,13 +2162,14 @@ pub async fn run_uninstall(
     ui: &dyn SessionUi,
     mgr: &ManagedElevate,
 ) -> anyhow::Result<SessionResult> {
+    let ui = LiveUi::new(ui);
     let txn = crate::utils::sentry::Transaction::start("uninstall", "session");
-    emit_insight(ui, project, settings, config, "uninstall", None, true);
-    let result = run_uninstall_inner(settings, config, project, ui, mgr).await;
+    emit_insight(&ui, project, settings, config, "uninstall", None, true);
+    let result = run_uninstall_inner(settings, config, project, &ui, mgr).await;
     txn.finish(txn_status(&result));
     if let Err(err) = &result {
         emit_insight(
-            ui,
+            &ui,
             project,
             settings,
             config,
@@ -2149,7 +2196,7 @@ async fn run_uninstall_inner(
     settings: &Settings,
     config: &InstallerConfig,
     project: &ProjectConfig,
-    ui: &dyn SessionUi,
+    ui: &LiveUi<'_>,
     mgr: &ManagedElevate,
 ) -> anyhow::Result<SessionResult> {
     log_session_start("uninstall", settings, config, project);

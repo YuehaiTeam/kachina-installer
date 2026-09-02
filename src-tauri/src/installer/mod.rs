@@ -234,12 +234,24 @@ pub async fn find_process_by_name(name: String) -> Result<Vec<(u32, String)>> {
 }
 
 pub async fn error_dialog(title: String, message: String, parent: crate::host::HwndParent) {
-    rfd::MessageDialog::new()
-        .set_title(&title)
-        .set_description(&message)
-        .set_level(rfd::MessageLevel::Error)
-        .set_parent(&parent)
-        .show();
+    let ok = crate::utils::i18n::t("dialog.ok", &[]);
+    tokio::task::spawn_blocking(move || {
+        crate::utils::taskdialog::task_dialog(
+            crate::utils::taskdialog::TaskDialogRequest {
+                title,
+                content: message,
+                expanded: None,
+                footer: None,
+                buttons: vec![crate::utils::taskdialog::CommandLink {
+                    id: windows::Win32::UI::WindowsAndMessaging::IDOK.0,
+                    text: ok,
+                }],
+            },
+            parent.hwnd(),
+        );
+    })
+    .await
+    .ok();
 }
 
 pub async fn confirm_dialog(
@@ -247,15 +259,32 @@ pub async fn confirm_dialog(
     message: String,
     parent: crate::host::HwndParent,
 ) -> bool {
-    let ret = rfd::MessageDialog::new()
-        .set_title(&title)
-        .set_description(&message)
-        .set_level(rfd::MessageLevel::Info)
-        .set_parent(&parent)
-        .set_buttons(rfd::MessageButtons::YesNo)
-        .show();
-
-    matches!(ret, rfd::MessageDialogResult::Yes)
+    let yes = crate::utils::i18n::t("dialog.yes", &[]);
+    let no = crate::utils::i18n::t("dialog.no", &[]);
+    let clicked = tokio::task::spawn_blocking(move || {
+        crate::utils::taskdialog::task_dialog(
+            crate::utils::taskdialog::TaskDialogRequest {
+                title,
+                content: message,
+                expanded: None,
+                footer: None,
+                buttons: vec![
+                    crate::utils::taskdialog::CommandLink {
+                        id: windows::Win32::UI::WindowsAndMessaging::IDYES.0,
+                        text: yes,
+                    },
+                    crate::utils::taskdialog::CommandLink {
+                        id: windows::Win32::UI::WindowsAndMessaging::IDNO.0,
+                        text: no,
+                    },
+                ],
+            },
+            parent.hwnd(),
+        )
+    })
+    .await
+    .unwrap_or(0);
+    clicked == windows::Win32::UI::WindowsAndMessaging::IDYES.0
 }
 
 pub async fn pick_install_path(

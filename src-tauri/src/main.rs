@@ -191,14 +191,12 @@ fn main() {
 }
 
 fn crash_dialog(event_id: Option<&str>) {
-    rfd::MessageDialog::new()
-        .set_title("出错了")
-        .set_level(rfd::MessageLevel::Error)
-        .set_description(format!(
-            "安装程序发生内部错误，已终止运行。\n\n请重新运行安装程序；若问题持续出现，请凭以下编号反馈：\n{}",
-            event_id.unwrap_or("未知")
-        ))
-        .show();
+    crate::utils::taskdialog::show_error(
+        crate::utils::code::INTERNAL_ERROR,
+        event_id,
+        None,
+        windows::Win32::Foundation::HWND::default(),
+    );
 }
 
 async fn gui_entry(args: InstallArgs) {
@@ -219,11 +217,12 @@ async fn native_entry(args: InstallArgs) {
             }
         Err(err) => {
             tracing::error!("native ui failed: {err:#}");
-            rfd::MessageDialog::new()
-                .set_title("错误")
-                .set_description(format!("{err}"))
-                .set_level(rfd::MessageLevel::Error)
-                .show();
+            crate::utils::taskdialog::show_error(
+                crate::utils::code::INTERNAL_ERROR,
+                Some(&format!("{err:#}")),
+                None,
+                windows::Win32::Foundation::HWND::default(),
+            );
             utils::sentry::flush(Duration::from_secs(3));
             std::process::exit(1);
         }
@@ -237,11 +236,12 @@ fn host_main(
 ) {
     if let Err(err) = host::run(args, preset, gui) {
         tracing::error!("gui host failed: {err:#}");
-        rfd::MessageDialog::new()
-            .set_title("错误")
-            .set_description(format!("窗口初始化失败: {err}"))
-            .set_level(rfd::MessageLevel::Error)
-            .show();
+        crate::utils::taskdialog::show_error(
+            crate::utils::code::INTERNAL_ERROR,
+            Some(&format!("{err:#}")),
+            None,
+            windows::Win32::Foundation::HWND::default(),
+        );
         utils::sentry::flush(Duration::from_secs(3));
         std::process::exit(1);
     }

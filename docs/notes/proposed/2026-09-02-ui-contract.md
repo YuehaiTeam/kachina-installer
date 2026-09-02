@@ -227,6 +227,33 @@ bridge 暴露两层：`error_dialog({ code, detail, subject })` 直通 `show_err
 - 现有 e2e 十项保持全绿（`test:all`），它们保的是主流程行为正确性，不为本提案新增用例。
 - `host/native.rs` 与 `main.rs` 不再 `use rfd::MessageDialog`；`rfd` 在 `Cargo.toml` 的 feature 只剩目录选择所需。
 
+## Current landing
+
+2026-09-02 this pass on `refactor/native` landed SessionUi four methods, rfd MessageDialog cleanup, and leftover visible Chinese into locales. Status stays proposed; do not move to implemented while rows below are unverified.
+
+Landed:
+
+- `run.rs` holds a `LiveUi` `UiState` snapshot. The `progress` helper only sets `Phase::Running` and calls `ui.state(&snap)`. `SessionUi` no longer has `progress` / `alert` / `insight` / `reopen_source`. `GuiUi::state` merges `Running` into the live session (does not wipe Ready options).
+- All `rfd::MessageDialog` calls are `show_error` / `task_dialog`. rfd 0.15 has no separate `message-dialog` feature; `Cargo.toml` still uses `tokio` + `common-controls-v6` for `AsyncFileDialog` directory pick.
+- User-visible Chinese moved from `main.rs` / `module/wv2.rs` / uninstall shortcut name in `session/run.rs` into `locales/zh-CN.tsv`. `session/state.rs` test fixture `Mirrorc` is ASCII.
+- Unused `ProgressEvent` / `PromptEvent` removed.
+
+Still out of scope (leftovers): EULA checkbox as UiState, Preact CSS / Vue class / Fluent restyle, `recursion_limit` / nightly CI, native Win32 visual redesign, putting EULA into the contract.
+
+### Acceptance status
+
+| Criterion | Result |
+|---|---|
+| CJK rg (comments excluded) only i18n test fixtures; zero in `session/` `main.rs` `wv2.rs` `dfs.rs` `fs.rs` `utils/error.rs` `utils/code.rs` | PASS. `host/native.rs` has no CJK key-name constants this pass; hits are `utils/i18n.rs` unit-test strings only. |
+| `SessionUi` is only `state` `confirm` `notify` `plugin_host`; no `progress`; no `ProgressEvent`/`PromptEvent`; no `session-progress` event names | PASS |
+| `utils/code.rs` tests attach/extract/Cancelled/detail/subject/sid | PASS (`cargo test --bin kachina-installer`) |
+| `session/state.rs` tests SetPath/SetSource/Answer/Dismiss | PASS (same run) |
+| silent path log line `METADATA_HTTP_ERROR: 500 ...` and exit 1 | Not re-verified this pass. SilentUi still logs Failed as `code: detail`. Silent/`LiveUi` wrap changed; re-run e2e. |
+| `locales/zh-CN.tsv` covers codes and stage/prompt keys | PASS (`locale_covers_codes_stages_prompts`) |
+| Elevate-path Coded postcard roundtrip | Not re-verified this pass |
+| e2e `test:all` | Not run. Touched silent start, `confirm_dialog`, WebView2 install dialogs; should re-run |
+| `host/native.rs` and `main.rs` no longer `use rfd::MessageDialog`; rfd features only directory pick | PASS. Zero `MessageDialog` in the tree. rfd 0.15 has no separate message-dialog feature. |
+
 ## Risks
 
 - 挂码遗漏会让真实用户错误以 `INTERNAL_ERROR` 呈现并上报：可接受，`Uncoded` 上报正是发现漏挂码的机制；上线初期按 Sentry 分组补码。

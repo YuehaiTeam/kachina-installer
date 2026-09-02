@@ -60,28 +60,6 @@ pub trait SessionUi: Send + Sync {
     fn plugin_host(&self) -> Option<Arc<dyn PluginHost>> {
         None
     }
-
-    /// Step-2 intermediate: `run.rs` does not hold `UiSession` yet.
-    fn progress(
-        &self,
-        sub_step: u32,
-        percent: f64,
-        stage: &'static str,
-        subject: Option<&str>,
-        done: Option<u64>,
-        total: Option<u64>,
-    ) {
-        let mut state = UiState::default();
-        state.phase = Phase::Running(Progress {
-            sub_step,
-            percent,
-            stage,
-            subject: subject.map(str::to_string),
-            done,
-            total,
-        });
-        self.state(&state);
-    }
 }
 
 pub struct SilentUi;
@@ -415,30 +393,15 @@ impl GuiUi {
 #[async_trait]
 impl SessionUi for GuiUi {
     fn state(&self, state: &UiState) {
+        if let Phase::Running(p) = &state.phase {
+            let mut sess = self.session.lock().unwrap_or_else(|e| e.into_inner());
+            sess.state.phase = Phase::Running(p.clone());
+            let snap = sess.state.clone();
+            drop(sess);
+            self.window.emit("ui-state", &snap);
+            return;
+        }
         self.window.emit("ui-state", state);
-    }
-
-    fn progress(
-        &self,
-        sub_step: u32,
-        percent: f64,
-        stage: &'static str,
-        subject: Option<&str>,
-        done: Option<u64>,
-        total: Option<u64>,
-    ) {
-        let mut sess = self.session.lock().unwrap_or_else(|e| e.into_inner());
-        sess.state.phase = Phase::Running(Progress {
-            sub_step,
-            percent,
-            stage,
-            subject: subject.map(str::to_string),
-            done,
-            total,
-        });
-        let snap = sess.state.clone();
-        drop(sess);
-        self.state(&snap);
     }
 
     async fn confirm(&self, mut prompt: Prompt) -> bool {
