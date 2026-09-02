@@ -215,21 +215,6 @@ impl SessionResult {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ProgressEvent {
-    pub sub_step: u32,
-    pub percent: f64,
-    pub current: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PromptEvent {
-    pub id: String,
-    pub kind: String,
-    pub title: String,
-    pub message: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PluginEvent {
     pub id: String,
     pub method: String,
