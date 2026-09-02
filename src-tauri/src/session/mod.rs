@@ -1,6 +1,5 @@
 pub mod commands;
 pub mod dump;
-pub mod error;
 pub mod merge;
 pub mod plan;
 pub mod plugin;

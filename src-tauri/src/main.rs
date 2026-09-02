@@ -174,8 +174,8 @@ fn main() {
                 .block_on(async move {
                     if install.silent {
                         if let Err(err) = session::run::silent_main(install).await {
-                            tracing::error!("silent install failed: {err:#}");
-                            if session::error::classify(&err).report {
+                            tracing::error!("silent install failed: {}", utils::code::log_line(&err));
+                            if utils::code::should_report_error(&err) {
                                 utils::sentry::capture_anyhow(&err);
                             }
                             utils::sentry::flush(Duration::from_secs(3));

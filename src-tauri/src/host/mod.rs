@@ -23,7 +23,7 @@ use crate::cli::arg::InstallArgs;
 use crate::installer::uninstall::delete_self_on_exit;
 use crate::ipc::manager::ManagedElevate;
 use crate::session::commands::SessionState;
-use crate::session::error::{self, user};
+use crate::utils::code::{Coded, PLUGIN_FAILED};
 use crate::session::types::SessionInput;
 use crate::APP_BOOT_SIGNAL;
 
@@ -133,8 +133,8 @@ pub fn run(args: InstallArgs, preset: Option<SessionInput>) -> anyhow::Result<()
     let temp_dir = std::env::temp_dir();
     if std::env::set_current_dir(&temp_dir).is_err() {
         rfd::MessageDialog::new()
-            .set_title("错误")
-            .set_description("无法访问临时文件夹")
+            .set_title(&crate::utils::i18n::t("dialog.error_title", &[]))
+            .set_description(&crate::utils::i18n::t("dialog.temp_dir", &[]))
             .show();
         return Ok(());
     }
@@ -257,10 +257,10 @@ pub async fn spawn_plugin_runtime(
 
     let handle = started_rx
         .await
-        .map_err(|_| user(error::PLUGIN_HOST_FAILED))?
+        .map_err(|_| anyhow::Error::from(Coded::bare(PLUGIN_FAILED)))?
         .map_err(|err| {
             tracing::error!("plugin host thread failed: {err:#}");
-            user(error::PLUGIN_HOST_FAILED)
+            anyhow::Error::from(Coded::bare(PLUGIN_FAILED))
         })?;
 
     let runtime = PluginRuntime {
@@ -271,7 +271,7 @@ pub async fn spawn_plugin_runtime(
         Ok(Ok(())) => Ok(runtime),
         _ => {
             runtime.close();
-            Err(user(error::PLUGIN_HOST_FAILED))
+            Err(anyhow::Error::from(Coded::bare(PLUGIN_FAILED)))
         }
     }
 }
