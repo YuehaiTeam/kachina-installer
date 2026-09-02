@@ -182,6 +182,10 @@ pub struct UiSession {
     pub state: UiState,
     all_sources: Vec<SourceItem>,
     renderer: Renderer,
+    exe_name: String,
+    #[allow(dead_code)] // native ReadyState (step 4); GUI pick_path uses ProjectConfig.app_name
+    app_name: String,
+    uac_strategy: String,
 }
 
 impl Default for UiState {
@@ -223,11 +227,24 @@ impl UiSession {
     }
 
     pub fn with_renderer(state: UiState, renderer: Renderer) -> Self {
+        Self::with_project(state, renderer, String::new(), String::new(), String::new())
+    }
+
+    pub fn with_project(
+        state: UiState,
+        renderer: Renderer,
+        exe_name: String,
+        app_name: String,
+        uac_strategy: String,
+    ) -> Self {
         let all_sources = state.sources.clone();
         let mut sess = Self {
             state,
             all_sources,
             renderer,
+            exe_name,
+            app_name,
+            uac_strategy,
         };
         sess.refresh_sources();
         sess
@@ -295,7 +312,7 @@ impl UiSession {
     }
 
     fn recompute_path(&mut self) {
-        let probed = probe_path(Path::new(&self.state.options.install_path));
+        let probed = probe_path(Path::new(&self.state.options.install_path), &self.exe_name);
         if matches!(self.state.mode, Mode::Uninstall) {
             // Uninstall is a session kind, not derived from the path marker.
         } else if probed.upgrade {
@@ -303,7 +320,7 @@ impl UiSession {
         } else {
             self.state.mode = Mode::Install;
         }
-        self.state.needs_elevate = !matches!(probed.writable, PathWritable::Writable);
+        self.state.needs_elevate = compute_elevate(probed.writable, &self.uac_strategy);
         self.state.path = probed;
     }
 }
@@ -320,10 +337,27 @@ impl UiSession {
 ///   (uninstall-metadata-like). Existing-install detection in production still
 ///   uses the project's exe name; this probe stays independent of `ProjectConfig`
 ///   so unit tests can set the marker.
-fn probe_path(path: &Path) -> PathState {
+fn compute_elevate(writable: PathWritable, strategy: &str) -> bool {
+    if strategy.is_empty() {
+        return !matches!(writable, PathWritable::Writable);
+    }
+    crate::session::types::elevate_from_state(&dir_state(writable), strategy)
+}
+
+fn dir_state(w: PathWritable) -> crate::installer::DirState {
+    match w {
+        PathWritable::Writable => crate::installer::DirState::Writable,
+        PathWritable::Unwritable => crate::installer::DirState::Unwritable,
+        PathWritable::Private => crate::installer::DirState::Private,
+    }
+}
+
+fn probe_path(path: &Path, exe_name: &str) -> PathState {
     let exists = path.exists();
     let upgrade = exists
-        && (path.join(".kachina-upgrade").is_file() || path.join("installer-meta.json").is_file());
+        && (path.join(".kachina-upgrade").is_file()
+            || path.join("installer-meta.json").is_file()
+            || (!exe_name.is_empty() && path.join(exe_name).is_file()));
     let writable = classify_writable(path);
     PathState {
         writable,

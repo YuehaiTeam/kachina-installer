@@ -136,7 +136,7 @@ fn main() {
                 .unwrap()
                 .block_on(async {
                     if module::wv2::install_webview2().await.is_ok() {
-                        host_main(InstallArgs::default(), None);
+                        host_main(InstallArgs::default(), None, None);
                     }
                     utils::sentry::flush(Duration::from_secs(3));
                 });
@@ -203,7 +203,8 @@ fn crash_dialog(event_id: Option<&str>) {
 
 async fn gui_entry(args: InstallArgs) {
     if host::webview_version().is_ok() {
-        host_main(args, None);
+        let gui = session::commands::prepare_gui(args.clone(), None).await;
+        host_main(args, None, Some(gui));
         return;
     }
     native_entry(args).await;
@@ -212,7 +213,10 @@ async fn gui_entry(args: InstallArgs) {
 async fn native_entry(args: InstallArgs) {
     match host::native::run(args).await {
         Ok(host::native::NativeOutcome::Exit) | Ok(host::native::NativeOutcome::Again { .. }) => {}
-        Ok(host::native::NativeOutcome::Web { args, preset }) => host_main(args, Some(preset)),
+        Ok(host::native::NativeOutcome::Web { args, preset }) => {
+                let gui = session::commands::prepare_gui(args.clone(), Some(preset.clone())).await;
+                host_main(args, Some(preset), Some(gui));
+            }
         Err(err) => {
             tracing::error!("native ui failed: {err:#}");
             rfd::MessageDialog::new()
@@ -226,8 +230,12 @@ async fn native_entry(args: InstallArgs) {
     }
 }
 
-fn host_main(args: InstallArgs, preset: Option<session::types::SessionInput>) {
-    if let Err(err) = host::run(args, preset) {
+fn host_main(
+    args: InstallArgs,
+    preset: Option<session::types::SessionInput>,
+    gui: Option<std::sync::Arc<session::commands::GuiRuntime>>,
+) {
+    if let Err(err) = host::run(args, preset, gui) {
         tracing::error!("gui host failed: {err:#}");
         rfd::MessageDialog::new()
             .set_title("错误")

@@ -1,21 +1,17 @@
 {
   "compilerOptions": {
     "lib": ["DOM", "ES2020"],
-    "jsx": "preserve",
+    "jsx": "react-jsx",
+    "jsxImportSource": "preact",
     "target": "ES2020",
     "noEmit": true,
     "skipLibCheck": true,
-    "jsxImportSource": "vue",
     "useDefineForClassFields": true,
-
-    /* modules */
     "module": "ESNext",
     "isolatedModules": true,
     "resolveJsonModule": true,
     "moduleResolution": "Bundler",
     "allowImportingTsExtensions": true,
-
-    /* type checking */
     "strict": true,
     "noUnusedLocals": true,
     "noUnusedParameters": true

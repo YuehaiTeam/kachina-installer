@@ -1,5 +1,5 @@
 import { defineConfig } from '@rsbuild/core';
-import { pluginVue } from '@rsbuild/plugin-vue';
+import { pluginPreact } from '@rsbuild/plugin-preact';
 import { purgeCSSPlugin } from '@fullhuman/postcss-purgecss';
 
 export default defineConfig({
@@ -27,7 +27,7 @@ export default defineConfig({
       strategy: 'all-in-one',
     },
   },
-  plugins: [pluginVue()],
+  plugins: [pluginPreact()],
   tools: {
     rspack: {
       experiments: {
