@@ -39,17 +39,8 @@ impl Serialize for TACommandError {
             insight: self.insight.clone(),
         };
 
-        // 过滤规则见遥测通道职责收敛：
-        // - 提权进程不是事件上报点（panic 除外）：错误经管道回主进程后由会话边界
-        //   统一上报，保证一次失败一个事件、面包屑时间线完整
-        // - 携带 insight 的错误是下载错误，其家是 DFS insight 通道，不重复上报
-        // - 环境/用户错误（Expected 标记）不进错误上报后端
-        if !crate::utils::sentry::is_pipe_mode()
-            && self.insight.is_none()
-            && crate::session::error::classify(&self.error).report
-        {
-            super::sentry::capture_anyhow(&self.error);
-        }
+        // 过滤规则见遥测通道职责收敛，与 `report_if_needed` 共用。
+        self.report_if_needed();
         response.serialize(serializer)
     }
 }
@@ -193,5 +184,16 @@ impl TACommandError {
         };
 
         Self { error, insight }
+    }
+
+    /// 会话失败上报咽喉。非 pipe、无 insight、且 `classify.report` 时发错误事件。
+    /// 提权进程把错误送回主进程再报；带 insight 的走 DFS；Expected 不进后端。
+    pub fn report_if_needed(&self) {
+        if !crate::utils::sentry::is_pipe_mode()
+            && self.insight.is_none()
+            && crate::session::error::classify(&self.error).report
+        {
+            super::sentry::capture_anyhow(&self.error);
+        }
     }
 }
