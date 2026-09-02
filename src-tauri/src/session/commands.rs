@@ -248,7 +248,7 @@ fn failed_runtime_with_config(config: InstallerConfig, coded: Coded) -> Arc<GuiR
     })
 }
 
-fn visible_sources(project: &ProjectConfig, current_uri: &str) -> Vec<SourceItem> {
+pub(crate) fn visible_sources(project: &ProjectConfig, current_uri: &str) -> Vec<SourceItem> {
     match &project.source {
         SourceField::Single(uri) => vec![SourceItem {
             id: "default".into(),
