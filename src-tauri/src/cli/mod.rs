@@ -306,10 +306,19 @@ fn help_and_exit() -> ! {
     if has_console {
         println!("{text}");
     } else {
-        rfd::MessageDialog::new()
-            .set_title("Kachina Installer")
-            .set_description(&text)
-            .show();
+        crate::utils::taskdialog::task_dialog(
+            crate::utils::taskdialog::TaskDialogRequest {
+                title: "Kachina Installer".into(),
+                content: text,
+                expanded: None,
+                footer: None,
+                buttons: vec![crate::utils::taskdialog::CommandLink {
+                    id: windows::Win32::UI::WindowsAndMessaging::IDOK.0,
+                    text: crate::utils::i18n::t("dialog.ok", &[]),
+                }],
+            },
+            windows::Win32::Foundation::HWND::default(),
+        );
     }
     std::process::exit(0);
 }

@@ -55,13 +55,16 @@ dialog.mirrorc_cdk_get	获取 CDK
 dialog.mirrorc_cdk_hint	Mirror酱是独立的第三方软件下载平台，提供付费的软件下载加速服务。如果你有 Mirror酱的 CDK，可以在这里输入。
 dialog.mirrorc_cdk_placeholder	请输入 Mirror酱 CDK
 dialog.mirrorc_cdk_title	设置 Mirror酱 CDK
+dialog.no	否
 dialog.ok	确定
 dialog.prompt	提示
 dialog.temp_dir	无法访问临时文件夹
 dialog.unknown	未知错误，请检查日志
 dialog.unknown_event	未知
+dialog.webview2_fault	WebView2 初始化失败
 dialog.webview2_required	该安装源需要 WebView2，请使用「高级安装」。
 dialog.window_init_failed	窗口初始化失败
+dialog.yes	是
 done.close	关闭
 done.install	安装完成
 done.latest	您已安装最新版本
@@ -115,6 +118,7 @@ ready.uninstalling	正在卸载
 ready.update	更新
 ready.update_to	更新到
 ready.updating	正在更新
+shortcut.uninstall	卸载{subject}
 step.default.0	获取最新版本
 step.default.1	校验更新内容
 step.default.2	下载和解压文件
@@ -123,3 +127,7 @@ step.mirrorc.0	从 Mirror酱 获取最新版本
 step.mirrorc.1	下载数据包
 step.mirrorc.2	解压文件
 step.mirrorc.3	准备运行环境
+webview2.progress_downloading	正在下载安装程序...
+webview2.progress_heading	当前系统缺少 WebView2 运行时，正在安装...
+webview2.progress_installing	正在安装 WebView2 运行时...
+webview2.progress_title	安装 WebView2 运行时

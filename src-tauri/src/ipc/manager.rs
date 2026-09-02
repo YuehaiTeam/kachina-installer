@@ -234,10 +234,12 @@ pub async fn uac_ipc_main(args: crate::cli::arg::UacArgs) {
     };
 
     if let Err(err) = client {
-        rfd::MessageDialog::new()
-            .set_title("Elevate Fail")
-            .set_description(format!("Client: Failed to connect to pipe: {err:?}"))
-            .show();
+        crate::utils::taskdialog::show_error(
+            crate::utils::code::ELEVATE_FAILED,
+            Some(&format!("{err:?}")),
+            None,
+            windows::Win32::Foundation::HWND::default(),
+        );
         return;
     }
     let client = client.unwrap();

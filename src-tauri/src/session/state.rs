@@ -517,7 +517,7 @@ mod tests {
             },
             SourceItem {
                 id: "mirrorc".into(),
-                name: "Mirror酱".into(),
+                name: "Mirrorc".into(),
                 uri: "mirrorc://rid/1".into(),
                 icon: None,
                 requires_webview: false,
