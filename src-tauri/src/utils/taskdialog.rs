@@ -9,10 +9,10 @@ use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Controls::{
     TaskDialogIndirect, TASKDIALOGCONFIG, TASKDIALOGCONFIG_0, TASKDIALOG_BUTTON,
     TASKDIALOG_COMMON_BUTTON_FLAGS, TASKDIALOG_NOTIFICATIONS, TDE_CONTENT,
-    TDF_ALLOW_DIALOG_CANCELLATION, TDF_NO_DEFAULT_RADIO_BUTTON, TDF_SHOW_MARQUEE_PROGRESS_BAR,
-    TDF_SHOW_PROGRESS_BAR, TDF_SIZE_TO_CONTENT, TDF_USE_COMMAND_LINKS, TDF_USE_HICON_MAIN,
-    TDF_VERIFICATION_FLAG_CHECKED, TDM_SET_PROGRESS_BAR_MARQUEE, TDM_SET_PROGRESS_BAR_POS,
-    TDM_UPDATE_ELEMENT_TEXT, TDN_CREATED, TDN_DESTROYED,
+    TDF_ALLOW_DIALOG_CANCELLATION, TDF_EXPAND_FOOTER_AREA, TDF_NO_DEFAULT_RADIO_BUTTON,
+    TDF_SHOW_MARQUEE_PROGRESS_BAR, TDF_SHOW_PROGRESS_BAR, TDF_SIZE_TO_CONTENT, TDF_USE_COMMAND_LINKS,
+    TDF_USE_HICON_MAIN, TDF_VERIFICATION_FLAG_CHECKED, TDM_SET_PROGRESS_BAR_MARQUEE,
+    TDM_SET_PROGRESS_BAR_POS, TDM_UPDATE_ELEMENT_TEXT, TDN_BUTTON_CLICKED, TDN_CREATED, TDN_DESTROYED,
 };
 use windows::Win32::UI::Shell::ExtractIconExW;
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -618,5 +618,196 @@ fn prompt_state(hwnd: HWND) -> Option<*mut PromptState> {
         None
     } else {
         Some(ptr)
+    }
+}
+
+
+const ID_COPY: i32 = 100;
+
+pub struct TaskDialogRequest {
+    pub title: String,
+    pub content: String,
+    pub expanded: Option<String>,
+    pub footer: Option<String>,
+    pub buttons: Vec<CommandLink>,
+}
+
+/// TaskDialog error: title = locale[code], main = subject, expanded = detail,
+/// footer = code, Copy keeps the dialog open.
+pub fn show_error(code: &str, detail: Option<&str>, subject: Option<&str>, parent: HWND) {
+    let title = crate::utils::i18n::t("dialog.error", &[]);
+    let instruction = crate::utils::i18n::t(code, &[("subject", subject.unwrap_or(""))]);
+    let content = subject.unwrap_or("").to_string();
+    let expanded = detail.unwrap_or("").to_string();
+    let copy_text = format!(
+        "code: {code}\nsubject: {}\ndetail: {}",
+        subject.unwrap_or(""),
+        detail.unwrap_or("")
+    );
+    let copy_label = crate::utils::i18n::t("dialog.copy", &[]);
+    let ok_label = crate::utils::i18n::t("dialog.ok", &[]);
+    let _ = show_task_dialog(
+        TaskDialogSpec {
+            title,
+            instruction,
+            content,
+            expanded,
+            footer: code.to_string(),
+            buttons: vec![
+                CommandLink {
+                    id: ID_COPY,
+                    text: copy_label,
+                },
+                CommandLink {
+                    id: IDOK.0,
+                    text: ok_label,
+                },
+            ],
+            parent,
+            copy: Some(copy_text),
+        },
+    );
+}
+
+pub fn show_error_coded(coded: &crate::utils::code::Coded, parent: HWND) {
+    show_error(
+        coded.code,
+        coded.detail.as_deref(),
+        coded.subject.as_deref(),
+        parent,
+    );
+}
+
+pub fn task_dialog(req: TaskDialogRequest, parent: HWND) -> i32 {
+    show_task_dialog(TaskDialogSpec {
+        title: req.title,
+        instruction: String::new(),
+        content: req.content,
+        expanded: req.expanded.unwrap_or_default(),
+        footer: req.footer.unwrap_or_default(),
+        buttons: req.buttons,
+        parent,
+        copy: None,
+    })
+    .unwrap_or(0)
+}
+
+struct TaskDialogSpec {
+    title: String,
+    instruction: String,
+    content: String,
+    expanded: String,
+    footer: String,
+    buttons: Vec<CommandLink>,
+    parent: HWND,
+    copy: Option<String>,
+}
+
+fn show_task_dialog(spec: TaskDialogSpec) -> anyhow::Result<i32> {
+    let title = wide(&spec.title);
+    let instruction = wide(&spec.instruction);
+    let content = wide(&spec.content);
+    let expanded = wide(&spec.expanded);
+    let footer = wide(&spec.footer);
+    let btn_wides: Vec<Vec<u16>> = spec.buttons.iter().map(|b| wide(&b.text)).collect();
+    let buttons: Vec<TASKDIALOG_BUTTON> = spec
+        .buttons
+        .iter()
+        .zip(btn_wides.iter())
+        .map(|(b, w)| TASKDIALOG_BUTTON {
+            nButtonID: b.id,
+            pszButtonText: PCWSTR(w.as_ptr()),
+        })
+        .collect();
+    let icon = load_main_icon();
+    let mut flags = TDF_USE_HICON_MAIN | TDF_ALLOW_DIALOG_CANCELLATION | TDF_SIZE_TO_CONTENT;
+    if !spec.expanded.is_empty() {
+        flags |= TDF_EXPAND_FOOTER_AREA;
+    }
+    let copy_box = spec.copy.map(Box::new);
+    let copy_ptr = copy_box
+        .as_ref()
+        .map(|b| &**b as *const String as isize)
+        .unwrap_or(0);
+    let config = TASKDIALOGCONFIG {
+        cbSize: config_size(),
+        hwndParent: spec.parent,
+        hInstance: hinstance(),
+        pszWindowTitle: PCWSTR(title.as_ptr()),
+        pszMainInstruction: PCWSTR(instruction.as_ptr()),
+        pszContent: PCWSTR(content.as_ptr()),
+        pszExpandedInformation: if spec.expanded.is_empty() {
+            PCWSTR::null()
+        } else {
+            PCWSTR(expanded.as_ptr())
+        },
+        pszFooter: if spec.footer.is_empty() {
+            PCWSTR::null()
+        } else {
+            PCWSTR(footer.as_ptr())
+        },
+        dwFlags: flags,
+        dwCommonButtons: TASKDIALOG_COMMON_BUTTON_FLAGS(0),
+        cButtons: buttons.len() as u32,
+        pButtons: if buttons.is_empty() {
+            std::ptr::null()
+        } else {
+            buttons.as_ptr()
+        },
+        pfCallback: if copy_ptr != 0 {
+            Some(error_dialog_callback)
+        } else {
+            None
+        },
+        lpCallbackData: copy_ptr,
+        Anonymous1: TASKDIALOGCONFIG_0 { hMainIcon: icon },
+        ..TASKDIALOGCONFIG::default()
+    };
+    let mut button = 0i32;
+    unsafe {
+        TaskDialogIndirect(&config, Some(&mut button), None, None).context("TaskDialogIndirect")?;
+    }
+    drop(copy_box);
+    Ok(button)
+}
+
+unsafe extern "system" fn error_dialog_callback(
+    _hwnd: HWND,
+    msg: TASKDIALOG_NOTIFICATIONS,
+    wparam: WPARAM,
+    _lparam: LPARAM,
+    refdata: isize,
+) -> windows::core::HRESULT {
+    if msg == TDN_BUTTON_CLICKED && wparam.0 as i32 == ID_COPY && refdata != 0 {
+        let text = unsafe { &*(refdata as *const String) };
+        copy_text(text);
+        return windows::Win32::Foundation::S_FALSE;
+    }
+    S_OK
+}
+
+fn copy_text(text: &str) {
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::System::DataExchange::{
+        CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData,
+    };
+    use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
+    const CF_UNICODETEXT: u32 = 13;
+    let wide: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
+    let bytes = wide.len() * 2;
+    unsafe {
+        if OpenClipboard(None).is_err() {
+            return;
+        }
+        let _ = EmptyClipboard();
+        if let Ok(mem) = GlobalAlloc(GMEM_MOVEABLE, bytes) {
+            let ptr = GlobalLock(mem);
+            if !ptr.is_null() {
+                std::ptr::copy_nonoverlapping(wide.as_ptr() as *const u8, ptr as *mut u8, bytes);
+                let _ = GlobalUnlock(mem);
+                let _ = SetClipboardData(CF_UNICODETEXT, Some(HANDLE(mem.0 as *mut _)));
+            }
+        }
+        let _ = CloseClipboard();
     }
 }

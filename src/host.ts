@@ -10,7 +10,13 @@ type ReplyMsg = {
   kind: 'reply';
   ok: boolean;
   data?: unknown;
-  error?: { message?: string; insight?: unknown };
+  error?: {
+    code?: string | null;
+    detail?: string | null;
+    subject?: string | null;
+    insight?: unknown;
+    message?: string;
+  };
 };
 
 type EventMsg = {
@@ -37,8 +43,16 @@ function webview(): {
     handler: (ev: { data: HostMsg }) => void,
   ) => void;
 } {
-  const wv = (window as unknown as { chrome?: { webview?: any } }).chrome
-    ?.webview;
+  const wv = (window as unknown as { chrome?: { webview?: unknown } }).chrome
+    ?.webview as
+    | {
+        postMessage: (msg: unknown) => void;
+        addEventListener: (
+          type: string,
+          handler: (ev: { data: HostMsg }) => void,
+        ) => void;
+      }
+    | undefined;
   if (!wv) {
     throw new Error('chrome.webview is not available');
   }
@@ -59,7 +73,7 @@ function ensureListen() {
       if (msg.ok) {
         waiter.resolve(msg.data);
       } else {
-        waiter.reject(msg.error ?? { message: 'invoke failed' });
+        waiter.reject(msg.error ?? { code: null, detail: 'invoke failed' });
       }
       return;
     }
@@ -91,7 +105,7 @@ export async function invoke<T = unknown>(
 
 export async function listen<T>(
   event: string,
-  handler: (e: { payload: T }) => void,
+  handler: (payload: T) => void,
 ): Promise<() => void> {
   ensureListen();
   let set = listeners.get(event);
@@ -99,24 +113,35 @@ export async function listen<T>(
     set = new Set();
     listeners.set(event, set);
   }
-  const wrapped = (payload: unknown) => handler({ payload: payload as T });
+  const wrapped = (payload: unknown) => handler(payload as T);
   set.add(wrapped);
   return () => {
     set?.delete(wrapped);
   };
 }
 
-export function sep() {
-  return '\\';
+function formatLog(args: unknown[]): string {
+  return args.reduce((acc: string, arg) => {
+    if (typeof arg === 'string') {
+      return acc + ' ' + arg;
+    }
+    return acc + ' ' + (arg instanceof Error ? arg.toString() : JSON.stringify(arg));
+  }, '');
 }
 
-export function getCurrentWindow() {
-  return {
-    show: () => invoke('window_show'),
-    close: () => invoke('window_close'),
-    minimize: () => invoke('window_minimize'),
-    setTitle: (title: string) => invoke('window_set_title', { title }),
-    setDecorations: (decorations: boolean) =>
-      invoke('window_set_decorations', { decorations }),
-  };
+export function log(...args: unknown[]) {
+  console.log(...args);
+  void invoke('log', { data: formatLog(args) });
+}
+
+export function warn(...args: unknown[]) {
+  console.warn(...args);
+  void invoke('warn', { data: formatLog(args) });
+}
+
+export function error(...args: unknown[]): string {
+  console.error(...args);
+  const logstr = formatLog(args);
+  void invoke('error', { data: logstr });
+  return logstr;
 }

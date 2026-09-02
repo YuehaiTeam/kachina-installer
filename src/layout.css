@@ -1,0 +1,288 @@
+
+.main {
+  min-height: 100vh;
+  app-region: drag;
+}
+.init-loading {
+  height: 100vh;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  padding-bottom: 24px;
+  box-sizing: border-box;
+}
+.init-loading .fui-Spinner__spinner {
+  width: 40px;
+  height: 40px;
+  --fui-Spinner--strokeWidth: 4px;
+}
+.content {
+  display: flex;
+  min-height: 100vh;
+  line-height: 1.1;
+  text-align: center;
+  justify-content: center;
+  user-select: none;
+  padding: 0 16px;
+  gap: 8px;
+}
+.desc {
+  font-size: 14px;
+  opacity: 0.8;
+  padding-left: 10px;
+  padding-bottom: 2px;
+}
+.image {
+  min-width: 180px;
+  width: 180px;
+  box-sizing: border-box;
+  padding: 12px 0 12px 12px;
+}
+.image img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+.right {
+  position: relative;
+  width: calc(100% - 188px);
+  text-align: left;
+  display: flex;
+  flex-direction: column;
+  padding: 16px;
+  box-sizing: border-box;
+  overflow: hidden;
+}
+.content.borderless .right {
+  padding-top: 44px;
+}
+.content.no-image .right {
+  width: 100%;
+}
+.title {
+  font-size: 25px;
+  padding: 2px 10px 6px;
+}
+.btn-install {
+  app-region: no-drag;
+  height: 40px;
+  width: 140px;
+  position: absolute;
+  bottom: 20px;
+  right: 8px;
+}
+.btn-install.btn-install-2rd {
+  right: 158px;
+  width: 100px;
+}
+.btn-install svg {
+  width: 20px;
+  margin-right: 6px;
+  margin-left: -6px;
+  padding-top: 2px;
+}
+.actions {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-top: 16px;
+  app-region: no-drag;
+}
+.read,
+.lnk {
+  align-items: center;
+  gap: 4px;
+  padding-left: 12px;
+  font-size: 13px;
+  display: flex;
+}
+.read a,
+.lnk a {
+  cursor: pointer;
+}
+.more {
+  align-items: flex-start;
+  gap: 6px;
+  padding-top: 8px;
+  padding-left: 10px;
+  font-size: 13px;
+  display: flex;
+  flex-direction: column;
+}
+.more svg {
+  width: 12px;
+  position: relative;
+  top: 2px;
+  padding-left: 2px;
+  opacity: 0.8;
+}
+.more span span {
+  opacity: 0.8;
+}
+.more a {
+  cursor: pointer;
+  font-family: Consolas, "Courier New", Microsoft Yahei;
+  opacity: 0.8;
+  font-size: 12px;
+}
+.finish-text {
+  text-align: center;
+  opacity: 0.9;
+  width: 100%;
+  padding: 38px 10px;
+  font-size: 18px;
+  display: flex;
+  justify-content: center;
+  gap: 8px;
+  align-items: center;
+}
+.finish-text svg {
+  width: 24px;
+}
+.progress-bar {
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  height: 4px;
+  background: var(--colorBrandForeground1);
+  transition: width 0.1s;
+  transition-timing-function: cubic-bezier(0.33, 0, 0.67, 1);
+  width: 30%;
+}
+.step-desc {
+  padding: 14px 10px;
+  font-size: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.substep {
+  display: flex;
+  gap: 6px;
+}
+.substep .fui-Spinner__spinner {
+  width: 16px;
+  height: 16px;
+  display: block;
+}
+.substep-done {
+  width: 16px;
+  height: 16px;
+  display: block;
+}
+.substep.done {
+  font-size: 13px;
+  opacity: 0.8;
+}
+.current-status {
+  position: relative;
+  max-width: 100%;
+  font-size: 12px;
+  opacity: 0.7;
+  padding-left: 14px;
+  margin-top: -6px;
+  font-family: Consolas, "Courier New", Microsoft Yahei;
+}
+.current-status.ellipsis {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.controls {
+  app-region: no-drag;
+  position: absolute;
+  right: 0;
+  top: 0;
+  z-index: 9999;
+  height: 32px;
+  display: flex;
+}
+.controls > button {
+  width: 45px;
+  height: 32px;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  appearance: none;
+  background: transparent;
+  border: 0;
+  color: inherit;
+}
+.controls > button svg {
+  height: 14px;
+}
+.controls > button:active {
+  opacity: 0.8;
+}
+.controls .cont-close:hover {
+  background: #c42b1c;
+}
+.controls .cont-minimize:hover {
+  background: rgba(255, 255, 255, 0.07);
+}
+.dialog {
+  position: absolute;
+  top: 4px;
+  left: 16px;
+  right: 16px;
+  bottom: 0;
+  background: var(--colorNeutralBackground1, #111);
+  z-index: 5;
+}
+.prompt-items {
+  font-size: 12px;
+  opacity: 0.8;
+  padding-left: 28px;
+  max-height: 90px;
+  overflow: auto;
+  app-region: no-drag;
+}
+.cdk-input {
+  app-region: no-drag;
+  margin: 30px 10px;
+  margin-bottom: 48px;
+  width: 320px;
+}
+.cdk-input input {
+  font-family: Consolas, monospace !important;
+}
+.card {
+  padding: 8px 10px;
+  font-size: 12px;
+  opacity: 0.6;
+  border: 1px solid #fff;
+  border-radius: 5px;
+  width: 74px;
+  height: 74px;
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-evenly;
+  align-items: center;
+  cursor: pointer;
+  transition: all 0.1s ease-in-out;
+}
+.card:hover {
+  opacity: 1;
+}
+.card.active {
+  background: rgba(255, 255, 255, 0.1);
+  opacity: 1;
+}
+.card-container {
+  padding: 8px 10px;
+  display: flex;
+  gap: 18px;
+  justify-content: center;
+  align-items: center;
+  height: 150px;
+  app-region: no-drag;
+}
+.card svg,
+.source-icon svg,
+.source-icon {
+  width: 40px;
+  height: 40px;
+}

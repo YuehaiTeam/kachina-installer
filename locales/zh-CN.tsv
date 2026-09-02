@@ -28,7 +28,7 @@ PERMISSION_DENIED	拒绝访问
 PKG_BROKEN	安装包损坏，请重新下载
 PLUGIN_FAILED	插件宿主启动失败
 PLUGIN_NOT_FOUND	未找到插件
-PLUGIN_NO_UI	该安装源需要图形界鍼bPROCESS_KILL_FAILED	结束进程失败
+PLUGIN_NO_UI	该安装源需要图形界面
 PROCESS_KILL_FAILED	结束进程失败
 REGISTRY_WRITE_FAILED	写入注册表失败
 REMOTE_FILE_MISSING	无法获取所需文件，请检查网络连接或更换下载源
@@ -94,9 +94,11 @@ prompt.process_running.title	提示
 prompt.version_mismatch.message	当前安装包不是最新版本，是否直接安装最新版本？
 prompt.version_mismatch.title	提示
 ready.advanced	高级安装
-ready.advanced_hint	将安装 WebView2 并打开完整界鍼bready.agree	我已阅读并同意bready.change_path	更改安装位置
+ready.advanced_hint	将安装 WebView2 并打开完整界面
+ready.agree	我已阅读并同意
+ready.change_path	更改安装位置
 ready.continue	使用当前选项继续
-ready.create_lnk	创建桌鍼快捷方式
+ready.create_lnk	创建桌面快捷方式
 ready.delete_user_data	同时删除用户数据
 ready.dir_not_empty	您选择的目录不为空，是否创建新文件夹再安装？选【否】将可能影响原有数据。
 ready.eula	用户协议

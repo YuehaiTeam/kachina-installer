@@ -258,6 +258,51 @@ pub async fn confirm_dialog(
     matches!(ret, rfd::MessageDialogResult::Yes)
 }
 
+pub async fn pick_install_path(
+    current: &str,
+    exe_name: &str,
+    app_name: &str,
+    parent: crate::host::HwndParent,
+) -> Option<String> {
+    let picked = rfd::AsyncFileDialog::new()
+        .set_directory(current)
+        .set_can_create_directories(true)
+        .set_parent(&parent)
+        .pick_folder()
+        .await?;
+    let path = picked.path().to_str()?.to_string();
+    let seldir = inspect_dir(path, exe_name.to_string()).await?;
+    apply_path_choice(seldir, app_name, parent).await
+}
+
+pub async fn apply_path_choice(
+    seldir: SelectDirRes,
+    app_name: &str,
+    parent: crate::host::HwndParent,
+) -> Option<String> {
+    if !seldir.empty && !seldir.upgrade {
+        let is_drive_root = {
+            let n = seldir.path.replace('\\', "/");
+            n.len() == 3 && n.as_bytes().get(1) == Some(&b':') && n.ends_with('/')
+        };
+        let nest = is_drive_root
+            || confirm_dialog(
+                crate::utils::i18n::t("dialog.prompt", &[]),
+                crate::utils::i18n::t("ready.dir_not_empty", &[]),
+                parent,
+            )
+            .await;
+        if nest {
+            return Some(format!(
+                "{}\\{app_name}",
+                seldir.path.trim_end_matches(['\\', '/'])
+            ));
+        }
+    }
+    Some(seldir.path)
+}
+
+
 pub fn log(data: String) {
     tracing::info!("{}", data);
 }

@@ -20,32 +20,31 @@
     "test:builder-extract-replace": "cd tests && node builder-extract-replace.mjs",
     "test:plugin-stub": "cd tests && node plugin-stub.mjs",
     "test:dump-offline-install": "cd tests && node dump-offline-install.mjs",
-    "test:all": "npm run test:prepare && npm run test:offline-install && npm run test:online-install && npm run test:offline-update && npm run test:online-update && npm run test:already-latest && npm run test:uninstall && npm run test:userdata-ignore && npm run test:occupied-process && npm run test:builder-extract-replace && npm run test:plugin-stub"
+    "test:all": "npm run test:prepare && npm run test:offline-install && npm run test:online-install && npm run test:offline-update && npm run test:online-update && npm run test:already-latest && npm run test:uninstall && npm run test:userdata-ignore && npm run test:occupied-process && npm run test:builder-extract-replace && npm run test:plugin-stub",
+    "test": "vitest run"
   },
   "dependencies": {
-    "@sentry/cli": "^2.46.0",
-    "async": "^3.2.6",
-    "compare-versions": "^6.1.1",
-    "dompurify": "^3.2.6",
-    "uuid": "^11.1.0",
-    "vue": "^3.5.16"
+    "preact": "^10.27.2",
+    "@preact/signals": "^2.3.2"
   },
   "devDependencies": {
     "@eslint/js": "^9.29.0",
     "@fullhuman/postcss-purgecss": "^7.0.2",
     "@rsbuild/core": "^1.5.10",
-    "@rsbuild/plugin-vue": "^1.1.2",
-    "@types/async": "^3.2.24",
-    "@types/uuid": "^10.0.0",
+    "@rsbuild/plugin-preact": "^1.5.2",
+    "@sentry/cli": "^2.46.0",
+    "@testing-library/preact": "^3.2.4",
     "compression-webpack-plugin": "^11.1.0",
     "cross-env": "^7.0.3",
     "eslint": "^9.29.0",
     "express": "^4.18.2",
     "fs-extra": "^11.2.0",
     "globals": "^15.15.0",
+    "jsdom": "^26.1.0",
     "prettier": "^3.5.3",
     "typescript": "^5.8.3",
     "typescript-eslint": "^8.34.0",
+    "vitest": "^3.2.4",
     "zx": "^8.8.2"
   },
   "packageManager": "pnpm@10.17.0"
