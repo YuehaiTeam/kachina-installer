@@ -16,7 +16,7 @@ use windows::Win32::System::Threading::GetCurrentThreadId;
 use windows::Win32::UI::HiDpi::{SetProcessDpiAwareness, PROCESS_PER_MONITOR_DPI_AWARE};
 use windows::Win32::UI::WindowsAndMessaging::{
     DispatchMessageW, GetMessageW, IsWindow, PostThreadMessageW, TranslateMessage, MSG, WM_APP,
-    WM_QUIT, WM_SETTINGCHANGE,
+    WM_QUIT,
 };
 
 use crate::cli::arg::InstallArgs;
@@ -139,16 +139,14 @@ pub fn run(args: InstallArgs, preset: Option<SessionInput>) -> anyhow::Result<()
         return Ok(());
     }
 
-    let (major, minor, build) = nt_version::get();
-    let build = (build & 0xffff) as u16;
-    let is_win11 = major == 10 && minor == 0 && build >= 22000;
+    let is_win11 = window::is_win11();
 
     let text_scale = crate::windows_text_scale_factor();
     let scale = text_scale * window::dpi_scale();
     let width = (520.0 * scale).round() as i32;
     let height = (250.0 * scale).round() as i32;
 
-    let hwnd = window::create(width, height, is_win11).context("create window")?;
+    let hwnd = window::create(width, height).context("create window")?;
 
     let (tx, rx) = mpsc::channel();
     let handle = HostHandle {
@@ -225,7 +223,7 @@ pub fn run(args: InstallArgs, preset: Option<SessionInput>) -> anyhow::Result<()
                     delete_self_on_exit();
                     break Ok(());
                 }
-                if msg.message == WM_SETTINGCHANGE && window::is_color_theme_change(msg.lParam) {
+                if msg.message == window::WM_THEME_BACKGROUND {
                     let dark = crate::utils::gui::is_dark_mode().unwrap_or(false);
                     if let Err(err) = webview.apply(hwnd, UiAction::SetBackground { dark }) {
                         tracing::warn!("ui action failed: {err}");
@@ -309,9 +307,7 @@ fn plugin_runtime_setup(
         CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok()?;
     }
 
-    let (major, minor, build) = nt_version::get();
-    let build = (build & 0xffff) as u16;
-    let is_win11 = major == 10 && minor == 0 && build >= 22000;
+    let is_win11 = window::is_win11();
 
     let hwnd = window::create_hidden().context("create hidden plugin window")?;
     let (tx, rx) = mpsc::channel();
@@ -359,7 +355,7 @@ fn plugin_runtime_loop(
                 if msg.message == WM_QUIT {
                     break;
                 }
-                if msg.message == WM_SETTINGCHANGE && window::is_color_theme_change(msg.lParam) {
+                if msg.message == window::WM_THEME_BACKGROUND {
                     let dark = crate::utils::gui::is_dark_mode().unwrap_or(false);
                     if let Err(err) = webview.apply(hwnd, UiAction::SetBackground { dark }) {
                         tracing::warn!("plugin host ui action failed: {err}");

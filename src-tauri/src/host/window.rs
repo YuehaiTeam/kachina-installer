@@ -22,10 +22,10 @@ use windows::Win32::UI::Shell::ExtractIconExW;
 use windows::Win32::UI::WindowsAndMessaging::{
     AdjustWindowRectEx, CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect,
     GetSystemMetrics, GetWindowLongPtrW, LoadCursorW, PostQuitMessage, RegisterClassExW,
-    SendMessageW, SetWindowLongPtrW, SetWindowPos, SetWindowTextW, ShowWindow, GWLP_USERDATA,
+    PostMessageW, SendMessageW, SetWindowLongPtrW, SetWindowPos, SetWindowTextW, ShowWindow, GWLP_USERDATA,
     GWL_STYLE, HICON, ICON_BIG, ICON_SMALL, IDC_ARROW, SM_CXSCREEN, SM_CYSCREEN, SWP_FRAMECHANGED,
     SWP_NOMOVE, SWP_NOZORDER, SW_HIDE, SW_MINIMIZE, SW_SHOW, SW_SHOWNA, WM_CLOSE, WM_DESTROY,
-    WM_SETICON, WM_SETTINGCHANGE, WNDCLASSEXW, WS_CAPTION, WS_EX_NOACTIVATE,
+    WM_APP, WM_SETICON, WM_SETTINGCHANGE, WNDCLASSEXW, WS_CAPTION, WS_EX_NOACTIVATE,
     WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_MAXIMIZE, WS_MINIMIZE, WS_MINIMIZEBOX,
     WS_OVERLAPPED, WS_POPUP, WS_SYSMENU, WS_VISIBLE,
 };
@@ -70,6 +70,15 @@ use std::num::NonZeroIsize;
 const CLASS: PCWSTR = w!("KachinaInstaller");
 const PLUGIN_CLASS: PCWSTR = w!("KachinaPluginHost");
 
+/// Posted by wndproc on theme change so the UI loop can refresh WebView background.
+pub const WM_THEME_BACKGROUND: u32 = WM_APP + 1;
+
+pub fn is_win11() -> bool {
+    let (major, minor, build) = nt_version::get();
+    let build = (build & 0xffff) as u16;
+    major == 10 && minor == 0 && build >= 22000
+}
+
 pub fn primary_dpi() -> u32 {
     unsafe {
         let monitor = MonitorFromPoint(POINT { x: 0, y: 0 }, MONITOR_DEFAULTTOPRIMARY);
@@ -87,7 +96,7 @@ pub fn dpi_scale() -> f64 {
     primary_dpi() as f64 / 96.0
 }
 
-pub fn create(client_w: i32, client_h: i32, is_win11: bool) -> anyhow::Result<HWND> {
+pub fn create(client_w: i32, client_h: i32) -> anyhow::Result<HWND> {
     let hinstance = unsafe { GetModuleHandleW(None) }?.into();
     let (h_icon, h_icon_sm) = load_exe_icons().unwrap_or_default();
     let class = WNDCLASSEXW {
@@ -135,9 +144,7 @@ pub fn create(client_w: i32, client_h: i32, is_win11: bool) -> anyhow::Result<HW
     }
     .context("CreateWindowExW")?;
 
-    if is_win11 {
-        apply_mica(hwnd);
-    }
+    apply_mica(hwnd);
     apply_icon(hwnd);
     unsafe {
         let _ = UpdateWindow(hwnd);
@@ -182,22 +189,24 @@ pub fn create_hidden() -> anyhow::Result<HWND> {
 }
 
 pub fn apply_mica(hwnd: HWND) {
-    let backdrop = DWM_SYSTEMBACKDROP_TYPE(2); // DWMSBT_MAINWINDOW (Mica)
-    let _ = unsafe {
-        DwmSetWindowAttribute(
-            hwnd,
-            DWMWA_SYSTEMBACKDROP_TYPE,
-            &backdrop as *const _ as *const _,
-            size_of::<DWM_SYSTEMBACKDROP_TYPE>() as u32,
-        )
-    };
-    let margins = MARGINS {
-        cxLeftWidth: -1,
-        cxRightWidth: -1,
-        cyTopHeight: -1,
-        cyBottomHeight: -1,
-    };
-    let _ = unsafe { DwmExtendFrameIntoClientArea(hwnd, &margins) };
+    if is_win11() {
+        let backdrop = DWM_SYSTEMBACKDROP_TYPE(2); // DWMSBT_MAINWINDOW (Mica)
+        let _ = unsafe {
+            DwmSetWindowAttribute(
+                hwnd,
+                DWMWA_SYSTEMBACKDROP_TYPE,
+                &backdrop as *const _ as *const _,
+                size_of::<DWM_SYSTEMBACKDROP_TYPE>() as u32,
+            )
+        };
+        let margins = MARGINS {
+            cxLeftWidth: -1,
+            cxRightWidth: -1,
+            cyTopHeight: -1,
+            cyBottomHeight: -1,
+        };
+        let _ = unsafe { DwmExtendFrameIntoClientArea(hwnd, &margins) };
+    }
     let dark = is_dark_mode().unwrap_or(false) as i32;
     let _ = unsafe {
         DwmSetWindowAttribute(
@@ -207,6 +216,12 @@ pub fn apply_mica(hwnd: HWND) {
             size_of::<i32>() as u32,
         )
     };
+}
+
+fn post_theme_background(hwnd: HWND) {
+    unsafe {
+        let _ = PostMessageW(Some(hwnd), WM_THEME_BACKGROUND, WPARAM(0), LPARAM(0));
+    }
 }
 
 pub fn apply_icon(hwnd: HWND) {
@@ -368,6 +383,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
         WM_SETTINGCHANGE => {
             if is_color_theme_change(lparam) {
                 apply_mica(hwnd);
+                post_theme_background(hwnd);
             }
             unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
         }
@@ -390,6 +406,7 @@ extern "system" fn plugin_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         WM_SETTINGCHANGE => {
             if is_color_theme_change(lparam) {
                 apply_mica(hwnd);
+                post_theme_background(hwnd);
             }
             unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
         }

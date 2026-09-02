@@ -16,9 +16,9 @@ Status: proposed
 
 ## Proposal
 
-1. `host/bridge.rs` `on_message` 的 `Err` 分支显式调用 `crate::utils::sentry::capture_anyhow`，过滤条件与 `TACommandError::serialize` 一致：非 pipe 模式、`insight.is_none()`、`classify(&err.error).report`。把过滤逻辑抽成 `TACommandError::report_if_needed(&self)`，`serialize` 与 bridge 共用。
+1. 已落地。`TACommandError::report_if_needed` 承载过滤（非 pipe、无 insight、`classify.report`）；`serialize` 与 `host/bridge.rs` `on_message` 的 `Err` 分支都显式调用，不再把上报藏在序列化副作用里。
 2. `main.rs` 增加 `#![recursion_limit = "256"]`。
-3. `host/window.rs` 的两个 wndproc 在 `WM_SETTINGCHANGE` 且 `is_color_theme_change` 时 `PostMessageW(hwnd, WM_APP + 1, 0, 0)`；主循环与 `plugin_runtime_loop` 改为匹配 `WM_APP + 1` 触发 `SetBackground`，删除对 `WM_SETTINGCHANGE` 的判断。wndproc 中的 `apply_mica` 按窗口创建时的 `is_win11` 门控，标记方式为 `RegisterClassExW` 时分两个类名或以 `GWLP_USERDATA` 存布尔，取实现时更简的一种。
+3. 已落地。wndproc 在 `ImmersiveColorSet` 时 `apply_mica` 并 `PostMessageW(hwnd, WM_THEME_BACKGROUND)`（`WM_APP+1`）；主循环与插件循环匹配该消息刷 `SetBackground`，不再读 `GetMessage` 的 `WM_SETTINGCHANGE`。`apply_mica` 里 mica / `DwmExtendFrameIntoClientArea(-1)` 仅 `is_win11()`，`DWMWA_USE_IMMERSIVE_DARK_MODE` 始终跟标题栏。
 4. 已落地。`strip_install_prefix` 只用小写副本做比较，返回值从 slash 规范化后的原始路径按同一字节偏移切片；`normalize_full` 改用 `to_ascii_lowercase`。`strip_install_prefix_ignores_case_and_slashes` 期望为 `"Sub/a.dll"`。
 5. 已落地。`PromptHub` / `PluginHub` 拆出 `register(id) -> Receiver`；`GuiPluginHost::call` 与 `GuiUi::confirm` 先 `register` 再 `emit`。单测覆盖应答在 await 之前同步到达。
 6. 已落地。`flush(3s)` 放在 GUI 相关 `block_on` 的末尾（Runtime 尚未 drop，在途 envelope 的 `spawn` 才能跑完）。`native_entry` / `host_main` / silent 失败的 `process::exit(1)` 在退出前同样 flush，避免跳过 `block_on` 尾部。`INFLIGHT == 0` 时立即返回。
