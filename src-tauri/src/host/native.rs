@@ -4,55 +4,42 @@ use std::sync::Arc;
 use anyhow::Context;
 use async_trait::async_trait;
 use windows::Win32::Foundation::HWND;
-use windows::Win32::UI::WindowsAndMessaging::GetDesktopWindow;
+use windows::Win32::UI::WindowsAndMessaging::{GetDesktopWindow, IDOK};
 
 use crate::cli::arg::InstallArgs;
 use crate::host::HwndParent;
 use crate::installer::config::{resolve_installer_config, InstallerConfig};
-use crate::installer::inspect_dir;
 use crate::ipc::manager::ManagedElevate;
-use crate::session::commands::settings_from_input;
+use crate::session::commands::{mirrorc_target, settings_from_input, visible_sources};
 use crate::session::run::{run_install, run_uninstall};
 use crate::session::source::needs_js_plugin;
-use crate::session::types::{
-    settings_from_cli, SessionInput, SessionResult, SourceField, SourceItem,
+use crate::session::state::{
+    CdkStatus, Intent, Mode, Options, Phase, Progress, Renderer, UiSession, UiState,
 };
-use crate::session::state::{Phase, Prompt, UiState};
-use crate::session::ui::{notice_from_error, notice_text, progress_current, prompt_copy, SessionUi};
+use crate::session::types::{settings_from_cli, SessionInput};
+use crate::session::ui::{progress_current, prompt_copy, SessionUi};
+use crate::session::ProjectConfig;
 use crate::utils::code::{
-    extract, should_report_error, Coded, Extracted, MIRRORC_CDK_BANNED, MIRRORC_CDK_EXPIRED,
-    MIRRORC_CDK_INVALID, MIRRORC_CDK_MISMATCH,
+    extract, should_report_error, Coded, Extracted, INTERNAL_ERROR, MIRRORC_CDK_BANNED,
+    MIRRORC_CDK_EXPIRED, MIRRORC_CDK_INVALID, MIRRORC_CDK_MISMATCH, MIRRORC_CDK_MISSING,
+    PKG_BROKEN, TEMP_DIR_UNAVAILABLE, WEBVIEW2_REQUIRED,
 };
 use crate::utils::i18n;
-use crate::session::ProjectConfig;
 use crate::utils::taskdialog::{
-    prompt_text, show_ready, CommandLink, ProgressDialog, ProgressHwnd, ReadySpec, ID_ADVANCED,
-    ID_CHANGE_PATH, ID_CLOSE, ID_INSTALL, ID_LAUNCH, ID_RADIO_BASE,
+    prompt_text, show_error, show_error_coded, show_ready, task_dialog, CommandLink,
+    ProgressDialog, ProgressHwnd, ReadySpec, TaskDialogRequest, ID_ADVANCED, ID_CHANGE_PATH,
+    ID_CLOSE, ID_INSTALL, ID_LAUNCH, ID_RADIO_BASE,
 };
 
 pub enum NativeOutcome {
     Exit,
-    Again { reopen_source: bool },
+    Again {
+        reopen_source: bool,
+    },
     Web {
         args: InstallArgs,
         preset: SessionInput,
     },
-}
-
-enum ReadyAction {
-    Install,
-    Uninstall,
-    Advanced,
-}
-
-struct ReadyState {
-    path: String,
-    source_uri: String,
-    create_lnk: bool,
-    delete_user_data: bool,
-    mirrorc_cdk: Option<String>,
-    is_update: bool,
-    is_uninstall: bool,
 }
 
 pub async fn run(args: InstallArgs) -> anyhow::Result<NativeOutcome> {
@@ -61,10 +48,7 @@ pub async fn run(args: InstallArgs) -> anyhow::Result<NativeOutcome> {
     }
     let temp_dir = std::env::temp_dir();
     if std::env::set_current_dir(&temp_dir).is_err() {
-        rfd::MessageDialog::new()
-        .set_title(&i18n::t("dialog.error_title", &[]))
-        .set_description(&i18n::t("dialog.temp_dir", &[]))
-            .show();
+        show_error(TEMP_DIR_UNAVAILABLE, None, None, desktop_hwnd());
         return Ok(NativeOutcome::Exit);
     }
 
@@ -72,30 +56,15 @@ pub async fn run(args: InstallArgs) -> anyhow::Result<NativeOutcome> {
     let project = match config.embedded_config.as_ref() {
         Some(value) => ProjectConfig::from_value(value)?,
         None => {
-            rfd::MessageDialog::new()
-                .set_title(&i18n::t("dialog.error", &[]))
-                .set_description(&i18n::t(crate::utils::code::PKG_BROKEN, &[]))
-                .set_level(rfd::MessageLevel::Error)
-                .show();
+            show_error(PKG_BROKEN, None, None, desktop_hwnd());
             return Ok(NativeOutcome::Exit);
         }
     };
 
-    let mut state = ready_state_from(&args, &config, &project).await?;
+    let mut sess = ui_session_from(&args, &config, &project).await?;
     if args.non_interactive {
-        let input = state_to_input(&state);
-        return match finish_action(
-            if state.is_uninstall {
-                ReadyAction::Uninstall
-            } else {
-                ReadyAction::Install
-            },
-            input,
-            args,
-            &config,
-            &project,
-        )
-        .await?
+        let input = options_to_input(&sess.state.options);
+        return match finish_action(Intent::Start, input, args, &config, &project, &mut sess).await?
         {
             NativeOutcome::Again { .. } => Ok(NativeOutcome::Exit),
             other => Ok(other),
@@ -103,39 +72,43 @@ pub async fn run(args: InstallArgs) -> anyhow::Result<NativeOutcome> {
     }
 
     loop {
-        let action = match show_ready_page(&project, &mut state).await? {
+        let action = match show_ready_page(&project, &mut sess).await? {
             None => return Ok(NativeOutcome::Exit),
-            Some(ReadyAction::Advanced) => ReadyAction::Advanced,
-            Some(ReadyAction::Install) => ReadyAction::Install,
-            Some(ReadyAction::Uninstall) => ReadyAction::Uninstall,
+            Some(intent) => intent,
         };
 
-        if matches!(action, ReadyAction::Install | ReadyAction::Uninstall)
+        if matches!(action, Intent::Start)
             && !project.need_web_view2
-            && needs_js_plugin(&state.source_uri)
+            && needs_js_plugin(&sess.state.options.source_uri)
         {
-            rfd::MessageDialog::new()
-                .set_title("提示")
-                .set_description("该安装源需要 WebView2，请使用「高级安装」。")
-                .set_level(rfd::MessageLevel::Info)
-                .show();
+            show_error(WEBVIEW2_REQUIRED, None, None, desktop_hwnd());
             continue;
         }
 
-        if matches!(action, ReadyAction::Install)
-            && state.source_uri.starts_with("mirrorc://")
-            && state.mirrorc_cdk.as_deref().unwrap_or("").is_empty()
-        {
-            if !ensure_mirrorc_cdk(&project, &mut state, false).await {
+        if matches!(action, Intent::Start) {
+            sess.apply(Intent::Start);
+            if cdk_missing(&sess) {
+                sess.apply(Intent::Dismiss);
+                if !ensure_mirrorc_cdk(&project, &mut sess, false).await {
+                    continue;
+                }
+                sess.apply(Intent::Start);
+                if cdk_missing(&sess) {
+                    continue;
+                }
+            } else if let Phase::Failed(c) = &sess.state.phase {
+                let coded = c.clone();
+                show_error_coded(&coded, desktop_hwnd());
+                sess.apply(Intent::Dismiss);
                 continue;
             }
         }
 
-        let input = state_to_input(&state);
-        match finish_action(action, input, args.clone(), &config, &project).await? {
+        let input = options_to_input(&sess.state.options);
+        match finish_action(action, input, args.clone(), &config, &project, &mut sess).await? {
             NativeOutcome::Again { reopen_source } => {
                 if reopen_source {
-                    let _ = ensure_mirrorc_cdk(&project, &mut state, true).await;
+                    let _ = ensure_mirrorc_cdk(&project, &mut sess, true).await;
                 }
                 continue;
             }
@@ -144,56 +117,102 @@ pub async fn run(args: InstallArgs) -> anyhow::Result<NativeOutcome> {
     }
 }
 
-async fn ready_state_from(
+async fn ui_session_from(
     args: &InstallArgs,
     config: &InstallerConfig,
     project: &ProjectConfig,
-) -> anyhow::Result<ReadyState> {
+) -> anyhow::Result<UiSession> {
     let settings = settings_from_cli(args, config, project).await?;
     let mut cdk = settings.mirrorc_cdk;
     if cdk.is_none() && settings.source_uri.starts_with("mirrorc://") {
         cdk = crate::utils::wincred::wincred_read(&mirrorc_target(&project.app_name)).ok();
     }
-    Ok(ReadyState {
-        path: if args.uninstall || config.is_uninstall {
-            config.install_path.clone()
+    let is_uninstall = config.is_uninstall || args.uninstall;
+    let install_path = if is_uninstall {
+        config.install_path.clone()
+    } else {
+        settings.install_path.clone()
+    };
+    let cdk_status = if cdk.as_deref().unwrap_or("").is_empty() {
+        CdkStatus::Idle
+    } else {
+        CdkStatus::Ok
+    };
+    let sources = visible_sources(project, &settings.source_uri);
+    let state = UiState {
+        phase: Phase::Ready,
+        mode: if is_uninstall {
+            Mode::Uninstall
+        } else if settings.is_update {
+            Mode::Update
         } else {
-            settings.install_path
+            Mode::Install
         },
-        source_uri: settings.source_uri,
-        create_lnk: settings.create_lnk,
-        delete_user_data: settings.delete_user_data,
-        mirrorc_cdk: cdk,
-        is_update: settings.is_update,
-        is_uninstall: config.is_uninstall || args.uninstall,
-    })
+        project: crate::session::state::ProjectView {
+            window_title: project.window_title.clone(),
+            title: project.title.clone(),
+            description: project.description.clone(),
+            borderless: project.window_borderless.unwrap_or(false),
+            lang: i18n::lang().to_string(),
+        },
+        options: Options {
+            install_path: install_path.clone(),
+            source_uri: settings.source_uri,
+            create_lnk: settings.create_lnk,
+            delete_user_data: settings.delete_user_data,
+            mirrorc_cdk: cdk.filter(|s| !s.is_empty()),
+        },
+        sources,
+        path: crate::session::state::PathState {
+            writable: crate::session::state::PathWritable::Writable,
+            exists: false,
+            upgrade: false,
+        },
+        needs_elevate: settings.elevate,
+        cdk: cdk_status,
+        theme: crate::session::state::Theme::None,
+        pending: None,
+    };
+    let mut sess = UiSession::with_project(
+        state,
+        Renderer::Native,
+        project.exe_name.clone(),
+        project.app_name.clone(),
+        project.uac_strategy.clone(),
+    );
+    sess.apply(Intent::SetPath { path: install_path });
+    if is_uninstall {
+        sess.state.mode = Mode::Uninstall;
+    }
+    Ok(sess)
 }
 
-fn state_to_input(state: &ReadyState) -> SessionInput {
+fn options_to_input(options: &Options) -> SessionInput {
     SessionInput {
-        install_path: state.path.clone(),
-        source_uri: state.source_uri.clone(),
-        create_lnk: state.create_lnk,
-        delete_user_data: state.delete_user_data,
-        mirrorc_cdk: state.mirrorc_cdk.clone(),
+        install_path: options.install_path.clone(),
+        source_uri: options.source_uri.clone(),
+        create_lnk: options.create_lnk,
+        delete_user_data: options.delete_user_data,
+        mirrorc_cdk: options.mirrorc_cdk.clone(),
     }
 }
 
-fn visible_sources(project: &ProjectConfig, current_uri: &str) -> Vec<SourceItem> {
-    match &project.source {
-        SourceField::Single(_) => Vec::new(),
-        SourceField::List(list) => list
-            .iter()
-            .filter(|s| (!s.hidden || s.uri == current_uri) && !needs_js_plugin(&s.uri))
-            .cloned()
-            .collect(),
-    }
+fn t(state: &UiState, key: &str) -> String {
+    i18n::catalog().t(&state.project.lang, key, &[])
+}
+
+fn desktop_hwnd() -> HWND {
+    unsafe { GetDesktopWindow() }
+}
+
+fn cdk_missing(sess: &UiSession) -> bool {
+    matches!(&sess.state.phase, Phase::Failed(c) if c.code == MIRRORC_CDK_MISSING)
 }
 
 fn apply_preset_to_args(args: &mut InstallArgs, project: &ProjectConfig, input: &SessionInput) {
     args.target = Some(PathBuf::from(&input.install_path));
     args.mirrorc_cdk = input.mirrorc_cdk.clone();
-    if let SourceField::List(list) = &project.source {
+    if let crate::session::types::SourceField::List(list) = &project.source {
         if let Some(item) = list.iter().find(|s| s.uri == input.source_uri) {
             args.source = Some(item.id.clone());
         }
@@ -202,82 +221,100 @@ fn apply_preset_to_args(args: &mut InstallArgs, project: &ProjectConfig, input: 
 
 async fn show_ready_page(
     project: &ProjectConfig,
-    state: &mut ReadyState,
-) -> anyhow::Result<Option<ReadyAction>> {
+    sess: &mut UiSession,
+) -> anyhow::Result<Option<Intent>> {
     loop {
-        let sources = visible_sources(project, &state.source_uri);
-        if !sources.is_empty() && !sources.iter().any(|s| s.uri == state.source_uri) {
-            state.source_uri = sources[0].uri.clone();
+        let sources = sess.state.sources.clone();
+        if sources.len() > 1
+            && !sources
+                .iter()
+                .any(|s| s.uri == sess.state.options.source_uri)
+        {
+            sess.apply(Intent::SetSource {
+                uri: sources[0].uri.clone(),
+            });
         }
-        let default_radio = sources
-            .iter()
-            .position(|s| s.uri == state.source_uri)
-            .map(|i| ID_RADIO_BASE + i as i32)
-            .unwrap_or(0);
-        let radios = sources
-            .iter()
-            .enumerate()
-            .map(|(i, s)| CommandLink {
-                id: ID_RADIO_BASE + i as i32,
-                text: s.name.clone(),
-            })
-            .collect();
+        let show_radios = sources.len() > 1;
+        let default_radio = if show_radios {
+            sources
+                .iter()
+                .position(|s| s.uri == sess.state.options.source_uri)
+                .map(|i| ID_RADIO_BASE + i as i32)
+                .unwrap_or(0)
+        } else {
+            0
+        };
+        let radios = if show_radios {
+            sources
+                .iter()
+                .enumerate()
+                .map(|(i, s)| CommandLink {
+                    id: ID_RADIO_BASE + i as i32,
+                    text: s.name.clone(),
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
 
-        let verb = if state.is_uninstall {
-            "卸载"
-        } else if state.is_update {
-            "更新"
-        } else {
-            "安装"
+        let verb_key = match sess.state.mode {
+            Mode::Uninstall => "ready.uninstall",
+            Mode::Update => "ready.update",
+            Mode::Install => "ready.install",
         };
-        let dest = if state.is_uninstall {
-            format!("卸载自 {}", state.path)
-        } else if state.is_update {
-            format!("更新到 {}", state.path)
-        } else {
-            format!("安装到 {}", state.path)
+        let dest_key = match sess.state.mode {
+            Mode::Uninstall => "ready.uninstall_from",
+            Mode::Update => "ready.update_to",
+            Mode::Install => "ready.install_to",
         };
-        let mut content = project.description.clone();
+        let dest = format!(
+            "{} {}",
+            t(&sess.state, dest_key),
+            sess.state.options.install_path
+        );
+        let mut content = sess.state.project.description.clone();
         if !content.is_empty() {
             content.push_str("\n\n");
         }
         content.push_str(&dest);
 
+        let verb = t(&sess.state, verb_key);
         let mut links = vec![CommandLink {
             id: ID_INSTALL,
-            text: if state.is_uninstall {
-                "卸载".to_string()
+            text: if matches!(sess.state.mode, Mode::Uninstall) {
+                verb
             } else {
-                format!("{verb}\n使用当前选项继续")
+                format!("{}\n{}", verb, t(&sess.state, "ready.continue"))
             },
         }];
-        if !state.is_uninstall {
+        if !matches!(sess.state.mode, Mode::Uninstall) {
             links.push(CommandLink {
                 id: ID_CHANGE_PATH,
-                text: "更改安装位置".to_string(),
+                text: t(&sess.state, "ready.change_path"),
             });
         }
         links.push(CommandLink {
             id: ID_ADVANCED,
-            text: "高级安装\n将安装 WebView2 并打开完整界面".to_string(),
+            text: format!(
+                "{}\n{}",
+                t(&sess.state, "ready.advanced"),
+                t(&sess.state, "ready.advanced_hint")
+            ),
         });
 
-        let verification = if state.is_uninstall {
-            Some("同时删除用户数据".to_string())
-        } else if !state.is_update {
-            Some("创建桌面快捷方式".to_string())
-        } else {
-            None
+        let verification = match sess.state.mode {
+            Mode::Uninstall => Some(t(&sess.state, "ready.delete_user_data")),
+            Mode::Install => Some(t(&sess.state, "ready.create_lnk")),
+            Mode::Update => None,
         };
-        let verification_checked = if state.is_uninstall {
-            state.delete_user_data
-        } else {
-            state.create_lnk
+        let verification_checked = match sess.state.mode {
+            Mode::Uninstall => sess.state.options.delete_user_data,
+            _ => sess.state.options.create_lnk,
         };
 
         let spec = ReadySpec {
-            title: project.window_title.clone(),
-            instruction: project.title.clone(),
+            title: sess.state.project.window_title.clone(),
+            instruction: sess.state.project.title.clone(),
             content,
             links,
             radios,
@@ -289,36 +326,40 @@ async fn show_ready_page(
             .await
             .context("ready dialog")??;
 
-        if !sources.is_empty() {
+        if show_radios {
             if let Some(src) = sources
                 .iter()
                 .enumerate()
                 .find(|(i, _)| ID_RADIO_BASE + *i as i32 == result.radio)
                 .map(|(_, s)| s)
             {
-                state.source_uri = src.uri.clone();
+                sess.apply(Intent::SetSource {
+                    uri: src.uri.clone(),
+                });
             }
         }
-        if state.is_uninstall {
-            state.delete_user_data = result.verified;
-        } else if !state.is_update {
-            state.create_lnk = result.verified;
+        match sess.state.mode {
+            Mode::Uninstall => sess.apply(Intent::SetDeleteUserData {
+                value: result.verified,
+            }),
+            Mode::Install => sess.apply(Intent::SetCreateLnk {
+                value: result.verified,
+            }),
+            Mode::Update => {}
         }
 
         match result.button {
-            ID_INSTALL if state.is_uninstall => return Ok(Some(ReadyAction::Uninstall)),
-            ID_INSTALL => return Ok(Some(ReadyAction::Install)),
-            ID_ADVANCED => return Ok(Some(ReadyAction::Advanced)),
+            ID_INSTALL => return Ok(Some(Intent::Start)),
+            ID_ADVANCED => return Ok(Some(Intent::Advanced)),
             ID_CHANGE_PATH => {
-                if let Some(path) =
-                    pick_path(&state.path, &project.exe_name, &project.app_name).await
+                if let Some(path) = pick_path(
+                    &sess.state.options.install_path,
+                    &project.exe_name,
+                    &project.app_name,
+                )
+                .await
                 {
-                    state.path = path;
-                    if let Some(dir) =
-                        inspect_dir(state.path.clone(), project.exe_name.clone()).await
-                    {
-                        state.is_update = dir.upgrade;
-                    }
+                    sess.apply(Intent::SetPath { path });
                 }
             }
             _ => return Ok(None),
@@ -331,38 +372,47 @@ async fn pick_path(current: &str, exe_name: &str, app_name: &str) -> Option<Stri
     crate::installer::pick_install_path(current, exe_name, app_name, parent).await
 }
 
-fn mirrorc_target(app_name: &str) -> String {
-    format!("KachinaInstaller_MirrorChyanCDK_{app_name}")
-}
-
-async fn ensure_mirrorc_cdk(
-    project: &ProjectConfig,
-    state: &mut ReadyState,
-    force: bool,
-) -> bool {
+async fn ensure_mirrorc_cdk(project: &ProjectConfig, sess: &mut UiSession, force: bool) -> bool {
     if !force {
-        if state.mirrorc_cdk.as_deref().unwrap_or("").is_empty() {
-            state.mirrorc_cdk =
-                crate::utils::wincred::wincred_read(&mirrorc_target(&project.app_name)).ok();
+        if sess
+            .state
+            .options
+            .mirrorc_cdk
+            .as_deref()
+            .unwrap_or("")
+            .is_empty()
+        {
+            if let Ok(cdk) = crate::utils::wincred::wincred_read(&mirrorc_target(&project.app_name))
+            {
+                sess.apply(Intent::SetCdk { cdk });
+            }
         }
-        if !state.mirrorc_cdk.as_deref().unwrap_or("").is_empty() {
+        if !sess
+            .state
+            .options
+            .mirrorc_cdk
+            .as_deref()
+            .unwrap_or("")
+            .is_empty()
+        {
+            sess.state.cdk = CdkStatus::Ok;
             return true;
         }
     }
 
-    let app = project.app_name.clone();
-    let initial = state.mirrorc_cdk.clone().unwrap_or_default();
-    let key = tokio::task::spawn_blocking(move || {
-        prompt_text("Mirror酱", &format!("请输入 {app} 的 Mirror酱 CDK"), &initial)
-    })
-    .await
-    .ok()
-    .flatten();
+    let initial = sess.state.options.mirrorc_cdk.clone().unwrap_or_default();
+    let title = t(&sess.state, "dialog.mirrorc_cdk_title");
+    let prompt = t(&sess.state, "dialog.mirrorc_cdk_placeholder");
+    let key = tokio::task::spawn_blocking(move || prompt_text(&title, &prompt, &initial))
+        .await
+        .ok()
+        .flatten();
 
     match key {
         Some(key) if key.is_empty() => {
             let _ = crate::utils::wincred::wincred_delete(&mirrorc_target(&project.app_name));
-            state.mirrorc_cdk = None;
+            sess.apply(Intent::SetCdk { cdk: String::new() });
+            sess.state.cdk = CdkStatus::Idle;
             false
         }
         Some(key) => {
@@ -371,28 +421,44 @@ async fn ensure_mirrorc_cdk(
                 &key,
                 "MirrorChyan CDK",
             );
-            state.mirrorc_cdk = Some(key);
+            sess.apply(Intent::SetCdk { cdk: key });
+            sess.state.cdk = CdkStatus::Ok;
             true
         }
-        None => !state.mirrorc_cdk.as_deref().unwrap_or("").is_empty(),
+        None => {
+            if sess
+                .state
+                .options
+                .mirrorc_cdk
+                .as_deref()
+                .unwrap_or("")
+                .is_empty()
+            {
+                false
+            } else {
+                sess.state.cdk = CdkStatus::Ok;
+                true
+            }
+        }
     }
 }
 
 async fn finish_action(
-    action: ReadyAction,
+    action: Intent,
     input: SessionInput,
     mut args: InstallArgs,
     config: &InstallerConfig,
     project: &ProjectConfig,
+    sess: &mut UiSession,
 ) -> anyhow::Result<NativeOutcome> {
-    let to_web = project.need_web_view2 || matches!(action, ReadyAction::Advanced);
+    let to_web = project.need_web_view2 || matches!(action, Intent::Advanced);
     if to_web {
         if crate::module::wv2::install_webview2().await.is_err() {
             return Ok(NativeOutcome::Exit);
         }
         apply_preset_to_args(&mut args, project, &input);
-        args.non_interactive = !matches!(action, ReadyAction::Advanced);
-        args.uninstall = matches!(action, ReadyAction::Uninstall);
+        args.non_interactive = !matches!(action, Intent::Advanced);
+        args.uninstall = matches!(sess.state.mode, Mode::Uninstall);
         return Ok(NativeOutcome::Web {
             args,
             preset: input,
@@ -400,31 +466,39 @@ async fn finish_action(
     }
 
     match action {
-        ReadyAction::Advanced => unreachable!(),
-        ReadyAction::Install => native_session(false, input, args, config, project).await,
-        ReadyAction::Uninstall => native_session(true, input, args, config, project).await,
+        Intent::Advanced => unreachable!(),
+        Intent::Start => native_session(input, args, config, project, sess).await,
+        _ => Ok(NativeOutcome::Exit),
     }
 }
 
 async fn native_session(
-    uninstall: bool,
     input: SessionInput,
     args: InstallArgs,
     config: &InstallerConfig,
     project: &ProjectConfig,
+    sess: &mut UiSession,
 ) -> anyhow::Result<NativeOutcome> {
     let (settings, _) = settings_from_input(&input, &args, config).await?;
-    let heading = if uninstall {
-        i18n::t("ready.uninstalling", &[])
-    } else if settings.is_update {
-        i18n::t("ready.updating", &[])
-    } else {
-        i18n::t("ready.installing", &[])
+    let heading = match sess.state.mode {
+        Mode::Uninstall => t(&sess.state, "ready.uninstalling"),
+        Mode::Update => t(&sess.state, "ready.updating"),
+        Mode::Install => t(&sess.state, "ready.installing"),
     };
-    let prepare = i18n::t("progress.prepare", &[]);
+    let prepare = t(&sess.state, "progress.prepare");
+    sess.state.phase = Phase::Running(Progress {
+        sub_step: 0,
+        percent: 0.0,
+        stage: "prepare",
+        subject: None,
+        done: None,
+        total: None,
+    });
     let dialog = ProgressDialog::show(&project.window_title, &heading, &prepare, false).await?;
     let ui = NativeUi::new(dialog.hwnd_arc());
+    ui.state(&sess.state);
     let mgr = ManagedElevate::new();
+    let uninstall = matches!(sess.state.mode, Mode::Uninstall);
     let result = if uninstall {
         run_uninstall(&settings, config, project, &ui, &mgr).await
     } else {
@@ -433,55 +507,63 @@ async fn native_session(
     dialog.close().await;
 
     match result {
-        Ok(result) if result.cancelled => Ok(NativeOutcome::Again { reopen_source: false }),
+        Ok(result) if result.cancelled => {
+            sess.state.phase = Phase::Ready;
+            Ok(NativeOutcome::Again {
+                reopen_source: false,
+            })
+        }
         Ok(result) => {
-            show_finish(project, &input, &result).await;
+            sess.state.phase = Phase::Done(result);
+            show_finish(&sess.state, &project.exe_name).await;
             Ok(NativeOutcome::Exit)
         }
         Err(err) => {
             if should_report_error(&err) {
                 crate::utils::sentry::capture_anyhow(&err);
             }
-            let (title, message) = notice_from_error(&err);
-            rfd::MessageDialog::new()
-                .set_title(&title)
-                .set_description(&message)
-                .set_level(rfd::MessageLevel::Error)
-                .show();
+            let coded = coded_from_error(&err);
+            let reopen = cdk_should_reopen(&err);
+            show_error_coded(&coded, desktop_hwnd());
+            sess.state.phase = Phase::Failed(coded);
+            sess.apply(Intent::Dismiss);
             Ok(NativeOutcome::Again {
-                reopen_source: cdk_should_reopen(&err),
+                reopen_source: reopen,
             })
         }
     }
 }
 
-async fn show_finish(project: &ProjectConfig, input: &SessionInput, result: &SessionResult) {
+async fn show_finish(state: &UiState, exe_name: &str) {
+    let Phase::Done(result) = &state.phase else {
+        return;
+    };
     if result.cancelled {
         return;
     }
-    let (instruction, launch) = if result.is_uninstall {
-        ("卸载成功", false)
+    let (instruction_key, launch) = if result.is_uninstall {
+        ("done.uninstall", false)
     } else if result.already_latest {
-        ("您已安装最新版本", true)
+        ("done.latest", true)
     } else if result.is_update {
-        ("更新完成", true)
+        ("done.update", true)
     } else {
-        ("安装完成", true)
+        ("done.install", true)
     };
     let mut links = Vec::new();
     if launch {
         links.push(CommandLink {
             id: ID_LAUNCH,
-            text: "启动".to_string(),
+            text: t(state, "done.launch"),
         });
     }
     links.push(CommandLink {
         id: ID_CLOSE,
-        text: "关闭".to_string(),
+        text: t(state, "done.close"),
     });
     let spec = ReadySpec {
-        title: project.window_title.clone(),
-        instruction: instruction.to_string(),
+        title: state.project.window_title.clone(),
+        instruction: t(state, instruction_key),
         content: String::new(),
         links,
         radios: Vec::new(),
@@ -494,7 +576,7 @@ async fn show_finish(project: &ProjectConfig, input: &SessionInput, result: &Ses
         .ok()
         .and_then(|r| r.ok());
     if result.is_some_and(|r| r.button == ID_LAUNCH) {
-        let path = PathBuf::from(&input.install_path).join(&project.exe_name);
+        let path = PathBuf::from(&state.options.install_path).join(exe_name);
         crate::installer::launch(path.to_string_lossy().to_string()).await;
     }
 }
@@ -521,12 +603,23 @@ fn cdk_should_reopen(err: &anyhow::Error) -> bool {
     match extract(err) {
         Extracted::Coded(c) => matches!(
             c.code,
-            MIRRORC_CDK_EXPIRED
-                | MIRRORC_CDK_INVALID
-                | MIRRORC_CDK_MISMATCH
-                | MIRRORC_CDK_BANNED
+            MIRRORC_CDK_EXPIRED | MIRRORC_CDK_INVALID | MIRRORC_CDK_MISMATCH | MIRRORC_CDK_BANNED
         ),
         _ => false,
+    }
+}
+
+fn coded_from_error(err: &anyhow::Error) -> Coded {
+    match extract(err) {
+        Extracted::Coded(c) => c.clone(),
+        Extracted::Cancelled => Coded::bare("cancelled"),
+        Extracted::Uncoded { detail } => {
+            let mut c = Coded::bare(INTERNAL_ERROR);
+            if !detail.is_empty() {
+                c.detail = Some(detail);
+            }
+            c
+        }
     }
 }
 
@@ -540,16 +633,41 @@ impl SessionUi for NativeUi {
         }
     }
 
-    async fn confirm(&self, prompt: Prompt) -> bool {
+    async fn confirm(&self, prompt: crate::session::state::Prompt) -> bool {
         let (title, message) = prompt_copy(&prompt);
-        crate::installer::confirm_dialog(title, message, self.parent()).await
+        let parent = self.parent();
+        let ok = i18n::t("dialog.ok", &[]);
+        let cancel = i18n::t("dialog.cancel", &[]);
+        tokio::task::spawn_blocking(move || {
+            task_dialog(
+                TaskDialogRequest {
+                    title,
+                    content: message,
+                    expanded: None,
+                    footer: None,
+                    buttons: vec![
+                        CommandLink {
+                            id: IDOK.0,
+                            text: ok,
+                        },
+                        CommandLink {
+                            id: ID_CLOSE,
+                            text: cancel,
+                        },
+                    ],
+                },
+                parent.hwnd(),
+            ) == IDOK.0
+        })
+        .await
+        .unwrap_or(false)
     }
 
     fn notify(&self, coded: &Coded) {
-        let (title, message) = notice_text(coded);
+        let coded = coded.clone();
         let parent = self.parent();
-        tokio::spawn(async move {
-            crate::installer::error_dialog(title, message, parent).await;
+        tokio::task::spawn_blocking(move || {
+            show_error_coded(&coded, parent.hwnd());
         });
     }
 }

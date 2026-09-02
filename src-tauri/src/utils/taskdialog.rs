@@ -508,6 +508,8 @@ unsafe extern "system" fn prompt_wndproc(
                 )
             };
             let _ = label;
+            let ok = wide(&crate::utils::i18n::t("dialog.ok", &[]));
+            let cancel = wide(&crate::utils::i18n::t("dialog.cancel", &[]));
             let edit = unsafe {
                 CreateWindowExW(
                     windows::Win32::UI::WindowsAndMessaging::WS_EX_CLIENTEDGE,
@@ -535,7 +537,7 @@ unsafe extern "system" fn prompt_wndproc(
                 CreateWindowExW(
                     windows::Win32::UI::WindowsAndMessaging::WINDOW_EX_STYLE::default(),
                     w!("BUTTON"),
-                    w!("确定"),
+                    PCWSTR(ok.as_ptr()),
                     WS_CHILD | WS_VISIBLE | WS_TABSTOP | WINDOW_STYLE(BS_DEFPUSHBUTTON as u32),
                     230,
                     90,
@@ -553,7 +555,7 @@ unsafe extern "system" fn prompt_wndproc(
                 CreateWindowExW(
                     windows::Win32::UI::WindowsAndMessaging::WINDOW_EX_STYLE::default(),
                     w!("BUTTON"),
-                    w!("取消"),
+                    PCWSTR(cancel.as_ptr()),
                     WS_CHILD | WS_VISIBLE | WS_TABSTOP,
                     326,
                     90,
