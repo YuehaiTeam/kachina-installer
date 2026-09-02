@@ -38,12 +38,13 @@ Status: implemented
 | `opt-level = "z"` 的哈希吞吐 | PASS：独立 bench（512MiB 内存缓冲、1MiB 分块、LTO + codegen-units=1、nightly msvc）MD5 在 s/z 下均约 778 MB/s；xxh3 22.2 GB/s → 19.0 GB/s |
 | 两个 bin 均可构建 | PASS：`cargo build --release` 产出 kachina-installer 3,102,208 字节、kachina-builder 2,870,784 字节 |
 | 单测 | PASS：`cargo test` 13 passed（kachina-builder）+ 59 passed, 1 ignored（kachina-installer） |
+| CI 产物（x86_64-win7-windows-msvc + build-std + optimize_for_size） | PASS：2,806,784 字节。上一记录值为 [IPC 类型化](./2026-08-29-typed-ipc.md) 的 3,487,744，两者之间另有 zstd legacy 移除一次提交，本轮降幅不少于 680,960（−19.5%），大于本机比例，符合 std 同样受 `opt-level = "z"` 影响的预期 |
 
-合计 3,716,096 → 3,102,208 字节（−613,888，−16.5%），未改动任何仓库代码。
+本机合计 3,716,096 → 3,102,208 字节（−613,888，−16.5%），未改动任何仓库代码。
 
 ## Consequences
 
 - `Url::parse` 对非 ASCII 域名返回错误，沿既有错误路径（如 `META_FAILED`）呈现；配置中的国际化域名须以 Punycode 填写。
 - DEBUG/TRACE 事件在 release 构建中彻底不存在，调试依赖内部行为只能用 debug 构建；此前 release 下它们也从未被输出。
 - `opt-level = "z"` 下所有 Rust 代码带 `minsize` 属性，后续新增 CPU 密集路径需自行评估是否加 per-package 覆盖或 `#[optimize(speed)]`。
-- CI 构建（build-std + optimize_for_size）下 std 同样受 `opt-level = "z"` 影响，产物降幅预期大于本机数字；`cargo bloat` 的函数榜单在新配置下会整体缩小，后续代码级裁剪应以新基线重测。
+- CI 构建（build-std + optimize_for_size）下 std 同样受 `opt-level = "z"` 影响，产物降幅比例大于本机；`cargo bloat` 的函数榜单在新配置下整体缩小，后续代码级裁剪以新基线重测。
