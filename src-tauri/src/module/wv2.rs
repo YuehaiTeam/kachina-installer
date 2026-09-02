@@ -63,13 +63,13 @@ pub async fn install_webview2() -> anyhow::Result<()> {
     }
 
     dialog.set_content("正在安装 WebView2 运行时...");
-    let status = tokio::process::Command::new(&installer_path)
-        .arg("/install")
-        .status()
-        .await;
+    let code = match crate::utils::process::spawn(&installer_path, &["/install"], false) {
+        Ok(child) => child.wait().await,
+        Err(e) => Err(e),
+    };
     let _ = tokio::fs::remove_file(&installer_path).await;
-    match status {
-        Ok(status) if status.success() => {
+    match code {
+        Ok(0) => {
             dialog.close().await;
             Ok(())
         }

@@ -1,8 +1,65 @@
+use std::path::PathBuf;
+
 use anyhow::{Context, Result};
-use windows::Win32::System::Threading::CREATE_NO_WINDOW;
 
 use crate::fs::{create_http_stream, create_local_stream, create_target_file, progressed_copy};
 use crate::ipc::{Progress, ProgressNotify};
+use crate::utils::process;
+
+/// 32 位注册表视图下 .NET 安装器写入的键。本二进制是 x64 进程，直接走 WOW6432Node。
+const DOTNET_INSTALLED_VERSIONS: &str = r"SOFTWARE\WOW6432Node\dotnet\Setup\InstalledVersions\x64";
+
+/// apphost 查找 .NET 根目录的顺序：`DOTNET_ROOT`、注册表 `InstallLocation`、`%ProgramFiles%\dotnet`。
+/// apphost 只取第一个存在的；这里全部收集，任一处装有合适版本即视为已安装。
+fn dotnet_roots() -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    if let Some(root) = std::env::var_os("DOTNET_ROOT") {
+        roots.push(PathBuf::from(root));
+    }
+    if let Ok(key) = windows_registry::LOCAL_MACHINE
+        .options()
+        .read()
+        .open(DOTNET_INSTALLED_VERSIONS)
+    {
+        if let Ok(location) = key.get_string("InstallLocation") {
+            roots.push(PathBuf::from(location));
+        }
+    }
+    if let Some(pf) = std::env::var_os("ProgramFiles") {
+        roots.push(PathBuf::from(pf).join("dotnet"));
+    }
+    roots
+}
+
+/// `framework` 为 `Microsoft.WindowsDesktop.App` 等共享框架名，`major` 为主版本号。
+/// 目录枚举 `<root>\shared\<framework>\<version>` 与注册表 `sharedfx\<framework>` 的值名任一命中即通过。
+pub fn dotnet_runtime_installed(framework: &str, major: &str) -> bool {
+    let prefix = format!("{major}.");
+    let matches = |name: &str| name.starts_with(&prefix);
+    for root in dotnet_roots() {
+        let Ok(entries) = std::fs::read_dir(root.join("shared").join(framework)) else {
+            continue;
+        };
+        let found = entries.flatten().any(|e| {
+            e.file_type().is_ok_and(|t| t.is_dir()) && e.file_name().to_str().is_some_and(matches)
+        });
+        if found {
+            return true;
+        }
+    }
+    if let Ok(key) = windows_registry::LOCAL_MACHINE
+        .options()
+        .read()
+        .open(format!(r"{DOTNET_INSTALLED_VERSIONS}\sharedfx\{framework}"))
+    {
+        if let Ok(mut values) = key.values() {
+            if values.any(|(name, _)| matches(&name)) {
+                return true;
+            }
+        }
+    }
+    false
+}
 
 pub async fn install_runtime(
     tag: String,
@@ -50,25 +107,12 @@ pub async fn install_dotnet(
             return Err(anyhow::anyhow!("UNSUPPORTED_DOTNET_RUNTIME"));
         }
     };
-    // check if runtime is installed by running dotnet --list-runtimes
-    let cmd = tokio::process::Command::new("dotnet")
-        .arg("--list-runtimes")
-        .creation_flags(CREATE_NO_WINDOW.0)
-        .output()
-        .await;
-    // if installed, continue; if check failed, return error
-    if let Ok(output) = cmd {
-        if output.status.success() {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            let version_primary = tag
-                .split('.')
-                .nth(3)
-                .ok_or_else(|| anyhow::anyhow!("INVALID_DOTNET_VERSION"))?;
-            let query_name = format!("{} {}", runtime.2, version_primary);
-            if stdout.contains(&query_name) {
-                return Ok("ALREADY_INSTALLED".to_string());
-            }
-        }
+    let version_primary = tag
+        .split('.')
+        .nth(3)
+        .ok_or_else(|| anyhow::anyhow!("INVALID_DOTNET_VERSION"))?;
+    if dotnet_runtime_installed(runtime.2, version_primary) {
+        return Ok("ALREADY_INSTALLED".to_string());
     }
     // download to tmp folder
     let temp_dir = std::env::temp_dir();
@@ -127,14 +171,10 @@ pub async fn install_dotnet(
     // close streams
     drop(stream);
     drop(target);
-    // run installer with /passive /norestart
-    let mut cmd = tokio::process::Command::new(&installer_path)
-        .arg("/passive")
-        .arg("/norestart")
-        .spawn()
+    let child = process::spawn(&installer_path, &["/passive", "/norestart"], false)
         .context("RUNTIME_INSTALL_START_ERR")?;
-    let status = cmd.wait().await.context("RUNTIME_INSTALL_WAIT_ERR")?;
-    if !status.success() {
+    let code = child.wait().await.context("RUNTIME_INSTALL_WAIT_ERR")?;
+    if code != 0 {
         return Err(anyhow::anyhow!("RUNTIME_INSTALL_FAILED"));
     }
     // remove installer
@@ -217,14 +257,14 @@ pub async fn install_vcredist(
     // close streams
     drop(stream);
     drop(target);
-    let mut cmd = tokio::process::Command::new(&installer_path)
-        .arg("/install")
-        .arg("/quiet")
-        .arg("/norestart")
-        .spawn()
-        .context("RUNTIME_INSTALL_START_ERR")?;
-    let status = cmd.wait().await.context("RUNTIME_INSTALL_WAIT_ERR")?;
-    if !status.success() {
+    let child = process::spawn(
+        &installer_path,
+        &["/install", "/quiet", "/norestart"],
+        false,
+    )
+    .context("RUNTIME_INSTALL_START_ERR")?;
+    let code = child.wait().await.context("RUNTIME_INSTALL_WAIT_ERR")?;
+    if code != 0 {
         return Err(anyhow::anyhow!("RUNTIME_INSTALL_FAILED"));
     }
     let _ = tokio::fs::remove_file(installer_path).await;

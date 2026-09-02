@@ -1,12 +1,9 @@
 use anyhow::Context;
-use std::{
-    os::windows::process::CommandExt,
-    path::{Path, PathBuf},
-};
+use std::path::{Path, PathBuf};
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
-use windows::Win32::System::Threading::CREATE_NO_WINDOW;
 
 use crate::utils::error::{return_ta_result, TAResult};
+use crate::utils::process;
 
 lazy_static::lazy_static!(
     pub static ref DELETE_SELF_ON_EXIT_PATH: std::sync::RwLock<Option<String>> = std::sync::RwLock::new(None);
@@ -188,22 +185,23 @@ pub fn delete_self_on_exit() {
         return;
     }
     let path = path.as_ref().unwrap();
-    // run the cmd file with window hidden
-    #[allow(clippy::zombie_processes)]
-    let _ = std::process::Command::new("cmd")
-        .arg("/C")
-        .arg("ping")
-        .arg("127.0.0.1")
-        .arg("-n")
-        .arg("2")
-        .arg("&")
-        .arg("del")
-        .arg("/f")
-        .arg("/q")
-        .arg(path)
-        .creation_flags(CREATE_NO_WINDOW.0)
-        .spawn()
-        .unwrap();
+    // 子进程独立于本进程存活；ping 拖延约 1 秒等本进程退出后再删。
+    let _ = process::spawn(
+        "cmd",
+        &[
+            "/C",
+            "ping",
+            "127.0.0.1",
+            "-n",
+            "2",
+            "&",
+            "del",
+            "/f",
+            "/q",
+            path.as_str(),
+        ],
+        true,
+    );
 }
 
 #[derive(serde::Deserialize, serde::Serialize, Clone, Debug)]
