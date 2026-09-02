@@ -127,12 +127,18 @@ pub fn add_breadcrumb(category: &str, level: &str, message: String) {
     });
     // 提权进程本地留一份（panic 事件用），同时转发主进程合并出完整时间线
     if is_pipe_mode() {
-        pipe_send(PipeMsg::Breadcrumb(crumb.clone()), "breadcrumb");
+        pipe_send(PipeMsg::Breadcrumb(crumb.to_string()), "breadcrumb");
     }
     add_breadcrumb_value(crumb);
 }
 
-/// 主进程也用它接收提权进程转发来的面包屑。
+/// 主进程接收提权进程经管道转发的面包屑 JSON 文本。
+pub fn add_breadcrumb_json(crumb: &str) {
+    if let Ok(crumb) = serde_json::from_str::<Value>(crumb) {
+        add_breadcrumb_value(crumb);
+    }
+}
+
 pub fn add_breadcrumb_value(crumb: Value) {
     if let Ok(mut crumbs) = STATE.breadcrumbs.lock() {
         if crumbs.len() >= MAX_BREADCRUMBS {
@@ -442,4 +448,6 @@ mod tests {
             format!("crumb {}", MAX_BREADCRUMBS + 9)
         );
     }
+}
+
 }

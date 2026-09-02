@@ -28,3 +28,4 @@ Status: implemented
 
 - session dump（`04-install-ops.json`）的 JSON 形状变化，人工阅读旧 dump 时注意区分版本。
 - 未来若有类型需要跨版本/跨端稳定形状，不能沿用"标签风格随意"的假设，需在类型旁注明。
+- 管道帧本身已不再是 JSON，标签风格只影响 debug 构建的 session dump；见 [提权管道帧编码](./2026-09-02-ipc-postcard-frames.md)。

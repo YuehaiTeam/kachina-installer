@@ -2098,8 +2098,15 @@ async fn run_mirrorc(
         },
     )
     .await?;
-    let IpcResult::RunMirrorcInstall(meta, _) = installed else {
+    let IpcResult::RunMirrorcInstall(meta) = installed else {
         bail!("IPC_SHAPE_ERR");
+    };
+    let meta: Option<RepoMetadata> = match meta.as_deref() {
+        Some(text) => Some(
+            serde_json::from_str(text)
+                .map_err(|e| crate::session::error::hide(crate::session::error::META_FAILED, e))?,
+        ),
+        None => None,
     };
     install_runtimes(settings, config, project, ui, mgr).await?;
     finish_install(settings, config, project, meta.as_ref(), ui, mgr).await?;

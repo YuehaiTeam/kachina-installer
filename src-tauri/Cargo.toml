@@ -108,6 +108,9 @@ http-body-util = "0.1"
 
 zstd = { version = "0.13", default-features = false }
 regex-lite = "0.1.9"
+# 提权管道帧编码。位置编码，同一二进制的两个进程间使用；不能承载 serde_json::Value
+# 与带 skip_serializing_if 的类型，这类载荷以 JSON 文本字段过管道。
+postcard = { version = "1", default-features = false, features = ["use-std"] }
 
 [build-dependencies]
 embed-resource = "3"
