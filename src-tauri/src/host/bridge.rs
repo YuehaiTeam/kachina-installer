@@ -28,13 +28,16 @@ pub fn on_message(ctx: &Arc<HostCtx>, handle: &HostHandle, json: &str) {
         let result = dispatch(&ctx, &handle, &msg.cmd, msg.args).await;
         let (ok, data) = match result {
             Ok(data) => (true, data),
-            Err(err) => (
-                false,
-                json!({
-                    "message": format!("{:#}", err.error),
-                    "insight": err.insight,
-                }),
-            ),
+            Err(err) => {
+                err.report_if_needed();
+                (
+                    false,
+                    json!({
+                        "message": format!("{:#}", err.error),
+                        "insight": err.insight,
+                    }),
+                )
+            }
         };
         handle.send(UiAction::Reply {
             id: msg.id,
