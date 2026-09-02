@@ -6,6 +6,7 @@ pub mod hash;
 pub mod icon;
 pub mod log;
 pub mod metadata;
+pub mod process;
 pub mod progressed_read;
 pub mod sentry;
 pub mod taskdialog;
