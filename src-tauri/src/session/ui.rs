@@ -184,10 +184,14 @@ pub struct PromptHub {
 }
 
 impl PromptHub {
-    pub async fn wait(&self, id: String) -> bool {
+    pub async fn register(&self, id: String) -> oneshot::Receiver<bool> {
         let (tx, rx) = oneshot::channel();
         self.pending.lock().await.insert(id, tx);
-        rx.await.unwrap_or(false)
+        rx
+    }
+
+    pub async fn wait(&self, id: String) -> bool {
+        self.register(id).await.await.unwrap_or(false)
     }
 
     pub async fn answer(&self, id: &str, accept: bool) -> bool {
@@ -216,9 +220,13 @@ pub struct PluginHub {
 }
 
 impl PluginHub {
-    pub async fn wait(&self, id: String) -> PluginAnswer {
+    pub async fn register(&self, id: String) -> oneshot::Receiver<PluginAnswer> {
         let (tx, rx) = oneshot::channel();
-        self.pending.lock().await.insert(id.clone(), tx);
+        self.pending.lock().await.insert(id, tx);
+        rx
+    }
+
+    pub async fn recv(&self, id: String, rx: oneshot::Receiver<PluginAnswer>) -> PluginAnswer {
         let failed = || PluginAnswer {
             id: String::new(),
             ok: false,
@@ -234,6 +242,11 @@ impl PluginHub {
                 failed()
             }
         }
+    }
+
+    pub async fn wait(&self, id: String) -> PluginAnswer {
+        let rx = self.register(id.clone()).await;
+        self.recv(id, rx).await
     }
 
     pub async fn answer(&self, reply: PluginAnswer) -> bool {
@@ -255,6 +268,7 @@ struct GuiPluginHost {
 impl PluginHost for GuiPluginHost {
     async fn call(&self, args: PluginArgs) -> anyhow::Result<PluginResult> {
         let id = uuid::Uuid::new_v4().to_string();
+        let rx = self.hub.register(id.clone()).await;
         self.window.emit(
             "session-plugin",
             PluginEvent {
@@ -267,7 +281,7 @@ impl PluginHost for GuiPluginHost {
                 insights: args.insights,
             },
         );
-        let reply = self.hub.wait(id).await;
+        let reply = self.hub.recv(id, rx).await;
         if reply.unimplemented {
             return Ok(PluginResult::Unimplemented);
         }
@@ -314,6 +328,7 @@ impl SessionUi for GuiUi {
             return true;
         }
         let id = uuid::Uuid::new_v4().to_string();
+        let rx = self.hub.register(id.clone()).await;
         self.window.emit(
             "session-prompt",
             PromptEvent {
@@ -323,7 +338,7 @@ impl SessionUi for GuiUi {
                 message: message.to_string(),
             },
         );
-        self.hub.wait(id).await
+        rx.await.unwrap_or(false)
     }
 
     fn progress(&self, event: ProgressEvent) {
@@ -366,3 +381,37 @@ impl SessionUi for GuiUi {
         }))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn prompt_answer_before_await_is_not_lost() {
+        let hub = PromptHub::default();
+        let rx = hub.register("p1".into()).await;
+        assert!(hub.answer("p1", true).await);
+        assert_eq!(rx.await, Ok(true));
+    }
+
+    #[tokio::test]
+    async fn plugin_answer_before_await_is_not_lost() {
+        let hub = PluginHub::default();
+        let rx = hub.register("g1".into()).await;
+        let reply = PluginAnswer {
+            id: "g1".into(),
+            ok: true,
+            data: Some("1".into()),
+            error: None,
+            unimplemented: false,
+        };
+        assert!(hub.answer(reply).await);
+        let got = tokio::time::timeout(Duration::from_millis(200), rx)
+            .await
+            .expect("must not wait for plugin timeout")
+            .expect("sender dropped");
+        assert!(got.ok);
+        assert_eq!(got.data.as_deref(), Some("1"));
+    }
+}
+

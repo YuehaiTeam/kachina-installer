@@ -138,6 +138,7 @@ fn main() {
                     if module::wv2::install_webview2().await.is_ok() {
                         host_main(InstallArgs::default(), None);
                     }
+                    utils::sentry::flush(Duration::from_secs(3));
                 });
         }
         Command::NativeUi(args) => {
@@ -152,6 +153,7 @@ fn main() {
                 .unwrap()
                 .block_on(async move {
                     native_entry(args).await;
+                    utils::sentry::flush(Duration::from_secs(3));
                 });
         }
         Command::CrashDialog { .. } => unreachable!("handled before telemetry init"),
@@ -182,6 +184,7 @@ fn main() {
                     } else {
                         gui_entry(install).await;
                     }
+                    utils::sentry::flush(Duration::from_secs(3));
                 });
         }
     }
@@ -217,6 +220,7 @@ async fn native_entry(args: InstallArgs) {
                 .set_description(format!("{err}"))
                 .set_level(rfd::MessageLevel::Error)
                 .show();
+            utils::sentry::flush(Duration::from_secs(3));
             std::process::exit(1);
         }
     }
@@ -230,6 +234,7 @@ fn host_main(args: InstallArgs, preset: Option<session::types::SessionInput>) {
             .set_description(format!("窗口初始化失败: {err}"))
             .set_level(rfd::MessageLevel::Error)
             .show();
+        utils::sentry::flush(Duration::from_secs(3));
         std::process::exit(1);
     }
 }

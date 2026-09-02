@@ -86,7 +86,7 @@ pub fn normalize_rel(path: &str) -> String {
 pub fn normalize_full(path: &str) -> String {
     path.replace('/', "\\")
         .trim_end_matches('\\')
-        .to_lowercase()
+        .to_ascii_lowercase()
 }
 
 pub fn expand_template(template: &str, install_path: &str, app_name: &str) -> String {
@@ -109,13 +109,18 @@ pub fn is_under(file: &str, dir: &str) -> bool {
 
 /// Strip install_path from a scanned full path, ignoring case and slash style.
 pub fn strip_install_prefix(path: &str, install_path: &str) -> String {
-    let file = normalize_full(path);
-    let dir = normalize_full(install_path);
-    if file == dir {
+    let file = path.replace('/', "\\");
+    let file = file.trim_end_matches('\\');
+    let dir = install_path.replace('/', "\\");
+    let dir = dir.trim_end_matches('\\');
+    let file_l = file.to_ascii_lowercase();
+    let dir_l = dir.to_ascii_lowercase();
+    if file_l == dir_l {
         return String::new();
     }
-    if let Some(rest) = file.strip_prefix(&format!("{dir}\\")) {
-        return rest.replace('\\', "/");
+    if let Some(rest) = file_l.strip_prefix(&format!("{dir_l}\\")) {
+        let offset = file_l.len() - rest.len();
+        return file[offset..].replace('\\', "/");
     }
     path.replace('\\', "/")
         .trim_start_matches('/')
@@ -602,7 +607,7 @@ mod tests {
         );
         assert_eq!(
             strip_install_prefix(r"C:\App\Sub\a.dll", r"c:/app"),
-            "sub/a.dll",
+            "Sub/a.dll",
         );
         assert_eq!(
             strip_install_prefix(r"C:\App\foo.exe", "C:\\App\\"),
