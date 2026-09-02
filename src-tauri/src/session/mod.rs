@@ -6,6 +6,7 @@ pub mod plan;
 pub mod plugin;
 pub mod run;
 pub mod source;
+pub mod state;
 pub mod types;
 pub mod ui;
 
