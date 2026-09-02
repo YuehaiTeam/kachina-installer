@@ -9,7 +9,7 @@ use windows::Win32::UI::WindowsAndMessaging::GetDesktopWindow;
 use crate::cli::arg::InstallArgs;
 use crate::host::HwndParent;
 use crate::installer::config::{resolve_installer_config, InstallerConfig};
-use crate::installer::{inspect_dir, select_dir, SelectDirRes};
+use crate::installer::inspect_dir;
 use crate::ipc::manager::ManagedElevate;
 use crate::session::commands::settings_from_input;
 use crate::session::run::{run_install, run_uninstall};
@@ -328,32 +328,7 @@ async fn show_ready_page(
 
 async fn pick_path(current: &str, exe_name: &str, app_name: &str) -> Option<String> {
     let parent = HwndParent::from_hwnd(unsafe { GetDesktopWindow() });
-    let seldir = select_dir(current.to_string(), exe_name.to_string(), false, parent).await?;
-    apply_path_choice(seldir, app_name).await
-}
-
-async fn apply_path_choice(seldir: SelectDirRes, app_name: &str) -> Option<String> {
-    if !seldir.empty && !seldir.upgrade {
-        let is_drive_root = {
-            let n = seldir.path.replace('\\', "/");
-            n.len() == 3 && n.as_bytes().get(1) == Some(&b':') && n.ends_with('/')
-        };
-        let nest = is_drive_root
-            || crate::installer::confirm_dialog(
-                "提示".to_string(),
-                "您选择的目录不为空，是否创建新文件夹再安装？选【否】将可能影响原有数据。"
-                    .to_string(),
-                HwndParent::from_hwnd(unsafe { GetDesktopWindow() }),
-            )
-            .await;
-        if nest {
-            return Some(format!(
-                "{}\\{app_name}",
-                seldir.path.trim_end_matches(['\\', '/'])
-            ));
-        }
-    }
-    Some(seldir.path)
+    crate::installer::pick_install_path(current, exe_name, app_name, parent).await
 }
 
 fn mirrorc_target(app_name: &str) -> String {

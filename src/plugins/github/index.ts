@@ -1,6 +1,6 @@
 import type { KachinaInstallSource } from '../types';
 import type { HttpGetResponse } from '../../types';
-import { invoke } from '../../tauri';
+import { invoke } from '../../host';
 
 interface UrlCache {
   resolvedUrl: string;

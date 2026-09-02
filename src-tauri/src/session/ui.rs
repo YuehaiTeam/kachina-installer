@@ -9,7 +9,7 @@ use tokio::sync::{oneshot, Mutex};
 
 use crate::host::HostHandle;
 use crate::session::state::{Phase, Progress, Prompt, UiState};
-use crate::session::types::{PluginEvent, ProgressEvent, PromptEvent};
+use crate::session::types::PluginEvent;
 use crate::utils::code::{Coded, Extracted};
 use crate::utils::i18n::{self, format_size};
 
@@ -391,6 +391,7 @@ pub struct GuiUi {
     hub: Arc<PromptHub>,
     plugins: Arc<PluginHub>,
     auto_answer: bool,
+    session: Arc<std::sync::Mutex<crate::session::state::UiSession>>,
 }
 
 impl GuiUi {
@@ -399,12 +400,14 @@ impl GuiUi {
         hub: Arc<PromptHub>,
         plugins: Arc<PluginHub>,
         auto_answer: bool,
+        session: Arc<std::sync::Mutex<crate::session::state::UiSession>>,
     ) -> Self {
         Self {
             window,
             hub,
             plugins,
             auto_answer,
+            session,
         }
     }
 }
@@ -412,16 +415,30 @@ impl GuiUi {
 #[async_trait]
 impl SessionUi for GuiUi {
     fn state(&self, state: &UiState) {
-        if let Phase::Running(p) = &state.phase {
-            self.window.emit(
-                "session-progress",
-                ProgressEvent {
-                    sub_step: p.sub_step,
-                    percent: p.percent,
-                    current: progress_current(p),
-                },
-            );
-        }
+        self.window.emit("ui-state", state);
+    }
+
+    fn progress(
+        &self,
+        sub_step: u32,
+        percent: f64,
+        stage: &'static str,
+        subject: Option<&str>,
+        done: Option<u64>,
+        total: Option<u64>,
+    ) {
+        let mut sess = self.session.lock().unwrap_or_else(|e| e.into_inner());
+        sess.state.phase = Phase::Running(Progress {
+            sub_step,
+            percent,
+            stage,
+            subject: subject.map(str::to_string),
+            done,
+            total,
+        });
+        let snap = sess.state.clone();
+        drop(sess);
+        self.state(&snap);
     }
 
     async fn confirm(&self, mut prompt: Prompt) -> bool {
@@ -433,30 +450,22 @@ impl SessionUi for GuiUi {
         }
         let id = prompt.id.clone();
         let rx = self.hub.register(id.clone()).await;
-        let (title, message) = prompt_copy(&prompt);
-        self.window.emit(
-            "session-prompt",
-            PromptEvent {
-                id,
-                kind: prompt.kind.to_string(),
-                title,
-                message,
-            },
-        );
-        rx.await.unwrap_or(false)
+        {
+            let mut sess = self.session.lock().unwrap_or_else(|e| e.into_inner());
+            sess.state.pending = Some(prompt);
+            self.window.emit("ui-state", &sess.state);
+        }
+        let ok = rx.await.unwrap_or(false);
+        {
+            let mut sess = self.session.lock().unwrap_or_else(|e| e.into_inner());
+            sess.state.pending = None;
+            self.window.emit("ui-state", &sess.state);
+        }
+        ok
     }
 
     fn notify(&self, coded: &Coded) {
-        let (title, message) = notice_text(coded);
-        let parent = self.window.parent();
-        let _ = tokio::task::spawn_blocking(move || {
-            rfd::MessageDialog::new()
-                .set_title(&title)
-                .set_description(&message)
-                .set_level(rfd::MessageLevel::Error)
-                .set_parent(&parent)
-                .show();
-        });
+        self.window.emit("ui-notice", coded);
     }
 
     fn plugin_host(&self) -> Option<Arc<dyn PluginHost>> {
@@ -466,6 +475,7 @@ impl SessionUi for GuiUi {
         }))
     }
 }
+
 
 #[cfg(test)]
 mod tests {

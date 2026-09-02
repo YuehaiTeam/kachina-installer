@@ -3,7 +3,10 @@ use std::sync::Arc;
 use serde_json::{json, Value};
 
 use super::{HostCtx, HostHandle, UiAction};
+use crate::session::state::Intent;
+use crate::utils::code::{extract, Extracted};
 use crate::utils::error::TACommandError;
+use crate::utils::taskdialog::{show_error, task_dialog, CommandLink, TaskDialogRequest};
 
 #[derive(Debug, serde::Deserialize)]
 struct InvokeMessage {
@@ -30,13 +33,7 @@ pub fn on_message(ctx: &Arc<HostCtx>, handle: &HostHandle, json: &str) {
             Ok(data) => (true, data),
             Err(err) => {
                 err.report_if_needed();
-                (
-                    false,
-                    json!({
-                        "message": format!("{:#}", err.error),
-                        "insight": err.insight,
-                    }),
-                )
+                (false, error_payload(&err))
             }
         };
         handle.send(UiAction::Reply {
@@ -50,13 +47,45 @@ pub fn on_message(ctx: &Arc<HostCtx>, handle: &HostHandle, json: &str) {
     });
 }
 
+fn error_payload(err: &TACommandError) -> Value {
+    let (code, detail, subject) = match extract(&err.error) {
+        Extracted::Coded(c) => (
+            Value::String(c.code.to_string()),
+            json_opt(c.detail.as_deref()),
+            json_opt(c.subject.as_deref()),
+        ),
+        Extracted::Cancelled => (Value::Null, Value::String("cancelled".into()), Value::Null),
+        Extracted::Uncoded { detail } => (
+            Value::Null,
+            if detail.is_empty() {
+                Value::Null
+            } else {
+                Value::String(detail)
+            },
+            Value::Null,
+        ),
+    };
+    json!({
+        "code": code,
+        "detail": detail,
+        "subject": subject,
+        "insight": err.insight,
+    })
+}
+
+fn json_opt(v: Option<&str>) -> Value {
+    match v {
+        Some(s) if !s.is_empty() => Value::String(s.to_string()),
+        _ => Value::Null,
+    }
+}
+
 async fn dispatch(
     ctx: &HostCtx,
     handle: &HostHandle,
     cmd: &str,
     args: Value,
 ) -> Result<Value, TACommandError> {
-    // Plugin host is default-deny: third-party plugins run in this WebView later.
     if ctx.plugin_runtime
         && !matches!(
             cmd,
@@ -85,48 +114,94 @@ async fn dispatch(
             }
             ok(())
         }
-        "get_installer_config" => {
-            let scan_exe = req_bool(&args, &["scanExe", "scan_exe"])?;
-            let mut cfg =
-                crate::installer::config::get_installer_config(&ctx.args, scan_exe).await?;
-            cfg.preset = ctx.preset.clone();
-            ok(cfg)
+        "intent" => {
+            let intent: Intent = serde_json::from_value(args)
+                .map_err(|e| TACommandError::new(anyhow::anyhow!(e)))?;
+            crate::session::commands::handle_intent(intent, ctx, handle).await
         }
-        "select_dir" => {
-            let path = req_str(&args, &["path"])?;
-            let exe_name = req_str(&args, &["exeName", "exe_name"])?;
-            let silent = req_bool(&args, &["silent"])?;
-            let res = crate::installer::select_dir(path, exe_name, silent, handle.parent()).await;
-            ok(res)
-        }
-        "start_install" => {
-            let input = parse_session_input(&args)?;
-            let res = crate::session::commands::start_install(
-                input,
-                &ctx.args,
-                &ctx.elevate,
-                &ctx.session,
-                handle.clone(),
+        "pick_path" => {
+            let gui = ctx
+                .gui
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone()
+                .ok_or_else(|| TACommandError::new(anyhow::anyhow!("gui session not ready")))?;
+            let snap = gui.snapshot();
+            let app_name = gui
+                .project
+                .as_ref()
+                .map(|p| p.app_name.clone())
+                .unwrap_or_default();
+            let exe_name = gui
+                .project
+                .as_ref()
+                .map(|p| p.exe_name.clone())
+                .unwrap_or_default();
+            let path = crate::installer::pick_install_path(
+                &snap.options.install_path,
+                &exe_name,
+                &app_name,
+                handle.parent(),
             )
-            .await?;
-            ok(res)
+            .await
+            .unwrap_or_default();
+            ok(path)
         }
-        "start_uninstall" => {
-            let input = parse_session_input(&args)?;
-            let res = crate::session::commands::start_uninstall(
-                input,
-                &ctx.args,
-                &ctx.elevate,
-                &ctx.session,
-                handle.clone(),
-            )
-            .await?;
-            ok(res)
+        "error_dialog" => {
+            let code = req_str(&args, &["code"])?;
+            let detail = opt_str(&args, &["detail"]);
+            let subject = opt_str(&args, &["subject"]);
+            let parent = handle.hwnd().0 as isize;
+            let code_owned = code;
+            let detail_owned = detail;
+            let subject_owned = subject;
+            tokio::task::spawn_blocking(move || {
+                show_error(
+                    &code_owned,
+                    detail_owned.as_deref(),
+                    subject_owned.as_deref(),
+                    windows::Win32::Foundation::HWND(parent as *mut _),
+                );
+            })
+            .await
+            .ok();
+            ok(())
         }
-        "answer_session_prompt" => {
-            let id = req_str(&args, &["id"])?;
-            let accept = req_bool(&args, &["accept"])?;
-            ok(ctx.session.prompts.answer(&id, accept).await)
+        "task_dialog" => {
+            let title = req_str(&args, &["title"]).unwrap_or_default();
+            let content = req_str(&args, &["content"]).unwrap_or_default();
+            let expanded = opt_str(&args, &["expanded"]);
+            let footer = opt_str(&args, &["footer"]);
+            let buttons = args
+                .get("buttons")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|b| {
+                            Some(CommandLink {
+                                id: b.get("id")?.as_i64()? as i32,
+                                text: b.get("text")?.as_str()?.to_string(),
+                            })
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            let parent = handle.hwnd().0 as isize;
+            let clicked = tokio::task::spawn_blocking(move || {
+                task_dialog(
+                    TaskDialogRequest {
+                        title,
+                        content,
+                        expanded,
+                        footer,
+                        buttons,
+                    },
+                    windows::Win32::Foundation::HWND(parent as *mut _),
+                )
+            })
+            .await
+            .unwrap_or(0);
+            ok(clicked)
         }
         "answer_session_plugin" => ok(ctx
             .session
@@ -151,44 +226,6 @@ async fn dispatch(
             .map_err(TACommandError::new)?;
             ok(res)
         }
-        "wincred_read" => {
-            let target = req_str(&args, &["target"])?;
-            ok(crate::utils::wincred::wincred_read(&target)?)
-        }
-        "wincred_write" => {
-            crate::utils::wincred::wincred_write(
-                &req_str(&args, &["target"])?,
-                &req_str(&args, &["token"])?,
-                &req_str(&args, &["comment"])?,
-            )?;
-            ok(())
-        }
-        "wincred_delete" => {
-            crate::utils::wincred::wincred_delete(&req_str(&args, &["target"])?)?;
-            ok(())
-        }
-        "get_mirrorc_status" => {
-            let resource_id = req_str(&args, &["resourceId", "resource_id"])?;
-            let current_version = req_str(&args, &["currentVersion", "current_version"])?;
-            let cdk = req_str(&args, &["cdk"])?;
-            let channel = req_str(&args, &["channel"])?;
-            let arch = opt_str(&args, &["arch"]);
-            let os = opt_str(&args, &["os"]);
-            let res = crate::thirdparty::mirrorc::get_mirrorc_status(
-                &resource_id,
-                &current_version,
-                &cdk,
-                &channel,
-                arch.as_deref(),
-                os.as_deref(),
-            )
-            .await?;
-            ok(res)
-        }
-        "read_uninstall_metadata" => {
-            let reg_name = req_str(&args, &["regName", "reg_name"])?;
-            ok(crate::installer::registry::read_uninstall_metadata(reg_name).await?)
-        }
         "launch" => {
             let path = req_str(&args, &["path"])?;
             if ctx.plugin_runtime && !is_http_or_https_url(&path) {
@@ -203,21 +240,6 @@ async fn dispatch(
             crate::installer::launch(req_str(&args, &["path"])?).await;
             ok(())
         }
-        "error_dialog" => {
-            crate::installer::error_dialog(
-                req_str(&args, &["title"])?,
-                req_str(&args, &["message"])?,
-                handle.parent(),
-            )
-            .await;
-            ok(())
-        }
-        "confirm_dialog" => ok(crate::installer::confirm_dialog(
-            req_str(&args, &["title"])?,
-            req_str(&args, &["message"])?,
-            handle.parent(),
-        )
-        .await),
         "log" => {
             crate::installer::log(string_arg(&args, "data"));
             ok(())
@@ -232,11 +254,12 @@ async fn dispatch(
         }
         "window_show" => {
             handle.send(UiAction::Show);
+            if let Some(gui) = ctx.gui.lock().unwrap_or_else(|e| e.into_inner()).clone() {
+                gui.emit(handle);
+            }
             ok(())
         }
-        "window_close" => {
-            ok(())
-        }
+        "window_close" => ok(()),
         "window_minimize" => {
             handle.send(UiAction::Minimize);
             ok(())
@@ -258,16 +281,6 @@ async fn dispatch(
 fn is_http_or_https_url(path: &str) -> bool {
     let lower = path.trim().to_ascii_lowercase();
     lower.starts_with("http://") || lower.starts_with("https://")
-}
-
-fn parse_session_input(
-    args: &Value,
-) -> Result<crate::session::types::SessionInput, TACommandError> {
-    let input = args
-        .get("input")
-        .cloned()
-        .ok_or_else(|| TACommandError::new(anyhow::anyhow!("missing input")))?;
-    serde_json::from_value(input).map_err(|e| TACommandError::new(anyhow::anyhow!(e)))
 }
 
 fn field<'a>(args: &'a Value, keys: &[&str]) -> Option<&'a Value> {

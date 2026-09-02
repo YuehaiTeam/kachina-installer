@@ -108,7 +108,8 @@ pub trait SessionUi: Send + Sync {
 }
 ```
 
-`progress`、`alert`、`insight`、`reopen_source` 从 trait 移除。进度经 `state()` 推送；`alert` 改为 `notify(Coded)`（`RUNTIME_INSTALL_FAILED` 带 `subject = 运行库名`、`detail = 原始错误`），前端与 native 用与 `Failed` 相同的默认错误对话框呈现；`reopen_source` 由前端根据 `MIRRORC_CDK_*` 码自行决定。
+`progress`、`alert`、`insight`、`reopen_source` 从 trait 移除。 Step 3 落地时 `run.rs` 尚未持有 `UiSession`，因此 `SessionUi::progress` 仍作为默认方法保留（构造仅含 `Phase::Running` 的 `UiState` 再 `state()`）；`GuiUi` 覆盖该方法，把进度写进现有会话并 emit `ui-state`，不再发 `session-progress`。
+进度经 `state()` 推送；`alert` 改为 `notify(Coded)`（`RUNTIME_INSTALL_FAILED` 带 `subject = 运行库名`、`detail = 原始错误`），前端与 native 用与 `Failed` 相同的默认错误对话框呈现；`reopen_source` 由前端根据 `MIRRORC_CDK_*` 码自行决定。
 
 ### 错误
 

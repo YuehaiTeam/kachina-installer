@@ -1,4 +1,4 @@
-mod assets;
+pub(crate) mod assets;
 mod bridge;
 pub mod native;
 mod webview;
@@ -22,7 +22,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use crate::cli::arg::InstallArgs;
 use crate::installer::uninstall::delete_self_on_exit;
 use crate::ipc::manager::ManagedElevate;
-use crate::session::commands::SessionState;
+use crate::session::commands::{GuiRuntime, SessionState};
 use crate::utils::code::{Coded, PLUGIN_FAILED};
 use crate::session::types::SessionInput;
 use crate::APP_BOOT_SIGNAL;
@@ -86,6 +86,7 @@ pub struct HostCtx {
     pub plugin_runtime: bool,
     pub plugin_ready: Mutex<Option<oneshot::Sender<()>>>,
     pub preset: Option<SessionInput>,
+    pub gui: Mutex<Option<std::sync::Arc<GuiRuntime>>>,
 }
 
 pub struct PluginRuntime {
@@ -122,7 +123,11 @@ pub fn webview_version() -> Result<String, anyhow::Error> {
     webview::available_version()
 }
 
-pub fn run(args: InstallArgs, preset: Option<SessionInput>) -> anyhow::Result<()> {
+pub fn run(
+    args: InstallArgs,
+    preset: Option<SessionInput>,
+    gui: Option<std::sync::Arc<GuiRuntime>>,
+) -> anyhow::Result<()> {
     unsafe {
         CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok()?;
         if SetProcessDpiAwareness(PROCESS_PER_MONITOR_DPI_AWARE).is_err() {
@@ -155,6 +160,7 @@ pub fn run(args: InstallArgs, preset: Option<SessionInput>) -> anyhow::Result<()
         hwnd: hwnd.0 as isize,
     };
 
+    let non_interactive = args.non_interactive;
     let ctx = Arc::new(HostCtx {
         args,
         elevate: ManagedElevate::new(),
@@ -163,6 +169,7 @@ pub fn run(args: InstallArgs, preset: Option<SessionInput>) -> anyhow::Result<()
         plugin_runtime: false,
         plugin_ready: Mutex::new(None),
         preset,
+        gui: Mutex::new(gui),
     });
 
     tokio::spawn({
@@ -188,7 +195,25 @@ pub fn run(args: InstallArgs, preset: Option<SessionInput>) -> anyhow::Result<()
         format!("{UI_HOST}/index.html")
     };
     let webview =
-        webview::attach(hwnd, handle.clone(), ctx, is_win11, &start).context("attach webview2")?;
+        webview::attach(hwnd, handle.clone(), ctx.clone(), is_win11, &start).context("attach webview2")?;
+    if let Some(gui) = ctx.gui.lock().unwrap_or_else(|e| e.into_inner()).clone() {
+        let st = gui.snapshot();
+        handle.send(UiAction::SetTitle(st.project.window_title.clone()));
+        handle.send(UiAction::SetDecorations(!st.project.borderless));
+        gui.emit(&handle);
+        if non_interactive {
+            let ctx2 = ctx.clone();
+            let handle2 = handle.clone();
+            tokio::spawn(async move {
+                let _ = crate::session::commands::handle_intent(
+                    crate::session::state::Intent::Start,
+                    &ctx2,
+                    &handle2,
+                )
+                .await;
+            });
+        }
+    }
 
     if !cfg!(debug_assertions) {
         window::set_visible(hwnd, false);
@@ -324,6 +349,7 @@ fn plugin_runtime_setup(
         plugin_runtime: true,
         plugin_ready: Mutex::new(Some(ready_tx)),
         preset: None,
+        gui: Mutex::new(None),
     });
     let start = format!("{UI_HOST}/index.html?pluginHost=1");
     let webview = webview::attach(hwnd, handle.clone(), ctx, is_win11, &start)
