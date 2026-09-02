@@ -410,6 +410,196 @@ fn strip_urls(input: &str) -> String {
     out
 }
 
+
+impl Class {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Class::N => "n",
+            Class::E => "e",
+            Class::U => "u",
+            Class::C => "c",
+            Class::S => "s",
+            Class::M => "m",
+        }
+    }
+}
+
+pub fn fail_kind(err: &anyhow::Error) -> &'static str {
+    match extract(err) {
+        Extracted::Cancelled => "cancelled",
+        Extracted::Coded(c) => class_of(c.code).map(Class::as_str).unwrap_or("uncoded"),
+        Extracted::Uncoded { .. } => "uncoded",
+    }
+}
+
+pub fn should_report_error(err: &anyhow::Error) -> bool {
+    match extract(err) {
+        Extracted::Cancelled => false,
+        Extracted::Coded(c) => should_report(c.code),
+        Extracted::Uncoded { .. } => true,
+    }
+}
+
+/// One-line silent/log form: code: detail or just code.
+pub fn log_line(err: &anyhow::Error) -> String {
+    match extract(err) {
+        Extracted::Cancelled => "cancelled".to_string(),
+        Extracted::Coded(c) => match c.detail.as_deref().filter(|d| !d.is_empty()) {
+            Some(d) => format!("{}: {d}", c.code),
+            None => c.code.to_string(),
+        },
+        Extracted::Uncoded { detail } => detail,
+    }
+}
+
+
+fn reqwest_ref<'a>(err: &'a (dyn std::error::Error + 'static)) -> Option<&'a reqwest::Error> {
+    if let Some(e) = err.downcast_ref::<reqwest::Error>() {
+        return Some(e);
+    }
+    if let Some(e) = err.downcast_ref::<reqwest_middleware::Error>() {
+        if let reqwest_middleware::Error::Reqwest(inner) = e {
+            return Some(inner);
+        }
+    }
+    None
+}
+
+fn code_for_reqwest(e: &reqwest::Error) -> &'static str {
+    if e.is_timeout() {
+        DOWNLOAD_TIMEOUT
+    } else if e.is_connect() {
+        DOWNLOAD_REFUSED
+    } else if e.status().is_some() {
+        SERVER_HTTP_ERROR
+    } else {
+        DOWNLOAD_FAILED
+    }
+}
+
+fn code_for_io_kind(kind: std::io::ErrorKind) -> &'static str {
+    use std::io::ErrorKind as K;
+    match kind {
+        K::PermissionDenied => PERMISSION_DENIED,
+        K::StorageFull => DISK_FULL,
+        K::TimedOut => DOWNLOAD_TIMEOUT,
+        K::ConnectionRefused | K::AddrNotAvailable => DOWNLOAD_REFUSED,
+        K::ConnectionReset
+        | K::ConnectionAborted
+        | K::NotConnected
+        | K::UnexpectedEof
+        | K::BrokenPipe => DOWNLOAD_FAILED,
+        _ => FILE_IO_FAILED,
+    }
+}
+
+fn download_code(err: &anyhow::Error) -> &'static str {
+    for cause in err.chain() {
+        if let Some(io) = cause.downcast_ref::<std::io::Error>() {
+            let msg = io.to_string();
+            if msg == crate::utils::error::DOWNLOAD_STALLED
+                || msg == crate::utils::error::DOWNLOAD_TOO_SLOW
+            {
+                return DOWNLOAD_STALLED;
+            }
+        }
+        if let Some(e) = reqwest_ref(cause) {
+            return code_for_reqwest(e);
+        }
+        if let Some(io) = cause.downcast_ref::<std::io::Error>() {
+            return code_for_io_kind(io.kind());
+        }
+    }
+    DOWNLOAD_FAILED
+}
+
+fn metadata_code(err: &anyhow::Error) -> &'static str {
+    for cause in err.chain() {
+        if cause.downcast_ref::<serde_json::Error>().is_some() {
+            return METADATA_INVALID;
+        }
+        if let Some(e) = reqwest_ref(cause) {
+            if e.is_timeout() || e.is_connect() {
+                return METADATA_UNREACHABLE;
+            }
+            if e.status().is_some() {
+                return METADATA_HTTP_ERROR;
+            }
+            return METADATA_UNREACHABLE;
+        }
+        if let Some(io) = cause.downcast_ref::<std::io::Error>() {
+            return match io.kind() {
+                std::io::ErrorKind::TimedOut
+                | std::io::ErrorKind::ConnectionRefused
+                | std::io::ErrorKind::ConnectionReset
+                | std::io::ErrorKind::ConnectionAborted
+                | std::io::ErrorKind::NotConnected
+                | std::io::ErrorKind::UnexpectedEof
+                | std::io::ErrorKind::BrokenPipe => METADATA_UNREACHABLE,
+                _ => METADATA_UNREACHABLE,
+            };
+        }
+    }
+    let head = format!("{err}");
+    let status = head.split([':', ' ']).next().unwrap_or("");
+    if status.parse::<u16>().is_ok() {
+        return METADATA_HTTP_ERROR;
+    }
+    METADATA_UNREACHABLE
+}
+
+/// Hang a download-family code inferred from reqwest / io. Idempotent.
+pub fn attach_download(
+    err: anyhow::Error,
+    subject: Option<&str>,
+    sid: Option<&str>,
+) -> anyhow::Error {
+    if already_coded(&err) {
+        return err;
+    }
+    let mut coded = Coded::bare(download_code(&err));
+    if let Some(s) = subject {
+        coded.subject = Some(s.to_string());
+    }
+    if let Some(s) = sid {
+        coded.sid = Some(s.to_string());
+    }
+    attach_coded(coded, err)
+}
+
+/// Hang a metadata-family code. Idempotent.
+pub fn attach_metadata(err: anyhow::Error) -> anyhow::Error {
+    let code = metadata_code(&err);
+    err.attach(code)
+}
+
+/// True when the error is a retryable network failure (timeout / connect / reset).
+pub fn is_retryable_network(err: &anyhow::Error) -> bool {
+    for cause in err.chain() {
+        if let Some(e) = reqwest_ref(cause) {
+            if e.is_timeout() || e.is_connect() {
+                return true;
+            }
+        }
+        if let Some(io) = cause.downcast_ref::<std::io::Error>() {
+            use std::io::ErrorKind as K;
+            if matches!(
+                io.kind(),
+                K::TimedOut
+                    | K::ConnectionRefused
+                    | K::ConnectionReset
+                    | K::ConnectionAborted
+                    | K::NotConnected
+                    | K::UnexpectedEof
+                    | K::BrokenPipe
+            ) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

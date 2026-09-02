@@ -29,15 +29,19 @@ pub async fn start_install(
     let (settings, project) = settings_from_input(&input, args, &config)
         .await
         .map_err(TACommandError::new)?;
+    let handle = ui;
     let ui = GuiUi::new(
-        ui,
+        handle.clone(),
         session.prompts.clone(),
         session.plugins.clone(),
         settings.auto_answer,
     );
     run_install(&settings, &config, &project, &ui, mgr)
         .await
-        .map_err(TACommandError::new)
+        .map_err(|e| {
+            emit_cdk_reopen(&handle, &e);
+            TACommandError::new(e)
+        })
 }
 
 pub async fn start_uninstall(
@@ -73,12 +77,12 @@ pub(crate) async fn settings_from_input(
     let project = config
         .embedded_config
         .as_ref()
-        .ok_or_else(|| crate::session::error::user(crate::session::error::PKG_BROKEN))
+        .ok_or_else(|| anyhow::Error::from(crate::utils::code::Coded::bare(crate::utils::code::PKG_BROKEN)))
         .and_then(ProjectConfig::from_value)?;
     let inspected =
         crate::installer::inspect_dir(input.install_path.clone(), project.exe_name.clone())
             .await
-            .ok_or_else(|| crate::session::error::user(crate::session::error::PATH_INVALID))?;
+            .ok_or_else(|| anyhow::Error::from(crate::utils::code::Coded::bare(crate::utils::code::INSTALL_PATH_INVALID)))?;
     Ok((
         Settings {
             install_path: input.install_path.clone(),
@@ -97,4 +101,16 @@ pub(crate) async fn settings_from_input(
         },
         project,
     ))
+}
+
+fn emit_cdk_reopen(handle: &HostHandle, err: &anyhow::Error) {
+    use crate::utils::code::{extract, Extracted, MIRRORC_CDK_BANNED, MIRRORC_CDK_EXPIRED, MIRRORC_CDK_INVALID, MIRRORC_CDK_MISMATCH};
+    if let Extracted::Coded(c) = extract(err) {
+        if matches!(
+            c.code,
+            MIRRORC_CDK_EXPIRED | MIRRORC_CDK_INVALID | MIRRORC_CDK_MISMATCH | MIRRORC_CDK_BANNED
+        ) {
+            handle.emit("session-reopen-source", ());
+        }
+    }
 }

@@ -5,7 +5,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use lazy_static::lazy_static;
 
 use crate::dfs::http_get_request;
-use crate::session::error::{self, hide};
+use crate::utils::code::{attach_metadata, Attach, VERSION_REGEX_INVALID};
 
 struct UrlCache {
     resolved_url: String,
@@ -112,7 +112,7 @@ fn parse_github_url(url: &str) -> anyhow::Result<GitHubUrl> {
     let mut cache_time = None;
     if let Some(params) = params {
         let parsed = url::Url::parse(&format!("https://dummy.local/?{params}"))
-            .map_err(|e| hide(error::META_FAILED, e))?;
+            .map_err(|e| attach_metadata(e.into()))?;
         for (k, v) in parsed.query_pairs() {
             match k.as_ref() {
                 "versionRegex" => version_regex = Some(v.into_owned()),
@@ -129,11 +129,11 @@ fn parse_github_url(url: &str) -> anyhow::Result<GitHubUrl> {
     }
     let releases_index = base_url
         .find("/releases/")
-        .ok_or_else(|| hide(error::META_FAILED, "URL must contain /releases/"))?;
+        .ok_or_else(|| anyhow::anyhow!("URL must contain /releases/").attach(crate::utils::code::SOURCE_INVALID))?;
     let releases_prefix = format!("{}{}", &base_url[..releases_index], "/releases");
     let releases_latest_url = format!("{releases_prefix}/latest");
     let (owner, repo) = owner_repo_from_releases_url(&base_url)
-        .ok_or_else(|| hide(error::META_FAILED, "Invalid releases URL format"))?;
+        .ok_or_else(|| anyhow::anyhow!("Invalid releases URL format").attach(crate::utils::code::SOURCE_INVALID))?;
     let host_ok = url::Url::parse(&base_url)
         .ok()
         .and_then(|u| u.host_str().map(|h| h == "github.com"))
@@ -154,7 +154,7 @@ async fn resolve_version(
 ) -> anyhow::Result<String> {
     let response = http_get_request(releases_latest_url.to_string(), Some(true), None, None)
         .await
-        .map_err(|e| hide(error::META_FAILED, e))?;
+        .map_err(|e| attach_metadata(e.into()))?;
     let redirect = if !response.final_url.is_empty() {
         response.final_url
     } else {
@@ -165,19 +165,13 @@ async fn resolve_version(
             .unwrap_or_default()
     };
     if redirect.is_empty() {
-        return Err(hide(
-            error::META_FAILED,
-            "No redirect found for GitHub latest release",
-        ));
+        return Err(anyhow::anyhow!("No redirect found for GitHub latest release").attach(crate::utils::code::METADATA_UNREACHABLE));
     }
     if let Some(custom) = version_regex {
         return capture_version(custom, &redirect);
     }
     tag_from_releases_redirect(&redirect).ok_or_else(|| {
-        hide(
-            error::META_FAILED,
-            format!("Failed to extract tag from {redirect}"),
-        )
+        anyhow::anyhow!("Failed to extract tag from {redirect}").attach(crate::utils::code::METADATA_INVALID)
     })
 }
 
@@ -209,23 +203,16 @@ fn tag_from_releases_redirect(url: &str) -> Option<String> {
 /// without groups falls back to the whole match.
 fn capture_version(pattern: &str, text: &str) -> anyhow::Result<String> {
     let re = regex_lite::Regex::new(pattern).map_err(|e| {
-        hide(
-            error::META_FAILED,
-            format!("Invalid versionRegex {pattern:?}: {e}"),
-        )
+        anyhow::anyhow!("Invalid versionRegex {pattern:?}: {e}").attach(VERSION_REGEX_INVALID)
     })?;
     let caps = re.captures(text).ok_or_else(|| {
-        hide(
-            error::META_FAILED,
-            format!("versionRegex {pattern:?} did not match {text}"),
-        )
+        anyhow::anyhow!("versionRegex {pattern:?} did not match {text}")
+            .attach(crate::utils::code::METADATA_INVALID)
     })?;
     let m = caps.get(1).unwrap_or_else(|| caps.get(0).unwrap());
     if m.is_empty() {
-        return Err(hide(
-            error::META_FAILED,
-            format!("versionRegex {pattern:?} matched empty version in {text}"),
-        ));
+        return Err(anyhow::anyhow!("versionRegex {pattern:?} matched empty version in {text}")
+            .attach(crate::utils::code::METADATA_INVALID));
     }
     Ok(m.as_str().to_string())
 }
@@ -241,7 +228,7 @@ async fn resolve_direct_url(original_url: &str, cache_time: Option<u64>) -> anyh
     }
     let response = http_get_request(original_url.to_string(), Some(true), None, None)
         .await
-        .map_err(|e| hide(error::META_FAILED, e))?;
+        .map_err(|e| attach_metadata(e.into()))?;
     let mut redirect = response
         .headers
         .get("location")
@@ -357,8 +344,7 @@ mod tests {
 
     #[test]
     fn custom_version_bad_pattern_or_no_match_errors() {
-        // 详细原因（invalid pattern / no match）走 hide() 进日志，
-        // 用户侧统一收 META_FAILED。
+        // 详细原因（invalid pattern / no match）are coded METADATA_INVALID / VERSION_REGEX_INVALID.
         assert!(capture_version(r"v([0-9.+", "https://x/releases/tag/v1").is_err());
         assert!(capture_version(r"/zzz/(\d+)", "https://x/releases/tag/v1").is_err());
         assert!(capture_version(r"(x*)", "https://x/releases/tag/v1").is_err());

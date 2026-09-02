@@ -11,7 +11,11 @@ use crate::dfs::{
     InsightItem,
 };
 use crate::local::Embedded;
-use crate::session::error::{self, hide, user};
+use crate::utils::code::{
+    attach_download, attach_metadata, is_retryable_network, Attach, Coded, NO_DOWNLOAD_NODE,
+    PLUGIN_NOT_FOUND, PLUGIN_NO_UI, REMOTE_FILE_MISSING, SOURCE_INVALID, SOURCE_NEEDS_VERIFICATION,
+    MIRRORC_UNREACHABLE,
+};
 use crate::session::plan::HashKey;
 use crate::session::plugin::{
     clean_plugin_url, forced_plugin_name, is_github_source, resolve_github_file_url,
@@ -193,16 +197,11 @@ impl SourceCtx {
 pub fn parse_source(source: &str) -> anyhow::Result<ParsedSource> {
     if source.starts_with("mirrorc://") {
         let url = url::Url::parse(source).map_err(|e| {
-            hide(
-                format!("无法获取Mirror酱数据，安装包可能已经损坏：{source}"),
-                e,
-            )
+            anyhow::Error::from(e).attach(MIRRORC_UNREACHABLE)
         })?;
         let resource_id = url.host_str().unwrap_or_default().to_string();
         if resource_id.is_empty() {
-            return Err(user(format!(
-                "无法获取Mirror酱数据，安装包可能已经损坏：{source}"
-            )));
+            return Err(anyhow::Error::from(Coded::bare(MIRRORC_UNREACHABLE)));
         }
         let params = url.query_pairs();
         let mut channel = "stable".to_string();
@@ -256,18 +255,18 @@ pub fn parse_source(source: &str) -> anyhow::Result<ParsedSource> {
         rest.to_string()
     };
     if !rest.starts_with("http://") && !rest.starts_with("https://") {
-        return Err(anyhow!("Invalid dfs source: {source}"));
+        return Err(anyhow!("Invalid dfs source: {source}").attach(SOURCE_INVALID));
     }
     let storage = if let Some(s) = storage_hint {
         s
     } else {
-        let url = url::Url::parse(&rest).map_err(|_| anyhow!("Invalid dfs source: {source}"))?;
+        let url = url::Url::parse(&rest).map_err(|_| anyhow!("Invalid dfs source: {source}").attach(SOURCE_INVALID))?;
         if url.path().ends_with(".exe") {
             StorageKind::Packed
         } else if url.path().ends_with(".json") {
             StorageKind::Hashed
         } else {
-            return Err(anyhow!("Invalid dfs source: {source}"));
+            return Err(anyhow!("Invalid dfs source: {source}").attach(SOURCE_INVALID));
         }
     };
     if is_github_source(source) || is_github_source(&rest) {
@@ -292,24 +291,21 @@ async fn fetch_hashed_metadata(url: &str) -> anyhow::Result<RepoMetadata> {
         .get(url)
         .send()
         .await
-        .map_err(|e| hide(error::META_FAILED, e))?;
+        .map_err(|e| attach_metadata(e.into()))?;
     if !res.status().is_success() {
-        return Err(hide(
-            error::META_FAILED,
-            format!("hashed metadata http {}", res.status()),
-        ));
+        return Err(anyhow!("hashed metadata http {}", res.status()).attach(crate::utils::code::METADATA_HTTP_ERROR));
     }
-    let body = res.text().await.map_err(|e| hide(error::META_FAILED, e))?;
-    serde_json::from_str(&body).map_err(|e| hide(error::META_FAILED, e))
+    let body = res.text().await.map_err(|e| attach_metadata(e.into()))?;
+    serde_json::from_str(&body).map_err(|e| attach_metadata(e.into()))
 }
 
 async fn fetch_dfs2_metadata(api_url: &str, ctx: &mut SourceCtx) -> anyhow::Result<RepoMetadata> {
     let dfs2 = get_dfs2_metadata(api_url.to_string())
         .await
-        .map_err(|e| hide(error::META_FAILED, e))?;
+        .map_err(|e| attach_metadata(e.into()))?;
     let data = dfs2
         .data
-        .ok_or_else(|| hide(error::META_FAILED, "dfs2 metadata is null"))?;
+        .ok_or_else(|| anyhow!("dfs2 metadata is null").attach(crate::utils::code::METADATA_INVALID))?;
     ctx.index.clear();
     for (name, info) in data.index {
         ctx.index.insert(
@@ -343,7 +339,7 @@ async fn refresh_packed_index(
         .await
         .into_anyhow()?;
     let header_offset = find_subslice(&pre, b"!KachinaInstaller!")
-        .ok_or_else(|| hide(error::META_FAILED, "invalid remote index header"))?;
+        .ok_or_else(|| anyhow!("invalid remote index header").attach(crate::utils::code::METADATA_INVALID))?;
     let index_offset = header_offset + 18;
     let index_start = read_u32be(&pre, index_offset)? as u64;
     let config_sz = read_u32be(&pre, index_offset + 4)? as u64;
@@ -384,10 +380,10 @@ async fn refresh_packed_index(
             "\0META" => {
                 // 走 from_str：RepoMetadata 的反序列化按 Deserializer 类型单态化，
                 // 只用 StrRead 一种可省掉整棵 SliceRead 副本。
-                let text = std::str::from_utf8(data).map_err(|e| hide(error::META_FAILED, e))?;
+                let text = std::str::from_utf8(data).map_err(|e| attach_metadata(e.into()))?;
                 metadata = Some(
                     serde_json::from_str::<RepoMetadata>(text)
-                        .map_err(|e| hide(error::META_FAILED, e))?,
+                        .map_err(|e| attach_metadata(e.into()))?,
                 );
             }
             "\0INDEX" => {
@@ -397,7 +393,7 @@ async fn refresh_packed_index(
         }
     }
     ctx.installer_end = (index_start + config_sz + theme_sz) as usize;
-    metadata.ok_or_else(|| hide(error::META_FAILED, "packed index has no metadata"))
+    metadata.ok_or_else(|| anyhow!("packed index has no metadata").attach(crate::utils::code::METADATA_INVALID))
 }
 
 fn parse_packed_index(
@@ -440,10 +436,7 @@ pub async fn fetch_metadata(
     ctx.parsed = Some(parsed.clone());
     match parsed {
         ParsedSource::Plugin { name, raw } => fetch_plugin_metadata(&name, &raw, extras, ctx).await,
-        ParsedSource::Mirrorc { .. } => Err(hide(
-            error::META_FAILED,
-            "mirrorc metadata is handled separately",
-        )),
+        ParsedSource::Mirrorc { .. } => Err(anyhow!("mirrorc metadata is handled separately").attach(crate::utils::code::SOURCE_INVALID)),
         ParsedSource::GitHub { raw, storage } => match storage {
             StorageKind::Hashed => {
                 let url = resolve_github_file_url(&raw).await?;
@@ -477,16 +470,13 @@ pub async fn resolve_file_location(
     installer: bool,
 ) -> anyhow::Result<FileLocation> {
     let Some(parsed) = ctx.parsed.as_ref() else {
-        return Err(hide(error::META_FAILED, "source not loaded"));
+        return Err(anyhow!("source not loaded").attach(crate::utils::code::SOURCE_INVALID));
     };
     match parsed {
         ParsedSource::Plugin { name, raw } => {
             resolve_plugin_location(ctx, name, raw, hash, installer).await
         }
-        ParsedSource::Mirrorc { .. } => Err(hide(
-            error::META_FAILED,
-            "mirrorc does not resolve hashed files",
-        )),
+        ParsedSource::Mirrorc { .. } => Err(anyhow!("mirrorc does not resolve hashed files").attach(crate::utils::code::SOURCE_INVALID)),
         ParsedSource::GitHub { raw, storage } => {
             let file_url = resolve_github_file_url(raw).await?;
             match storage {
@@ -515,7 +505,7 @@ pub async fn resolve_file_location(
                             None,
                         ))
                     } else {
-                        Err(hide(error::FILE_MISSING, "no file in remote binary"))
+                        Err(anyhow!("no file in remote binary").attach(REMOTE_FILE_MISSING))
                     }
                 }
             }
@@ -563,7 +553,7 @@ pub async fn resolve_file_location(
                         };
                         Ok(FileLocation::remote(full, 0, ctx.installer_end, true, None))
                     } else {
-                        Err(hide(error::FILE_MISSING, "no file in remote binary"))
+                        Err(anyhow!("no file in remote binary").attach(REMOTE_FILE_MISSING))
                     }
                 }
             },
@@ -579,7 +569,7 @@ async fn resolve_dfs2_location(
     let session = ctx
         .dfs2
         .as_ref()
-        .ok_or_else(|| hide(error::DFS2_SESSION, "DFS2 session not found"))?;
+        .ok_or_else(|| anyhow!("DFS2 session not found").attach(NO_DOWNLOAD_NODE))?;
     let session_api = format!(
         "{}/session/{}/{}",
         session.base_url, session.session_id, session.res_id
@@ -610,7 +600,7 @@ async fn resolve_dfs2_location(
             Some(range),
         ))
     } else {
-        Err(hide(error::FILE_MISSING, "no file in dfs2 index"))
+        Err(anyhow!("no file in dfs2 index").attach(REMOTE_FILE_MISSING))
     }
 }
 
@@ -620,7 +610,7 @@ async fn dfs2_chunk_url(ctx: &SourceCtx, session_api: &str, range: &str) -> anyh
     }
     let resp = get_dfs2_chunk_url(session_api.to_string(), range.to_string())
         .await
-        .map_err(|e| anyhow!(e))?;
+        ?;
     Ok(resp.url)
 }
 
@@ -631,14 +621,14 @@ pub async fn resolve_range_url(
     size: usize,
 ) -> anyhow::Result<String> {
     let Some(parsed) = ctx.parsed.as_ref() else {
-        return Err(hide(error::META_FAILED, "source not loaded"));
+        return Err(anyhow!("source not loaded").attach(crate::utils::code::SOURCE_INVALID));
     };
     match parsed {
         ParsedSource::Plugin { name, raw } => {
             let end = start + size.saturating_sub(1);
             plugin_chunk_url(ctx, name, raw, &format!("{start}-{end}")).await
         }
-        ParsedSource::Mirrorc { .. } => Err(hide(error::META_FAILED, "mirrorc has no range url")),
+        ParsedSource::Mirrorc { .. } => Err(anyhow!("mirrorc has no range url").attach(crate::utils::code::SOURCE_INVALID)),
         ParsedSource::GitHub { raw, .. } => resolve_github_file_url(raw).await,
         ParsedSource::Http { remote, url, .. } => match remote {
             RemoteKind::Direct => Ok(url.clone()),
@@ -647,7 +637,7 @@ pub async fn resolve_range_url(
                 let session = ctx
                     .dfs2
                     .as_ref()
-                    .ok_or_else(|| hide(error::DFS2_SESSION, "DFS2 session not found"))?;
+                    .ok_or_else(|| anyhow!("DFS2 session not found").attach(NO_DOWNLOAD_NODE))?;
                 let session_api = format!(
                     "{}/session/{}/{}",
                     session.base_url, session.session_id, session.res_id
@@ -656,7 +646,7 @@ pub async fn resolve_range_url(
                 let range = format!("{start}-{end}");
                 dfs2_chunk_url(ctx, &session_api, &range)
                     .await
-                    .map_err(|e| hide(error::DFS2_SESSION, e))
+                    .map_err(|e| attach_download(e.into(), None, None).attach(NO_DOWNLOAD_NODE))
             }
         },
     }
@@ -705,7 +695,7 @@ pub async fn ensure_dfs2_session(
             return Err(err);
         }
     };
-    let parsed = url::Url::parse(&url).map_err(|e| hide(error::DFS2_SESSION, e))?;
+    let parsed = url::Url::parse(&url).map_err(|e| attach_download(e.into(), None, None).attach(NO_DOWNLOAD_NODE))?;
     let base_url = format!("{}://{}", parsed.scheme(), parsed.host_str().unwrap_or(""));
     let res_id = parsed
         .path_segments()
@@ -722,20 +712,8 @@ pub async fn ensure_dfs2_session(
     Ok(())
 }
 
-fn is_network_err(err: &impl std::fmt::Display) -> bool {
-    let s = err.to_string();
-    if s.contains("Session creation failed") {
-        return false;
-    }
-    let check = s.to_lowercase();
-    check.contains("failed to send request")
-        || check.contains("connection reset")
-        || check.contains("connection refused")
-        || check.contains("timed out")
-        || check.contains("timeout")
-        || check.contains("10054")
-        || check.contains("10060")
-        || check.contains("10061")
+fn is_network_err(err: &anyhow::Error) -> bool {
+    is_retryable_network(err)
 }
 
 async fn create_dfs2_session_with_challenge(
@@ -767,7 +745,7 @@ async fn create_dfs2_session_with_challenge(
             }
         }
     }
-    Err(last_err.unwrap_or_else(|| anyhow!(error::DFS2_SESSION)))
+    Err(last_err.unwrap_or_else(|| anyhow::Error::from(Coded::bare(NO_DOWNLOAD_NODE))))
 }
 
 async fn create_dfs2_session_once(
@@ -788,7 +766,7 @@ async fn create_dfs2_session_once(
             extras.clone(),
         )
         .await
-        .map_err(|e| anyhow!(e))?;
+        ?;
         if let Some(sid) = resp.sid.clone() {
             if resp.challenge.is_none() {
                 return Ok(sid);
@@ -797,22 +775,19 @@ async fn create_dfs2_session_once(
         if let (Some(challenge), Some(data), Some(sid)) = (resp.challenge, resp.data, resp.sid) {
             if challenge == "web" {
                 let _ = data;
-                return Err(user("当前下载源需要网页验证，请更换下载源"));
+                return Err(anyhow::Error::from(Coded::bare(SOURCE_NEEDS_VERIFICATION)));
             }
             challenge_response = Some(
                 solve_dfs2_challenge(challenge, data)
                     .await
-                    .map_err(|e| anyhow!(e))?,
+                    .map_err(|e| anyhow!(e).attach(NO_DOWNLOAD_NODE))?,
             );
             session_id = Some(sid);
             continue;
         }
-        return Err(hide(error::DFS2_SESSION, "invalid session response format"));
+        return Err(anyhow!("invalid session response format").attach(NO_DOWNLOAD_NODE));
     }
-    Err(hide(
-        error::DFS2_SESSION,
-        "failed to create session after 3 challenge attempts",
-    ))
+    Err(anyhow!("failed to create session after 3 challenge attempts").attach(NO_DOWNLOAD_NODE))
 }
 
 pub async fn cleanup_dfs2(ctx: &mut SourceCtx) {
@@ -896,7 +871,7 @@ async fn fetch_plugin_metadata(
 }
 
 fn apply_plugin_metadata(ctx: &mut SourceCtx, data: String) -> anyhow::Result<RepoMetadata> {
-    let data: Dfs2Data = serde_json::from_str(&data).map_err(|e| hide(error::META_FAILED, e))?;
+    let data: Dfs2Data = serde_json::from_str(&data).map_err(|e| attach_metadata(e.into()))?;
     ctx.index.clear();
     for (name, info) in data.index {
         ctx.index.insert(
@@ -943,7 +918,7 @@ async fn resolve_plugin_location(
             Some(range),
         ))
     } else {
-        Err(hide(error::FILE_MISSING, "no file in remote binary"))
+        Err(anyhow!("no file in remote binary").attach(REMOTE_FILE_MISSING))
     }
 }
 
@@ -980,7 +955,7 @@ async fn ensure_plugin_session(
         }
         Err(err) => {
             tracing::error!("Failed to create plugin session: {err}");
-            Err(hide(error::DFS2_SESSION, err))
+            Err(attach_download(err, None, None).attach(NO_DOWNLOAD_NODE))
         }
     }
 }
@@ -1009,23 +984,20 @@ async fn plugin_chunk_url(
     )
     .await?
     {
-        PluginResult::Unimplemented => Err(error::plugin_not_found(name)),
+        PluginResult::Unimplemented => Err(anyhow::Error::from(Coded::bare_with(PLUGIN_NOT_FOUND, name))),
         PluginResult::Value(data) => serde_json::from_str::<PluginChunkUrl>(&data)
             .ok()
             .map(|c| c.url)
             .filter(|s| !s.is_empty())
             .ok_or_else(|| {
-                hide(
-                    error::NO_DOWNLOAD_NODE,
-                    "plugin getChunkUrl returned no url",
-                )
+anyhow!("plugin getChunkUrl returned no url").attach(NO_DOWNLOAD_NODE)
             }),
     }
 }
 
 async fn plugin_call(ctx: &SourceCtx, args: PluginArgs) -> anyhow::Result<PluginResult> {
     let Some(host) = ctx.plugin.as_ref() else {
-        return Err(user(error::PLUGIN_NO_UI));
+        return Err(anyhow::Error::from(Coded::bare(PLUGIN_NO_UI)));
     };
     host.call(args).await
 }
@@ -1062,7 +1034,7 @@ async fn resolve_dfs_file_url(
     let range = length.map(|len| format!("{}-{}", start, start + len.saturating_sub(1)));
     let dfs = get_dfs(apiurl.to_string(), range, extras.map(|s| s.to_string()))
         .await
-        .map_err(|e| anyhow!(e))?;
+        .map_err(|e| attach_download(e, None, None))?;
     if let Some(url) = dfs.url {
         return Ok(url);
     }
@@ -1074,7 +1046,7 @@ async fn resolve_dfs_file_url(
     if let Some(source) = dfs.source {
         return Ok(source);
     }
-    Err(user(error::NO_DOWNLOAD_NODE))
+    Err(anyhow::Error::from(Coded::bare(NO_DOWNLOAD_NODE)))
 }
 
 async fn pick_fastest_test(tests: Vec<(String, String)>) -> Option<String> {
@@ -1111,7 +1083,7 @@ fn find_subslice(hay: &[u8], needle: &[u8]) -> Option<usize> {
 fn read_u32be(data: &[u8], offset: usize) -> anyhow::Result<u32> {
     let bytes: [u8; 4] = data
         .get(offset..offset + 4)
-        .ok_or_else(|| hide(error::META_FAILED, "invalid remote index"))?
+        .ok_or_else(|| anyhow!("invalid remote index").attach(crate::utils::code::METADATA_INVALID))?
         .try_into()
         .unwrap();
     Ok(u32::from_be_bytes(bytes))
@@ -1140,7 +1112,7 @@ async fn prefetch_batch_urls(
     );
     let resp = get_dfs2_batch_chunk_urls(session_api, ranges)
         .await
-        .map_err(|e| anyhow!(e))?;
+        .map_err(|e| attach_download(e, None, None))?;
     let mut out = HashMap::new();
     for (k, v) in resp.urls {
         if let Some(url) = v.url {

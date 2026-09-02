@@ -86,6 +86,62 @@ fn interpolate(text: &str, params: &[(&str, &str)]) -> String {
     s
 }
 
+
+use std::sync::OnceLock;
+
+static CATALOG: OnceLock<Catalog> = OnceLock::new();
+static LANG: OnceLock<String> = OnceLock::new();
+
+fn embedded_bytes() -> &'static [u8] {
+    static DECODED: OnceLock<Vec<u8>> = OnceLock::new();
+    DECODED
+        .get_or_init(|| {
+            let compressed = include_bytes!(concat!(env!("OUT_DIR"), "/i18n.tsv.zst"));
+            zstd::decode_all(&compressed[..]).unwrap_or_default()
+        })
+        .as_slice()
+}
+
+pub fn catalog() -> &'static Catalog {
+    CATALOG.get_or_init(|| Catalog::parse(embedded_bytes()))
+}
+
+pub fn lang() -> &'static str {
+    LANG.get_or_init(system_lang).as_str()
+}
+
+fn system_lang() -> String {
+    let mut buf = [0u16; 85];
+    let n = unsafe { windows::Win32::Globalization::GetUserDefaultLocaleName(&mut buf) };
+    if n > 1 {
+        let s = String::from_utf16_lossy(&buf[..n as usize - 1]).replace('_', "-");
+        if !s.is_empty() {
+            return s;
+        }
+    }
+    catalog()
+        .langs()
+        .first()
+        .cloned()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "zh-CN".into())
+}
+
+/// Look up copy. Renderers only (GuiUi / NativeUi / show paths).
+pub fn t(key: &str, params: &[(&str, &str)]) -> String {
+    catalog().t(lang(), key, params)
+}
+
+pub fn format_size(size: u64) -> String {
+    if size >= 1024 * 1024 {
+        format!("{:.1}MB", size as f64 / 1024.0 / 1024.0)
+    } else if size >= 1024 {
+        format!("{:.0}KB", size as f64 / 1024.0)
+    } else {
+        format!("{size}B")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

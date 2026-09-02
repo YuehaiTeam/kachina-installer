@@ -1,3 +1,4 @@
+use crate::utils::code::Attach;
 use crate::{
     dfs::{apply_insight_error, InsightItem},
     fs::{
@@ -141,14 +142,10 @@ async fn verify_hash_keep_insight(
     match verify_hash(target, md5, xxh).await {
         Ok(()) => Ok(()),
         Err(e) => {
+            let e = e.attach(crate::utils::code::HASH_MISMATCH);
             if let Some(handle) = handle {
                 if let Ok(mut insight) = handle.lock() {
-                    let code = crate::dfs::short_insight_code(&format!("{e:#}"));
-                    insight.error = Some(if code == "ERR_NETWORK_OTHER" {
-                        "HASH_MISMATCH_ERR".to_string()
-                    } else {
-                        code
-                    });
+                    crate::dfs::apply_insight_error(&mut insight, &format!("{e:#}"));
                 }
                 return Err(crate::utils::error::TACommandError::with_insight_handle(
                     e,

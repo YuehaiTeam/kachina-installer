@@ -1,3 +1,4 @@
+use anyhow::{anyhow, Context};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::time::Duration;
@@ -112,24 +113,47 @@ pub struct InsightItem {
     pub mode: Option<String>, // 安装模式
 }
 
-const SHORT_INSIGHT_CODES: &[&str] = &[
-    "HASH_MISMATCH_ERR",
-    "HASH_CHECK_ERR",
-    "HTTP_STATUS_ERR",
-    "HTTP_REQUEST_ERR",
-    "ERR_CONNECTION_RESET",
-    "ERR_CONNECTION_TIMEOUT",
-    "ERR_STREAM_ERROR",
-    "ERR_DNS_RESOLUTION_FAILED",
-    "ERR_TLS_HANDSHAKE_ERROR",
-    "ERR_HTTP_PROTOCOL_ERROR",
-    "ERR_NETWORK_UNREACHABLE",
-    "ERR_REQUEST_TIMEOUT",
-    "ERR_RESPONSE_BODY_ERROR",
-    "ERR_DOWNLOAD_STALLED",
-    "ERR_DOWNLOAD_TOO_SLOW",
-    "ERR_NETWORK_OTHER",
-];
+
+pub fn apply_insight_error_code(err: &str) -> String {
+    insight_code_from_text(err).to_string()
+}
+
+pub fn apply_insight_error(insight: &mut InsightItem, err: &str) {
+    if insight.error.as_deref().is_some_and(is_insight_code) {
+        return;
+    }
+    insight.error = Some(insight_code_from_text(err).to_string());
+}
+
+fn is_insight_code(code: &str) -> bool {
+    crate::utils::code::ALL_CODES.iter().any(|c| *c == code) || code == "cancelled"
+}
+
+fn insight_code_from_text(err: &str) -> &'static str {
+    use crate::utils::code::*;
+    for c in ALL_CODES {
+        if err == *c {
+            return c;
+        }
+        if err.starts_with(c) {
+            let rest = &err[c.len()..];
+            if rest.is_empty() || rest.starts_with(':') || rest.starts_with(' ') {
+                return c;
+            }
+        }
+    }
+    if err.contains(DOWNLOAD_STALLED)
+        || err.contains(crate::utils::error::DOWNLOAD_TOO_SLOW)
+        || err.contains("ERR_DOWNLOAD_STALLED")
+        || err.contains("ERR_DOWNLOAD_TOO_SLOW")
+    {
+        return DOWNLOAD_STALLED;
+    }
+    if err.contains(HASH_MISMATCH) || err.contains("HASH_MISMATCH_ERR") {
+        return HASH_MISMATCH;
+    }
+    INTERNAL_ERROR
+}
 
 pub fn is_remote_insight_url(url: &str) -> bool {
     let lower = url.trim().to_ascii_lowercase();
@@ -139,35 +163,6 @@ pub fn is_remote_insight_url(url: &str) -> bool {
         || lower.starts_with("h3://")
         || lower.starts_with("h3wt://")
         || lower.starts_with("sftp://")
-}
-
-pub fn is_short_insight_code(code: &str) -> bool {
-    SHORT_INSIGHT_CODES.contains(&code)
-}
-
-pub fn short_insight_code(err: &str) -> String {
-    for code in SHORT_INSIGHT_CODES {
-        if err.contains(code) {
-            return (*code).to_string();
-        }
-    }
-    if err.contains("DOWNLOAD_TOO_SLOW") {
-        return "ERR_DOWNLOAD_TOO_SLOW".to_string();
-    }
-    if err.contains("DOWNLOAD_STALLED") {
-        return "ERR_DOWNLOAD_STALLED".to_string();
-    }
-    if err.to_ascii_lowercase().contains("http status") {
-        return "HTTP_STATUS_ERR".to_string();
-    }
-    "ERR_NETWORK_OTHER".to_string()
-}
-
-pub fn apply_insight_error(insight: &mut InsightItem, err: &str) {
-    if insight.error.as_deref().is_some_and(is_short_insight_code) {
-        return;
-    }
-    insight.error = Some(short_insight_code(err));
 }
 
 #[derive(Deserialize, Serialize, Debug)]
@@ -185,7 +180,7 @@ pub async fn get_dfs(
     url: String,
     range: Option<String>,
     extras: Option<String>,
-) -> Result<DownloadResp, String> {
+) -> anyhow::Result<DownloadResp> {
     let url_with_range_in_query = if let Some(range) = range {
         format!("{url}?range={range}")
     } else {
@@ -202,7 +197,7 @@ pub async fn get_dfs(
         .send()
         .await
         .with_http_context("get_dfs", &url_with_range_in_query)
-        .map_err(|e| e.to_string())?;
+        ?;
     // check status code if is not 200 or 401
     if res.status() != reqwest::StatusCode::OK && res.status() != reqwest::StatusCode::UNAUTHORIZED
     {
@@ -210,23 +205,19 @@ pub async fn get_dfs(
         // check if body exists
         let body = res.text().await;
         if body.is_err() {
-            return Err(format!("{status}"));
+            return Err(anyhow!("{status}"));
         } else {
-            return Err(format!("{}: {}", status, body.unwrap()));
+            return Err(anyhow!("{}: {}", status, body.unwrap()));
         }
     }
     let body_text = res
         .text()
         .await
         .with_http_context("get_dfs", &url)
-        .map_err(|e| format!("Failed to read response body: {}", e))?;
+        .context("read response body")?;
     let json: Result<DownloadResp, serde_json::Error> = serde_json::from_str(&body_text);
     if json.is_err() {
-        return Err(format!(
-            "Failed to parse JSON ({}): {}",
-            json.err().unwrap(),
-            body_text
-        ));
+        return Err(anyhow!("parse JSON: {body_text}"));
     }
     let json = json.unwrap();
     // directly return if not challenge
@@ -237,7 +228,7 @@ pub async fn get_dfs(
     // split challenge into "hash/source"
     let challenge: Vec<&str> = challenge.split('/').collect();
     if challenge.len() != 2 {
-        return Err("Invalid challenge".to_string());
+        return Err(anyhow!("Invalid challenge"));
     }
     let hash = challenge[0];
     let source = challenge[1];
@@ -253,7 +244,7 @@ pub async fn get_dfs(
         }
     }
     if solve.is_empty() {
-        return Err("Failed to solve challenge".to_string());
+        return Err(anyhow!("Failed to solve challenge"));
     }
     let url = format!("{url_with_range_in_query}&sid={solve}");
     let res = REQUEST_CLIENT
@@ -262,40 +253,36 @@ pub async fn get_dfs(
         .send()
         .await
         .with_http_context("get_dfs", &url)
-        .map_err(|e| e.to_string())?;
+        ?;
     // check status code if is not 200 or 401
     if res.status() != reqwest::StatusCode::OK && res.status() != reqwest::StatusCode::UNAUTHORIZED
     {
         let status = res.status();
         let body = res.text().await;
         if body.is_err() {
-            return Err(format!("{status}"));
+            return Err(anyhow!("{status}"));
         } else {
-            return Err(format!("{}: {}", status, body.unwrap()));
+            return Err(anyhow!("{}: {}", status, body.unwrap()));
         }
     }
     let body_text = res
         .text()
         .await
         .with_http_context("get_dfs", &url)
-        .map_err(|e| format!("Failed to read response body: {}", e))?;
+        .context("read response body")?;
     let json: Result<DownloadResp, serde_json::Error> = serde_json::from_str(&body_text);
     if json.is_err() {
-        return Err(format!(
-            "Failed to parse JSON ({}): {}",
-            json.err().unwrap(),
-            body_text
-        ));
+        return Err(anyhow!("parse JSON: {body_text}"));
     }
     let json = json.unwrap();
     if json.challenge.is_some() {
-        return Err("Challenge not solved".to_string());
+        return Err(anyhow!("Challenge not solved"));
     }
     Ok(json)
 }
 
 // DFS2 API commands
-pub async fn get_dfs2_metadata(api_url: String) -> Result<Dfs2Metadata, String> {
+pub async fn get_dfs2_metadata(api_url: String) -> anyhow::Result<Dfs2Metadata> {
     let url_with_metadata = if api_url.contains('?') {
         format!("{}&with_metadata=1", api_url)
     } else {
@@ -307,22 +294,22 @@ pub async fn get_dfs2_metadata(api_url: String) -> Result<Dfs2Metadata, String> 
         .send()
         .await
         .with_http_context("get_dfs2_metadata", &url_with_metadata)
-        .map_err(|e| e.to_string())?;
+        ?;
 
     if !res.status().is_success() {
         let status = res.status();
         let body = res.text().await.unwrap_or_default();
-        return Err(format!("{}: {}", status, body));
+        return Err(anyhow!("{}: {}", status, body));
     }
 
     let body_text = res
         .text()
         .await
         .with_http_context("get_dfs2_metadata", &url_with_metadata)
-        .map_err(|e| format!("Failed to read response body: {}", e))?;
+        .context("read response body")?;
 
     let metadata: Dfs2Metadata = serde_json::from_str(&body_text)
-        .map_err(|e| format!("Failed to parse JSON ({}): {}", e, body_text))?;
+        .map_err(|e| anyhow!("parse JSON ({e}): {body_text}"))?;
 
     Ok(metadata)
 }
@@ -334,7 +321,7 @@ pub async fn create_dfs2_session(
     challenge_response: Option<String>,
     session_id: Option<String>,
     extras: Option<serde_json::Value>,
-) -> Result<Dfs2SessionResponse, String> {
+) -> anyhow::Result<Dfs2SessionResponse> {
     let request_body = Dfs2SessionRequest {
         chunks,
         sid: session_id,
@@ -349,23 +336,23 @@ pub async fn create_dfs2_session(
         .send()
         .await
         .with_http_context("create_dfs2_session", &api_url)
-        .map_err(|e| e.to_string())?;
+        ?;
 
     let status = res.status();
     let body_text = res
         .text()
         .await
         .with_http_context("create_dfs2_session", &api_url)
-        .map_err(|e| format!("Failed to read response body: {}", e))?;
+        .context("read response body")?;
 
     tracing::info!("Response body: {}", body_text);
 
     let response: Dfs2SessionResponse = serde_json::from_str(&body_text)
-        .map_err(|e| format!("Failed to parse JSON ({}): {}", e, body_text))?;
+        .map_err(|e| anyhow!("parse JSON ({e}): {body_text}"))?;
 
     // Return response directly - let frontend handle challenges
     if !status.is_success() && status != reqwest::StatusCode::PAYMENT_REQUIRED {
-        return Err(format!("Session creation failed: {}", status));
+        return Err(anyhow!("Session creation failed: {status}"));
     }
 
     Ok(response)
@@ -374,7 +361,7 @@ pub async fn create_dfs2_session(
 pub async fn get_dfs2_chunk_url(
     session_api_url: String,
     range: String,
-) -> Result<Dfs2ChunkResponse, String> {
+) -> anyhow::Result<Dfs2ChunkResponse> {
     let url = format!("{}?range={}", session_api_url, range);
 
     let res = REQUEST_CLIENT
@@ -382,22 +369,22 @@ pub async fn get_dfs2_chunk_url(
         .send()
         .await
         .with_http_context("get_dfs2_chunk_url", &url)
-        .map_err(|e| e.to_string())?;
+        ?;
 
     if !res.status().is_success() {
         let status = res.status();
         let body = res.text().await.unwrap_or_default();
-        return Err(format!("{}: {}", status, body));
+        return Err(anyhow!("{}: {}", status, body));
     }
 
     let body_text = res
         .text()
         .await
         .with_http_context("get_dfs2_chunk_url", &url)
-        .map_err(|e| format!("Failed to read response body: {}", e))?;
+        .context("read response body")?;
 
     let response: Dfs2ChunkResponse = serde_json::from_str(&body_text)
-        .map_err(|e| format!("Failed to parse JSON ({}): {}", e, body_text))?;
+        .map_err(|e| anyhow!("parse JSON ({e}): {body_text}"))?;
 
     Ok(response)
 }
@@ -405,7 +392,7 @@ pub async fn get_dfs2_chunk_url(
 pub async fn get_dfs2_batch_chunk_urls(
     session_api_url: String,
     chunks: Vec<String>,
-) -> Result<Dfs2BatchChunkResponse, String> {
+) -> anyhow::Result<Dfs2BatchChunkResponse> {
     let request_body = Dfs2BatchChunkRequest { chunks };
 
     let res = REQUEST_CLIENT
@@ -414,22 +401,22 @@ pub async fn get_dfs2_batch_chunk_urls(
         .send()
         .await
         .with_http_context("get_dfs2_batch_chunk_urls", &session_api_url)
-        .map_err(|e| e.to_string())?;
+        ?;
 
     if !res.status().is_success() {
         let status = res.status();
         let body = res.text().await.unwrap_or_default();
-        return Err(format!("{}: {}", status, body));
+        return Err(anyhow!("{}: {}", status, body));
     }
 
     let body_text = res
         .text()
         .await
         .with_http_context("get_dfs2_batch_chunk_urls", &session_api_url)
-        .map_err(|e| format!("Failed to read response body: {}", e))?;
+        .context("read response body")?;
 
     let response: Dfs2BatchChunkResponse = serde_json::from_str(&body_text)
-        .map_err(|e| format!("Failed to parse JSON ({}): {}", e, body_text))?;
+        .map_err(|e| anyhow!("parse JSON ({e}): {body_text}"))?;
 
     Ok(response)
 }
@@ -437,7 +424,7 @@ pub async fn get_dfs2_batch_chunk_urls(
 pub async fn end_dfs2_session(
     session_api_url: String,
     insights: Option<Dfs2SessionInsights>,
-) -> Result<(), String> {
+) -> anyhow::Result<()> {
     let request_body = Dfs2DeleteRequest { insights };
 
     let res = REQUEST_CLIENT
@@ -446,12 +433,12 @@ pub async fn end_dfs2_session(
         .send()
         .await
         .with_http_context("end_dfs2_session", &session_api_url)
-        .map_err(|e| e.to_string())?;
+        ?;
 
     if !res.status().is_success() {
         let status = res.status();
         let body = res.text().await.unwrap_or_default();
-        return Err(format!("{}: {}", status, body));
+        return Err(anyhow!("{}: {}", status, body));
     }
     Ok(())
 }
@@ -551,14 +538,14 @@ pub async fn http_get_request(
     ignore_redirects: Option<bool>,
     headers: Option<HashMap<String, String>>,
     timeout_ms: Option<u64>,
-) -> Result<HttpGetResponse, String> {
+) -> anyhow::Result<HttpGetResponse> {
     // Send request — use a one-off raw client when redirect policy differs
     let response = if ignore_redirects.unwrap_or(false) {
         let client = reqwest::ClientBuilder::new()
             .user_agent(crate::capabilities::ua_string())
             .redirect(reqwest::redirect::Policy::none())
             .build()
-            .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
+            .context("create HTTP client")?;
 
         let mut rb = client.get(&url);
         if let Some(timeout) = timeout_ms {
@@ -572,7 +559,7 @@ pub async fn http_get_request(
         rb.send()
             .await
             .with_http_context("http_get_request", &url)
-            .map_err(|e| e.to_string())?
+            ?
     } else {
         let mut rb = REQUEST_CLIENT.get(&url);
         if let Some(timeout) = timeout_ms {
@@ -586,7 +573,7 @@ pub async fn http_get_request(
         rb.send()
             .await
             .with_http_context("http_get_request", &url)
-            .map_err(|e| e.to_string())?
+            ?
     };
 
     // Get final URL (after redirects)
@@ -612,7 +599,7 @@ pub async fn http_get_request(
         .text()
         .await
         .with_http_context("http_get_request", &url)
-        .map_err(|e| format!("Failed to read response body: {}", e))?;
+        .context("read response body")?;
 
     Ok(HttpGetResponse {
         status_code,
@@ -638,29 +625,33 @@ mod tests {
     }
 
     #[test]
-    fn short_codes_stay_short() {
+    fn insight_error_uses_coded() {
         assert_eq!(
-            short_insight_code("ERR_DOWNLOAD_TOO_SLOW [https://x]: DOWNLOAD_TOO_SLOW"),
-            "ERR_DOWNLOAD_TOO_SLOW"
+            insight_code_from_text("DOWNLOAD_STALLED: stalled"),
+            crate::utils::code::DOWNLOAD_STALLED
         );
         assert_eq!(
-            short_insight_code("HTTP_STATUS_ERR in create_http_stream: https://x"),
-            "HTTP_STATUS_ERR"
-        );
-        assert_eq!(
-            short_insight_code("HASH_MISMATCH_ERR: File a hash mismatch"),
-            "HASH_MISMATCH_ERR"
+            insight_code_from_text("HASH_MISMATCH_ERR: File a hash mismatch"),
+            crate::utils::code::HASH_MISMATCH
         );
         let mut item = InsightItem {
             url: "https://x".to_string(),
             ttfb: 1,
             time: 1,
             size: 1,
-            error: Some("ERR_DOWNLOAD_TOO_SLOW".to_string()),
+            error: Some(crate::utils::code::DOWNLOAD_STALLED.to_string()),
             range: vec![],
             mode: None,
         };
         apply_insight_error(&mut item, "some longer io error");
-        assert_eq!(item.error.as_deref(), Some("ERR_DOWNLOAD_TOO_SLOW"));
+        assert_eq!(
+            item.error.as_deref(),
+            Some(crate::utils::code::DOWNLOAD_STALLED)
+        );
+        apply_insight_error(&mut item, crate::utils::code::HASH_MISMATCH);
+        assert_eq!(
+            item.error.as_deref(),
+            Some(crate::utils::code::DOWNLOAD_STALLED)
+        );
     }
 }

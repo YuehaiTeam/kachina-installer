@@ -2,7 +2,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use anyhow::{anyhow, bail, Context};
+use anyhow::{anyhow, bail};
 use futures::future::join_all;
 use serde_json::{json, Value};
 use tokio::sync::Semaphore;
@@ -34,10 +34,18 @@ use crate::session::source::{
     prefetch_chunk_urls, resolve_file_location, resolve_range_url, FileLocation, ParsedSource,
     SourceCtx,
 };
+use crate::session::state::Prompt;
 use crate::session::types::{
-    version_gt, ProgressEvent, ProjectConfig, SessionResult, Settings, SourceField,
+    version_gt, ProjectConfig, SessionResult, Settings, SourceField,
 };
-use crate::session::ui::{PromptKind, SessionUi, SilentPluginUi};
+use crate::session::ui::{send_ev_insight, SessionUi, SilentPluginUi};
+use crate::utils::code::{
+    attach_download, attach_metadata, code_for_mirrorc_status, fail_kind, Attach, Coded,
+    FILE_IO_FAILED, HASH_ALGORITHM_UNSUPPORTED, METADATA_UNREACHABLE, MIRRORC_CDK_MISSING,
+    MIRRORC_FAILED, MIRRORC_UNREACHABLE, NO_DOWNLOAD_NODE, PKG_BROKEN, PROCESS_KILL_FAILED,
+    REGISTRY_WRITE_FAILED, RUNTIME_INSTALL_FAILED, SHORTCUT_FAILED, TEMP_DIR_UNAVAILABLE,
+    UNINSTALL_INFO_MISSING, WEBVIEW2_REQUIRED,
+};
 use crate::thirdparty::mirrorc::get_mirrorc_status;
 use crate::utils::error::IntoAnyhow;
 use crate::utils::metadata::{FileMeta, RepoMetadata};
@@ -148,12 +156,16 @@ fn merged_mode(
     }
 }
 
-fn progress(ui: &dyn SessionUi, sub_step: u32, percent: f64, current: impl Into<String>) {
-    ui.progress(ProgressEvent {
-        sub_step,
-        percent,
-        current: current.into(),
-    });
+fn progress(
+    ui: &dyn SessionUi,
+    sub_step: u32,
+    percent: f64,
+    stage: &'static str,
+    subject: Option<&str>,
+    done: Option<u64>,
+    total: Option<u64>,
+) {
+    ui.progress(sub_step, percent, stage, subject, done, total);
 }
 
 fn log_session_start(
@@ -362,7 +374,7 @@ fn txn_status(result: &anyhow::Result<SessionResult>) -> &'static str {
 }
 
 fn emit_insight(
-    ui: &dyn SessionUi,
+    _ui: &dyn SessionUi,
     project: &ProjectConfig,
     settings: &Settings,
     config: &InstallerConfig,
@@ -370,11 +382,11 @@ fn emit_insight(
     data: Option<Value>,
     uninstall: bool,
 ) {
-    ui.insight(
-        &insight_base(project, settings, config, uninstall),
-        event,
-        data,
-    );
+    let url = insight_base(project, settings, config, uninstall);
+    let event = event.to_string();
+    tokio::spawn(async move {
+        send_ev_insight(&url, &event, data).await;
+    });
 }
 
 pub async fn run_install(
@@ -407,7 +419,7 @@ pub async fn run_install(
             settings,
             config,
             "fail",
-            Some(json!({ "kind": crate::session::error::classify(err).kind.as_str() })),
+            Some(json!({ "kind": fail_kind(err) })),
             false,
         );
     }
@@ -422,7 +434,7 @@ async fn run_dfs_install(
     mgr: &ManagedElevate,
     txn: &crate::utils::sentry::Transaction,
 ) -> anyhow::Result<SessionResult> {
-    progress(ui, 0, 1.0, "获取最新版本");
+    progress(ui, 0, 1.0, "metadata", None, None, None);
     session_dump!(
         settings.dump_dir.as_deref(),
         "01-settings.json",
@@ -457,7 +469,7 @@ async fn run_dfs_install(
                 Ok(meta) => Some(meta),
                 Err(err) => {
                     tracing::warn!("online metadata failed: {err:#}");
-                    online_err = Some(crate::session::error::friendly(&err));
+                    online_err = Some(attach_metadata(err));
                     None
                 }
             }
@@ -533,7 +545,7 @@ async fn run_dfs_install(
             }
         }
     }
-    progress(ui, 1, 5.0, "校验本地文件……");
+    progress(ui, 1, 5.0, "hash_scan", None, None, None);
     let local = txn
         .timed(
             "hash-scan",
@@ -629,7 +641,7 @@ async fn run_dfs_install(
             finish_install(settings, config, project, Some(&latest), ui, mgr),
         )
         .await?;
-        progress(ui, 2, 100.0, "已是最新版本");
+        progress(ui, 2, 100.0, "done", None, None, None);
         return Ok(SessionResult::install(true, settings.is_update));
     }
 
@@ -641,14 +653,12 @@ async fn run_dfs_install(
     if !occupied.is_empty() {
         tracing::info!("occupied files: {}", occupied.join(", "));
         if !ui
-            .confirm(
-                PromptKind::OccupiedFiles,
-                "提示",
-                &format!(
-                    "检测到部分文件被占用，继续安装可能无法成功，是否继续？\n\n被占用的文件列表：{}",
-                    occupied.join("\n")
-                ),
-            )
+            .confirm(Prompt {
+                id: String::new(),
+                kind: "occupied_files",
+                items: occupied.clone(),
+                params: std::collections::BTreeMap::new(),
+            })
             .await
         {
             tracing::info!("install cancelled at occupied-files prompt");
@@ -700,22 +710,12 @@ async fn run_dfs_install(
     .await
     {
         cleanup_dfs2(&mut source_ctx).await;
-        let detail = crate::session::error::friendly(&err);
-        if detail == crate::session::error::DFS2_SESSION
-            || detail.starts_with(crate::session::error::DFS2_SESSION)
-        {
-            return Err(err);
-        }
-        return Err(anyhow!(
-            "{}: {}",
-            crate::session::error::DFS2_SESSION,
-            detail
-        ));
+        return Err(err.attach(NO_DOWNLOAD_NODE));
     }
     log_task_plan(&tasks, &ranges);
     prefetch_chunk_urls(&source_ctx, ranges).await;
 
-    progress(ui, 2, 20.0, "准备下载……");
+    progress(ui, 2, 20.0, "download", None, None, None);
     let ops = txn
         .timed(
             "download",
@@ -743,7 +743,7 @@ async fn run_dfs_install(
     session_dump!(settings.dump_dir.as_deref(), "04-install-ops.json", ops);
 
     if !plan.deletes.is_empty() {
-        progress(ui, 2, 95.0, "删除旧版残留文件……");
+        progress(ui, 2, 95.0, "delete", None, None, None);
         let list: Vec<String> = plan
             .deletes
             .iter()
@@ -763,13 +763,13 @@ async fn run_dfs_install(
         install_runtimes(settings, config, project, ui, mgr),
     )
     .await?;
-    progress(ui, 3, 98.0, "很快就好……");
+    progress(ui, 3, 98.0, "finalize", None, None, None);
     txn.timed(
         "finalize",
         finish_install(settings, config, project, Some(&latest), ui, mgr),
     )
     .await?;
-    progress(ui, 3, 100.0, "安装完成");
+    progress(ui, 3, 100.0, "done", None, None, None);
     Ok(SessionResult::install(false, settings.is_update))
 }
 
@@ -783,16 +783,10 @@ async fn pick_metadata(
     ui: &dyn SessionUi,
     local: Option<RepoMetadata>,
     online: Option<RepoMetadata>,
-    online_err: Option<String>,
+    online_err: Option<anyhow::Error>,
 ) -> anyhow::Result<(RepoMetadata, bool)> {
     match (local, online) {
-        (None, None) => Err(anyhow!(
-            "{}{}",
-            crate::session::error::META_FAILED,
-            online_err
-                .map(|e| format!("\n{}", crate::session::error::friendly(&e)))
-                .unwrap_or_else(|| "：未知错误，请检查日志".to_string())
-        )),
+        (None, None) => Err(online_err.unwrap_or_else(|| anyhow::Error::from(Coded::bare(METADATA_UNREACHABLE)))),
         (None, Some(online)) => {
             tracing::info!("Local meta not found, use online meta");
             Ok((online, true))
@@ -822,11 +816,12 @@ async fn pick_metadata(
                 } else {
                     (settings.is_update && no_index)
                         || ui
-                            .confirm(
-                                PromptKind::VersionMismatch,
-                                "提示",
-                                "当前安装包不是最新版本，是否直接安装最新版本？",
-                            )
+                            .confirm(Prompt {
+                                id: String::new(),
+                                kind: "version_mismatch",
+                                items: Vec::new(),
+                                params: std::collections::BTreeMap::new(),
+                            })
                             .await
                 };
                 if take_online {
@@ -871,14 +866,12 @@ async fn prepare_process(
         return Ok(true);
     }
     if !ui
-        .confirm(
-            PromptKind::ProcessRunning,
-            "提示",
-            &format!(
-                "检测到{}正在运行，是否结束进程并继续安装？",
-                project.app_name
-            ),
-        )
+        .confirm(Prompt {
+            id: String::new(),
+            kind: "process_running",
+            items: vec![project.app_name.clone()],
+            params: std::collections::BTreeMap::new(),
+        })
         .await
     {
         return Ok(false);
@@ -895,7 +888,7 @@ async fn prepare_process(
         {
             run_op(mgr, true, IpcOperation::KillProcess(*pid), progress_noop())
                 .await
-                .context("结束进程失败")?;
+                .attach(PROCESS_KILL_FAILED)?;
         }
     }
     Ok(true)
@@ -943,12 +936,12 @@ async fn scan_local(
                     continue;
                 };
                 let total = total.max(1);
-                progress(ui, 1, 5.0 + (cur as f64 / total as f64) * 15.0, format!("{cur} / {total}"));
+                progress(ui, 1, 5.0 + (cur as f64 / total as f64) * 15.0, "hash_scan", None, Some(cur), Some(total));
             }
             res = &mut op_fut => break res?,
         }
     };
-    progress(ui, 1, 20.0, "校验本地文件……");
+    progress(ui, 1, 20.0, "hash_scan", None, None, None);
     let IpcResult::CheckLocalFiles(scanned) = raw else {
         bail!("IPC_SHAPE_ERR");
     };
@@ -977,7 +970,6 @@ struct DownloadProg {
     files: Vec<FileProg>,
     last_bytes: u64,
     last_at: Instant,
-    speed: f64,
 }
 
 impl DownloadProg {
@@ -1007,41 +999,24 @@ impl DownloadProg {
             files,
             last_bytes: 0,
             last_at: Instant::now(),
-            speed: 0.0,
         }
     }
 
-    fn render(&mut self) -> (f64, String) {
+    fn render(&mut self) -> (f64, Option<String>, u64, u64) {
         let total: u64 = self.files.iter().map(|f| f.size).sum::<u64>().max(1);
         let done: u64 = self.files.iter().map(|f| f.downloaded.min(f.size)).sum();
         let now = Instant::now();
         let dt = now.duration_since(self.last_at).as_millis() as f64;
         if dt > 100.0 {
-            self.speed = (done.saturating_sub(self.last_bytes) as f64) / dt;
             self.last_bytes = done;
             self.last_at = now;
         }
-        let running: Vec<String> = self
+        let subject = self
             .files
             .iter()
-            .filter(|f| f.running && f.downloaded < f.size)
-            .map(|f| {
-                format!(
-                    "{} {}/{}",
-                    basename(&f.name),
-                    format_size(f.downloaded),
-                    format_size(f.size)
-                )
-            })
-            .collect();
-        let html = format!(
-            "<span class=\"d-single-stat\">{} / {} ({}/s)</span><div class=\"d-single-list\"><div class=\"d-single\">{}</div></div>",
-            format_size(done),
-            format_size(total),
-            format_size((self.speed * 1000.0) as u64),
-            running.join("</div><div class=\"d-single\">")
-        );
-        (20.0 + (done as f64 / total as f64) * 75.0, html)
+            .find(|f| f.running && f.downloaded < f.size)
+            .map(|f| basename(&f.name).to_string());
+        (20.0 + (done as f64 / total as f64) * 75.0, subject, done, total)
     }
 }
 
@@ -1363,16 +1338,16 @@ async fn install_files(
         tokio::select! {
             _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {
                 if let Ok(mut g) = prog.lock() {
-                    let (pct, html) = g.render();
-                    progress(ui, 2, pct, html);
+                    let (pct, subject, done, total) = g.render();
+                    progress(ui, 2, pct, "download", subject.as_deref(), Some(done), Some(total));
                 }
             }
             results = &mut download => break results,
         }
     };
     if let Ok(mut g) = prog.lock() {
-        let (pct, html) = g.render();
-        progress(ui, 2, pct, html);
+        let (pct, subject, done, total) = g.render();
+        progress(ui, 2, pct, "download", subject.as_deref(), Some(done), Some(total));
     }
 
     let mut ops = Vec::new();
@@ -1503,7 +1478,7 @@ async fn install_one(
             Err(err) => last_err = Some(err),
         }
     }
-    let err = last_err.unwrap_or_else(|| anyhow!("安装失败，请重试"));
+    let err = last_err.unwrap_or_else(|| anyhow::Error::from(Coded::bare(FILE_IO_FAILED)));
     log_task(
         "direct",
         item.size,
@@ -1512,7 +1487,7 @@ async fn install_one(
         false,
         Some(&err.to_string()),
     );
-    Err(crate::session::error::file_release(&file_name, &err))
+    Err(attach_download(err, Some(&file_name), None).attach_with(FILE_IO_FAILED, file_name))
 }
 
 struct MergedResult {
@@ -1631,7 +1606,7 @@ async fn build_install_op(
 ) -> anyhow::Result<IpcOperation> {
     let target = join_install(&settings.install_path, &item.file_name);
     let hash =
-        hash_of_item(item, hash_key).ok_or_else(|| anyhow!(crate::session::error::HASH_INVALID))?;
+        hash_of_item(item, hash_key).ok_or_else(|| anyhow::Error::from(Coded::bare(HASH_ALGORITHM_UNSUPPORTED)))?;
     let installer = item.installer.unwrap_or(false);
     if !skip_patch {
         if let Some(local) = local_files.iter().find(|l| l.name == hash) {
@@ -1775,7 +1750,7 @@ async fn install_runtimes(
         return Ok(());
     };
     tracing::info!("latest_meta.runtimes {runtimes:?}");
-    progress(ui, 3, 96.0, "安装运行库……");
+    progress(ui, 3, 96.0, "runtime_install", None, None, None);
     for tag in runtimes {
         tracing::info!("Installing runtime: {tag}");
         let embed = config
@@ -1783,7 +1758,7 @@ async fn install_runtimes(
             .as_ref()
             .and_then(|files| files.iter().find(|e| e.name == *tag));
         let name = runtime_name(tag);
-        progress(ui, 3, 96.0, format!("安装{name}……"));
+        progress(ui, 3, 96.0, "runtime_install", Some(name), None, None);
         let mut last_err = None;
         for _ in 0..3 {
             let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Progress>();
@@ -1810,14 +1785,13 @@ async fn install_runtimes(
                                 ui,
                                 3,
                                 96.0,
-                                format!(
-                                    "下载 {name} ……<br>{} / {}",
-                                    format_size(cur),
-                                    format_size(total)
-                                ),
+                                "runtime_download",
+                                Some(name),
+                                Some(cur),
+                                Some(total),
                             );
                         } else {
-                            progress(ui, 3, 96.0, format!("安装 {name} ……"));
+                            progress(ui, 3, 96.0, "runtime_install", Some(name), None, None);
                         }
                     }
                     res = &mut op_fut => break res,
@@ -1829,15 +1803,16 @@ async fn install_runtimes(
                     break;
                 }
                 Err(err) => {
-                    tracing::info!("安装{name}失败: {err:#}，重试中");
+                    tracing::info!("runtime {name} failed: {err:#}, retrying");
                     last_err = Some(err);
                 }
             }
         }
         if let Some(err) = last_err {
-            tracing::error!("安装{name}失败: {err:#}，请手动安装");
-            ui.alert("出错了", &format!("安装{name}失败: {err}，请手动安装"))
-                .await;
+            tracing::error!("runtime {name} failed: {err:#}");
+            let mut coded = Coded::bare_with(RUNTIME_INSTALL_FAILED, name.to_string());
+            coded.detail = Some(format!("{err:#}"));
+            ui.notify(&coded);
         }
     }
     Ok(())
@@ -1900,8 +1875,9 @@ async fn finish_install(
         .await
         {
             tracing::warn!("create uninstaller failed: {err:#}");
-            ui.alert("出错了", &format!("创建卸载程序失败: {err}"))
-                .await;
+            let mut coded = Coded::bare(SHORTCUT_FAILED);
+            coded.detail = Some(format!("{err:#}"));
+            ui.notify(&coded);
         }
         let _ = run_op(
             mgr,
@@ -1935,7 +1911,9 @@ async fn finish_install(
         .await
         {
             tracing::warn!("write registry failed: {err:#}");
-            ui.alert("出错了", &format!("写入注册表失败: {err}")).await;
+            let mut coded = Coded::bare(REGISTRY_WRITE_FAILED);
+            coded.detail = Some(format!("{err:#}"));
+            ui.notify(&coded);
         }
     }
     emit_insight(ui, project, settings, config, "finish", None, false);
@@ -1953,7 +1931,7 @@ async fn run_mirrorc(
         .mirrorc_cdk
         .as_deref()
         .filter(|s| !s.is_empty())
-        .ok_or_else(|| anyhow!("需要 Mirror酱 CDK"))?; // GUI already prompts for CDK before start
+        .ok_or_else(|| Coded::bare(MIRRORC_CDK_MISSING))?; // GUI already prompts for CDK before start
     let parsed = parse_source(&settings.source_uri)?;
     let ParsedSource::Mirrorc {
         resource_id,
@@ -1962,12 +1940,9 @@ async fn run_mirrorc(
         os,
     } = parsed
     else {
-        return Err(anyhow!(format!(
-            "无法获取Mirror酱数据，安装包可能已经损坏：{}",
-            settings.source_uri
-        )));
+        return Err(anyhow::Error::from(Coded::bare(MIRRORC_UNREACHABLE)));
     };
-    progress(ui, 0, 2.0, "从 Mirror酱 获取最新版本");
+    progress(ui, 0, 2.0, "mirrorc_metadata", None, None, None);
     let current_version = win32_version_info::VersionInfo::from_file(join_install(
         &settings.install_path,
         &project.exe_name,
@@ -1983,12 +1958,10 @@ async fn run_mirrorc(
         os.as_deref(),
     )
     .await
-    .into_anyhow()?;
-    if let Some((msg, reopen)) = mirrorc_error(&status) {
-        if reopen {
-            ui.reopen_source();
-        }
-        return Err(anyhow!(msg));
+    .into_anyhow()
+    .map_err(|e| e.attach(MIRRORC_UNREACHABLE))?;
+    if let Some(coded) = mirrorc_error(&status) {
+        return Err(anyhow::Error::from(coded));
     }
     let version_name = status
         .pointer("/data/version_name")
@@ -2027,17 +2000,17 @@ async fn run_mirrorc(
     let url = status
         .pointer("/data/url")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| anyhow!("从Mirror酱获取更新失败: 下载地址为空，请联系Mirror酱客服"))?;
+        .ok_or_else(|| Coded::bare(MIRRORC_FAILED))?;
     tracing::info!("Mirrorc URL {url}");
     let sha256 = status
         .pointer("/data/sha256")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| anyhow!("从Mirror酱获取更新失败: 校验数据为空，请联系Mirror酱客服"))?;
+        .ok_or_else(|| Coded::bare(MIRRORC_FAILED))?;
     let zip_path = join_install(
         &settings.install_path,
         &format!("KachinaInstaller_Mirrorc_{sha256}.zip"),
     );
-    progress(ui, 1, 5.0, "准备从Mirror酱下载……");
+    progress(ui, 1, 5.0, "mirrorc_download", None, None, None);
     run_op_with_ui(
         mgr,
         settings.elevate,
@@ -2057,13 +2030,16 @@ async fn run_mirrorc(
                     ui,
                     1,
                     5.0 + (*downloaded as f64 / total as f64) * 65.0,
-                    format!("{} / {}", format_size(*downloaded), format_size(total)),
+                    "mirrorc_download",
+                    None,
+                    Some(*downloaded),
+                    Some(total),
                 );
             }
         },
     )
     .await?;
-    progress(ui, 2, 70.0, "检查压缩包……");
+    progress(ui, 2, 70.0, "mirrorc_verify", None, None, None);
     let installed = run_op_with_ui(
         mgr,
         settings.elevate,
@@ -2083,7 +2059,10 @@ async fn run_mirrorc(
                     ui,
                     2,
                     70.0 + (*count as f64 / total as f64) * 25.0,
-                    format!("<div class=\"d-single-stat\">解压 {file}</div>"),
+                    "extract",
+                    Some(file),
+                    Some(*count),
+                    Some(total),
                 );
             }
             Progress::Delete(file) => {
@@ -2091,7 +2070,10 @@ async fn run_mirrorc(
                     ui,
                     2,
                     97.0,
-                    format!("<div class=\"d-single-stat\">删除 {file}</div>"),
+                    "delete",
+                    Some(file),
+                    None,
+                    None,
                 );
             }
             _ => {}
@@ -2104,47 +2086,27 @@ async fn run_mirrorc(
     let meta: Option<RepoMetadata> = match meta.as_deref() {
         Some(text) => Some(
             serde_json::from_str(text)
-                .map_err(|e| crate::session::error::hide(crate::session::error::META_FAILED, e))?,
+                .map_err(|e| attach_metadata(e.into()))?,
         ),
         None => None,
     };
     install_runtimes(settings, config, project, ui, mgr).await?;
     finish_install(settings, config, project, meta.as_ref(), ui, mgr).await?;
-    progress(ui, 3, 100.0, "安装完成");
+    progress(ui, 3, 100.0, "done", None, None, None);
     Ok(SessionResult::install(false, settings.is_update))
 }
 
-fn mirrorc_error(status: &Value) -> Option<(String, bool)> {
+fn mirrorc_error(status: &Value) -> Option<Coded> {
     let code = status.get("code").and_then(|v| v.as_i64())?;
-    if code == 0 {
-        return None;
-    }
-    let (msg, reopen) = match code {
-        1001 | 8002 | 8003 | 8004 => ("Mirror酱参数错误，请检查打包配置", false),
-        8001 => ("从Mirror酱获取更新失败，请检查打包配置", false),
-        7001 => ("Mirror酱 CDK 已过期", true),
-        7002 => ("Mirror酱 CDK 错误，请检查设置的 CDK 是否正确", true),
-        7003 => (
-            "Mirror酱 CDK 今日下载次数已达上限，请更换 CDK 或明天再试",
-            false,
-        ),
-        7004 => (
-            "Mirror酱 CDK 类型和待下载的资源不匹配，请检查设置的 CDK 是否正确",
-            true,
-        ),
-        7005 => ("Mirror酱 CDK 已被封禁，请更换 CDK", true),
-        _ => {
-            let detail = status
-                .get("msg")
-                .and_then(|v| v.as_str())
-                .unwrap_or("未知错误");
-            return Some((
-                format!("从Mirror酱获取更新失败: {detail}，请联系Mirror酱客服"),
-                false,
-            ));
-        }
-    };
-    Some((msg.to_string(), reopen))
+    let mapped = code_for_mirrorc_status(code)?;
+    let detail = status
+        .get("msg")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
+    let mut coded = Coded::bare(mapped);
+    coded.detail = detail;
+    Some(coded)
 }
 
 pub async fn run_uninstall(
@@ -2155,6 +2117,7 @@ pub async fn run_uninstall(
     mgr: &ManagedElevate,
 ) -> anyhow::Result<SessionResult> {
     let txn = crate::utils::sentry::Transaction::start("uninstall", "session");
+    emit_insight(ui, project, settings, config, "uninstall", None, true);
     let result = run_uninstall_inner(settings, config, project, ui, mgr).await;
     txn.finish(txn_status(&result));
     if let Err(err) = &result {
@@ -2164,7 +2127,7 @@ pub async fn run_uninstall(
             settings,
             config,
             "fail",
-            Some(json!({ "kind": crate::session::error::classify(err).kind.as_str() })),
+            Some(json!({ "kind": fail_kind(err) })),
             true,
         );
     }
@@ -2190,11 +2153,9 @@ async fn run_uninstall_inner(
     mgr: &ManagedElevate,
 ) -> anyhow::Result<SessionResult> {
     log_session_start("uninstall", settings, config, project);
-    progress(ui, 0, 10.0, "准备卸载……");
+    progress(ui, 0, 10.0, "uninstall_scan", None, None, None);
     let meta = read_uninstall_metadata_raw(&project.reg_name, Some(settings.install_path.as_str()))
-        .map_err(|e| {
-            crate::session::error::hide(crate::session::error::UNINSTALL_META_MISSING, e)
-        })?;
+        .map_err(|e| e.attach(UNINSTALL_INFO_MISSING))?;
     tracing::info!("UNINSTALL_METADATA: {meta}");
     let meta: UninstallMeta = serde_json::from_str(&meta).unwrap_or_default();
     let mut files: Vec<String> = meta.hashed.into_iter().map(|e| e.file_name).collect();
@@ -2223,7 +2184,7 @@ async fn run_uninstall_inner(
     if settings.elevate {
         let _ = run_op(mgr, true, IpcOperation::Ping, progress_noop()).await;
     }
-    progress(ui, 1, 40.0, "正在卸载……");
+    progress(ui, 1, 40.0, "uninstall_delete", None, None, None);
     run_op(
         mgr,
         settings.elevate,
@@ -2238,7 +2199,7 @@ async fn run_uninstall_inner(
         progress_noop(),
     )
     .await?;
-    progress(ui, 2, 100.0, "卸载完成");
+    progress(ui, 2, 100.0, "done", None, None, None);
     let _ = config;
     Ok(SessionResult::uninstall())
 }
@@ -2246,10 +2207,7 @@ async fn run_uninstall_inner(
 pub async fn silent_main(args: crate::cli::arg::InstallArgs) -> anyhow::Result<()> {
     let temp_dir = std::env::temp_dir();
     if std::env::set_current_dir(&temp_dir).is_err() {
-        return Err(crate::session::error::expected(
-            crate::session::error::FailKind::Disk,
-            crate::session::error::TEMP_DIR,
-        ));
+        return Err(anyhow::Error::from(Coded::bare(TEMP_DIR_UNAVAILABLE)));
     }
     let config = crate::installer::config::resolve_installer_config(args.clone(), true).await?;
     let project = match config.embedded_config.as_ref() {
@@ -2259,9 +2217,7 @@ pub async fn silent_main(args: crate::cli::arg::InstallArgs) -> anyhow::Result<(
                 "embedded config missing (embedded_files={})",
                 config.embedded_files.as_ref().map(|f| f.len()).unwrap_or(0)
             );
-            return Err(crate::session::error::user(
-                crate::session::error::PKG_BROKEN,
-            ));
+            return Err(anyhow::Error::from(Coded::bare(PKG_BROKEN)));
         }
     };
     let mut settings = crate::session::types::settings_from_cli(&args, &config, &project).await?;
@@ -2280,16 +2236,13 @@ pub async fn silent_main(args: crate::cli::arg::InstallArgs) -> anyhow::Result<(
                 crate::session::types::elevate_from_state(&dir.state, &project.uac_strategy);
         }
         let mgr = ManagedElevate::new();
-        emit_insight(&ui, &project, &settings, &config, "uninstall", None, true);
         return run_uninstall(&settings, &config, &project, &ui, &mgr)
             .await
             .map(|_| ());
     }
     if needs_js_plugin(&settings.source_uri) {
         if crate::host::webview_version().is_err() {
-            return Err(crate::session::error::user(
-                crate::session::error::PLUGIN_NEED_WEBVIEW2,
-            ));
+            return Err(anyhow::Error::from(Coded::bare(WEBVIEW2_REQUIRED)));
         }
         let session = SessionState::default();
         let runtime = crate::host::spawn_plugin_runtime(args.clone(), session.clone()).await?;

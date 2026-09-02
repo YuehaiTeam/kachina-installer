@@ -1,3 +1,4 @@
+use crate::utils::code::Attach;
 use async_compression::tokio::bufread::ZstdDecoder as TokioZstdDecoder;
 use bytes::Bytes;
 use fmmap::tokio::AsyncMmapFileExt;
@@ -19,7 +20,7 @@ use std::{
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader, ReadBuf};
 
 use crate::{
-    dfs::{apply_insight_error, short_insight_code, InsightItem},
+    dfs::{apply_insight_error, InsightItem},
     installer::uninstall::DELETE_SELF_ON_EXIT_PATH,
     ipc::{Progress, ProgressNotify},
     local::mmap,
@@ -693,7 +694,7 @@ pub async fn create_http_stream(
                 ttfb: request_start_time.elapsed().as_millis() as u32,
                 time: 0,
                 size: 0,
-                error: Some(short_insight_code(&format!("{e:#}"))),
+                error: Some(crate::dfs::apply_insight_error_code(&format!("{e:#}"))),
                 range: insight_range.clone(),
                 mode: None,
             }));
@@ -809,7 +810,7 @@ pub async fn create_multi_http_stream(
                 ttfb: request_start_time.elapsed().as_millis() as u32,
                 time: 0,
                 size: 0,
-                error: Some(short_insight_code(&format!("{e:#}"))),
+                error: Some(crate::dfs::apply_insight_error_code(&format!("{e:#}"))),
                 range: range_info.clone(),
                 mode: None,
             }));
@@ -1111,8 +1112,8 @@ pub async fn verify_hash(
     if hash != expected {
         return Err(anyhow::Error::new(std::io::Error::other(format!(
             "File {target} hash mismatch: expected {expected}, got {hash}"
-        ))))
-        .context("HASH_MISMATCH_ERR");
+        )))
+        .attach(crate::utils::code::HASH_MISMATCH));
     }
     Ok(())
 }
