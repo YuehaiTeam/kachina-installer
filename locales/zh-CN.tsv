@@ -1,0 +1,123 @@
+DISK_FULL	磁盘空间不足
+DOWNLOAD_FAILED	连接下载服务器失败，请重试或更换下载源
+DOWNLOAD_REFUSED	下载服务器出现问题，请重试或更换下载源
+DOWNLOAD_STALLED	检测到下载速度异常，请检查你的网络连接或更换下载源
+DOWNLOAD_TIMEOUT	连接下载服务器超时，请检查你的网络连接或更换下载源
+ELEVATE_FAILED	提权失败
+EXTRACT_FAILED	解压失败
+FILE_IN_USE	文件正在使用
+FILE_IO_FAILED	文件读写失败
+HASH_ALGORITHM_UNSUPPORTED	更新服务端配置有误，不支持的哈希算法
+HASH_MISMATCH	文件校验失败
+INSTALL_PATH_INVALID	安装路径无效
+INTERNAL_ERROR	安装程序发生内部错误，已终止运行
+METADATA_HTTP_ERROR	获取更新信息失败，请检查网络连接
+METADATA_INVALID	更新信息无效
+METADATA_UNREACHABLE	获取更新信息失败，请检查网络连接
+MIRRORC_CDK_BANNED	Mirror酱 CDK 已被封禁，请更换 CDK
+MIRRORC_CDK_EXPIRED	Mirror酱 CDK 已过期
+MIRRORC_CDK_INVALID	Mirror酱 CDK 错误，请检查设置的 CDK 是否正确
+MIRRORC_CDK_MISMATCH	Mirror酱 CDK 类型和待下载的资源不匹配，请检查设置的 CDK 是否正确
+MIRRORC_CDK_MISSING	需要 Mirror酱 CDK
+MIRRORC_CDK_QUOTA_EXCEEDED	Mirror酱 CDK 今日下载次数已达上限，请更换 CDK 或明天再试
+MIRRORC_CONFIG_INVALID	Mirror酱参数错误，请检查打包配置
+MIRRORC_FAILED	从Mirror酱获取更新失败，请联系Mirror酱客服
+MIRRORC_UNREACHABLE	无法获取Mirror酱数据，安装包可能已经损坏
+NO_DOWNLOAD_NODE	没有可用的下载节点
+PERMISSION_DENIED	拒绝访问
+PKG_BROKEN	安装包损坏，请重新下载
+PLUGIN_FAILED	插件宿主启动失败
+PLUGIN_NOT_FOUND	未找到插件
+PLUGIN_NO_UI	该安装源需要图形界鍼bPROCESS_KILL_FAILED	结束进程失败
+PROCESS_KILL_FAILED	结束进程失败
+REGISTRY_WRITE_FAILED	写入注册表失败
+REMOTE_FILE_MISSING	无法获取所需文件，请检查网络连接或更换下载源
+RUNTIME_INSTALL_FAILED	安装{subject}失败
+RUNTIME_UNSUPPORTED	不支持的运行库
+SELF_UPDATE_FAILED	更新安装程序失败
+SERVER_HTTP_ERROR	下载服务器返回错误
+SHORTCUT_FAILED	创建快捷方式失败
+SOURCE_INVALID	安装源无效
+SOURCE_METADATA_INVALID	更新信息无效
+SOURCE_NEEDS_VERIFICATION	安装源需要验证
+TEMP_DIR_UNAVAILABLE	无法访问临时文件夹
+UNINSTALL_INFO_MISSING	未找到卸载配置文件，请重新安装后再卸载
+VERSION_REGEX_INVALID	版本号规则无效
+WEBVIEW2_FAILED	WebView2 安装失败
+WEBVIEW2_REQUIRED	该安装源需要 WebView2
+dialog.cancel	取消
+dialog.copy	复制
+dialog.crash	安装程序发生内部错误，已终止运行。请重新运行安装程序；若问题持续出现，请凭以下编号反馈：{event_id}
+dialog.error	出错了
+dialog.error_title	错误
+dialog.install_failed	安装失败，请重试
+dialog.mirrorc_cdk_get	获取 CDK
+dialog.mirrorc_cdk_hint	Mirror酱是独立的第三方软件下载平台，提供付费的软件下载加速服务。如果你有 Mirror酱的 CDK，可以在这里输入。
+dialog.mirrorc_cdk_placeholder	请输入 Mirror酱 CDK
+dialog.mirrorc_cdk_title	设置 Mirror酱 CDK
+dialog.ok	确定
+dialog.prompt	提示
+dialog.temp_dir	无法访问临时文件夹
+dialog.unknown	未知错误，请检查日志
+dialog.unknown_event	未知
+dialog.webview2_required	该安装源需要 WebView2，请使用「高级安装」。
+dialog.window_init_failed	窗口初始化失败
+done.close	关闭
+done.install	安装完成
+done.latest	您已安装最新版本
+done.launch	启动
+done.uninstall	卸载成功
+done.update	更新完成
+progress.delete	删除 {subject}
+progress.done	安装完成
+progress.download	下载 {subject} ……
+progress.extract	解压 {subject}
+progress.finalize	很快就好……
+progress.hash_scan	校验本地文件……
+progress.metadata	获取最新版本
+progress.mirrorc_download	准备从Mirror酱下载……
+progress.mirrorc_metadata	从 Mirror酱 获取最新版本
+progress.mirrorc_verify	检查压缩包……
+progress.patch	修补 {subject}
+progress.plan	准备下载……
+progress.prepare	准备中...
+progress.registry	写入注册表
+progress.runtime_download	下载 {subject} ……
+progress.runtime_install	安装{subject}……
+progress.shortcut	创建快捷方式
+progress.uninstall_delete	正在卸载……
+progress.uninstall_scan	准备卸载……
+prompt.occupied_files.message	检测到部分文件被占用，继续安装可能无法成功，是否继续？
+prompt.occupied_files.title	提示
+prompt.process_running.message	检测到{items}正在运行，是否结束进程并继续安装？
+prompt.process_running.title	提示
+prompt.version_mismatch.message	当前安装包不是最新版本，是否直接安装最新版本？
+prompt.version_mismatch.title	提示
+ready.advanced	高级安装
+ready.advanced_hint	将安装 WebView2 并打开完整界鍼bready.agree	我已阅读并同意bready.change_path	更改安装位置
+ready.continue	使用当前选项继续
+ready.create_lnk	创建桌鍼快捷方式
+ready.delete_user_data	同时删除用户数据
+ready.dir_not_empty	您选择的目录不为空，是否创建新文件夹再安装？选【否】将可能影响原有数据。
+ready.eula	用户协议
+ready.from	从
+ready.install	安装
+ready.install_to	安装到
+ready.installing	正在安装
+ready.no_cdk	无CDK
+ready.select_source	选择安装源
+ready.source_multi	支持多种在线安装方式。
+ready.uninstall	卸载
+ready.uninstall_from	卸载自
+ready.uninstalling	正在卸载
+ready.update	更新
+ready.update_to	更新到
+ready.updating	正在更新
+step.default.0	获取最新版本
+step.default.1	校验更新内容
+step.default.2	下载和解压文件
+step.default.3	准备运行环境
+step.mirrorc.0	从 Mirror酱 获取最新版本
+step.mirrorc.1	下载数据包
+step.mirrorc.2	解压文件
+step.mirrorc.3	准备运行环境

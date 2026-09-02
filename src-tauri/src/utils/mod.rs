@@ -1,8 +1,10 @@
 pub mod acl;
+pub mod code;
 pub mod dir;
 pub mod error;
 pub mod gui;
 pub mod hash;
+pub mod i18n;
 pub mod icon;
 pub mod log;
 pub mod metadata;
