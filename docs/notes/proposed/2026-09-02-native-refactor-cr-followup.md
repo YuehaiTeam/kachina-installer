@@ -19,9 +19,9 @@ Status: proposed
 1. `host/bridge.rs` `on_message` 的 `Err` 分支显式调用 `crate::utils::sentry::capture_anyhow`，过滤条件与 `TACommandError::serialize` 一致：非 pipe 模式、`insight.is_none()`、`classify(&err.error).report`。把过滤逻辑抽成 `TACommandError::report_if_needed(&self)`，`serialize` 与 bridge 共用。
 2. `main.rs` 增加 `#![recursion_limit = "256"]`。
 3. `host/window.rs` 的两个 wndproc 在 `WM_SETTINGCHANGE` 且 `is_color_theme_change` 时 `PostMessageW(hwnd, WM_APP + 1, 0, 0)`；主循环与 `plugin_runtime_loop` 改为匹配 `WM_APP + 1` 触发 `SetBackground`，删除对 `WM_SETTINGCHANGE` 的判断。wndproc 中的 `apply_mica` 按窗口创建时的 `is_win11` 门控，标记方式为 `RegisterClassExW` 时分两个类名或以 `GWLP_USERDATA` 存布尔，取实现时更简的一种。
-4. `strip_install_prefix` 只用小写副本做比较，返回值从原始 `path` 按同一字节偏移切片；`normalize_full` 改用 `to_ascii_lowercase` 保证字节长度不变。更新 `strip_install_prefix_ignores_case_and_slashes` 的期望为 `"Sub/a.dll"`。
-5. `PromptHub::wait` 与 `PluginHub::wait` 拆为 `register(id) -> Receiver` 与 `await`，调用方先 `register` 再 `emit`。
-6. `host_main` 与 `native_entry` 返回后、`main` 退出前调用 `utils::sentry::flush(Duration::from_secs(3))`；`flush` 在 `INFLIGHT == 0` 时立即返回，正常路径不增加退出耗时。
+4. 已落地。`strip_install_prefix` 只用小写副本做比较，返回值从 slash 规范化后的原始路径按同一字节偏移切片；`normalize_full` 改用 `to_ascii_lowercase`。`strip_install_prefix_ignores_case_and_slashes` 期望为 `"Sub/a.dll"`。
+5. 已落地。`PromptHub` / `PluginHub` 拆出 `register(id) -> Receiver`；`GuiPluginHost::call` 与 `GuiUi::confirm` 先 `register` 再 `emit`。单测覆盖应答在 await 之前同步到达。
+6. 已落地。`flush(3s)` 放在 GUI 相关 `block_on` 的末尾（Runtime 尚未 drop，在途 envelope 的 `spawn` 才能跑完）。`native_entry` / `host_main` / silent 失败的 `process::exit(1)` 在退出前同样 flush，避免跳过 `block_on` 尾部。`INFLIGHT == 0` 时立即返回。
 7. 已实施，见上。
 
 ## Alternatives considered
@@ -30,7 +30,7 @@ Status: proposed
 - 第 2 项改为 `Box::pin` `dispatch` 的 future 以切断 Send 推导链：能消警告，但会话状态机每加一层 `.await` 嵌套就可能再次触顶；提高上限是编译器建议的做法，代价是 crate 级设置。
 - 第 3 项改为 wndproc 直接持有 `HostHandle` 指针（`GWLP_USERDATA`）并 `send(UiAction::SetBackground)`：需要在 wndproc 中解裸指针并处理窗口销毁后的悬垂，投递自定义消息更简单且两个循环已在处理 `WM_APP`。
 - 第 4 项保留小写返回值、只改 dump 与日志显示：治标；相对路径是数据不是展示，应保持原样。
-- 第 6 项在 `UiAction::Close` 处理处 flush：关窗与进程退出之间还有 native 对话框等路径，放在 `main` 尾部覆盖全部 GUI 出口。
+- 第 6 项在 `UiAction::Close` 处理处 flush：关窗与进程退出之间还有 native 对话框等路径；放在 `block_on` 末尾覆盖 GUI 正常返回，并在 `process::exit` 前补一次，因为临时 Runtime 在 `block_on` 返回后立刻 drop，会中止已 spawn 的上报任务。
 - 第 7 项不修（`main` 上即如此）：提权进程崩溃或被杀是崩溃采集要覆盖的场景，主进程在此期间空转会干扰复现与排查。
 
 ## Acceptance criteria
