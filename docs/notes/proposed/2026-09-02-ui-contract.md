@@ -199,7 +199,7 @@ bridge 暴露两层：`error_dialog({ code, detail, subject })` 直通 `show_err
 1. `utils/code.rs`、`session/state.rs`、`utils/i18n.rs`、`build.rs` 的 `locales/` 合并、`locales/zh-CN.tsv` 初稿（把现有中文原样搬入）。Rust 单测覆盖 `attach` / `extract` / 类表、`SessionState::apply`。
 2. 会话层迁移：`SessionUi` 精简、`run.rs` 进度与提示改为键与数据、错误挂码、`mirrorc_error` 改码、`dfs.rs` 返回 `anyhow::Result`、遥测回到 Rust、旧错误工具与常量删除。
 3. bridge 与 Preact 渲染器一起：`ui-state` / `intent` / `error_dialog` / `task_dialog` / `pick_path`，旧命令删除；`on_message` 的 `Err` 载荷改为结构体；第一方前端按渲染器 note 重写，e2e 在这一批结束时全绿。
-4. native 渲染器：`ReadyState` → `UiState`，`rfd::MessageDialog` → `show_error` / `task_dialog`，文案从 `i18n.rs` 取。可与第 3 步并行，不依赖 Preact。
+4. native 渲染器（**已落地**）：`ReadyState` → `UiState` / `UiSession`，`ReadyAction` → `Intent`，`rfd::MessageDialog` → `show_error` / `task_dialog`，ready / finish / CDK 文案从 `i18n.rs` 取。可与第 3 步并行，不依赖 Preact。
 
 ## Alternatives considered
 
