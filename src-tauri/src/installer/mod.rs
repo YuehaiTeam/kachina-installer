@@ -13,7 +13,12 @@ pub mod runtimes;
 pub mod uninstall;
 
 pub async fn launch(path: String) {
-    let _ = open::that(path);
+    let _ = tokio::task::spawn_blocking(move || {
+        if let Err(e) = crate::utils::process::shell_open(&path) {
+            tracing::warn!("launch {path} failed: {e}");
+        }
+    })
+    .await;
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

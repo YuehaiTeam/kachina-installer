@@ -317,9 +317,7 @@ pub fn install_panic_hook(show_dialog: bool) {
         }
         if show_dialog {
             if let Ok(exe) = std::env::current_exe() {
-                let _ = std::process::Command::new(exe)
-                    .args(["crash-dialog", &event_id])
-                    .spawn();
+                let _ = super::process::spawn(&exe, &["crash-dialog", &event_id], false);
             }
         }
         capture_panic(&event_id, format!("panic at {location}: {message}"));
