@@ -121,10 +121,10 @@ pub async fn run_opr(op: IpcOperation, notify: ProgressNotify) -> TAResult<IpcRe
             zip_path,
             target_path,
         } => {
-            let (meta, changeset) =
+            let meta =
                 crate::thirdparty::mirrorc::run_mirrorc_install(&zip_path, &target_path, notify)
                     .await?;
-            Ok(IpcResult::RunMirrorcInstall(meta, changeset))
+            Ok(IpcResult::RunMirrorcInstall(meta))
         }
     }
 }
