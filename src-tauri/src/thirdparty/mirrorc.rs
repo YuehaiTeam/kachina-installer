@@ -151,6 +151,11 @@ pub fn run_mirrorc_install_sync(
         if file.is_dir() {
             continue;
         }
+        if !crate::fs::staging::is_safe_rel(&file_name) {
+            return Err(anyhow::Error::from(Coded::bare(MIRRORC_FAILED))
+                .context("unsafe archive path")
+                .into());
+        }
         let out_path = crate::fs::staging::join_rel(Path::new(new_dir), &file_name);
         if let Some(parent) = out_path.parent() {
             std::fs::create_dir_all(parent)
@@ -189,12 +194,22 @@ pub fn run_mirrorc_install_sync(
         if let Some(deleted) = changeset.deleted.as_ref() {
             for file in deleted {
                 let strip_path = file.strip_prefix(&prefix).unwrap_or(file);
+                if !crate::fs::staging::is_safe_rel(strip_path) {
+                    return Err(anyhow::Error::from(Coded::bare(MIRRORC_FAILED))
+                        .context("unsafe delete path")
+                        .into());
+                }
                 deletes.push(strip_path.replace('\\', "/"));
             }
         }
     }
     if let Some(metadata) = metadata.as_ref() {
         for file in &metadata.deletes {
+            if !crate::fs::staging::is_safe_rel(file) {
+                return Err(anyhow::Error::from(Coded::bare(MIRRORC_FAILED))
+                    .context("unsafe delete path")
+                    .into());
+            }
             deletes.push(file.replace('\\', "/"));
         }
     }

@@ -34,13 +34,13 @@ Status: implemented
 - 与目标同卷时：`%TEMP%\kachina-staged\<h>\`，`<h>` 为安装路径经 `session/plan.rs::normalize_full` 规范化后 sha256 的前 16 个十六进制字符。用户在安装目录旁看不到任何暂存文件。
 - 不同卷时（`GetVolumePathNameW` 对两侧取卷根比较，不存在的路径取最近存在的祖先）：`<安装目录>.kachina-staged\`，例如 `D:\app\someapp.kachina-staged\`。rename 必须同卷才是原子的，跨卷会退化成复制，所以不能用 `%TEMP%`。
 
-盘根不是安装目录：`installer::probe_dir` 对 `C:\` 这类路径返回 `None`，于是 `Settings` 的两个构造点（GUI `Start`、CLI `-D`）、注册表里的旧路径、打包配置的默认路径、自定义 HTML 发来的 `set_path` 在会话开始前都以 `INSTALL_PATH_INVALID` 拦住，就绪页把它显示为不可写；目录选择器（`pick_install_path`，GUI 与 native 共用）把选中的盘根无条件改成 `<盘根>\<app_name>`。装在盘根上的旧安装既不能升级也不能卸载。`staging_root` 对没有父目录的路径挂的 `INSTALL_PATH_INVALID` 因此只是兜底。
+盘根不是安装目录：`installer::probe_dir` 对 `C:\` 这类路径、以及安装路径本身为 reparse point（junction / symlink）的情况返回 `None`，于是 `Settings` 的两个构造点（GUI `Start`、CLI `-D`）、注册表里的旧路径、打包配置的默认路径、自定义 HTML 发来的 `set_path` 在会话开始前都以 `INSTALL_PATH_INVALID` 拦住，就绪页把它显示为不可写；目录选择器（`pick_install_path`，GUI 与 native 共用）把选中的盘根无条件改成 `<盘根>\<app_name>`。装在盘根或 junction 上的旧安装既不能升级也不能卸载。`staging_root` 对没有父目录的路径挂的 `INSTALL_PATH_INVALID` 因此只是兜底。
 
-目录布局：`new\<相对路径>` 放产出文件，`old\<相对路径>` 放被换下的旧文件（根目录单元的旧目录放 `old\~root`），`dl\` 放运行库安装器与 Mirror酱 归档，`journal` 是提交清单，`lock` 内含持有进程的 pid。安装目录内不再出现任何安装器自己的文件。
+目录布局：`new\<相对路径>` 放产出文件，`old\<相对路径>` 放被换下的旧文件（根目录单元的旧目录放 `old\~root`），`dl\` 放运行库安装器与 Mirror酱 归档，`journal` 是提交清单，`lock` 内含持有进程的 pid。安装目录内没有安装器自己的文件。
 
-`fs/staging.rs` 承载全部临时目录逻辑：`same_volume`、`staging_root`、`free_space`（`GetDiskFreeSpaceExW`）、`path_hash`、`Staging::open`、`enter_neutral_cwd()`（把进程 cwd 切到 `%TEMP%`，失败挂 `TEMP_DIR_UNAVAILABLE`）、`scratch_file(name)`（WebView2 引导器在任何暂存目录存在之前下载，落在 `%TEMP%` 根下）。`host/mod.rs`、`host/native.rs`、`silent_main` 与提权侧 `uac_ipc_main` 都调 `enter_neutral_cwd`，不依赖 cwd 继承。自卸载改为 `installer/uninstall.rs::park_self`：`rename(exe → <staging>\old\<uninstall_name>)`，同卷由 `staging_root` 保证，不再以 rename 失败反推跨卷；`run_uninstall` 把暂存根路径作为 `UninstallOutcome.self_moved_to` 交回会话。运行库安装器下载到 `dl\`，随暂存目录一起清理。
+`fs/staging.rs` 承载全部临时目录逻辑：`same_volume`、`staging_root`、`free_space`（`GetDiskFreeSpaceExW`）、`path_hash`、`Staging::open`、`enter_neutral_cwd()`（把进程 cwd 切到 `%TEMP%`，失败挂 `TEMP_DIR_UNAVAILABLE`）、`scratch_file(name)`（WebView2 引导器在任何暂存目录存在之前下载，落在 `%TEMP%` 根下）。`host/mod.rs`、`host/native.rs`、`silent_main` 与提权侧 `uac_ipc_main` 都调 `enter_neutral_cwd`，不依赖 cwd 继承。自卸载走 `installer/uninstall.rs::park_self`：`rename(exe → <staging>\old\<uninstall_name>)`，同卷由 `staging_root` 保证，不从 rename 失败推断跨卷；`run_uninstall` 把暂存根路径作为 `UninstallOutcome.self_moved_to` 交回会话。运行库安装器下载到 `dl\`，随暂存目录一起清理。
 
-`Staging::open(install_dir)` 按"同级、`%TEMP%`"顺序查看两个候选位置：某个候选的 `lock` 内 pid 存活（`OpenProcess` + `GetExitCodeProcess == STILL_ACTIVE`）且不是本进程 → 挂 `STAGING_IN_USE`（E 类、不上报，文案"另一个安装程序正在处理此目录"）；第一个含 `journal` 的候选保留，其余候选整目录删除；没有可保留的就在 `staging_root` 建新目录；最后写入本进程 pid 到 `lock`，返回根路径与 journal 原文。它以 `IpcOperation::OpenStaging(install_dir)` 运行在有写权限的一侧（需要提权时是提权进程），`Commit` / `Recover` / `DiscardStaging` 同理；主进程只拿到根路径，用它拼 `new\` 下的输出路径。
+`Staging::open(install_dir)` 按"同级、`%TEMP%`"顺序查看两个候选位置：某个候选的 `lock` 内 pid 存活（`OpenProcess` + `GetExitCodeProcess == STILL_ACTIVE`）且不是本进程 → 挂 `STAGING_IN_USE`（E 类、不上报，文案"另一个安装程序正在处理此目录"）；第一个含 `journal` 的候选保留，其余候选整目录删除；没有可保留的就在 `staging_root` 建新目录；最后以 `create_new` 占用 `lock` 写入本进程 pid（已有锁且持有者存活 → `STAGING_IN_USE`；持有者已死则删掉重占），返回根路径与 journal 原文。它以 `IpcOperation::OpenStaging(install_dir)` 运行在有写权限的一侧（需要提权时是提权进程），`Commit` / `Recover` / `DiscardStaging` 同理；主进程只拿到根路径，用它拼 `new\` 下的输出路径。相对路径经 `is_safe_rel` 拒绝绝对路径、盘符与 `.` / `..` 组件，再 `join_rel`；journal 解析、Mirror酱 解压与删除清单、自镜像文件名共用同一套校验。
 
 打开时机在 `Intent::Start` 之后、本次 metadata（或 Mirror酱 API 应答）已知之后：恢复核对要比对 journal 记录的目标内容与本次要安装的内容，就绪页之前拿不到后者；不改路径点开始就是默认路径，改过路径再点开始查的是新路径，两种情形同一处代码。暂存目录不跨越两次会话存活：恢复要么当场完成要么当场丢弃；会话结束（成功、失败、取消、已是最新）时 `DiscardStaging` 整目录删除，唯一例外是本次换掉了运行中的 exe（见下）。
 
@@ -50,7 +50,7 @@ Status: implemented
 
 ### 卸载器与更新器
 
-卸载器（`uninstall_name`）与更新器（`updater_name`）是安装器自身生成的两个文件，不在 metadata 里，此前由 `finish_install` 在提交之后以 `File::create` 直写进安装目录。现在它们是阶段一的产出：`IpcOperation::StageSelfImage { install_dir, new_dir, hash_algorithm, names, copy_from }` 在提权侧把镜像写进 `new\<名>`（`copy_from` 为空时取 `local::get_base_with_config` 即自身 `base + config`，并清索引标记；否则复制 `copy_from` 指向的文件）、算哈希、与安装目录里现有同名文件比对，返回每个名字的 `(hash, changed)`；会话对 `changed` 的名字各出一个文件单元并入同一份 journal，随主提交换入，未变的直接删掉暂存副本。`already_latest` 路径没有主提交，需要刷新时单独跑一次只含这些单元的提交。`journal_matches_target` 对这两个名字放行——它们不在 metadata 的期望哈希里，恢复时按 journal 自己记录的哈希核对。
+卸载器（`uninstall_name`）与更新器（`updater_name`）是安装器自身生成的两个文件，不在 metadata 里。它们是阶段一的产出：`IpcOperation::StageSelfImage { install_dir, new_dir, hash_algorithm, names, copy_from }` 在提权侧把镜像写进 `new\<名>`（`copy_from` 为空时取 `local::get_base_with_config` 即自身 `base + config`，并清索引标记；否则复制 `copy_from` 指向的文件）、算哈希、与安装目录里现有同名文件比对，返回每个名字的 `(hash, changed)`；会话对 `changed` 的名字各出一个文件单元并入同一份 journal，随主提交换入，未变的直接删掉暂存副本。`already_latest` 路径没有主提交，需要刷新时单独跑一次只含这些单元的提交。`journal_matches_target` 对这两个名字放行——它们不在 metadata 的期望哈希里，恢复时按 journal 自己记录的哈希核对。
 
 生成 / 刷新的规则按会话情形分：
 
@@ -65,7 +65,7 @@ Status: implemented
 
 ### 计划阶段：一趟目录枚举
 
-`fs.rs::check_local_files` 不再逐文件 `metadata()`，而是在 `spawn_blocking` 里对含受管文件的目录 `read_dir` 一趟（`ScanWalk::walk`），受管文件的大小从条目取，同一趟得到每个目录的干净标记。返回 `LocalScan { files, dirty_dirs, reparse_dirs }`，`dirty_dirs` 是相对路径小写 `/` 形式、`""` 为根：
+`fs.rs::check_local_files` 在 `spawn_blocking` 里对含受管文件的目录 `read_dir` 一趟（`ScanWalk::walk`），受管文件的大小从条目取，同一趟得到每个目录的干净标记。返回 `LocalScan { files, dirty_dirs, reparse_dirs }`，`dirty_dirs` 是相对路径小写 `/` 形式、`""` 为根：
 
 - 文件条目：受管则记 stat；不受管即标本目录脏。
 - 子目录条目：是 reparse point（`is_symlink()` 或 `FILE_ATTRIBUTE_REPARSE_POINT`）→ 标父目录脏、记入 `reparse_dirs`、不进入，其下受管文件逐个 `metadata()`；metadata 中没有任何受管文件（含空目录）→ 标父目录脏、不进入；其下受管文件全部在 `skip_hash` 内（`userDataPath` / `ignoreFolderPath`）→ 标父目录脏、不进入、其下文件逐个 stat；否则进入，子目录脏则父目录脏。
@@ -79,11 +79,11 @@ reparse point 子树内的受管文件成为**复制单元**：阶段一仍写�
 
 **阶段一（写入）**：对计划中的全部文件只做写入、后处理、校验，不 rename。此阶段的任何失败、取消或中断（网络、哈希、磁盘满、用户取消、进程被结束）发生时安装目录未被修改，应用仍是完整旧版；残留只在暂存目录里，取消与失败当场删除，进程被结束的留到下次会话开始时删除。
 
-**取消**：`SessionUi::cancel_token()` 交出一个 `CancellationToken`；`LiveUi::check_cancel` 在 metadata、哈希扫描、占用确认、下载前后各检查一次，`install_files` 的下载循环 `select!` 它——命中即丢弃整个 `join_all`，在途流随之中止；Mirror酱 下载同样 `select!`。`run_install` 把 `Cancelled` 错误转成 `SessionResult::cancelled`，相位回 `Ready`，暂存目录删除。阶段二不检查 token。渲染器：WebView 的 `Running` 屏幕在 `commit` / `finalize` / `shortcut` / `registry` / `install_done` 之外的阶段显示取消按钮，发 `Intent::Cancel`，`handle_intent` 触发 `GuiRuntime.cancel`（每次 `Start` 换新 token）；native 进度 TaskDialog 以 `ProgressDialog::show_with_cancel` 打开，Cancel 按钮触发 token 并保持对话框打开，直到会话收尾关闭它，此时不设 `TDF_ALLOW_DIALOG_CANCELLATION`，没有关闭框；silent 无取消。
+**取消**：`SessionUi::cancel_token()` 交出一个 `CancellationToken`；`LiveUi::check_cancel` 在 metadata、哈希扫描、占用确认、下载前后各检查一次，`install_files` 的下载循环 `select!` 它——命中即丢弃整个 `join_all`，在途流随之中止；Mirror酱 下载同样 `select!`。`run_install` 把 `Cancelled` 错误转成 `SessionResult::cancelled`，相位回 `Ready`；`SessionStaging::discard` 在发 `DiscardStaging` 之前 `ManagedElevate::wait_idle`，等提权侧已发出的 `InstallFile` 等写完再删暂存目录。阶段二不检查 token。渲染器：WebView 的 `Running` 屏幕在 `commit` / `finalize` / `shortcut` / `registry` / `install_done` / `already_latest` / `runtime_download` / `runtime_install` 之外的阶段显示取消按钮，发 `Intent::Cancel`，`handle_intent` 触发 `GuiRuntime.cancel`（每次 `Start` 换新 token）；native 进度 TaskDialog 以 `ProgressDialog::show_with_cancel` 打开，Cancel 按钮触发 token 并保持对话框打开，直到会话收尾关闭它，此时不设 `TDF_ALLOW_DIALOG_CANCELLATION`，没有关闭框；silent 无取消。
 
 **阶段二（提交）**（`fs/commit.rs::commit`，`IpcOperation::Commit(CommitArgs { staging_root, install_dir, journal })`）：开始前对所有目录单元**重新探测**一次（`dir_is_clean`：目标目录内只有该单元列出的文件、无 reparse point），探测与提交之间隔着整个下载，用户可能已在被判干净的目录里放了文件，变脏的单元降级为逐文件单元。然后写 `journal` 并 `sync_all`——制表符分隔，首行格式版本 `kachina-journal 1`，第二行 `hash\t<算法>`（DFS 路径为 metadata 的哈希算法名，Mirror酱 路径为 `md5`），Mirror酱 路径再一行 `archive\t<sha256>`，其后每行一个单元：`file\t<相对路径>\t<旧哈希|->\t<新哈希>`、`dir\t<相对路径>`（其下文件各占一行 `file`，按前缀归属）、`del\t<相对路径>\t<旧哈希|->`、`copy\t<相对路径>\t<旧哈希|->\t<新哈希>`，按提交顺序：目录单元、文件与复制单元、删除单元。新哈希在写 `new\` 校验时已算出（Mirror酱 路径在解压时算 md5）；旧哈希来自计划阶段的扫描，Mirror酱 路径没有扫描，记 `-`——再逐单元：
 
-- 删除单元：`rename(目标 → old\<相对路径>)`，目标不存在则跳过。删除因此可回滚、进 journal、失败不再被丢弃；`IpcOperation::RmList` 不存在。
+- 删除单元：`rename(目标 → old\<相对路径>)`，目标不存在则跳过。删除因此可回滚、进 journal；失败挂错并回滚已换单元。`IpcOperation::RmList` 不存在。
 - 目录单元：目标目录存在则 `rename(目标 → old\<相对路径>)`，再 `rename(new\<相对路径> → 目标)`。第一个 rename 因内部文件被占用而失败时，不放弃该单元，退化为逐文件提交：`new\<相对路径>\` 下每个文件按文件单元规则移入目标目录。
 - 文件单元：目标存在则 `rename(目标 → old\<相对路径>)`，再 `rename(new\<相对路径> → 目标)`。
 - 复制单元：按上节规则在链接目标所在卷内完成。
@@ -95,7 +95,7 @@ reparse point 子树内的受管文件成为**复制单元**：阶段一仍写�
 
 **阶段二内的失败**：某个 rename 在重试后仍失败，把已换过的单元按逆序复原（`rename(目标 → new\…)`、`rename(old\… → 目标)`，根目录为空被 `rmdir` 的重建空目录），删除 journal 与整个暂存目录，挂 `FILE_IN_USE`（其它 io 错误按 `code_for_local_io` 映射）、subject 为相对路径；安装目录回到完整旧版。`ProbeWritable` 与占用提示在阶段一之前已经排除了已知占用，此路径应当罕见。
 
-**会话收尾**：`Commit` 成功后运行库安装（`dl\`）、快捷方式、注册表照旧（卸载器与更新器已在提交内换入，`finish_install` 不再写它们）；随后 `finish_staging`：`self_replaced` 为假 → `DiscardStaging` 同步删除暂存目录；为真 → `installer/uninstall.rs::schedule_delete_on_exit(暂存根)`，旧 exe 停在 `old\` 里运行中不可删，`delete_self_on_exit` 在退出后 `rmdir /s /q` 整个暂存目录。`schedule_delete_on_exit` 是 `DELETE_SELF_ON_EXIT_PATH` 全库唯一的写入点，会话在提交（或恢复）成功之后与自卸载完成之后各调用一次。
+**会话收尾**：`Commit` 成功后运行库安装（`dl\`）、快捷方式、注册表照旧（卸载器与更新器已在提交内换入，`finish_install` 不写它们）；随后 `finish_staging`：`self_replaced` 为假 → `DiscardStaging` 同步删除暂存目录；为真 → `installer/uninstall.rs::schedule_delete_on_exit(暂存根)`，旧 exe 停在 `old\` 里运行中不可删，`delete_self_on_exit` 在退出后 `rmdir /s /q` 整个暂存目录。`schedule_delete_on_exit` 是 `DELETE_SELF_ON_EXIT_PATH` 全库唯一的写入点，会话在提交（或恢复）成功之后与自卸载完成之后各调用一次。
 
 **磁盘空间**：阶段一结束时峰值为现有安装加本次变更文件总大小。计划阶段以变更总量对比暂存目录所在卷的可用空间（`ensure_space`），不足时在写入任何文件之前以 `DISK_FULL` 失败，文案"磁盘空间不足，无法完成安装/更新"；不做逐文件即时提交的退化路径——退化路径会重新引入中断留下混合版本的窗口，且需要一套界面提示。Mirror酱 路径在下载前不知道变更总量，不做此检查。
 
@@ -112,21 +112,21 @@ reparse point 子树内的受管文件成为**复制单元**：阶段一仍写�
 会话在本次 metadata 已知之后、哈希扫描之前，若 `OpenStaging` 带回 `journal` 原文，`session/run.rs::recover_or_discard` 先做两层核对，核对是全有或全无的：
 
 - **核对目标**（会话侧，`fs/commit.rs::journal_matches_target`）：`Journal::parse` 失败或格式版本不等 → 丢弃；`hash` 行算法与本次不同 → 丢弃；DFS 路径：每个 `file` / `copy` 单元（含目录单元内的文件）的新哈希等于本次 metadata 对同一路径要求的哈希，每个 `del` 单元仍在本次删除清单中；Mirror酱 路径：`archive` 行等于 API 本次返回的 sha256。任一不等——服务端已发新内容、该文件已从清单移除、哈希算法变了——都是"目标已变"，`DiscardStaging` 后重新 `OpenStaging` 得到空目录，继续本次会话：上次中断的那次更新已不是这次要装的东西，前滚只会先换上旧目标再被本次覆盖。这个项目没有版本概念，安装模型是"任意本地状态 → metadata 的文件集合"，目标的身份就是这组哈希。
-- **核对目录**（提权侧，`IpcOperation::Recover(CommitArgs)` → `fs/commit.rs::recover`）：逐单元哈希当前目标。文件与复制单元：当前哈希等于新哈希为"已换"；等于旧哈希（或目标缺失而旧哈希为 `-`）且 `new\` 下有替换文件为"待换"，替换文件缺失为"不可完成"；其余为"有变"。删除单元：目标缺失为"已换"，哈希等于旧哈希为"待换"，其余"有变"。目录单元：目标目录内文件集合与哈希整体等于新集合为"已换"，等于旧集合（目标不存在且旧集合为空亦然）为"待换"或"不可完成"，多一个文件、少一个文件、任一哈希不符、含 reparse point 都是"有变"。旧哈希为 `-` 的单元只有"已换"能被证明，尚未换即视为"有变"。
+- **核对目录**（提权侧，`IpcOperation::Recover(CommitArgs)` → `fs/commit.rs::recover`）：逐单元哈希当前目标。文件与复制单元：当前哈希等于新哈希为"已换"；等于旧哈希（或目标缺失而旧哈希为 `-`，或目标缺失而 `old\` / `.kachina-old` 里已有刚搬过去的副本）且 `new\` 下有替换文件为"待换"，替换文件缺失为"不可完成"；其余为"有变"。删除单元：目标缺失为"已换"，哈希等于旧哈希为"待换"，其余"有变"。目录单元：目标目录内文件集合与哈希整体等于新集合为"已换"，等于旧集合（目标不存在且旧集合为空，或目标不存在且 `old\<rel>` 已在）为"待换"或"不可完成"，多一个文件、少一个文件、任一哈希不符、含 reparse point 都是"有变"。旧哈希为 `-` 的单元只有"已换"能被证明，尚未换且 `old\` 也没有对应副本即视为"有变"。`dir_is_clean` 把 `list_tree` 给出的相对 `target` 的路径加上单元 `rel/` 前缀再与 `FileEntry.rel` 比较。
 - **任一单元有变**：用户在两次运行之间改动了目录（覆盖安装了便携版、手动替换了文件），上次那次更新的前提不再成立，不做任何 rename，删除整个暂存目录，返回 `RecoverOutcome::Discarded`，会话重新 `OpenStaging` 继续正常流程，混合状态由本次哈希扫描修复。
 - **任一单元不可完成**（`new\` 被删）：把已换的单元复原（`old\` 里还有它们的旧文件），删除暂存目录，返回 `Discarded`。
 - **全部已换或待换**：把上次用户要求的更新做完——对待换单元完成两次 rename，删除单元移入 `old\`；随后删除 journal，返回 `Completed { self_replaced }`，暂存目录留给本次会话继续用，此时哈希扫描应得出无需再装任何文件。更新器本身若在中断前已换成新版，接手的就是新更新器，行为相同。
 - **前滚途中失败**（某个 rename 重试后仍失败）：与阶段二内失败同一规则——把已换的单元全部复原，包括上次中断前换过的，删除 journal 与暂存目录，报 `FILE_IN_USE`。进程活着就不留下半安装；半安装只在进程意外退出这一种情形下存在。
 
-核对需要读取 journal 内单元的当前目标文件，成本与一次只覆盖变更文件的哈希扫描相当。Mirror酱 路径的 journal 没有旧哈希，中断后除已全部换完的情形外一律丢弃、重下 zip。恢复若换掉了运行中的 exe，`self_replaced` 一路传到 `finish_staging`，本次会话无论成败都改为退出时删除暂存目录。
+核对需要读取 journal 内单元的当前目标文件，成本与一次只覆盖变更文件的哈希扫描相当。Mirror酱 路径的 journal 没有旧哈希，中断后除已全部换完的情形外一律丢弃、重下 zip。恢复若换掉了运行中的 exe，`self_replaced` 一路传到 `finish_staging`，本次会话无论成败都在退出时删除暂存目录。
 
 ### Mirror酱 路径
 
-zip 下载到 `<staging>\dl\<sha256>.zip`（`RunMirrorcDownload`）。`RunMirrorcInstall { zip_path, new_dir, sha256 }` 先以 `sha2` 计算摘要与 API 返回的 `sha256` 比对，不匹配删 zip、挂 `MIRRORC_FAILED`、不解压；解压到 `new\<相对路径>`，边写边算 md5 并 `sync_all`，返回 `MirrorcExtract { metadata, files: Vec<(rel, md5)>, deletes }`（删除清单取 `changes.json` 的 `deleted` 与 `.metadata.json` 的 `deletes` 之并），不触碰安装目录、不处理自更新。会话侧据此构造单元：安装目录不存在或为空 → 一个根目录单元；否则归档文件为文件单元、删除清单为删除单元；journal 带 `archive` 行，然后走通用的 `Commit`。`mirrorc.rs` 中没有改名、删除或直写安装目录的代码。
+zip 下载到 `<staging>\dl\<sha256>.zip`（`RunMirrorcDownload`）。`run_mirrorc` 在比较 `version_name` 与当前 exe 版本之前先 `OpenStaging` 并处理 journal：否则阶段二若已换入主程序，下次启动会把半更新当成已最新。`RunMirrorcInstall { zip_path, new_dir, sha256 }` 先以 `sha2` 计算摘要与 API 返回的 `sha256` 比对，不匹配删 zip、挂 `MIRRORC_FAILED`、不解压；解压到 `new\<相对路径>`，边写边算 md5 并 `sync_all`，返回 `MirrorcExtract { metadata, files: Vec<(rel, md5)>, deletes }`（删除清单取 `changes.json` 的 `deleted` 与 `.metadata.json` 的 `deletes` 之并），不触碰安装目录、不处理自更新。会话侧据此构造单元：安装目录不存在或为空 → 一个根目录单元；否则归档文件为文件单元、删除清单为删除单元；journal 带 `archive` 行，然后走通用的 `Commit`。`mirrorc.rs` 中没有改名、删除或直写安装目录的代码。
 
 ### 提权侧操作
 
-`IpcOperation` 新增 `OpenStaging(install_dir)`、`Commit(CommitArgs)`、`Recover(CommitArgs)`、`DiscardStaging(root)`、`StageSelfImage(..)`；`InstallRuntime` 增加 `dl_dir`；`RunMirrorcInstall` 改为 `{ zip_path, new_dir, sha256 }`；`RmList`、`CreateUninstaller` 删除。`IpcResult` 对应新增 `OpenStaging(StagingOpened)`、`Commit(CommitOutcome)`、`Recover(RecoverOutcome)`、`DiscardStaging`，`CheckLocalFiles(LocalScan)`、`RunUninstall(UninstallOutcome)`、`RunMirrorcInstall(MirrorcExtract)` 形状变化。写入阶段的 `InstallFile` / `InstallMultichunkStream` / `RunMirrorcDownload` / `RunMirrorcInstall` 输出路径都在暂存目录下。
+`IpcOperation` 含 `OpenStaging(install_dir)`、`Commit(CommitArgs)`、`Recover(CommitArgs)`、`DiscardStaging(root)`、`StageSelfImage(..)`；`InstallRuntime` 带 `dl_dir`；`RunMirrorcInstall` 为 `{ zip_path, new_dir, sha256 }`；没有 `RmList`、`CreateUninstaller`。`IpcResult` 对应 `OpenStaging(StagingOpened)`、`Commit(CommitOutcome)`、`Recover(RecoverOutcome)`、`DiscardStaging`，`CheckLocalFiles(LocalScan)`、`RunUninstall(UninstallOutcome)`、`RunMirrorcInstall(MirrorcExtract)`。写入阶段的 `InstallFile` / `InstallMultichunkStream` / `RunMirrorcDownload` / `RunMirrorcInstall` 输出路径都在暂存目录下。
 
 ### 提权管道：进度与结果分离
 
@@ -185,15 +185,15 @@ zip 下载到 `<staging>\dl\<sha256>.zip`（`RunMirrorcDownload`）。`RunMirror
 | 复制单元单测：以 junction 指向另一临时目录，提交后目标文件为新内容、`.kachina-tmp` / `.kachina-old` 已清理；注入第二个 rename 失败时目标为旧内容 | PASS：`copy_unit_via_junction`（第二例以后续单元被锁触发整体回滚，复制单元的旧内容恢复） |
 | journal 版本单测：首行为 `kachina-journal 0` 或缺失时恢复不执行任何 rename、暂存目录被删除 | PASS：`journal_roundtrip_and_version_gate`（`parse` 返回 `None`）；会话侧 `recover_or_discard` 对 `None` 走 `DiscardStaging` + 重开 |
 | 目标核对单测：第二个单元的哈希不等 → 丢弃；`del` 不再在清单 → 丢弃；算法不同 → 丢弃；`archive` 不等 → 丢弃；全部相等进入目录核对 | PASS：`journal_target_check` |
-| 恢复核对单测：目录未变时恢复完成剩余单元；第三个单元的目标被替换时不执行任何 rename、被替换内容保留；第一个（已换）单元被改动时同样整体丢弃；删除单元的目标被放回同哈希文件时视为未变；旧哈希为 `-` 的尚未换单元视为有变 | PASS：`interrupted_commit_recovers_forward`、`recovery_discards_when_target_was_overwritten`（`a.txt` 已换的单元保持新内容不被回滚）、`recovery_discards_when_swapped_unit_was_modified`。删除单元放回与 `-` 旧哈希两条由 `classify` 的分支直接给出，无单独用例 |
-| 恢复时机单测：`run_install` 在 metadata 之后、哈希扫描之前调用恢复，`run_mirrorc` 在拿到 API 应答之后调用；改过安装路径时查的是新路径 | 代码路径审阅：`run_dfs_install` 在 `pick_metadata` / `prepare_process` 之后、`dfs_staged` 的哈希扫描之前调用 `open_staging` + `recover_or_discard`；`run_mirrorc` 在 `get_mirrorc_status` 与 `prepare_process` 之后调用；`install_path` 取自 `Settings`，即 `Start` 时的路径。会话函数依赖网络与 IPC，无单测 |
-| `STAGING_IN_USE`：另一进程持有 `lock` 且 pid 存活时以该码失败、暂存目录不被删除；pid 已死时视为残留、整目录删除后继续 | PASS：`fs::staging::tests::open_refuses_live_lock`（以 `cmd /C ping` 子进程的 pid 写 `lock`）、`open_keeps_journal_dir_and_deletes_residue` |
-| 取消单测：`Running` 中收到 `Intent::Cancel` 后 token 被触发；阶段二进行中收到 `Cancel` 无效果；`cancel` 在 WebView 与 native 各有一个入口 | 部分 PASS：`render.test.tsx` 的 `renders running progress with a cancel button`（点击后发 `{kind: "cancel"}`）与 `hides cancel during the swap`（`stage == "commit"` 时无按钮）；`handle_intent(Cancel)` → `GuiRuntime::cancel_running` 与 native `ProgressDialog::show_with_cancel` 的回调无单测（依赖宿主 / TaskDialog） |
+| 恢复核对单测：目录未变时恢复完成剩余单元；第三个单元的目标被替换时不执行任何 rename、被替换内容保留；第一个（已换）单元被改动时同样整体丢弃；删除单元的目标被放回同哈希文件时视为未变；旧哈希为 `-` 的尚未换单元视为有变；目标已搬进 `old\` 而尚未换上新文件时前滚完成 | PASS：`interrupted_commit_recovers_forward`、`recovery_discards_when_target_was_overwritten`（`a.txt` 已换的单元保持新内容不被回滚）、`recovery_discards_when_swapped_unit_was_modified`、`recovery_finishes_file_after_old_was_moved`。删除单元放回与 `-` 旧哈希两条由 `classify` 的分支直接给出，无单独用例 |
+| 恢复时机单测：`run_install` 在 metadata 之后、哈希扫描之前调用恢复，`run_mirrorc` 在拿到 API 应答之后、比较版本是否已最新之前调用；改过安装路径时查的是新路径 | 代码路径审阅：`run_dfs_install` 在 `pick_metadata` / `prepare_process` 之后、`dfs_staged` 的哈希扫描之前调用 `open_staging` + `recover_or_discard`；`run_mirrorc` 在 `get_mirrorc_status` 之后、`version_name == current_version` 之前调用；`install_path` 取自 `Settings`，即 `Start` 时的路径。会话函数依赖网络与 IPC，无单测 |
+| `STAGING_IN_USE`：另一进程持有 `lock` 且 pid 存活时以该码失败、暂存目录不被删除；pid 已死时视为残留、`create_new` 重占 lock 后继续 | PASS：`fs::staging::tests::open_refuses_live_lock`（以 `cmd /C ping` 子进程的 pid 写 `lock`）、`open_keeps_journal_dir_and_deletes_residue`、`open_replaces_stale_lock` |
+| 取消单测：`Running` 中收到 `Intent::Cancel` 后 token 被触发；阶段二与运行库安装进行中无取消按钮；`cancel` 在 WebView 与 native 各有一个入口 | 部分 PASS：`render.test.tsx` 的 `renders running progress with a cancel button`（点击后发 `{kind: "cancel"}`）、`hides cancel during the swap`（`stage == "commit"`）、`hides cancel during runtime install`；`handle_intent(Cancel)` → `GuiRuntime::cancel_running` 与 native `ProgressDialog::show_with_cancel` 的回调无单测（依赖宿主 / TaskDialog）。`wait_idle` 为代码路径，无单测 |
+| 盘根不是安装目录；安装路径本身为 junction 时同样拒绝 | PASS：`installer::tests::drive_root_is_never_an_install_dir`、`install_dir_that_is_a_junction_is_rejected` |
 | 每个产出文件在校验通过后调用 `sync_all` | PASS（代码结构）：`ipc/install_file.rs::finalize_staged` 在 `verify_hash` 之后调 `fs.rs::sync_staged_file`，三种模式与 `install_file_by_reader` 共用；Mirror酱 解压在 `mirrorc.rs` 内逐文件 `sync_all`。无计数器断言 |
 | 删除单元单测：提交后该文件位于 `old\` 下、目标不存在；恢复时删除项同样完成；回滚时该文件回到原位 | PASS：`delete_unit_moves_to_old_and_rolls_back`（含回滚）；恢复路径的删除单元由 `classify` + `apply_unit` 共用同一实现 |
 | `ipc/manager.rs` 单测：服务端在回 `Ok` 前发送 1000 条 `Progress`，客户端 `run` 返回 `Ok` 而非 `IPC_ERR` | PASS：`progress_flood_does_not_lose_result`（`ManagedElevate::detached` 直连 `Pending` 与进度广播，容量 256）；`pipe_roundtrip_and_disconnect` 改为按 `oneshot` 断言，并新增孤儿等待者在断连时收到错误 |
 | 卸载器 / 更新器按会话情形生成或刷新，进同一份 journal；根目录单元存在时并入其文件清单 | PASS：`session::run::tests::self_image_plan_follows_session_kind`（全新安装两者皆生成；更新且清单无 updater 时外来安装器生成 updater、卸载器存在才刷新；清单有 updater 时只刷新卸载器且 `copy_from` 指向 `new\` 或安装目录里的 updater；无卸载器则无事可做）、`self_units_fold_into_root_unit_or_append`。"运行的是 updater 本身"一行依赖 `std::env::current_exe()`，测试进程无法伪装，由代码路径给出 |
-| 盘根不是安装目录 | PASS：`installer::tests::drive_root_is_never_an_install_dir`（`C:\`、`d:/`、`E:`、`C:\\` 均被 `probe_dir` 拒绝，`C:\App` 与 UNC 不受影响） |
 | `locales/zh-CN.tsv` 含 `STAGING_IN_USE`、`progress.commit`，`DISK_FULL` 文案为"磁盘空间不足，无法完成安装/更新"；`locale_covers_codes_stages_prompts` 通过 | PASS |
 | 现有 e2e 十项全绿；`offline-install` 追加断言父目录无 `.kachina-staged` | 未跑：本机未执行 `test:all`，待 CI；`offline-install` 的追加断言归入 [核心流程 e2e 补全](../proposed/2026-09-02-e2e-core-coverage.md) |
 | 单测与前端 | PASS：`cargo test`（`src-tauri` 内）13 passed（kachina-builder）+ 113 passed / 1 ignored（kachina-installer）；`pnpm exec vitest run` 20 passed；`pnpm exec tsc --noEmit` 零错误 |
@@ -209,7 +209,7 @@ zip 下载到 `<staging>\dl\<sha256>.zip`（`RunMirrorcDownload`）。`RunMirror
 - 以不同用户账户运行下一次更新时 `%TEMP%` 不同，找不到上次的 journal：哈希扫描看到混合状态后走正常修复重新下载，另一用户 `%TEMP%` 下的暂存目录成为孤儿。
 - `%TEMP%` 被系统磁盘清理清除后 journal 与 `new\` 一起消失：等同于无暂存目录，阶段二中断留下的混合状态由用户下一次主动更新时的哈希扫描修复。
 - 恢复核对以哈希相等判定"未变"，用户把某个文件替换成恰好同哈希的内容不会被识别为改动：这等价于没有改动，无害。
-- 同一安装目录被两个安装器并发处理：`lock` 让后来者以 `STAGING_IN_USE` 退出；pid 复用导致误判的概率可忽略。
+- 同一安装目录被两个安装器并发处理：`lock` 以 `create_new` 占用，后来者看到存活 pid 以 `STAGING_IN_USE` 退出；pid 复用导致误判的概率可忽略。
 - 目录 rename 在目标目录内有打开句柄时失败：退化为逐文件提交，只损失优化不引入新失败模式。
 - 安全软件持有新文件超过重试窗口（合计约 1.5 秒）时以 `FILE_IN_USE` 报错：用户重试即可，原文件完好。
 - 自更新的两次 rename 之间仍有一个原名缺失的瞬间：毫秒级本地操作，第二次失败有复原；进程恰在此刻被强制结束时新旧两份都在暂存目录与 `old\` 中，下次会话前滚。

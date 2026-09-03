@@ -532,7 +532,9 @@ impl ScanWalk<'_> {
             .map(|(_, orig)| orig.clone())
             .collect();
         for orig in under {
-            let path = staging::join_rel(self.root, &orig);
+            let Some(path) = staging::try_join_rel(self.root, &orig) else {
+                continue;
+            };
             if let Ok(meta) = std::fs::metadata(&path) {
                 if meta.is_file() {
                     self.stat.push((orig, meta.len()));
@@ -664,10 +666,11 @@ pub async fn check_local_files(
     let mut files = Vec::new();
     let mut stated = Vec::new();
     for (rel, size) in stat {
+        let Some(abs) = staging::try_join_rel(&source_path, &rel) else {
+            continue;
+        };
         let item = Metadata {
-            file_name: staging::join_rel(&source_path, &rel)
-                .to_string_lossy()
-                .to_string(),
+            file_name: abs.to_string_lossy().to_string(),
             hash: String::new(),
             size,
             unwritable: false,

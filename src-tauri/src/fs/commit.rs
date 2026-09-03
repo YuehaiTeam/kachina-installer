@@ -16,7 +16,7 @@ use std::time::Duration;
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
 
-use crate::fs::staging::{join_rel, remove_tree, Staging};
+use crate::fs::staging::{is_safe_rel, join_rel, remove_tree, Staging};
 use crate::ipc::{Progress, ProgressNotify};
 use crate::utils::code::{code_for_local_io, Attach, FILE_IO_FAILED};
 use crate::utils::hash::hash_file;
@@ -135,6 +135,9 @@ impl Journal {
                 ["hash", algo] => hash_algorithm = Some(algo.to_string()),
                 ["archive", digest] => archive = Some(digest.to_string()),
                 ["dir", rel] => {
+                    if !is_safe_rel(rel) {
+                        return None;
+                    }
                     units.push(Unit::Dir {
                         rel: rel.to_string(),
                         files: Vec::new(),
@@ -142,6 +145,9 @@ impl Journal {
                     open_dir = Some(units.len() - 1);
                 }
                 ["file", rel, old, new] => {
+                    if !is_safe_rel(rel) {
+                        return None;
+                    }
                     let entry = FileEntry {
                         rel: rel.to_string(),
                         old: parse_opt(old),
@@ -162,6 +168,9 @@ impl Journal {
                     }
                 }
                 ["copy", rel, old, new] => {
+                    if !is_safe_rel(rel) {
+                        return None;
+                    }
                     open_dir = None;
                     units.push(Unit::Copy(FileEntry {
                         rel: rel.to_string(),
@@ -170,6 +179,9 @@ impl Journal {
                     }));
                 }
                 ["del", rel, old] => {
+                    if !is_safe_rel(rel) {
+                        return None;
+                    }
                     open_dir = None;
                     units.push(Unit::Del {
                         rel: rel.to_string(),
@@ -274,9 +286,19 @@ fn lower(s: &str) -> String {
     s.to_lowercase()
 }
 
+fn listing_rel(dir: &str, sub: &str) -> String {
+    if dir.is_empty() {
+        lower(sub)
+    } else {
+        lower(&format!("{dir}/{sub}"))
+    }
+}
+
 /// The target directory holds exactly the unit's files (by name) and nothing
-/// else. A missing directory is clean.
-fn dir_is_clean(target: &Path, files: &[FileEntry]) -> bool {
+/// else. A missing directory is clean. `dir` is the unit rel (`""` for root);
+/// listing paths from [`list_tree`] are relative to `target` and are prefixed
+/// before comparing to `FileEntry.rel`.
+fn dir_is_clean(target: &Path, dir: &str, files: &[FileEntry]) -> bool {
     if !target.exists() {
         return true;
     }
@@ -284,7 +306,9 @@ fn dir_is_clean(target: &Path, files: &[FileEntry]) -> bool {
         return false;
     };
     let want: std::collections::HashSet<String> = files.iter().map(|f| lower(&f.rel)).collect();
-    listing.iter().all(|(rel, _)| want.contains(&lower(rel)))
+    listing
+        .iter()
+        .all(|(rel, _)| want.contains(&listing_rel(dir, rel)))
 }
 
 #[derive(Default, Debug)]
@@ -570,7 +594,7 @@ fn degrade_dirty_dirs(ctx: &Ctx, units: Vec<Unit>) -> Vec<Unit> {
     let mut out = Vec::with_capacity(units.len());
     for unit in units {
         match unit {
-            Unit::Dir { rel, files } if !dir_is_clean(&ctx.target(&rel), &files) => {
+            Unit::Dir { rel, files } if !dir_is_clean(&ctx.target(&rel), &rel, &files) => {
                 tracing::info!("dir unit {rel:?} no longer clean, committing per file");
                 out.extend(files.into_iter().map(Unit::File));
             }
@@ -691,11 +715,12 @@ fn hash_opt(algo: &str, path: &Path) -> Option<String> {
     }
 }
 
-fn classify_file(ctx: &Ctx, f: &FileEntry) -> Status {
-    let got = hash_opt(ctx.algo, &ctx.target(&f.rel));
+fn classify_file(ctx: &Ctx, f: &FileEntry, parked: &Path) -> Status {
+    let target = ctx.target(&f.rel);
+    let got = hash_opt(ctx.algo, &target);
     if got.as_deref() == Some(f.new.as_str()) {
         Status::Done
-    } else if got == f.old {
+    } else if got == f.old || (!target.exists() && parked.exists()) {
         if ctx.new_of(&f.rel).is_file() {
             Status::Pending
         } else {
@@ -708,7 +733,8 @@ fn classify_file(ctx: &Ctx, f: &FileEntry) -> Status {
 
 fn classify(ctx: &Ctx, unit: &Unit) -> Status {
     match unit {
-        Unit::File(f) | Unit::Copy(f) => classify_file(ctx, f),
+        Unit::File(f) => classify_file(ctx, f, &ctx.old_of(&f.rel)),
+        Unit::Copy(f) => classify_file(ctx, f, &copy_paths(&ctx.target(&f.rel)).1),
         Unit::Del { rel, old } => {
             let got = hash_opt(ctx.algo, &ctx.target(rel));
             if got.is_none() {
@@ -759,7 +785,9 @@ fn classify(ctx: &Ctx, unit: &Unit) -> Status {
             match current {
                 Some(cur) if cur == new_set => Status::Done,
                 Some(cur) if cur == old_set => pending(ctx.new_of(rel).is_dir()),
-                None if old_set.is_empty() => pending(ctx.new_of(rel).is_dir()),
+                None if old_set.is_empty() || ctx.old_of(rel).exists() => {
+                    pending(ctx.new_of(rel).is_dir())
+                }
                 _ => Status::Changed,
             }
         }
@@ -1336,6 +1364,10 @@ mod tests {
             read(&fx.staging.old_path("lib/a.dll")),
             Some(b"a1".to_vec())
         );
+        assert!(
+            !fx.staging.new_dir().join("lib").exists(),
+            "nested dir unit must rename new\\lib as a whole"
+        );
     }
 
     #[test]
@@ -1535,5 +1567,42 @@ mod tests {
             Some("zip2"),
             &none
         ));
+    }
+
+    #[test]
+    fn recovery_finishes_file_after_old_was_moved() {
+        let fx = Fixture::new();
+        let units = vec![Unit::File(FileEntry {
+            rel: "a.txt".into(),
+            old: Some(md5(b"a-old")),
+            new: md5(b"a-new"),
+        })];
+        write(&fx.target("a.txt"), b"a-old");
+        write(&fx.staging.new_path("a.txt"), b"a-new");
+        let args = fx.args(units);
+        let _ = commit_sync(args.clone(), progress_notify(|_| {}), FAST, Some(0));
+        std::fs::create_dir_all(fx.staging.old_dir()).unwrap();
+        std::fs::rename(fx.target("a.txt"), fx.staging.old_path("a.txt")).unwrap();
+        let journal =
+            Journal::parse(&std::fs::read_to_string(fx.staging.journal_path()).unwrap()).unwrap();
+        let out = recover_sync(
+            CommitArgs { journal, ..args },
+            progress_notify(|_| {}),
+            FAST,
+        )
+        .unwrap();
+        assert_eq!(
+            out,
+            RecoverOutcome::Completed {
+                self_replaced: false
+            }
+        );
+        assert_eq!(read(&fx.target("a.txt")), Some(b"a-new".to_vec()));
+    }
+
+    #[test]
+    fn journal_parse_rejects_parent_dir_rel() {
+        let text = "kachina-journal 1\nhash\tmd5\nfile\t../escape.txt\t-\tabc\n";
+        assert!(Journal::parse(text).is_none());
     }
 }
