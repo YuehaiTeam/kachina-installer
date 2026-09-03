@@ -133,7 +133,6 @@ jobs:
           Copy-Item "artifacts/artifact/*.pdb" "src-tauri/target/release/" -Force
       - name: Prepare test fixtures
         run: npm run test:prepare
-        continue-on-error: true
       - name: Run ${{ matrix.test }} test
         run: npm run test:${{ matrix.test }}
         timeout-minutes: 10

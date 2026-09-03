@@ -14,6 +14,7 @@ const builderPath = path.resolve(
   '..',
   'src-tauri',
   'target',
+  'x86_64-win7-windows-msvc',
   'release',
   'kachina-builder.exe',
 );
