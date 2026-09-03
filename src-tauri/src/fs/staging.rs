@@ -215,8 +215,9 @@ impl Staging {
     /// another live installer owns one, keep the one with a journal, delete the
     /// rest, and otherwise create a fresh directory at [`staging_root`].
     pub fn open(install_dir: &str) -> anyhow::Result<Opened> {
+        let candidates = candidates(install_dir);
         let mut keep: Option<PathBuf> = None;
-        for cand in candidates(install_dir) {
+        for cand in &candidates {
             if !cand.exists() {
                 continue;
             }
@@ -229,22 +230,39 @@ impl Staging {
                 }
             }
             if keep.is_none() && cand.join(JOURNAL).is_file() {
-                keep = Some(cand);
-            } else {
-                remove_tree(&cand);
+                keep = Some(cand.clone());
             }
         }
+        let has_journal = keep.is_some();
         let root = match keep {
             Some(root) => root,
-            None => {
-                let root = staging_root(install_dir)?;
-                remove_tree(&root);
-                root
-            }
+            None => staging_root(install_dir)?,
         };
         let staging = Staging::at(root);
         staging.ensure_layout()?;
         claim_lock(&staging.lock_path(), install_dir)?;
+        if !has_journal {
+            // The lock must be owned before stale contents are removed. A
+            // second opener may have observed the same empty root earlier.
+            for dir in [staging.new_dir(), staging.old_dir(), staging.dl_dir()] {
+                remove_tree(&dir);
+            }
+            let _ = std::fs::remove_file(staging.journal_path());
+            staging.ensure_layout()?;
+        }
+        // Old candidates are only residue after this process has claimed its
+        // selected root. Keep any candidate that became live meanwhile.
+        for cand in candidates {
+            if cand == staging.root() {
+                continue;
+            }
+            let live = lock_holder(&cand)
+                .filter(|pid| *pid != std::process::id())
+                .is_some_and(pid_alive);
+            if !live {
+                remove_tree(&cand);
+            }
+        }
         let journal = std::fs::read_to_string(staging.journal_path()).ok();
         Ok(Opened { staging, journal })
     }
