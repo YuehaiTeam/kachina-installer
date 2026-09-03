@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "node scripts/dev.mjs",
-    "build": "rsbuild build && cargo build --manifest-path src-tauri/Cargo.toml --release --target x86_64-win7-windows-msvc -Z build-std=std,panic_abort -Z build-std-features=optimize_for_size && cd src-tauri/target/x86_64-win7-windows-msvc/release && ren kachina-builder.exe kachina-builder-standalone.exe && del kachina-builder.exe && copy /b kachina-builder-standalone.exe+kachina-installer.exe kachina-builder.exe",
+    "build": "rsbuild build && cargo build --manifest-path src-tauri/Cargo.toml --release --target x86_64-win7-windows-msvc -Z build-std=std,panic_abort -Z build-std-features=optimize_for_size && node scripts/merge-release-bundle.mjs",
     "debug": "rsbuild build && cargo build --manifest-path src-tauri/Cargo.toml",
     "preview": "rsbuild preview",
     "test:prepare": "cd tests && node prepare.mjs",
