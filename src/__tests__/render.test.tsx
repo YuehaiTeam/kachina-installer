@@ -74,6 +74,13 @@ describe('screens', () => {
     expect(screen.queryByText('取消')).toBeNull();
   });
 
+  it('hides cancel during runtime install', async () => {
+    const ui = running();
+    if (ui.phase.kind === 'running') ui.phase.stage = 'runtime_install';
+    await mount(ui);
+    expect(screen.queryByText('取消')).toBeNull();
+  });
+
   it('renders done variants', async () => {
     await mount(doneInstall());
     expect(screen.getByText('安装完成')).toBeTruthy();

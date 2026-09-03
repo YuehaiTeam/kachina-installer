@@ -23,9 +23,17 @@ function counter(progress: Progress): string | null {
   return `${fmt(progress.done)} / ${fmt(progress.total)}`;
 }
 
-// Phase two (the swap) cannot be interrupted; Rust ignores a late cancel anyway,
-// but the button should not promise one.
-const NO_CANCEL = new Set(['commit', 'finalize', 'shortcut', 'registry', 'install_done']);
+// Phase two does not observe the cancel token.
+const NO_CANCEL = new Set([
+  'commit',
+  'finalize',
+  'shortcut',
+  'registry',
+  'install_done',
+  'already_latest',
+  'runtime_download',
+  'runtime_install',
+]);
 
 export function Running({ ui, progress }: { ui: UiState; progress: Progress }) {
   const [cancelling, setCancelling] = useState(false);

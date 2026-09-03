@@ -72,11 +72,17 @@ pub fn is_drive_root(path: &str) -> bool {
 
 /// Writability is tested by creating and removing a probe file in the directory,
 /// or in the nearest existing ancestor when the directory does not exist yet.
-/// `None` for an existing file and for a drive root: both are rejected as
-/// install paths wherever the probe result feeds `Settings`.
+/// `None` for an existing file, a drive root, and a path that is itself a
+/// reparse point (junction / symlink): all are rejected as install paths
+/// wherever the probe result feeds `Settings`.
 pub fn probe_dir(path: &std::path::Path, exe_name: &str) -> Option<DirProbe> {
     if path.is_file() || is_drive_root(&path.to_string_lossy()) {
         return None;
+    }
+    if let Ok(meta) = std::fs::symlink_metadata(path) {
+        if meta.file_type().is_symlink() || crate::fs::commit::is_reparse(&meta) {
+            return None;
+        }
     }
     let exists = path.is_dir();
     let (empty, upgrade) = if exists {
@@ -350,6 +356,27 @@ mod tests {
         assert!(!is_drive_root("C:\\App"));
         assert!(!is_drive_root("\\\\server\\share"));
         assert!(probe_dir(std::path::Path::new("C:\\Windows"), "").is_some());
+    }
+
+    #[test]
+    fn install_dir_that_is_a_junction_is_rejected() {
+        let dir = std::env::temp_dir().join(format!("kachina-probe-{}", uuid::Uuid::new_v4()));
+        let real = std::env::temp_dir().join(format!("kachina-probe-real-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&real).unwrap();
+        let out = std::process::Command::new("cmd")
+            .args([
+                "/C",
+                "mklink",
+                "/J",
+                &dir.to_string_lossy(),
+                &real.to_string_lossy(),
+            ])
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        assert!(probe_dir(&dir, "app.exe").is_none());
+        let _ = std::fs::remove_dir(&dir);
+        let _ = std::fs::remove_dir_all(&real);
     }
 }
 
