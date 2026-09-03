@@ -56,7 +56,8 @@ windows = { version = "0.62", features = [
     "Win32_UI_Shell",
     "Win32_System_Environment",
     "Win32_System_DataExchange",
-    "Win32_System_Memory"
+    "Win32_System_Memory",
+    "Win32_Storage_FileSystem"
 ] }
 
 nt_version = "0.1"

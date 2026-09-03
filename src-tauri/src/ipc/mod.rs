@@ -8,7 +8,10 @@ use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt};
 
 use crate::dfs::InsightItem;
-use crate::fs::Metadata as LocalFileMeta;
+use crate::fs::commit::{CommitOutcome, RecoverOutcome};
+use crate::fs::LocalScan;
+use crate::installer::uninstall::{StagedImage, UninstallOutcome};
+use crate::thirdparty::mirrorc::MirrorcExtract;
 use crate::utils::error::TACommandError;
 
 use install_file::{InstallResult, MultichunkResult};
@@ -134,6 +137,14 @@ impl IpcError {
     }
 }
 
+/// Staging directory opened for a session (see `fs::staging::Staging::open`).
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct StagingOpened {
+    pub root: String,
+    /// Journal text left by an interrupted commit.
+    pub journal: Option<String>,
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub enum IpcResult {
     Ping,
@@ -141,17 +152,21 @@ pub enum IpcResult {
     InstallMultichunkStream(MultichunkResult),
     CreateLnk,
     WriteRegistry,
-    CreateUninstaller,
-    RunUninstall(Vec<String>),
+    StageSelfImage(Vec<StagedImage>),
+    RunUninstall(UninstallOutcome),
     FindProcessByName(Vec<(u32, String)>),
     KillProcess,
-    RmList(Vec<String>),
     InstallRuntime(String),
-    CheckLocalFiles(Vec<LocalFileMeta>),
+    CheckLocalFiles(LocalScan),
     ProbeWritable(Vec<String>),
     RunMirrorcDownload,
-    /// 归档内 `.metadata.json` 原文。`RepoMetadata` 带 `skip_serializing_if`，不能位置编码。
-    RunMirrorcInstall(Option<String>),
+    /// 归档内 `.metadata.json` 原文与解出的文件清单。`RepoMetadata` 带
+    /// `skip_serializing_if`，不能位置编码，原文交回会话侧解析。
+    RunMirrorcInstall(MirrorcExtract),
+    OpenStaging(StagingOpened),
+    Commit(CommitOutcome),
+    Recover(RecoverOutcome),
+    DiscardStaging,
 }
 
 impl IpcResult {
@@ -248,11 +263,17 @@ mod tests {
 
         let meta = roundtrip(&PipeMsg::Ok(
             "m".into(),
-            IpcResult::RunMirrorcInstall(Some("{\"tag_name\":\"1\"}".into())),
+            IpcResult::RunMirrorcInstall(MirrorcExtract {
+                metadata: Some("{\"tag_name\":\"1\"}".into()),
+                files: vec![("a/b.dll".into(), "h".into())],
+                deletes: vec!["gone".into()],
+            }),
         ));
         assert!(matches!(
             meta,
-            PipeMsg::Ok(_, IpcResult::RunMirrorcInstall(Some(s))) if s.contains("tag_name")
+            PipeMsg::Ok(_, IpcResult::RunMirrorcInstall(m))
+                if m.metadata.as_deref().is_some_and(|s| s.contains("tag_name"))
+                    && m.files.len() == 1 && m.deletes == vec!["gone".to_string()]
         ));
     }
 
@@ -305,7 +326,8 @@ mod tests {
                     skip_decompress: true,
                 },
             },
-            target: "C:\\app\\a.dll".into(),
+            target: "C:\\staged\\new\\a.dll".into(),
+            old: Some("C:\\app\\a.dll".into()),
             md5: None,
             xxh: Some("ff".into()),
             clear_installer_index_mark: Some(false),
@@ -314,7 +336,8 @@ mod tests {
         let IpcOperation::InstallFile(args) = back else {
             panic!("variant lost");
         };
-        assert_eq!(args.target, "C:\\app\\a.dll");
+        assert_eq!(args.target, "C:\\staged\\new\\a.dll");
+        assert_eq!(args.old.as_deref(), Some("C:\\app\\a.dll"));
         assert_eq!(args.xxh.as_deref(), Some("ff"));
         let InstallFileMode::HybridPatch { diff, source } = args.mode else {
             panic!("mode lost");

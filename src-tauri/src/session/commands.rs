@@ -39,9 +39,23 @@ pub struct GuiRuntime {
     /// Startup already failed (broken package, missing uninstall metadata):
     /// there is no usable Ready page, so `Dismiss` closes the window instead.
     pub fatal: bool,
+    /// Token of the running session; replaced on every `Start`.
+    pub cancel: Mutex<tokio_util::sync::CancellationToken>,
 }
 
 impl GuiRuntime {
+    pub fn cancel_running(&self) {
+        self.cancel
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .cancel();
+    }
+
+    fn fresh_cancel(&self) -> tokio_util::sync::CancellationToken {
+        let token = tokio_util::sync::CancellationToken::new();
+        *self.cancel.lock().unwrap_or_else(|e| e.into_inner()) = token.clone();
+        token
+    }
     pub fn snapshot(&self) -> UiState {
         self.session
             .lock()
@@ -211,6 +225,7 @@ async fn ready_runtime(
         project: Some(Arc::new(project)),
         running: AtomicBool::new(false),
         fatal,
+        cancel: Mutex::new(tokio_util::sync::CancellationToken::new()),
     })
 }
 
@@ -239,6 +254,7 @@ fn failed_runtime(args: InstallArgs, coded: Coded) -> Arc<GuiRuntime> {
         project: None,
         running: AtomicBool::new(false),
         fatal: true,
+        cancel: Mutex::new(tokio_util::sync::CancellationToken::new()),
     })
 }
 
@@ -252,6 +268,7 @@ fn failed_runtime_with_config(config: InstallerConfig, coded: Coded) -> Arc<GuiR
         project: None,
         running: AtomicBool::new(false),
         fatal: true,
+        cancel: Mutex::new(tokio_util::sync::CancellationToken::new()),
     })
 }
 
@@ -431,6 +448,12 @@ pub async fn handle_intent(
             handle.close();
             ok(())
         }
+        Intent::Cancel => {
+            if gui.running.load(Ordering::SeqCst) {
+                gui.cancel_running();
+            }
+            ok(())
+        }
         Intent::SetPath { path } => {
             apply_locked(&gui, Intent::SetPath { path });
             gui.emit(handle);
@@ -490,6 +513,7 @@ async fn handle_start(
         ctx.session.plugins.clone(),
         settings.auto_answer,
         gui.session.clone(),
+        gui.fresh_cancel(),
     );
     let result = if uninstall {
         run_uninstall(&settings, &gui.config, &project, &ui, &base, &ctx.elevate).await

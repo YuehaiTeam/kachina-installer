@@ -2,7 +2,7 @@ use super::operation::run_opr;
 use super::operation::IpcOperation;
 use super::{
     decode_frame, encode_frame, progress_notify, read_frame, IpcError, IpcResult, PipeMsg,
-    ProgressNotify,
+    Progress, ProgressNotify,
 };
 use crate::utils::acl::create_security_attributes;
 use crate::utils::error::TAResult;
@@ -10,12 +10,16 @@ use crate::utils::uac::check_elevated;
 use crate::utils::uac::run_elevated;
 use crate::utils::uac::SendableHandle;
 use anyhow::Context;
+use std::collections::HashMap;
 use std::ffi::c_void;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::io::AsyncWriteExt;
 use tokio::net::windows::named_pipe::ClientOptions;
 use tokio::net::windows::named_pipe::NamedPipeServer;
 use tokio::net::windows::named_pipe::ServerOptions;
+use tokio::sync::oneshot;
 use tokio::time;
 use windows::Win32::Foundation::ERROR_PIPE_BUSY;
 
@@ -27,12 +31,30 @@ pub struct IpcInner {
     id: String,
 }
 
+/// One waiter per in-flight request, keyed by request id. Results are
+/// delivered here; progress goes over a broadcast that may lag without
+/// consequence.
+pub type Pending = Arc<Mutex<HashMap<String, oneshot::Sender<Result<IpcResult, IpcError>>>>>;
+
+pub fn disconnect_error() -> IpcError {
+    IpcError {
+        message: "Elevate process disconnected: PIPE_DISCONNECT_ERR".into(),
+        code: None,
+        subject: None,
+        sid: None,
+        cancelled: false,
+        insight: None,
+    }
+}
+
 #[derive(Debug)]
 pub struct ManagedElevate {
     process: tokio::sync::RwLock<Option<SendableHandle>>,
+    started: AtomicBool,
     mpsc_tx: tokio::sync::mpsc::Sender<IpcInner>,
     mpsc_rx: tokio::sync::RwLock<Option<tokio::sync::mpsc::Receiver<IpcInner>>>,
-    broadcast_tx: tokio::sync::broadcast::Sender<PipeMsg>,
+    progress_tx: tokio::sync::broadcast::Sender<(String, Progress)>,
+    pending: Pending,
     pipe_id: String,
     already_elevated: bool,
 }
@@ -45,17 +67,37 @@ impl Default for ManagedElevate {
 
 impl ManagedElevate {
     pub fn new() -> Self {
-        let (broadcast_tx, _broadcast_rx) = tokio::sync::broadcast::channel(100);
+        let (progress_tx, _progress_rx) = tokio::sync::broadcast::channel(256);
         let (mpsc_tx, mpsc_rx) = tokio::sync::mpsc::channel(100);
         let pipe_id = format!("{}", uuid::Uuid::new_v4());
         Self {
             process: tokio::sync::RwLock::new(None),
-            broadcast_tx,
+            started: AtomicBool::new(false),
+            progress_tx,
             mpsc_tx,
             mpsc_rx: tokio::sync::RwLock::new(Some(mpsc_rx)),
+            pending: Arc::new(Mutex::new(HashMap::new())),
             pipe_id,
             already_elevated: check_elevated().unwrap_or(false),
         }
+    }
+
+    /// A manager whose "elevated side" is whatever the test drives through
+    /// the returned request receiver, replying via `pending` / `progress_tx`.
+    #[cfg(test)]
+    fn detached() -> (
+        Self,
+        tokio::sync::mpsc::Receiver<IpcInner>,
+        Pending,
+        tokio::sync::broadcast::Sender<(String, Progress)>,
+    ) {
+        let mut me = Self::new();
+        me.already_elevated = false;
+        me.started.store(true, Ordering::SeqCst);
+        let rx = me.mpsc_rx.get_mut().take().unwrap();
+        let pending = me.pending.clone();
+        let progress_tx = me.progress_tx.clone();
+        (me, rx, pending, progress_tx)
     }
     pub fn create_pipe(name: &str) -> anyhow::Result<NamedPipeServer> {
         let mut attr = create_security_attributes();
@@ -85,12 +127,12 @@ impl ManagedElevate {
             process.replace(command);
             tracing::info!("UAC process started, waiting for pipe connection...");
 
-            let tx = self.broadcast_tx.clone();
             let rx = self.mpsc_rx.write().await.take().unwrap();
             if !wait_conn(&mut server).await {
                 return Err(anyhow::anyhow!("Failed to wait for connection").context("ELEVATE_ERR"));
             }
-            handle_pipe(server, tx, rx).await;
+            handle_pipe(server, self.progress_tx.clone(), self.pending.clone(), rx).await;
+            self.started.store(true, Ordering::SeqCst);
         }
         Ok(())
     }
@@ -104,13 +146,18 @@ impl ManagedElevate {
         if !elevate || self.already_elevated {
             return run_opr(ipc, on_progress).await;
         }
-        if self.process.read().await.is_none() {
+        if !self.started.load(Ordering::SeqCst) {
             tracing::info!("Elevate process not started, starting...");
             self.start().await?;
             tracing::info!("Elevate process started");
         }
         let id = uuid::Uuid::new_v4().to_string();
-        let mut rx = self.broadcast_tx.subscribe();
+        let (tx, mut result_rx) = oneshot::channel();
+        self.pending
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(id.clone(), tx);
+        let mut progress_rx = self.progress_tx.subscribe();
         // 管道任务已退出时接收端不存在，此处不返回就会永远等不到回包
         if self
             .mpsc_tx
@@ -121,28 +168,57 @@ impl ManagedElevate {
             .await
             .is_err()
         {
+            self.pending
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(&id);
             return Err(anyhow::anyhow!("Elevate process pipe is closed")
                 .context("IPC_ERR")
                 .into());
         }
-        while let Ok(v) = rx.recv().await {
-            match v {
-                PipeMsg::Progress(msgid, data) if msgid == id => on_progress(data),
-                PipeMsg::Ok(msgid, data) if msgid == id => return Ok(data),
-                PipeMsg::Err(msgid, error) if msgid == id => return Err(error.into_ta()),
-                PipeMsg::Disconnect(pipeerr) => {
-                    return Err(anyhow::anyhow!("Elevate process disconnected: {}", pipeerr)
-                        .context("IPC_ERR")
-                        .into());
+        loop {
+            tokio::select! {
+                res = &mut result_rx => {
+                    return match res {
+                        Ok(Ok(data)) => Ok(data),
+                        Ok(Err(error)) => Err(error.into_ta()),
+                        Err(_) => Err(anyhow::anyhow!("Failed to receive response from elevate process")
+                            .context("IPC_ERR")
+                            .into()),
+                    };
                 }
-                _ => {}
+                p = progress_rx.recv() => match p {
+                    Ok((msgid, data)) if msgid == id => on_progress(data),
+                    Ok(_) => {}
+                    // 进度洪水只丢进度，不丢结果
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        tracing::debug!("progress broadcast lagged by {n}");
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        // keep waiting for the result alone
+                        let res = (&mut result_rx).await;
+                        return match res {
+                            Ok(Ok(data)) => Ok(data),
+                            Ok(Err(error)) => Err(error.into_ta()),
+                            Err(_) => Err(anyhow::anyhow!("Failed to receive response from elevate process")
+                                .context("IPC_ERR")
+                                .into()),
+                        };
+                    }
+                },
             }
         }
-        Err(
-            anyhow::anyhow!("Failed to receive response from elevate process")
-                .context("IPC_ERR")
-                .into(),
-        )
+    }
+}
+
+fn fail_all_pending(pending: &Pending) {
+    let waiters: Vec<_> = pending
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .drain()
+        .collect();
+    for (_, tx) in waiters {
+        let _ = tx.send(Err(disconnect_error()));
     }
 }
 
@@ -156,10 +232,11 @@ pub async fn wait_conn(server: &mut NamedPipeServer) -> bool {
 }
 /// 读写各一个任务：`read_frame` 不可取消，不能放进与写端共用的 `select!`。
 /// 任一端结束（对端关闭、帧错位、读写错误、`ManagedElevate` 被丢弃）就停掉另一端，
-/// 让两个半边一起释放、管道真正关闭，并广播 `Disconnect` 唤醒等待中的 `run`。
+/// 让两个半边一起释放、管道真正关闭，并让所有等待中的 `run` 收到断连错误。
 pub async fn handle_pipe(
     server: NamedPipeServer,
-    tx: tokio::sync::broadcast::Sender<PipeMsg>,
+    progress_tx: tokio::sync::broadcast::Sender<(String, Progress)>,
+    pending: Pending,
     mut rx: tokio::sync::mpsc::Receiver<IpcInner>,
 ) {
     let (serverrx, mut servertx) = tokio::io::split(server);
@@ -176,7 +253,7 @@ pub async fn handle_pipe(
             }
         }
     });
-    let reader_tx = tx.clone();
+    let reader_pending = pending.clone();
     let mut reader = tokio::spawn(async move {
         let mut serverrx = tokio::io::BufReader::with_capacity(PIPE_BUFFER_SIZE, serverrx);
         loop {
@@ -195,9 +272,28 @@ pub async fn handle_pipe(
                 Ok(PipeMsg::Breadcrumb(crumb)) => {
                     crate::utils::sentry::add_breadcrumb_json(&crumb);
                 }
-                Ok(other) => {
-                    let _ = reader_tx.send(other);
+                Ok(PipeMsg::Progress(id, p)) => {
+                    let _ = progress_tx.send((id, p));
                 }
+                Ok(PipeMsg::Ok(id, data)) => {
+                    if let Some(tx) = reader_pending
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .remove(&id)
+                    {
+                        let _ = tx.send(Ok(data));
+                    }
+                }
+                Ok(PipeMsg::Err(id, err)) => {
+                    if let Some(tx) = reader_pending
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .remove(&id)
+                    {
+                        let _ = tx.send(Err(err));
+                    }
+                }
+                Ok(PipeMsg::Disconnect(_)) => {}
                 Err(err) => {
                     tracing::error!("Failed to read from pipe: {:?}", err);
                     break;
@@ -210,11 +306,14 @@ pub async fn handle_pipe(
             _ = &mut reader => writer.abort(),
             _ = &mut writer => reader.abort(),
         }
-        let _ = tx.send(PipeMsg::Disconnect("PIPE_DISCONNECT_ERR".into()));
+        fail_all_pending(&pending);
     });
 }
 
 pub async fn uac_ipc_main(args: crate::cli::arg::UacArgs) {
+    // the elevated side renames and removes install directories too; its cwd
+    // must not pin one (cwd is not inherited reliably across the UAC launch)
+    let _ = crate::fs::staging::enter_neutral_cwd();
     let pipe_name = format!(r"\\.\pipe\Kachina-Elevate-{}", args.pipe_id);
     let mut try_times = 0;
     let client = loop {
@@ -374,6 +473,12 @@ mod tests {
     use super::*;
     use crate::cli::arg::UacArgs;
 
+    fn register(pending: &Pending, id: &str) -> oneshot::Receiver<Result<IpcResult, IpcError>> {
+        let (tx, rx) = oneshot::channel();
+        pending.lock().unwrap().insert(id.to_string(), tx);
+        rx
+    }
+
     /// 真实命名管道上的往返：服务端 `handle_pipe` 对接客户端 `uac_ipc_main`，
     /// 覆盖 Ok / Err 两种回包与丢弃 `ManagedElevate` 后的断连收尾。
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -384,17 +489,20 @@ mod tests {
         let client = tokio::spawn(uac_ipc_main(UacArgs { pipe_id }));
         server.connect().await.unwrap();
 
-        let (broadcast_tx, mut events) = tokio::sync::broadcast::channel(16);
+        let (progress_tx, _progress_rx) = tokio::sync::broadcast::channel(16);
+        let pending: Pending = Arc::new(Mutex::new(HashMap::new()));
         let (mpsc_tx, mpsc_rx) = tokio::sync::mpsc::channel(16);
-        handle_pipe(server, broadcast_tx, mpsc_rx).await;
+        handle_pipe(server, progress_tx, pending.clone(), mpsc_rx).await;
 
-        async fn wait(events: &mut tokio::sync::broadcast::Receiver<PipeMsg>) -> PipeMsg {
-            time::timeout(Duration::from_secs(5), events.recv())
+        async fn wait(
+            rx: oneshot::Receiver<Result<IpcResult, IpcError>>,
+        ) -> Result<Result<IpcResult, IpcError>, oneshot::error::RecvError> {
+            time::timeout(Duration::from_secs(5), rx)
                 .await
                 .expect("pipe reply timeout")
-                .expect("broadcast closed")
         }
 
+        let ping = register(&pending, "ping");
         mpsc_tx
             .send(IpcInner {
                 op: IpcOperation::Ping,
@@ -402,9 +510,9 @@ mod tests {
             })
             .await
             .unwrap();
-        let msg = wait(&mut events).await;
-        assert!(matches!(msg, PipeMsg::Ok(id, IpcResult::Ping) if id == "ping"));
+        assert!(matches!(wait(ping).await, Ok(Ok(IpcResult::Ping))));
 
+        let kill = register(&pending, "kill");
         mpsc_tx
             .send(IpcInner {
                 op: IpcOperation::KillProcess(u32::MAX),
@@ -412,19 +520,54 @@ mod tests {
             })
             .await
             .unwrap();
-        let msg = wait(&mut events).await;
-        let PipeMsg::Err(id, err) = msg else {
-            panic!("expected Err, got {msg:?}");
+        let Ok(Err(err)) = wait(kill).await else {
+            panic!("expected Err");
         };
-        assert_eq!(id, "kill");
         assert!(err.message.contains("OPEN_PROCESS_ERR"), "{}", err.message);
 
+        let orphan = register(&pending, "orphan");
         drop(mpsc_tx);
-        let msg = wait(&mut events).await;
-        assert!(matches!(msg, PipeMsg::Disconnect(_)));
+        let Ok(Err(err)) = wait(orphan).await else {
+            panic!("orphan waiter should get the disconnect error");
+        };
+        assert!(err.message.contains("disconnected"), "{}", err.message);
+        assert!(pending.lock().unwrap().is_empty());
         time::timeout(Duration::from_secs(5), client)
             .await
             .expect("client did not exit after server closed")
             .unwrap();
+    }
+
+    /// 1000 条进度先于结果到达、超出广播容量：`run` 仍拿到 `Ok`，只丢进度。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn progress_flood_does_not_lose_result() {
+        let (mgr, mut requests, pending, progress_tx) = ManagedElevate::detached();
+        let responder = tokio::spawn(async move {
+            let req = requests.recv().await.unwrap();
+            for i in 0..1000u64 {
+                let _ = progress_tx.send((req.id.clone(), Progress::Bytes(i)));
+            }
+            let tx = pending.lock().unwrap().remove(&req.id).unwrap();
+            tx.send(Ok(IpcResult::Ping)).unwrap();
+        });
+        let seen = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let seen2 = seen.clone();
+        let res = time::timeout(
+            Duration::from_secs(5),
+            mgr.run(
+                IpcOperation::Ping,
+                true,
+                progress_notify(move |_| {
+                    seen2.fetch_add(1, Ordering::Relaxed);
+                }),
+            ),
+        )
+        .await
+        .expect("run timed out")
+        .unwrap();
+        assert!(matches!(res, IpcResult::Ping));
+        responder.await.unwrap();
+        // progress is best effort: some of the 1000 arrive, never all of them are required
+        assert!(seen.load(Ordering::Relaxed) <= 1000);
     }
 }

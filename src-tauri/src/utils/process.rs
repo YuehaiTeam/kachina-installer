@@ -14,8 +14,8 @@ use std::os::windows::ffi::OsStrExt;
 use windows::core::{HSTRING, PCWSTR, PWSTR};
 use windows::Win32::Foundation::{CloseHandle, HANDLE, WAIT_FAILED};
 use windows::Win32::System::Threading::{
-    CreateProcessW, GetExitCodeProcess, WaitForSingleObject, CREATE_NO_WINDOW, INFINITE,
-    PROCESS_CREATION_FLAGS, PROCESS_INFORMATION, STARTUPINFOW,
+    CreateProcessW, GetExitCodeProcess, GetProcessId, WaitForSingleObject, CREATE_NO_WINDOW,
+    INFINITE, PROCESS_CREATION_FLAGS, PROCESS_INFORMATION, STARTUPINFOW,
 };
 use windows::Win32::UI::Shell::{
     ShellExecuteExW, SEE_MASK_FLAG_NO_UI, SEE_MASK_NOASYNC, SHELLEXECUTEINFOW,
@@ -36,7 +36,7 @@ impl Child {
             .map_err(io::Error::other)?
     }
 
-    fn wait_blocking(&self) -> io::Result<u32> {
+    pub fn wait_blocking(&self) -> io::Result<u32> {
         unsafe {
             if WaitForSingleObject(self.0, INFINITE) == WAIT_FAILED {
                 return Err(io::Error::last_os_error());
@@ -45,6 +45,10 @@ impl Child {
             GetExitCodeProcess(self.0, &mut code)?;
             Ok(code)
         }
+    }
+
+    pub fn pid(&self) -> u32 {
+        unsafe { GetProcessId(self.0) }
     }
 }
 

@@ -1,12 +1,14 @@
 use std::io::Read;
+use std::path::Path;
 
 use anyhow::Context;
+use sha2::Digest;
 
 use crate::{
-    fs::{create_http_stream, create_target_file, prepare_target, progressed_copy},
-    installer::uninstall::DELETE_SELF_ON_EXIT_PATH,
+    fs::{create_http_stream, create_staged_file, progressed_copy},
     ipc::{Progress, ProgressNotify},
     utils::{
+        code::{Attach, Coded, MIRRORC_FAILED},
         error::{return_ta_result, IntoTAResult, TAResult},
         metadata::RepoMetadata,
         url::HttpContextExt,
@@ -22,27 +24,66 @@ pub struct MirrorcChangeset {
     pub modified: Option<Vec<String>>,
 }
 
-/// 返回归档内 `.metadata.json` 原文（若有），由会话侧解析。
+/// What phase one produced from a Mirror酱 archive: every extracted file with
+/// its md5 (relative path, `/`), the archive's delete list, and the
+/// `.metadata.json` text for the session to parse.
+#[derive(serde::Deserialize, serde::Serialize, Clone, Debug, Default)]
+pub struct MirrorcExtract {
+    pub metadata: Option<String>,
+    pub files: Vec<(String, String)>,
+    pub deletes: Vec<String>,
+}
+
+/// Verify the archive digest, then extract into the staging `new\` directory.
+/// The install directory is never touched here.
 pub async fn run_mirrorc_install(
     zip_path: &str,
-    target_path: &str,
+    new_dir: &str,
+    sha256: &str,
     notify: ProgressNotify,
-) -> TAResult<Option<String>> {
+) -> TAResult<MirrorcExtract> {
     let zip_path = zip_path.to_string();
-    let target_path = target_path.to_string();
-    tokio::task::spawn_blocking(move || run_mirrorc_install_sync(&zip_path, &target_path, notify))
-        .await
-        .into_ta_result()?
+    let new_dir = new_dir.to_string();
+    let sha256 = sha256.to_string();
+    tokio::task::spawn_blocking(move || {
+        run_mirrorc_install_sync(&zip_path, &new_dir, &sha256, notify)
+    })
+    .await
+    .into_ta_result()?
+}
+
+pub fn sha256_file(path: &Path) -> anyhow::Result<String> {
+    let mut file = std::fs::File::open(path).context("OPEN_TARGET_ERR")?;
+    let mut hasher = sha2::Sha256::new();
+    let mut buf = vec![0u8; 1024 * 1024];
+    loop {
+        let n = file.read(&mut buf).context("READ_FILE_ERR")?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    Ok(hex::encode(hasher.finalize()))
 }
 
 pub fn run_mirrorc_install_sync(
     zip_path: &str,
-    target_path: &str,
+    new_dir: &str,
+    sha256: &str,
     notify: ProgressNotify,
-) -> TAResult<Option<String>> {
+) -> TAResult<MirrorcExtract> {
+    if !sha256.is_empty() {
+        let got = sha256_file(Path::new(zip_path))?;
+        if !got.eq_ignore_ascii_case(sha256) {
+            let _ = std::fs::remove_file(zip_path);
+            return Err(anyhow::anyhow!("archive sha256 mismatch: expected {sha256}, got {got}")
+                .attach(MIRRORC_FAILED)
+                .into());
+        }
+    }
     let file = std::fs::File::open(zip_path).into_ta_result()?;
     let mut archive = zip::ZipArchive::new(file).into_ta_result()?;
-    let total_len = archive.len() - 1;
+    let total_len = archive.len();
 
     let file_lists = archive
         .file_names()
@@ -88,15 +129,12 @@ pub fn run_mirrorc_install_sync(
 
     // if both changeset and metadata are None, return error
     if changeset.is_none() && metadata.is_none() {
-        return return_ta_result(
-            "Not a valid mirrorc archive: neither changes.json nor .metadata.json found"
-                .to_string(),
-            "MIRRORC_ARCHIVE_ERR",
-        );
+        return Err(anyhow::Error::from(Coded::bare(MIRRORC_FAILED))
+            .context("Not a valid mirrorc archive: neither changes.json nor .metadata.json found")
+            .into());
     }
 
-    let current_exe = std::env::current_exe().context("GET_EXE_PATH_ERR")?;
-
+    let mut files = Vec::new();
     for i in 0..total_len {
         let mut file = archive.by_index(i).into_ta_result()?;
         let file_name = file
@@ -110,79 +148,64 @@ pub fn run_mirrorc_install_sync(
         {
             continue;
         }
-        let mut out_path = std::path::PathBuf::from(target_path);
-        out_path.push(file_name.clone());
         if file.is_dir() {
             continue;
         }
-        if out_path == current_exe {
-            // delete .instbak if exists
-            let instbak = out_path.clone().with_extension("instbak");
-            if instbak.exists() {
-                std::fs::remove_file(&instbak)
-                    .into_ta_result()
-                    .context("SELF_UPDATE_ERR")?;
-            }
-            // mv current exe to .instbak
-            std::fs::rename(&current_exe, &instbak)
+        let out_path = crate::fs::staging::join_rel(Path::new(new_dir), &file_name);
+        if let Some(parent) = out_path.parent() {
+            std::fs::create_dir_all(parent)
                 .into_ta_result()
-                .context("SELF_UPDATE_ERR")?;
-            DELETE_SELF_ON_EXIT_PATH
-                .write()
-                .unwrap()
-                .replace(instbak.to_string_lossy().to_string());
-        }
-        let parent = out_path.parent();
-        if let Some(parent) = parent {
-            if !parent.exists() {
-                std::fs::create_dir_all(parent)
-                    .into_ta_result()
-                    .context("CREATE_DIR_ERR")?;
-            }
+                .context("CREATE_DIR_ERR")?;
         }
         let mut out_file = std::fs::File::create(&out_path)
             .into_ta_result()
             .context(format!("CREATE_FILE_ERR: {}", out_path.display()))?;
-        std::io::copy(&mut file, &mut out_file)
-            .into_ta_result()
-            .context(format!("WRITE_FILE_ERR: {}", out_path.display()))?;
+        let mut hasher = chksum_md5::MD5::new();
+        let mut buf = vec![0u8; 256 * 1024];
+        loop {
+            let n = file
+                .read(&mut buf)
+                .into_ta_result()
+                .context(format!("READ_ENTRY_ERR: {}", out_path.display()))?;
+            if n == 0 {
+                break;
+            }
+            hasher.update(&buf[..n]);
+            std::io::Write::write_all(&mut out_file, &buf[..n])
+                .into_ta_result()
+                .context(format!("WRITE_FILE_ERR: {}", out_path.display()))?;
+        }
+        out_file.sync_all().into_ta_result()?;
+        files.push((file_name.replace('\\', "/"), hasher.digest().to_hex_lowercase()));
         notify(Progress::Extract {
             file: file_name,
-            done: i as u64,
+            done: (i + 1) as u64,
             total: total_len as u64,
         });
     }
 
-    // delete files in target_path that are not in the changeset
+    let mut deletes: Vec<String> = Vec::new();
     if let Some(changeset) = changeset.as_ref() {
-        if let Some(deletes) = changeset.deleted.as_ref() {
-            for file in deletes {
-                let mut out_path = std::path::PathBuf::from(target_path);
+        if let Some(deleted) = changeset.deleted.as_ref() {
+            for file in deleted {
                 let strip_path = file.strip_prefix(&prefix).unwrap_or(file);
-                out_path.push(strip_path);
-                if out_path.exists() {
-                    std::fs::remove_file(out_path).into_ta_result()?;
-                    notify(Progress::Delete(strip_path.to_string()));
-                }
+                deletes.push(strip_path.replace('\\', "/"));
             }
         }
     }
     if let Some(metadata) = metadata.as_ref() {
-        // delete files in target_path that are not in the metadata
-        if !metadata.deletes.is_empty() {
-            for file in &metadata.deletes {
-                let mut out_path = std::path::PathBuf::from(target_path);
-                out_path.push(file.clone());
-                if out_path.exists() {
-                    std::fs::remove_file(out_path).into_ta_result()?;
-                    notify(Progress::Delete(file.clone()));
-                }
-            }
+        for file in &metadata.deletes {
+            deletes.push(file.replace('\\', "/"));
         }
     }
-    // delete zip file
+    deletes.sort();
+    deletes.dedup();
     let _ = std::fs::remove_file(zip_path);
-    Ok(metadata_str)
+    Ok(MirrorcExtract {
+        metadata: metadata_str,
+        files,
+        deletes,
+    })
 }
 
 pub async fn get_mirrorc_status(
@@ -222,14 +245,14 @@ pub async fn get_mirrorc_status(
     Ok(status)
 }
 
+/// Download the archive to `zip_path` (under the staging `dl\` directory).
 pub async fn run_mirrorc_download(
     zip_path: &str,
     url: &str,
     notify: ProgressNotify,
 ) -> TAResult<()> {
     let (mut stream, len, _insight) = create_http_stream(url, 0, 0, true, None).await?;
-    prepare_target(zip_path).await?;
-    let mut target = create_target_file(zip_path).await?;
+    let mut target = create_staged_file(Path::new(zip_path)).await?;
     let on_progress = |downloaded| {
         notify(Progress::BytesOf {
             done: downloaded as u64,
@@ -240,6 +263,124 @@ pub async fn run_mirrorc_download(
         .await
         .context("MIRRORC_DOWNLOAD_ERR")?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ipc::progress_notify;
+    use std::io::Write;
+
+    fn tmp() -> std::path::PathBuf {
+        let dir = crate::fs::staging::scratch_file(&format!("kachina-mirrorc-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn make_zip(path: &Path, entries: &[(&str, &[u8])]) {
+        let file = std::fs::File::create(path).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+        let opts = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
+        for (name, bytes) in entries {
+            zip.start_file(*name, opts).unwrap();
+            zip.write_all(bytes).unwrap();
+        }
+        zip.finish().unwrap();
+    }
+
+    #[test]
+    fn extracts_into_new_dir_and_reports_deletes() {
+        let dir = tmp();
+        let zip_path = dir.join("pkg.zip");
+        let exe_name = std::env::current_exe()
+            .unwrap()
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+        let exe_entry = format!("root/{exe_name}");
+        make_zip(
+            &zip_path,
+            &[
+                ("changes.json", br#"{"deleted":["root/old.dll"]}"#),
+                ("root/app.exe", b"app"),
+                ("root/sub/lib.dll", b"lib"),
+                (exe_entry.as_str(), b"self"),
+            ],
+        );
+        let sha = sha256_file(&zip_path).unwrap();
+        let new_dir = dir.join("new");
+        let install = dir.join("install");
+        std::fs::create_dir_all(&install).unwrap();
+        std::fs::write(install.join("app.exe"), b"before").unwrap();
+        let out = run_mirrorc_install_sync(
+            &zip_path.to_string_lossy(),
+            &new_dir.to_string_lossy(),
+            &sha,
+            progress_notify(|_| {}),
+        )
+        .unwrap();
+        assert_eq!(std::fs::read(new_dir.join("app.exe")).unwrap(), b"app");
+        assert_eq!(std::fs::read(new_dir.join("sub").join("lib.dll")).unwrap(), b"lib");
+        assert_eq!(std::fs::read(new_dir.join(&exe_name)).unwrap(), b"self");
+        assert_eq!(std::fs::read(install.join("app.exe")).unwrap(), b"before");
+        assert_eq!(out.deletes, vec!["old.dll".to_string()]);
+        assert!(out.metadata.is_none());
+        let app = out.files.iter().find(|(r, _)| r == "app.exe").unwrap();
+        assert_eq!(app.1, chksum_md5::hash(b"app").to_hex_lowercase());
+        assert!(!zip_path.exists(), "archive removed after extraction");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn metadata_variant_and_invalid_archives() {
+        let dir = tmp();
+        let zip_path = dir.join("pkg.zip");
+        make_zip(
+            &zip_path,
+            &[
+                (".metadata.json", br#"{"tag_name":"v2","hashed":[],"deletes":["x.dll"]}"#),
+                ("a.txt", b"a"),
+            ],
+        );
+        let sha = sha256_file(&zip_path).unwrap();
+        let new_dir = dir.join("new");
+        let out = run_mirrorc_install_sync(
+            &zip_path.to_string_lossy(),
+            &new_dir.to_string_lossy(),
+            &sha,
+            progress_notify(|_| {}),
+        )
+        .unwrap();
+        assert_eq!(out.deletes, vec!["x.dll".to_string()]);
+        assert!(out.metadata.as_deref().unwrap().contains("v2"));
+
+        // digest mismatch: nothing extracted
+        make_zip(&zip_path, &[("a.txt", b"a")]);
+        let new2 = dir.join("new2");
+        let err = run_mirrorc_install_sync(
+            &zip_path.to_string_lossy(),
+            &new2.to_string_lossy(),
+            "00",
+            progress_notify(|_| {}),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("sha256"));
+        assert!(!new2.exists() || std::fs::read_dir(&new2).unwrap().next().is_none());
+
+        // neither changes.json nor .metadata.json
+        make_zip(&zip_path, &[("a.txt", b"a")]);
+        let sha = sha256_file(&zip_path).unwrap();
+        assert!(run_mirrorc_install_sync(
+            &zip_path.to_string_lossy(),
+            &new2.to_string_lossy(),
+            &sha,
+            progress_notify(|_| {}),
+        )
+        .is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
 
 pub fn longest_common_prefix(strs: Vec<String>) -> String {

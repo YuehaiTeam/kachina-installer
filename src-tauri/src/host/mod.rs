@@ -136,8 +136,7 @@ pub fn run(
         }
     }
 
-    let temp_dir = std::env::temp_dir();
-    if std::env::set_current_dir(&temp_dir).is_err() {
+    if crate::fs::staging::enter_neutral_cwd().is_err() {
         show_error(ErrorDialog::code(TEMP_DIR_UNAVAILABLE), HWND::default());
         return Ok(());
     }

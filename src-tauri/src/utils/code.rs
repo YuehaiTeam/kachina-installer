@@ -28,6 +28,7 @@ pub const RUNTIME_INSTALL_FAILED: &str = "RUNTIME_INSTALL_FAILED";
 pub const WEBVIEW2_REQUIRED: &str = "WEBVIEW2_REQUIRED";
 pub const WEBVIEW2_FAILED: &str = "WEBVIEW2_FAILED";
 pub const SELF_UPDATE_FAILED: &str = "SELF_UPDATE_FAILED";
+pub const STAGING_IN_USE: &str = "STAGING_IN_USE";
 
 // --- U: user input, do not report ---
 pub const MIRRORC_CDK_MISSING: &str = "MIRRORC_CDK_MISSING";
@@ -89,6 +90,7 @@ pub const ALL_CODES: &[&str] = &[
     WEBVIEW2_REQUIRED,
     WEBVIEW2_FAILED,
     SELF_UPDATE_FAILED,
+    STAGING_IN_USE,
     MIRRORC_CDK_MISSING,
     MIRRORC_CDK_EXPIRED,
     MIRRORC_CDK_INVALID,
@@ -388,7 +390,8 @@ pub fn class_of(code: &str) -> Option<Class> {
         | RUNTIME_INSTALL_FAILED
         | WEBVIEW2_REQUIRED
         | WEBVIEW2_FAILED
-        | SELF_UPDATE_FAILED => Some(Class::E),
+        | SELF_UPDATE_FAILED
+        | STAGING_IN_USE => Some(Class::E),
         MIRRORC_CDK_MISSING
         | MIRRORC_CDK_EXPIRED
         | MIRRORC_CDK_INVALID
@@ -585,6 +588,15 @@ fn code_for_io_kind(kind: std::io::ErrorKind) -> &'static str {
         | K::UnexpectedEof
         | K::BrokenPipe => DOWNLOAD_FAILED,
         _ => FILE_IO_FAILED,
+    }
+}
+
+/// Code for a local file-system failure (rename, copy, delete inside the
+/// install directory). Sharing / lock violations are `FILE_IN_USE`.
+pub fn code_for_local_io(io: &std::io::Error) -> &'static str {
+    match io.raw_os_error() {
+        Some(32) | Some(33) => FILE_IN_USE,
+        _ => code_for_io_kind(io.kind()),
     }
 }
 

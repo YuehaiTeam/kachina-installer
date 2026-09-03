@@ -61,10 +61,21 @@ impl DirProbe {
     }
 }
 
+/// `C:\` / `D:/` and friends. A drive root is never an install directory: it
+/// cannot be renamed or removed as a unit, and uninstalling it would sweep the
+/// whole volume.
+pub fn is_drive_root(path: &str) -> bool {
+    let n = path.replace('\\', "/");
+    let n = n.trim_end_matches('/');
+    n.len() == 2 && n.as_bytes()[1] == b':' && n.as_bytes()[0].is_ascii_alphabetic()
+}
+
 /// Writability is tested by creating and removing a probe file in the directory,
 /// or in the nearest existing ancestor when the directory does not exist yet.
+/// `None` for an existing file and for a drive root: both are rejected as
+/// install paths wherever the probe result feeds `Settings`.
 pub fn probe_dir(path: &std::path::Path, exe_name: &str) -> Option<DirProbe> {
-    if path.is_file() {
+    if path.is_file() || is_drive_root(&path.to_string_lossy()) {
         return None;
     }
     let exists = path.is_dir();
@@ -294,7 +305,12 @@ pub async fn pick_install_path(
     app_name: &str,
     parent: crate::host::HwndParent,
 ) -> Option<String> {
-    let path = crate::utils::folderdialog::pick_folder(current.to_string(), parent).await?;
+    let mut path = crate::utils::folderdialog::pick_folder(current.to_string(), parent).await?;
+    // a picked drive root always becomes `<root>\<app_name>`; the root itself
+    // is not an install path (see `probe_dir`)
+    if is_drive_root(&path) {
+        path = format!("{}\\{app_name}", path.trim_end_matches(['\\', '/']));
+    }
     let seldir = inspect_dir(path, exe_name.to_string()).await?;
     apply_path_choice(seldir, app_name, parent).await
 }
@@ -305,17 +321,12 @@ pub async fn apply_path_choice(
     parent: crate::host::HwndParent,
 ) -> Option<String> {
     if !seldir.empty && !seldir.upgrade {
-        let is_drive_root = {
-            let n = seldir.path.replace('\\', "/");
-            n.len() == 3 && n.as_bytes().get(1) == Some(&b':') && n.ends_with('/')
-        };
-        let nest = is_drive_root
-            || confirm_dialog(
-                crate::utils::i18n::t("dialog.prompt", &[]),
-                crate::utils::i18n::t("ready.dir_not_empty", &[]),
-                parent,
-            )
-            .await;
+        let nest = confirm_dialog(
+            crate::utils::i18n::t("dialog.prompt", &[]),
+            crate::utils::i18n::t("ready.dir_not_empty", &[]),
+            parent,
+        )
+        .await;
         if nest {
             return Some(format!(
                 "{}\\{app_name}",
@@ -324,6 +335,22 @@ pub async fn apply_path_choice(
         }
     }
     Some(seldir.path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn drive_root_is_never_an_install_dir() {
+        for root in ["C:\\", "d:/", "E:", "C:\\\\"] {
+            assert!(is_drive_root(root), "{root}");
+            assert!(probe_dir(std::path::Path::new(root), "app.exe").is_none(), "{root}");
+        }
+        assert!(!is_drive_root("C:\\App"));
+        assert!(!is_drive_root("\\\\server\\share"));
+        assert!(probe_dir(std::path::Path::new("C:\\Windows"), "").is_some());
+    }
 }
 
 

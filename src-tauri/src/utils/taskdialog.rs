@@ -3,16 +3,18 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::Context;
 use tokio::sync::oneshot;
+use tokio_util::sync::CancellationToken;
 use windows::core::{w, BOOL, HRESULT, PCWSTR};
-use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, S_OK, WPARAM};
+use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, S_FALSE, S_OK, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Controls::{
     TaskDialogIndirect, TASKDIALOGCONFIG, TASKDIALOGCONFIG_0, TASKDIALOG_BUTTON,
     TASKDIALOG_COMMON_BUTTON_FLAGS, TASKDIALOG_NOTIFICATIONS, TDE_CONTENT,
     TDF_ALLOW_DIALOG_CANCELLATION, TDF_EXPAND_FOOTER_AREA, TDF_NO_DEFAULT_RADIO_BUTTON,
     TDF_SHOW_MARQUEE_PROGRESS_BAR, TDF_SHOW_PROGRESS_BAR, TDF_SIZE_TO_CONTENT, TDF_USE_COMMAND_LINKS,
-    TDF_USE_HICON_MAIN, TDF_VERIFICATION_FLAG_CHECKED, TDM_SET_PROGRESS_BAR_MARQUEE,
-    TDM_SET_PROGRESS_BAR_POS, TDM_UPDATE_ELEMENT_TEXT, TDN_BUTTON_CLICKED, TDN_CREATED, TDN_DESTROYED,
+    TDF_USE_HICON_MAIN, TDF_VERIFICATION_FLAG_CHECKED, TDM_CLICK_BUTTON,
+    TDM_SET_PROGRESS_BAR_MARQUEE, TDM_SET_PROGRESS_BAR_POS, TDM_UPDATE_ELEMENT_TEXT,
+    TDN_BUTTON_CLICKED, TDN_CREATED, TDN_DESTROYED,
 };
 use windows::Win32::UI::Shell::ExtractIconExW;
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -196,6 +198,9 @@ struct ProgressShared {
     closing: AtomicBool,
     created: Mutex<Option<oneshot::Sender<()>>>,
     marquee: bool,
+    /// When set, the Cancel button fires this token and the dialog stays
+    /// open until the session closes it; the close box is disabled.
+    cancel: Option<CancellationToken>,
 }
 
 pub struct ProgressDialog {
@@ -210,6 +215,16 @@ impl ProgressDialog {
         content: &str,
         marquee: bool,
     ) -> anyhow::Result<Self> {
+        Self::show_with_cancel(title, heading, content, marquee, None).await
+    }
+
+    pub async fn show_with_cancel(
+        title: &str,
+        heading: &str,
+        content: &str,
+        marquee: bool,
+        cancel: Option<CancellationToken>,
+    ) -> anyhow::Result<Self> {
         let title = title.to_string();
         let heading = heading.to_string();
         let content = content.to_string();
@@ -218,6 +233,7 @@ impl ProgressDialog {
             closing: AtomicBool::new(false),
             created: Mutex::new(None),
             marquee,
+            cancel,
         });
         let (tx, rx) = oneshot::channel();
         *shared.created.lock().unwrap_or_else(|e| e.into_inner()) = Some(tx);
@@ -305,11 +321,14 @@ impl ProgressDialog {
             .unwrap_or_else(|e| e.into_inner())
             .take();
         if let Some(hwnd) = hwnd {
+            // click the (always present) Cancel button: works whether or not the
+            // dialog allows close-box cancellation, and the callback lets it
+            // through once `closing` is set
             unsafe {
                 SendMessageW(
                     HWND(hwnd as *mut _),
-                    WM_CLOSE,
-                    Some(WPARAM(0)),
+                    TDM_CLICK_BUTTON.0 as u32,
+                    Some(WPARAM(IDCANCEL.0 as usize)),
                     Some(LPARAM(0)),
                 );
             }
@@ -351,7 +370,10 @@ fn progress_thread(
     let heading = wide(&heading);
     let content = wide(&content);
     let icon = load_main_icon();
-    let mut flags = TDF_USE_HICON_MAIN | TDF_ALLOW_DIALOG_CANCELLATION | TDF_SIZE_TO_CONTENT;
+    let mut flags = TDF_USE_HICON_MAIN | TDF_SIZE_TO_CONTENT;
+    if shared.cancel.is_none() {
+        flags |= TDF_ALLOW_DIALOG_CANCELLATION;
+    }
     flags |= if marquee {
         TDF_SHOW_MARQUEE_PROGRESS_BAR
     } else {
@@ -379,12 +401,21 @@ fn progress_thread(
 unsafe extern "system" fn progress_callback(
     hwnd: HWND,
     msg: TASKDIALOG_NOTIFICATIONS,
-    _w_param: WPARAM,
+    w_param: WPARAM,
     _l_param: LPARAM,
     lp_ref_data: isize,
 ) -> HRESULT {
     let shared = unsafe { &*(lp_ref_data as *const ProgressShared) };
     match msg {
+        TDN_BUTTON_CLICKED if w_param.0 as i32 == IDCANCEL.0 => {
+            if let Some(token) = &shared.cancel {
+                if !shared.closing.load(Ordering::SeqCst) {
+                    token.cancel();
+                    // the session decides when the dialog goes away
+                    return S_FALSE;
+                }
+            }
+        }
         TDN_CREATED => {
             *shared.hwnd.lock().unwrap_or_else(|e| e.into_inner()) = Some(hwnd.0 as isize);
             if shared.marquee {
