@@ -23,7 +23,7 @@ use crate::cli::arg::InstallArgs;
 use crate::installer::uninstall::delete_self_on_exit;
 use crate::ipc::manager::ManagedElevate;
 use crate::session::commands::{GuiRuntime, SessionState};
-use crate::utils::code::{Coded, PLUGIN_FAILED, TEMP_DIR_UNAVAILABLE, WEBVIEW2_FAILED};
+use crate::utils::code::{Attach, Coded, PLUGIN_HOST_FAILED, TEMP_DIR_UNAVAILABLE, WEBVIEW2_FAILED};
 use crate::utils::taskdialog::{show_error, ErrorDialog};
 use crate::session::types::SessionInput;
 use crate::APP_BOOT_SIGNAL;
@@ -276,10 +276,10 @@ pub async fn spawn_plugin_runtime(
 
     let handle = started_rx
         .await
-        .map_err(|_| anyhow::Error::from(Coded::bare(PLUGIN_FAILED)))?
+        .map_err(|_| anyhow::Error::from(Coded::bare(PLUGIN_HOST_FAILED)))?
         .map_err(|err| {
             tracing::error!("plugin host thread failed: {err:#}");
-            anyhow::Error::from(Coded::bare(PLUGIN_FAILED))
+            err.attach(PLUGIN_HOST_FAILED)
         })?;
 
     let runtime = PluginRuntime {
@@ -290,7 +290,7 @@ pub async fn spawn_plugin_runtime(
         Ok(Ok(())) => Ok(runtime),
         _ => {
             runtime.close();
-            Err(anyhow::Error::from(Coded::bare(PLUGIN_FAILED)))
+            Err(anyhow::Error::from(Coded::bare(PLUGIN_HOST_FAILED)))
         }
     }
 }
