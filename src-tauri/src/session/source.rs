@@ -707,7 +707,11 @@ pub async fn ensure_dfs2_session(
         }
     };
     let parsed = url::Url::parse(&url).map_err(|e| anyhow::Error::from(e).attach(NO_DOWNLOAD_NODE))?;
-    let base_url = format!("{}://{}", parsed.scheme(), parsed.host_str().unwrap_or(""));
+    let mut authority = parsed.host_str().unwrap_or("").to_string();
+    if let Some(port) = parsed.port() {
+        authority.push_str(&format!(":{port}"));
+    }
+    let base_url = format!("{}://{authority}", parsed.scheme());
     let res_id = parsed
         .path_segments()
         .and_then(|s| s.last())

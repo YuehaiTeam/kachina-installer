@@ -153,6 +153,12 @@ async function createConfig() {
         uri: 'http://localhost:8080/test-app-v2.exe',
       },
       {
+        id: 'dfs2-v2',
+        name: 'DFS2 v2',
+        uri: 'dfs2+packed+http://localhost:8080/api/TestApp/v2.exe?challenge=1',
+        hidden: true,
+      },
+      {
         id: 'stub-v1',
         name: 'Stub plugin v1',
         uri: 'plugin-stub+http://localhost:8080/test-app-v1.exe',

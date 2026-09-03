@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::ipc::PipeMsg;
 
@@ -252,13 +252,20 @@ fn dispatch(body: String, blocking: bool) {
     // 排队进管道的消息来不及被写循环消费，必须在本进程直发 HTTP。
     if blocking {
         // 独立线程 + 独立 runtime，避免依赖（可能已损坏的）主 runtime。
-        // 5 秒上限：客户端 read_timeout 30 秒，黑洞后端会让崩溃中的进程僵住半分钟。
-        let _ = std::thread::spawn(move || {
-            block_on_new_runtime(async {
-                let _ = tokio::time::timeout(Duration::from_secs(5), post_envelope(body)).await;
-            })
-        })
-        .join();
+        // The panic hook waits through `flush`, with a bounded timeout.
+        INFLIGHT.fetch_add(1, Ordering::SeqCst);
+        std::thread::spawn(move || {
+            // Reporting must not re-enter the panic hook if the telemetry client
+            // itself panics; the hook still has to reach process termination.
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                block_on_new_runtime(async {
+                    // A black-holed endpoint must not keep shutdown blocked beyond
+                    // the panic reporting budget.
+                    let _ = tokio::time::timeout(Duration::from_secs(5), post_envelope(body)).await;
+                })
+            }));
+            INFLIGHT.fetch_sub(1, Ordering::SeqCst);
+        });
         return;
     }
     if is_pipe_mode() {
@@ -293,9 +300,33 @@ pub fn flush(timeout: Duration) {
     }
 }
 
+fn hide_process_windows() {
+    use windows::Win32::Foundation::LPARAM;
+    use windows::Win32::System::Threading::GetCurrentProcessId;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        EnumWindows, GetWindowThreadProcessId, SW_HIDE, ShowWindow,
+    };
+    use windows::core::BOOL;
+
+    unsafe extern "system" fn hide_window(
+        hwnd: windows::Win32::Foundation::HWND,
+        pid: LPARAM,
+    ) -> BOOL {
+        let mut owner = 0u32;
+        let _ = GetWindowThreadProcessId(hwnd, Some(&mut owner));
+        if owner == pid.0 as u32 {
+            let _ = ShowWindow(hwnd, SW_HIDE);
+        }
+        BOOL(1)
+    }
+
+    unsafe {
+        let _ = EnumWindows(Some(hide_window), LPARAM(GetCurrentProcessId() as isize));
+    }
+}
+
 /// `show_dialog`：silent 等无人值守场景为 false。
 pub fn install_panic_hook(show_dialog: bool) {
-    let prev = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         let message = info
             .payload()
@@ -308,21 +339,35 @@ pub fn install_panic_hook(show_dialog: bool) {
             .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
             .unwrap_or_else(|| "unknown".to_string());
         let event_id = new_uuid();
-        // writeln! 而非 eprintln!：后者写失败会 panic，在 hook 里意味着双重 panic
+        let diagnostic = format!(
+            "kachina-installer crashed at {location}: {message}\ncrash report id: {event_id}"
+        );
+        // Keep a direct fallback because the panic may happen before the logger is initialized.
         {
             use std::io::Write;
-            let _ = writeln!(
-                std::io::stderr(),
-                "kachina-installer crashed at {location}: {message}\ncrash report id: {event_id}"
-            );
+            let _ = writeln!(std::io::stderr(), "{diagnostic}");
+            let log_path = std::env::temp_dir().join("KachinaInstaller.log");
+            if let Ok(mut file) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(log_path)
+            {
+                let _ = writeln!(file, "error panic: {diagnostic}");
+            }
         }
         if show_dialog {
+            hide_process_windows();
             if let Ok(exe) = std::env::current_exe() {
                 let _ = super::process::spawn(&exe, &["crash-dialog", &event_id], false);
             }
         }
-        capture_panic(&event_id, format!("panic at {location}: {message}"));
-        prev(info);
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            capture_panic(&event_id, format!("panic at {location}: {message}"));
+        }));
+        flush(Duration::from_secs(5));
+        // Panic recovery is not implemented yet; never leave the installer host alive
+        // after an unrecoverable panic on a worker thread.
+        std::process::exit(1);
     }));
 }
 
