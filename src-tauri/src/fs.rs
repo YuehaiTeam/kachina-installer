@@ -1044,7 +1044,11 @@ pub async fn create_staged_file(
 /// metadata, so an unflushed file swapped in right before power loss would
 /// come back truncated.
 pub async fn sync_staged_file(path: &Path) -> Result<(), anyhow::Error> {
-    let file = tokio::fs::File::open(path)
+    // Windows requires a writable handle for FlushFileBuffers.
+    let file = tokio::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
         .await
         .context("OPEN_TARGET_ERR")?;
     file.sync_all().await.context("SYNC_TARGET_ERR")?;

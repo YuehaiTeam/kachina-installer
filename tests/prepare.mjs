@@ -234,7 +234,7 @@ async function buildCompletePackages() {
     '..',
     'src-tauri',
     'target',
-    dev ? 'debug' : 'release',
+    dev ? 'debug' : 'x86_64-win7-windows-msvc/release',
     dev ? 'kachina-builder-bundle.exe' : 'kachina-builder.exe',
   );
   const iconPath = path.resolve('../src-tauri/icons/icon.ico');
@@ -280,4 +280,7 @@ async function buildCompletePackages() {
   console.log(chalk.gray('  All packages built'));
 }
 
-main().catch(console.error);
+main().catch((error) => {
+  console.error(error);
+  process.exitCode = 1;
+});
