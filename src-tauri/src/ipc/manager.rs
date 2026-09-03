@@ -587,4 +587,22 @@ mod tests {
         // progress is best effort: some of the 1000 arrive, never all of them are required
         assert!(seen.load(Ordering::Relaxed) <= 1000);
     }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn wait_idle_waits_for_dropped_request_result() {
+        let (mgr, _requests, pending, _progress_tx) = ManagedElevate::detached();
+        let receiver = register(&pending, "pending");
+        drop(receiver);
+        let mut wait = tokio::spawn(async move { mgr.wait_idle().await });
+
+        assert!(time::timeout(Duration::from_millis(50), &mut wait)
+            .await
+            .is_err());
+        let tx = pending.lock().unwrap().remove("pending").unwrap();
+        let _ = tx.send(Ok(IpcResult::Ping));
+        time::timeout(Duration::from_secs(1), wait)
+            .await
+            .unwrap()
+            .unwrap();
+    }
 }
