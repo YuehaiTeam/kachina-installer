@@ -234,10 +234,12 @@ pub async fn uac_ipc_main(args: crate::cli::arg::UacArgs) {
     };
 
     if let Err(err) = client {
+        let detail = format!("{err:?}");
         crate::utils::taskdialog::show_error(
-            crate::utils::code::ELEVATE_FAILED,
-            Some(&format!("{err:?}")),
-            None,
+            crate::utils::taskdialog::ErrorDialog {
+                detail: Some(&detail),
+                ..crate::utils::taskdialog::ErrorDialog::code(crate::utils::code::ELEVATE_FAILED)
+            },
             windows::Win32::Foundation::HWND::default(),
         );
         return;

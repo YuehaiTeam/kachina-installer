@@ -64,7 +64,7 @@ export function t(key: string, params?: Record<string, string>): string {
   }
   if (params) {
     for (const [name, value] of Object.entries(params)) {
-      text = text.replaceAll(`{${name}}`, value);
+      text = text.split(`{${name}}`).join(value);
     }
   }
   return text;

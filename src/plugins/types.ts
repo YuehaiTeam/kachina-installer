@@ -1,4 +1,4 @@
-import type { Dfs2Data, InvokeGetDfsMetadataRes, Embedded } from '../types';
+import type { Dfs2Data } from '../types';
 
 export interface KachinaInstallSource {
   name: string;

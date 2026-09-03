@@ -10,7 +10,7 @@ FILE_IO_FAILED	文件读写失败
 HASH_ALGORITHM_UNSUPPORTED	更新服务端配置有误，不支持的哈希算法
 HASH_MISMATCH	文件校验失败
 INSTALL_PATH_INVALID	安装路径无效
-INTERNAL_ERROR	安装程序发生内部错误，已终止运行
+INTERNAL_ERROR	安装程序发生内部错误
 METADATA_HTTP_ERROR	获取更新信息失败，请检查网络连接
 METADATA_INVALID	更新信息无效
 METADATA_UNREACHABLE	获取更新信息失败，请检查网络连接
@@ -22,7 +22,7 @@ MIRRORC_CDK_MISSING	需要 Mirror酱 CDK
 MIRRORC_CDK_QUOTA_EXCEEDED	Mirror酱 CDK 今日下载次数已达上限，请更换 CDK 或明天再试
 MIRRORC_CONFIG_INVALID	Mirror酱参数错误，请检查打包配置
 MIRRORC_FAILED	从Mirror酱获取更新失败，请联系Mirror酱客服
-MIRRORC_UNREACHABLE	无法获取Mirror酱数据，安装包可能已经损坏
+MIRRORC_UNREACHABLE	无法连接 Mirror酱，请检查网络连接后重试
 NO_DOWNLOAD_NODE	没有可用的下载节点
 PERMISSION_DENIED	拒绝访问
 PKG_BROKEN	安装包损坏，请重新下载
@@ -32,7 +32,7 @@ PLUGIN_NO_UI	该安装源需要图形界面
 PROCESS_KILL_FAILED	结束进程失败
 REGISTRY_WRITE_FAILED	写入注册表失败
 REMOTE_FILE_MISSING	无法获取所需文件，请检查网络连接或更换下载源
-RUNTIME_INSTALL_FAILED	安装{subject}失败
+RUNTIME_INSTALL_FAILED	安装{subject}失败，请手动安装
 RUNTIME_UNSUPPORTED	不支持的运行库
 SELF_UPDATE_FAILED	更新安装程序失败
 SERVER_HTTP_ERROR	下载服务器返回错误
@@ -44,13 +44,12 @@ TEMP_DIR_UNAVAILABLE	无法访问临时文件夹
 UNINSTALL_INFO_MISSING	未找到卸载配置文件，请重新安装后再卸载
 VERSION_REGEX_INVALID	版本号规则无效
 WEBVIEW2_FAILED	WebView2 安装失败
-WEBVIEW2_REQUIRED	该安装源需要 WebView2
+WEBVIEW2_REQUIRED	该安装源需要 WebView2，请使用「高级安装」
 dialog.cancel	取消
 dialog.copy	复制
 dialog.crash	安装程序发生内部错误，已终止运行。请重新运行安装程序；若问题持续出现，请凭以下编号反馈：{event_id}
 dialog.error	出错了
-dialog.error_title	错误
-dialog.install_failed	安装失败，请重试
+dialog.event_id	事件编号：{event_id}
 dialog.mirrorc_cdk_get	获取 CDK
 dialog.mirrorc_cdk_hint	Mirror酱是独立的第三方软件下载平台，提供付费的软件下载加速服务。如果你有 Mirror酱的 CDK，可以在这里输入。
 dialog.mirrorc_cdk_placeholder	请输入 Mirror酱 CDK
@@ -58,12 +57,8 @@ dialog.mirrorc_cdk_title	设置 Mirror酱 CDK
 dialog.no	否
 dialog.ok	确定
 dialog.prompt	提示
-dialog.temp_dir	无法访问临时文件夹
-dialog.unknown	未知错误，请检查日志
+dialog.session_id	下载会话：{sid}
 dialog.unknown_event	未知
-dialog.webview2_fault	WebView2 初始化失败
-dialog.webview2_required	该安装源需要 WebView2，请使用「高级安装」。
-dialog.window_init_failed	窗口初始化失败
 dialog.yes	是
 done.close	关闭
 done.install	安装完成
@@ -71,24 +66,26 @@ done.latest	您已安装最新版本
 done.launch	启动
 done.uninstall	卸载成功
 done.update	更新完成
-progress.delete	删除 {subject}
-progress.done	安装完成
-progress.download	下载 {subject} ……
+progress.already_latest	已是最新版本
+progress.delete	删除旧版残留文件……
+progress.download	下载 {subject}
 progress.extract	解压 {subject}
 progress.finalize	很快就好……
 progress.hash_scan	校验本地文件……
+progress.install_done	安装完成
 progress.metadata	获取最新版本
 progress.mirrorc_download	准备从Mirror酱下载……
 progress.mirrorc_metadata	从 Mirror酱 获取最新版本
 progress.mirrorc_verify	检查压缩包……
 progress.patch	修补 {subject}
 progress.plan	准备下载……
-progress.prepare	准备中...
-progress.registry	写入注册表
-progress.runtime_download	下载 {subject} ……
-progress.runtime_install	安装{subject}……
-progress.shortcut	创建快捷方式
+progress.prepare	准备中……
+progress.registry	写入注册表……
+progress.runtime_download	下载 {subject}
+progress.runtime_install	安装 {subject}……
+progress.shortcut	创建快捷方式……
 progress.uninstall_delete	正在卸载……
+progress.uninstall_done	卸载完成
 progress.uninstall_scan	准备卸载……
 prompt.occupied_files.message	检测到部分文件被占用，继续安装可能无法成功，是否继续？ {items}
 prompt.occupied_files.title	提示

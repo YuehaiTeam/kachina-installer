@@ -77,23 +77,58 @@ pub fn progress_noop() -> ProgressNotify {
     progress_notify(|_| {})
 }
 
+/// 跨提权管道的错误。`code` 为空表示未挂码，此时 `message` 是整条链的 `{:#}`；
+/// 有码时 `message` 是 `Coded.detail`。`Coded.code` 是 `&'static str`，父进程用
+/// `code_from_str` 映射回常量，未知码按未挂码处理。
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct IpcError {
     pub message: String,
+    pub code: Option<String>,
+    pub subject: Option<String>,
+    pub sid: Option<String>,
+    pub cancelled: bool,
     pub insight: Option<InsightItem>,
 }
 
 impl IpcError {
     pub fn from_ta(err: &TACommandError) -> Self {
+        use crate::utils::code::{extract, Extracted};
+        let (message, code, subject, sid, cancelled) = match extract(&err.error) {
+            Extracted::Coded(c) => (
+                c.detail.clone().unwrap_or_default(),
+                Some(c.code.to_string()),
+                c.subject.clone(),
+                c.sid.clone(),
+                false,
+            ),
+            Extracted::Cancelled => (String::new(), None, None, None, true),
+            Extracted::Uncoded { detail } => (detail, None, None, None, false),
+        };
         Self {
-            message: format!("{:#}", err.error),
+            message,
+            code,
+            subject,
+            sid,
+            cancelled,
             insight: err.insight.clone(),
         }
     }
 
     pub fn into_ta(self) -> TACommandError {
+        use crate::utils::code::{code_from_str, Cancelled, Coded};
+        let error = if self.cancelled {
+            anyhow::Error::new(Cancelled)
+        } else if let Some(code) = self.code.as_deref().and_then(code_from_str) {
+            let mut coded = Coded::bare(code);
+            coded.detail = Some(self.message).filter(|s| !s.is_empty());
+            coded.subject = self.subject;
+            coded.sid = self.sid;
+            anyhow::Error::new(coded)
+        } else {
+            anyhow::anyhow!(self.message)
+        };
         TACommandError {
-            error: anyhow::anyhow!(self.message),
+            error,
             insight: self.insight,
         }
     }
@@ -177,6 +212,10 @@ mod tests {
                     Ok(10),
                     Err(IpcError {
                         message: "boom".into(),
+                        code: None,
+                        subject: None,
+                        sid: None,
+                        cancelled: false,
                         insight: Some(insight(Some("HASH_MISMATCH_ERR"))),
                     }),
                 ],
@@ -215,6 +254,38 @@ mod tests {
             meta,
             PipeMsg::Ok(_, IpcResult::RunMirrorcInstall(Some(s))) if s.contains("tag_name")
         ));
+    }
+
+    #[test]
+    fn coded_error_survives_pipe() {
+        use crate::utils::code::{extract, Attach, Coded, Extracted, DOWNLOAD_TIMEOUT, PERMISSION_DENIED};
+
+        let err = TACommandError::new(
+            Coded::bare_with(DOWNLOAD_TIMEOUT, "cdn.example")
+                .with_sid("sid-1")
+                .wrap(anyhow::anyhow!("timed out (https://cdn.example/a)")),
+        );
+        let back = roundtrip(&PipeMsg::Err("e".into(), IpcError::from_ta(&err)));
+        let PipeMsg::Err(_, ipc) = back else {
+            panic!("variant lost");
+        };
+        let ta = ipc.into_ta();
+        let Extracted::Coded(c) = extract(&ta.error) else {
+            panic!("code lost across pipe");
+        };
+        assert_eq!(c.code, DOWNLOAD_TIMEOUT);
+        assert_eq!(c.subject.as_deref(), Some("cdn.example"));
+        assert_eq!(c.sid.as_deref(), Some("sid-1"));
+        let detail = c.detail.as_deref().unwrap();
+        assert!(detail.contains("timed out") && !detail.contains("https://"));
+
+        let bare = TACommandError::new(anyhow::anyhow!("os error 5").attach(PERMISSION_DENIED));
+        let ta = IpcError::from_ta(&bare).into_ta();
+        assert!(matches!(extract(&ta.error), Extracted::Coded(c) if c.code == PERMISSION_DENIED));
+
+        let plain = TACommandError::new(anyhow::anyhow!("ipc shape"));
+        let ta = IpcError::from_ta(&plain).into_ta();
+        assert!(matches!(extract(&ta.error), Extracted::Uncoded { detail } if detail.contains("ipc shape")));
     }
 
     #[test]

@@ -176,7 +176,8 @@ fn main() {
                         if let Err(err) = session::run::silent_main(install).await {
                             tracing::error!("silent install failed: {}", utils::code::log_line(&err));
                             if utils::code::should_report_error(&err) {
-                                utils::sentry::capture_anyhow(&err);
+                                let event_id = utils::sentry::capture_anyhow(&err);
+                                tracing::error!("reported as event {event_id}");
                             }
                             utils::sentry::flush(Duration::from_secs(3));
                             std::process::exit(1);
@@ -191,10 +192,20 @@ fn main() {
 }
 
 fn crash_dialog(event_id: Option<&str>) {
-    crate::utils::taskdialog::show_error(
-        crate::utils::code::INTERNAL_ERROR,
-        event_id,
-        None,
+    use crate::utils::i18n::t;
+    use crate::utils::taskdialog::{task_dialog, CommandLink, TaskDialogRequest};
+    let unknown = t("dialog.unknown_event", &[]);
+    task_dialog(
+        TaskDialogRequest {
+            title: t("dialog.error", &[]),
+            content: t("dialog.crash", &[("event_id", event_id.unwrap_or(&unknown))]),
+            expanded: None,
+            footer: None,
+            buttons: vec![CommandLink {
+                id: windows::Win32::UI::WindowsAndMessaging::IDOK.0,
+                text: t("dialog.ok", &[]),
+            }],
+        },
         windows::Win32::Foundation::HWND::default(),
     );
 }
@@ -217,14 +228,7 @@ async fn native_entry(args: InstallArgs) {
             }
         Err(err) => {
             tracing::error!("native ui failed: {err:#}");
-            crate::utils::taskdialog::show_error(
-                crate::utils::code::INTERNAL_ERROR,
-                Some(&format!("{err:#}")),
-                None,
-                windows::Win32::Foundation::HWND::default(),
-            );
-            utils::sentry::flush(Duration::from_secs(3));
-            std::process::exit(1);
+            fatal_error(&err);
         }
     }
 }
@@ -236,13 +240,22 @@ fn host_main(
 ) {
     if let Err(err) = host::run(args, preset, gui) {
         tracing::error!("gui host failed: {err:#}");
-        crate::utils::taskdialog::show_error(
-            crate::utils::code::INTERNAL_ERROR,
-            Some(&format!("{err:#}")),
-            None,
-            windows::Win32::Foundation::HWND::default(),
-        );
-        utils::sentry::flush(Duration::from_secs(3));
-        std::process::exit(1);
+        fatal_error(&err);
     }
+}
+
+/// Host-level failure with no renderer alive: report, show the default error
+/// dialog with the event id, exit 1.
+fn fatal_error(err: &anyhow::Error) -> ! {
+    let event_id = if utils::code::should_report_error(err) {
+        Some(utils::sentry::capture_anyhow(err))
+    } else {
+        None
+    };
+    if let Some(mut coded) = utils::code::coded_from_error(err) {
+        coded.event_id = event_id;
+        utils::taskdialog::show_error_coded(&coded, windows::Win32::Foundation::HWND::default());
+    }
+    utils::sentry::flush(Duration::from_secs(3));
+    std::process::exit(1);
 }

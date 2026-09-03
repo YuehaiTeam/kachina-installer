@@ -117,6 +117,11 @@ pub const ALL_CODES: &[&str] = &[
     INTERNAL_ERROR,
 ];
 
+/// Map a code received as text (pipe, JSON) back to its `'static` constant.
+pub fn code_from_str(s: &str) -> Option<&'static str> {
+    ALL_CODES.iter().copied().find(|c| *c == s)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Class {
     N,
@@ -133,6 +138,9 @@ pub struct Coded {
     pub detail: Option<String>,
     pub subject: Option<String>,
     pub sid: Option<String>,
+    /// Sentry event id, filled at the session boundary once the error has been
+    /// reported, so the user can quote it (the copy button includes it).
+    pub event_id: Option<String>,
     #[serde(skip)]
     source: Option<anyhow::Error>,
 }
@@ -144,6 +152,7 @@ impl Clone for Coded {
             detail: self.detail.clone(),
             subject: self.subject.clone(),
             sid: self.sid.clone(),
+            event_id: self.event_id.clone(),
             source: None,
         }
     }
@@ -155,6 +164,7 @@ impl PartialEq for Coded {
             && self.detail == other.detail
             && self.subject == other.subject
             && self.sid == other.sid
+            && self.event_id == other.event_id
     }
 }
 
@@ -165,6 +175,7 @@ impl Coded {
             detail: None,
             subject: None,
             sid: None,
+            event_id: None,
             source: None,
         }
     }
@@ -175,6 +186,7 @@ impl Coded {
             detail: None,
             subject: Some(subject.into()),
             sid: None,
+            event_id: None,
             source: None,
         }
     }
@@ -215,30 +227,81 @@ impl fmt::Display for Cancelled {
 
 impl std::error::Error for Cancelled {}
 
+/// DFS2 session id, hung once by the session layer (`tag_session`) on any
+/// failure after the session exists. `extract` folds it into `Coded.sid` so
+/// inner layers that already hung a code do not need to know the id.
 #[derive(Debug)]
-pub enum Extracted<'a> {
+pub struct DfsSession {
+    pub sid: String,
+    source: anyhow::Error,
+}
+
+impl fmt::Display for DfsSession {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "dfs session {}", self.sid)
+    }
+}
+
+impl std::error::Error for DfsSession {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.source.as_ref())
+    }
+}
+
+pub fn tag_session(err: anyhow::Error, sid: impl Into<String>) -> anyhow::Error {
+    anyhow::Error::new(DfsSession {
+        sid: sid.into(),
+        source: err,
+    })
+}
+
+#[derive(Debug)]
+pub enum Extracted {
     Cancelled,
-    Coded(&'a Coded),
+    Coded(Coded),
     Uncoded { detail: String },
 }
 
-pub fn extract(err: &anyhow::Error) -> Extracted<'_> {
-    let mut coded = None;
+pub fn extract(err: &anyhow::Error) -> Extracted {
+    let mut coded: Option<Coded> = None;
+    let mut sid: Option<&str> = None;
     for cause in err.chain() {
         if cause.downcast_ref::<Cancelled>().is_some() {
             return Extracted::Cancelled;
         }
         if coded.is_none() {
             if let Some(c) = cause.downcast_ref::<Coded>() {
-                coded = Some(c);
+                coded = Some(c.clone());
+            }
+        }
+        if sid.is_none() {
+            if let Some(s) = cause.downcast_ref::<DfsSession>() {
+                sid = Some(&s.sid);
             }
         }
     }
     match coded {
-        Some(c) => Extracted::Coded(c),
+        Some(mut c) => {
+            if c.sid.is_none() {
+                c.sid = sid.map(str::to_string);
+            }
+            Extracted::Coded(c)
+        }
         None => Extracted::Uncoded {
             detail: strip_urls(&format!("{err:#}")),
         },
+    }
+}
+
+/// Whether the copy button is worth showing: someone on the other end can act
+/// on the copied text. Download (N), server (S) and metadata API (M) failures
+/// carry a session / event id the operator can look up; uncoded errors are our
+/// defects. Environment (E), user input (U) and packager config (C) failures
+/// can only be fixed locally, and a broken package cannot report anyway.
+pub fn copy_useful(code: &str) -> bool {
+    match class_of(code) {
+        Some(Class::N | Class::S | Class::M) | None => true,
+        Some(Class::E | Class::U | Class::C) => false,
     }
 }
 
@@ -265,6 +328,7 @@ fn attach_error(err: anyhow::Error, code: &'static str, subject: Option<String>)
             detail: None,
             subject,
             sid: None,
+            event_id: None,
             source: None,
         },
         err,
@@ -374,6 +438,34 @@ pub fn code_for_mirrorc_status(status: i64) -> Option<&'static str> {
         7005 => MIRRORC_CDK_BANNED,
         _ => MIRRORC_FAILED,
     })
+}
+
+/// Mirror酱 API response (`{ code, msg, data }`) → `Coded` with the API's own
+/// `msg` as detail. `None` when `code` is absent or `0`.
+pub fn coded_for_mirrorc_response(status: &serde_json::Value) -> Option<Coded> {
+    let code = status.get("code").and_then(|v| v.as_i64())?;
+    let mapped = code_for_mirrorc_status(code)?;
+    let mut coded = Coded::bare(mapped);
+    coded.detail = status
+        .get("msg")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    Some(coded)
+}
+
+/// `Coded` to render at a session boundary. `None` for user cancel. Uncoded
+/// errors become `INTERNAL_ERROR` with the whole chain as detail.
+pub fn coded_from_error(err: &anyhow::Error) -> Option<Coded> {
+    match extract(err) {
+        Extracted::Cancelled => None,
+        Extracted::Coded(c) => Some(c),
+        Extracted::Uncoded { detail } => {
+            let mut c = Coded::bare(INTERNAL_ERROR);
+            c.detail = Some(detail).filter(|d| !d.is_empty());
+            Some(c)
+        }
+    }
 }
 
 fn strip_urls(input: &str) -> String {
@@ -493,24 +585,65 @@ fn code_for_io_kind(kind: std::io::ErrorKind) -> &'static str {
     }
 }
 
-fn download_code(err: &anyhow::Error) -> &'static str {
-    for cause in err.chain() {
+pub fn code_for_network_type(kind: &crate::fs::NetworkErrorType) -> &'static str {
+    use crate::fs::NetworkErrorType as N;
+    match kind {
+        N::DownloadStalled | N::DownloadTooSlow => DOWNLOAD_STALLED,
+        N::ConnectionTimeout | N::RequestTimeout => DOWNLOAD_TIMEOUT,
+        N::DnsResolutionFailed | N::NetworkUnreachable => DOWNLOAD_REFUSED,
+        _ => DOWNLOAD_FAILED,
+    }
+}
+
+/// `io::Error::source()` skips the custom payload itself, so the stream layer's
+/// `ClassifiedNetworkError` has to be read through `get_ref()`.
+fn classified_ref(io: &std::io::Error) -> Option<&crate::fs::ClassifiedNetworkError> {
+    io.get_ref()
+        .and_then(|e| e.downcast_ref::<crate::fs::ClassifiedNetworkError>())
+}
+
+/// Download-family code inferred from typed causes only. `None` when the chain
+/// has no network / io / HTTP-status cause (e.g. a malformed API response).
+fn download_code(err: &anyhow::Error) -> Option<&'static str> {
+    download_code_in(err.chain())
+}
+
+fn download_code_in<'a>(
+    chain: impl IntoIterator<Item = &'a (dyn std::error::Error + 'static)>,
+) -> Option<&'static str> {
+    for cause in chain {
+        if let Some(c) = cause.downcast_ref::<crate::fs::ClassifiedNetworkError>() {
+            return Some(code_for_network_type(&c.error_type));
+        }
         if let Some(io) = cause.downcast_ref::<std::io::Error>() {
-            let msg = io.to_string();
-            if msg == crate::utils::error::DOWNLOAD_STALLED
-                || msg == crate::utils::error::DOWNLOAD_TOO_SLOW
-            {
-                return DOWNLOAD_STALLED;
+            if let Some(c) = classified_ref(io) {
+                return Some(code_for_network_type(&c.error_type));
             }
+            return Some(code_for_io_kind(io.kind()));
         }
         if let Some(e) = reqwest_ref(cause) {
-            return code_for_reqwest(e);
+            return Some(code_for_reqwest(e));
         }
-        if let Some(io) = cause.downcast_ref::<std::io::Error>() {
-            return code_for_io_kind(io.kind());
+        if cause.downcast_ref::<crate::dfs::HttpStatus>().is_some() {
+            return Some(SERVER_HTTP_ERROR);
         }
     }
-    DOWNLOAD_FAILED
+    None
+}
+
+/// Code to record in `InsightItem.error`: the hung code if any, otherwise the
+/// download-family inference, otherwise `INTERNAL_ERROR`.
+pub fn insight_code(err: &anyhow::Error) -> &'static str {
+    match extract(err) {
+        Extracted::Cancelled => "cancelled",
+        Extracted::Coded(c) => c.code,
+        Extracted::Uncoded { .. } => download_code(err).unwrap_or(INTERNAL_ERROR),
+    }
+}
+
+pub fn insight_code_for_io(io: &std::io::Error) -> &'static str {
+    let dyn_err: &(dyn std::error::Error + 'static) = io;
+    download_code_in(std::iter::once(dyn_err)).unwrap_or(FILE_IO_FAILED)
 }
 
 fn metadata_code(err: &anyhow::Error) -> &'static str {
@@ -518,52 +651,46 @@ fn metadata_code(err: &anyhow::Error) -> &'static str {
         if cause.downcast_ref::<serde_json::Error>().is_some() {
             return METADATA_INVALID;
         }
+        if cause.downcast_ref::<crate::dfs::HttpStatus>().is_some() {
+            return METADATA_HTTP_ERROR;
+        }
         if let Some(e) = reqwest_ref(cause) {
-            if e.is_timeout() || e.is_connect() {
-                return METADATA_UNREACHABLE;
-            }
             if e.status().is_some() {
                 return METADATA_HTTP_ERROR;
             }
             return METADATA_UNREACHABLE;
         }
-        if let Some(io) = cause.downcast_ref::<std::io::Error>() {
-            return match io.kind() {
-                std::io::ErrorKind::TimedOut
-                | std::io::ErrorKind::ConnectionRefused
-                | std::io::ErrorKind::ConnectionReset
-                | std::io::ErrorKind::ConnectionAborted
-                | std::io::ErrorKind::NotConnected
-                | std::io::ErrorKind::UnexpectedEof
-                | std::io::ErrorKind::BrokenPipe => METADATA_UNREACHABLE,
-                _ => METADATA_UNREACHABLE,
-            };
+        if cause.downcast_ref::<std::io::Error>().is_some() {
+            return METADATA_UNREACHABLE;
         }
     }
-    let head = format!("{err}");
-    let status = head.split([':', ' ']).next().unwrap_or("");
-    if status.parse::<u16>().is_ok() {
-        return METADATA_HTTP_ERROR;
-    }
-    METADATA_UNREACHABLE
+    METADATA_INVALID
 }
 
-/// Hang a download-family code inferred from reqwest / io. Idempotent.
+/// Hang a download-family code inferred from typed network / io causes;
+/// `DOWNLOAD_FAILED` when none is found. Idempotent.
 pub fn attach_download(
     err: anyhow::Error,
+    subject: Option<&str>,
+    sid: Option<&str>,
+) -> anyhow::Error {
+    attach_download_or(err, DOWNLOAD_FAILED, subject, sid)
+}
+
+/// Like `attach_download`, but a chain without any network / io / HTTP-status
+/// cause (the peer answered, the answer is unusable) gets `fallback` instead.
+pub fn attach_download_or(
+    err: anyhow::Error,
+    fallback: &'static str,
     subject: Option<&str>,
     sid: Option<&str>,
 ) -> anyhow::Error {
     if already_coded(&err) {
         return err;
     }
-    let mut coded = Coded::bare(download_code(&err));
-    if let Some(s) = subject {
-        coded.subject = Some(s.to_string());
-    }
-    if let Some(s) = sid {
-        coded.sid = Some(s.to_string());
-    }
+    let mut coded = Coded::bare(download_code(&err).unwrap_or(fallback));
+    coded.subject = subject.map(str::to_string);
+    coded.sid = sid.map(str::to_string);
     attach_coded(coded, err)
 }
 
@@ -710,6 +837,85 @@ mod tests {
             }
             other => panic!("expected Coded, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn download_or_uses_fallback_only_without_network_cause() {
+        let typed = attach_download_or(
+            anyhow::Error::new(std::io::Error::from(std::io::ErrorKind::TimedOut)),
+            NO_DOWNLOAD_NODE,
+            None,
+            None,
+        );
+        assert!(matches!(extract(&typed), Extracted::Coded(c) if c.code == DOWNLOAD_TIMEOUT));
+
+        let status = attach_download_or(
+            anyhow::Error::new(crate::dfs::HttpStatus::new(503, "busy")),
+            NO_DOWNLOAD_NODE,
+            None,
+            None,
+        );
+        assert!(matches!(extract(&status), Extracted::Coded(c) if c.code == SERVER_HTTP_ERROR));
+
+        let garbage = attach_download_or(
+            anyhow::anyhow!("Invalid challenge"),
+            NO_DOWNLOAD_NODE,
+            None,
+            None,
+        );
+        assert!(matches!(extract(&garbage), Extracted::Coded(c) if c.code == NO_DOWNLOAD_NODE));
+
+        let stalled = attach_download(
+            anyhow::Error::new(std::io::Error::from(crate::fs::ClassifiedNetworkError::new(
+                crate::fs::NetworkErrorType::DownloadStalled,
+                Box::new(std::io::Error::other("stalled")),
+                "https://x".into(),
+                vec![],
+            ))),
+            None,
+            None,
+        );
+        assert!(matches!(extract(&stalled), Extracted::Coded(c) if c.code == DOWNLOAD_STALLED));
+    }
+
+    #[test]
+    fn metadata_code_is_typed() {
+        let http = attach_metadata(anyhow::Error::new(crate::dfs::HttpStatus::new(500, "x")));
+        assert!(matches!(extract(&http), Extracted::Coded(c) if c.code == METADATA_HTTP_ERROR));
+        let json = attach_metadata(serde_json::from_str::<u8>("nope").unwrap_err().into());
+        assert!(matches!(extract(&json), Extracted::Coded(c) if c.code == METADATA_INVALID));
+        assert_eq!(code_from_str("PKG_BROKEN"), Some(PKG_BROKEN));
+        assert_eq!(code_from_str("NOPE"), None);
+    }
+
+    #[test]
+    fn session_id_folds_into_coded_and_copy_rule_follows_class() {
+        let inner = anyhow::anyhow!("mismatch").attach(HASH_MISMATCH);
+        let err = tag_session(inner, "sid-9");
+        let Extracted::Coded(c) = extract(&err) else {
+            panic!("coded lost under session tag");
+        };
+        assert_eq!(c.code, HASH_MISMATCH);
+        assert_eq!(c.sid.as_deref(), Some("sid-9"));
+
+        let explicit = tag_session(
+            Coded::bare(DOWNLOAD_FAILED)
+                .with_sid("sid-own")
+                .wrap(anyhow::anyhow!("x")),
+            "sid-outer",
+        );
+        let Extracted::Coded(c) = extract(&explicit) else {
+            panic!("coded lost");
+        };
+        assert_eq!(c.sid.as_deref(), Some("sid-own"), "an explicit sid wins");
+
+        assert!(copy_useful(DOWNLOAD_TIMEOUT));
+        assert!(copy_useful(NO_DOWNLOAD_NODE));
+        assert!(copy_useful(METADATA_INVALID));
+        assert!(copy_useful(INTERNAL_ERROR));
+        assert!(!copy_useful(PERMISSION_DENIED));
+        assert!(!copy_useful(MIRRORC_CDK_EXPIRED));
+        assert!(!copy_useful(PKG_BROKEN));
     }
 
     #[test]

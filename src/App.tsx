@@ -2,7 +2,16 @@ import { useEffect, useState } from 'preact/hooks';
 import { invoke, listen } from './host';
 import { ready as i18nReady } from './i18n';
 import { t } from './i18n';
-import { intent, isDone, isFailed, isRunning, state, type Coded, type UiState } from './state';
+import {
+  errorDialogArgs,
+  intent,
+  isDone,
+  isFailed,
+  isRunning,
+  state,
+  type Coded,
+  type UiState,
+} from './state';
 import { Ready } from './screens/Ready';
 import { Running } from './screens/Running';
 import { Done } from './screens/Done';
@@ -90,11 +99,7 @@ export function App() {
     void invoke('window_show');
     let unsub: (() => void) | undefined;
     void listen<Coded>('ui-notice', (coded) => {
-      void invoke('error_dialog', {
-        code: coded.code,
-        detail: coded.detail,
-        subject: coded.subject,
-      });
+      void invoke('error_dialog', errorDialogArgs(coded));
     }).then((fn) => {
       unsub = fn;
     });
