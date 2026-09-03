@@ -2,10 +2,6 @@ use std::mem::size_of;
 use std::os::windows::ffi::OsStrExt;
 
 use anyhow::Context;
-use raw_window_handle::{
-    DisplayHandle, HandleError, HasDisplayHandle, HasWindowHandle, RawDisplayHandle,
-    RawWindowHandle, Win32WindowHandle, WindowHandle, WindowsDisplayHandle,
-};
 use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Dwm::{
@@ -48,24 +44,6 @@ impl HwndParent {
 
 unsafe impl Send for HwndParent {}
 unsafe impl Sync for HwndParent {}
-
-impl HasWindowHandle for HwndParent {
-    fn window_handle(&self) -> Result<WindowHandle<'_>, HandleError> {
-        let hwnd = NonZeroIsize::new(self.0).ok_or(HandleError::Unavailable)?;
-        let handle = Win32WindowHandle::new(hwnd);
-        Ok(unsafe { WindowHandle::borrow_raw(RawWindowHandle::Win32(handle)) })
-    }
-}
-
-impl HasDisplayHandle for HwndParent {
-    fn display_handle(&self) -> Result<DisplayHandle<'_>, HandleError> {
-        Ok(unsafe {
-            DisplayHandle::borrow_raw(RawDisplayHandle::Windows(WindowsDisplayHandle::new()))
-        })
-    }
-}
-
-use std::num::NonZeroIsize;
 
 const CLASS: PCWSTR = w!("KachinaInstaller");
 const PLUGIN_CLASS: PCWSTR = w!("KachinaPluginHost");

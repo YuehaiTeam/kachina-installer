@@ -2,6 +2,7 @@ pub mod acl;
 pub mod code;
 pub mod dir;
 pub mod error;
+pub mod folderdialog;
 pub mod gui;
 pub mod hash;
 pub mod i18n;

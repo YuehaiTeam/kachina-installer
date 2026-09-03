@@ -36,28 +36,6 @@ pub struct SelectDirRes {
     pub upgrade: bool,
 }
 
-pub async fn select_dir(
-    path: String,
-    exe_name: String,
-    silent: bool,
-    parent: crate::host::HwndParent,
-) -> Option<SelectDirRes> {
-    let pathstr = if silent {
-        path.clone()
-    } else {
-        let res = rfd::AsyncFileDialog::new()
-            .set_directory(path)
-            .set_can_create_directories(true)
-            .set_parent(&parent)
-            .pick_folder()
-            .await;
-        res.as_ref()?;
-        let res = res.unwrap();
-        res.path().to_str().map(|s| s.to_string())?
-    };
-    inspect_dir(pathstr, exe_name).await
-}
-
 /// What the installer knows about a target directory. Single source for the
 /// GUI/native `UiState.path`, `Settings.elevate` / `is_update`, and the
 /// directory picker; `None` when the path is an existing file.
@@ -316,13 +294,7 @@ pub async fn pick_install_path(
     app_name: &str,
     parent: crate::host::HwndParent,
 ) -> Option<String> {
-    let picked = rfd::AsyncFileDialog::new()
-        .set_directory(current)
-        .set_can_create_directories(true)
-        .set_parent(&parent)
-        .pick_folder()
-        .await?;
-    let path = picked.path().to_str()?.to_string();
+    let path = crate::utils::folderdialog::pick_folder(current.to_string(), parent).await?;
     let seldir = inspect_dir(path, exe_name.to_string()).await?;
     apply_path_choice(seldir, app_name, parent).await
 }
