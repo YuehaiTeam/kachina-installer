@@ -10,7 +10,7 @@ use tokio::sync::{oneshot, Mutex};
 use crate::host::HostHandle;
 use crate::session::state::{Phase, Prompt, UiState};
 use crate::session::types::PluginEvent;
-use crate::utils::code::Coded;
+use crate::utils::code::{log_line, Coded};
 
 #[derive(Debug, Clone, Copy)]
 pub enum PromptKind {
@@ -111,10 +111,9 @@ impl SessionUi for SilentUi {
                     p.total
                 );
             }
-            Phase::Failed(c) => match c.detail.as_deref().filter(|d| !d.is_empty()) {
-                Some(d) => tracing::error!("{}: {d}", c.code),
-                None => tracing::error!("{}", c.code),
-            },
+            Phase::Failed(c) => {
+                tracing::error!("{}", log_line(&anyhow::Error::from(c.clone())));
+            }
             _ => {}
         }
     }
@@ -124,10 +123,7 @@ impl SessionUi for SilentUi {
     }
 
     fn notify(&self, coded: &Coded) {
-        match coded.detail.as_deref().filter(|d| !d.is_empty()) {
-            Some(d) => tracing::error!("{}: {d}", coded.code),
-            None => tracing::error!("{}", coded.code),
-        }
+        tracing::error!("{}", log_line(&anyhow::Error::from(coded.clone())));
     }
 }
 

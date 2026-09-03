@@ -26,7 +26,8 @@ MIRRORC_UNREACHABLE	无法连接 Mirror酱，请检查网络连接后重试
 NO_DOWNLOAD_NODE	没有可用的下载节点
 PERMISSION_DENIED	拒绝访问
 PKG_BROKEN	安装包损坏，请重新下载
-PLUGIN_FAILED	插件宿主启动失败
+PLUGIN_FAILED	插件执行失败
+PLUGIN_HOST_FAILED	插件宿主启动失败
 PLUGIN_NOT_FOUND	未找到插件
 PLUGIN_NO_UI	该安装源需要图形界面
 PROCESS_KILL_FAILED	结束进程失败

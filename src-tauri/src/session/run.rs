@@ -45,7 +45,8 @@ use crate::utils::code::{
     HASH_ALGORITHM_UNSUPPORTED,
     METADATA_UNREACHABLE, MIRRORC_CDK_MISSING, MIRRORC_CONFIG_INVALID, MIRRORC_FAILED,
     MIRRORC_UNREACHABLE, NO_DOWNLOAD_NODE, PKG_BROKEN, PROCESS_KILL_FAILED, REGISTRY_WRITE_FAILED,
-    RUNTIME_INSTALL_FAILED, TEMP_DIR_UNAVAILABLE, UNINSTALL_INFO_MISSING, WEBVIEW2_REQUIRED,
+    RUNTIME_INSTALL_FAILED, SHORTCUT_FAILED, TEMP_DIR_UNAVAILABLE, UNINSTALL_INFO_MISSING,
+    WEBVIEW2_REQUIRED,
 };
 use crate::thirdparty::mirrorc::get_mirrorc_status;
 use crate::utils::error::IntoAnyhow;
@@ -176,6 +177,19 @@ impl<'a> LiveUi<'a> {
 fn notify_error(ui: &LiveUi<'_>, err: anyhow::Error) {
     if let Some(coded) = coded_from_error(&err) {
         ui.notify(&coded);
+    }
+}
+
+async fn create_lnk_or_notify(
+    mgr: &ManagedElevate,
+    elevate: bool,
+    args: CreateLnkArgs,
+    ui: &LiveUi<'_>,
+) {
+    let lnk = args.lnk.clone();
+    if let Err(err) = run_op(mgr, elevate, IpcOperation::CreateLnk(args), progress_noop()).await {
+        tracing::warn!("create shortcut failed: {err:#}");
+        notify_error(ui, err.attach_with(SHORTCUT_FAILED, lnk));
     }
 }
 
@@ -1898,26 +1912,26 @@ async fn finish_install(
     );
     progress(ui, 3, 98.0, "shortcut", None, None, None);
     if settings.create_lnk && !settings.is_update {
-        let _ = run_op(
+        create_lnk_or_notify(
             mgr,
             settings.elevate,
-            IpcOperation::CreateLnk(CreateLnkArgs {
+            CreateLnkArgs {
                 target: exe_path.clone(),
                 lnk: desktop_lnk,
-            }),
-            progress_noop(),
+            },
+            ui,
         )
         .await;
     }
     if !settings.is_update {
-        let _ = run_op(
+        create_lnk_or_notify(
             mgr,
             settings.elevate,
-            IpcOperation::CreateLnk(CreateLnkArgs {
+            CreateLnkArgs {
                 target: exe_path.clone(),
                 lnk: program_lnk,
-            }),
-            progress_noop(),
+            },
+            ui,
         )
         .await;
     }
@@ -1937,14 +1951,14 @@ async fn finish_install(
             tracing::warn!("create uninstaller failed: {err:#}");
             notify_error(ui, err.attach_with(FILE_IO_FAILED, project.uninstall_name.clone()));
         }
-        let _ = run_op(
+        create_lnk_or_notify(
             mgr,
             settings.elevate,
-            IpcOperation::CreateLnk(CreateLnkArgs {
+            CreateLnkArgs {
                 target: join_install(&settings.install_path, &project.uninstall_name),
                 lnk: uninstall_lnk,
-            }),
-            progress_noop(),
+            },
+            ui,
         )
         .await;
     }

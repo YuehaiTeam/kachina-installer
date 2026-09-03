@@ -5,6 +5,7 @@ use windows::Win32::UI::Shell::{
 };
 
 use crate::utils::{
+    code::{Attach, SHORTCUT_FAILED},
     dir::get_dir,
     error::{IntoAnyhow, TAResult},
 };
@@ -15,7 +16,11 @@ pub struct CreateLnkArgs {
     pub lnk: String,
 }
 pub async fn create_lnk_with_args(args: CreateLnkArgs) -> Result<()> {
-    create_lnk(args.target, args.lnk).await.into_anyhow()
+    let lnk = args.lnk.clone();
+    create_lnk(args.target, args.lnk)
+        .await
+        .into_anyhow()
+        .attach_with(SHORTCUT_FAILED, lnk)
 }
 
 pub async fn create_lnk(target: String, lnk: String) -> TAResult<()> {

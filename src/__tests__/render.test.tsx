@@ -76,11 +76,12 @@ describe('screens', () => {
     expect(screen.getByText('卸载成功')).toBeTruthy();
   });
 
-  it('renders failed then posts error_dialog', async () => {
+  it('renders failed then posts error_dialog then dismiss', async () => {
     await mount(failed('PKG_BROKEN'));
     await waitFor(() => {
       expect(posted.some((m) => (m as { cmd?: string }).cmd === 'error_dialog')).toBe(true);
     });
+    await waitFor(() => expect(lastIntent()).toEqual({ kind: 'dismiss' }));
   });
 
   it('renders process_running prompt', async () => {
