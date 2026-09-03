@@ -44,10 +44,10 @@ Status: implemented
 | 真实拉起并取退出码 | PASS：`spawn_hidden_cmd_and_read_exit_code` 以 `hide_window` 拉起 `cmd /C exit 7`，`wait` 返回 7；`spawn_missing_program_fails` 对不存在的程序返回 `Err` |
 | `shell_open` 失败不弹窗 | PASS：`shell_open_missing_target_fails_without_dialog` 对不存在的路径返回 `Err`，测试进程无对话框 |
 | std `Command` 代码不再链入 | PASS：`cargo bloat --filter "process::|shell_open|ShellExecute"` 合计 5.5KiB，均为名字含 `process` 的无关函数（`prepare_process`、`kill_process` 等）；`spawn_with_attributes`、`EnvKey` `BTreeMap`、`Stdio::to_handle` 消失 |
-| 体积 | PASS：3,048,448 → 2,987,008 字节（−61,440；.text 2,385,920 → 2,334,208，.rdata 476,672 → 468,480；本机 x86_64-pc-windows-msvc、opt-level=z + LTO、非 build-std，在 `src-tauri` 目录内构建以载入 `.cargo/config.toml` 的静态 CRT 配置）。基线为 [Native 重构 CR 第二轮遗留](../proposed/2026-09-02-native-refactor-cr-followup.md) 两次修复提交之后的 HEAD |
+| 体积 | PASS：3,048,448 → 2,987,008 字节（−61,440；.text 2,385,920 → 2,334,208，.rdata 476,672 → 468,480；本机 x86_64-pc-windows-msvc、opt-level=z + LTO、非 build-std，在 `src-tauri` 目录内构建以载入 `.cargo/config.toml` 的静态 CRT 配置；两次测量时 `dist/index.html` 均未构建，前端 HTML 未嵌入，含前端的绝对值各高约 68 KiB，差值不受影响）。基线为 [Native 重构 CR 第二轮遗留](./2026-09-02-native-refactor-cr-followup.md) 两次修复提交之后的 HEAD |
 | .NET 检测两个来源在本机一致 | PASS：`%ProgramFiles%\dotnet\shared\Microsoft.WindowsDesktop.App` 目录与 `WOW6432Node\…\sharedfx\Microsoft.WindowsDesktop.App` 值名对 major 6/7/8/9 结论相同；64 位视图 `HKLM\SOFTWARE\dotnet\…\sharedfx` 下无值，`InstallLocation` 与 `sharedhost\Version` 均不存在 |
 | 单测 | PASS：`cargo test` 13 passed（kachina-builder）+ 69 passed, 1 ignored（kachina-installer） |
-| CI 产物（x86_64-win7-windows-msvc + build-std + optimize_for_size） | 待 CI 构建后补录；build-std 下 std 的 `Command` 实现同样受益，预期降幅不低于本机 |
+| CI 产物（x86_64-win7-windows-msvc + build-std + optimize_for_size） | PASS：2,753,536 → 2,720,768 字节（−32,768）。降幅约为本机的一半：CI 的 std 由 build-std 按 `opt-level = "z"` 编译，被移除的 `Command` 实现在该配置下本就小于本机预编译 std 中的版本 |
 
 ## Consequences
 
