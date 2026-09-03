@@ -1,3 +1,6 @@
+pub mod commit;
+pub mod staging;
+
 use crate::utils::code::{code_for_network_type, Attach};
 use async_compression::tokio::bufread::ZstdDecoder as TokioZstdDecoder;
 use bytes::Bytes;
@@ -6,7 +9,7 @@ use futures::Stream;
 use futures::TryStreamExt;
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     os::windows::fs::MetadataExt,
     path::{Path, PathBuf},
     pin::Pin,
@@ -21,7 +24,6 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader, R
 
 use crate::{
     dfs::{apply_insight_io_error, InsightItem},
-    installer::uninstall::DELETE_SELF_ON_EXIT_PATH,
     ipc::{Progress, ProgressNotify},
     local::mmap,
     utils::{
@@ -478,62 +480,199 @@ pub struct Metadata {
     pub unwritable: bool,
 }
 
+/// One enumeration pass over the install directory: stat + hash of every
+/// managed file, plus which directories are not wholly ours.
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+pub struct LocalScan {
+    pub files: Vec<Metadata>,
+    /// Existing directories (relative, `/`, lowercase, `""` = root) that hold
+    /// something the metadata does not manage — an unmanaged file, an
+    /// unmanaged or empty subdirectory, a reparse point, or a subtree whose
+    /// managed files are all hash-skipped (user data). Such a directory cannot
+    /// be swapped as one unit.
+    pub dirty_dirs: Vec<String>,
+    /// Subdirectories that are reparse points (junction / symlink); managed
+    /// files under them are committed by copy, not rename.
+    pub reparse_dirs: Vec<String>,
+}
+
+fn norm_rel(name: &str) -> String {
+    name.replace('\\', "/")
+        .trim_start_matches('/')
+        .to_lowercase()
+}
+
+struct ScanWalk<'a> {
+    root: &'a Path,
+    /// lowercase `/` rel → rel as listed in the metadata
+    managed: &'a HashMap<String, String>,
+    managed_dirs: &'a HashSet<String>,
+    all_skip_dirs: &'a HashSet<String>,
+    stat: Vec<(String, u64)>,
+    dirty: Vec<String>,
+    reparse: Vec<String>,
+}
+
+fn join_lower(dir: &str, name: &str) -> String {
+    if dir.is_empty() {
+        name.to_lowercase()
+    } else {
+        format!("{dir}/{}", name.to_lowercase())
+    }
+}
+
+impl ScanWalk<'_> {
+    /// Stat the managed files under `rel` one by one (subtree not entered).
+    fn stat_individually(&mut self, rel: &str) {
+        let prefix = format!("{rel}/");
+        let under: Vec<String> = self
+            .managed
+            .iter()
+            .filter(|(m, _)| m.starts_with(&prefix))
+            .map(|(_, orig)| orig.clone())
+            .collect();
+        for orig in under {
+            let path = staging::join_rel(self.root, &orig);
+            if let Ok(meta) = std::fs::metadata(&path) {
+                if meta.is_file() {
+                    self.stat.push((orig, meta.len()));
+                }
+            }
+        }
+    }
+
+    fn walk(&mut self, path: &Path, rel: &str) -> std::io::Result<bool> {
+        let mut clean = true;
+        for entry in std::fs::read_dir(path)? {
+            let entry = entry?;
+            let name = entry.file_name().to_string_lossy().to_string();
+            let sub_rel = join_lower(rel, &name);
+            let meta = entry.metadata()?;
+            let is_link = meta.file_type().is_symlink() || commit::is_reparse(&meta);
+            if is_link || meta.is_dir() {
+                if is_link {
+                    clean = false;
+                    self.reparse.push(sub_rel.clone());
+                    self.stat_individually(&sub_rel);
+                    continue;
+                }
+                if !self.managed_dirs.contains(&sub_rel) {
+                    clean = false;
+                    continue;
+                }
+                if self.all_skip_dirs.contains(&sub_rel) {
+                    clean = false;
+                    self.stat_individually(&sub_rel);
+                    continue;
+                }
+                if !self.walk(&entry.path(), &sub_rel)? {
+                    clean = false;
+                }
+            } else if let Some(orig) = self.managed.get(&sub_rel) {
+                self.stat.push((orig.clone(), meta.len()));
+            } else {
+                clean = false;
+            }
+        }
+        if !clean {
+            self.dirty.push(rel.to_string());
+        }
+        Ok(clean)
+    }
+}
+
+fn parent_dirs(rel: &str) -> impl Iterator<Item = String> + '_ {
+    let mut acc = String::new();
+    let parts: Vec<&str> = rel.split('/').collect();
+    let dirs = parts[..parts.len().saturating_sub(1)].to_vec();
+    std::iter::once(String::new()).chain(dirs.into_iter().map(move |p| {
+        if !acc.is_empty() {
+            acc.push('/');
+        }
+        acc.push_str(p);
+        acc.clone()
+    }))
+}
+
+fn enumerate(
+    source: &Path,
+    managed: &HashMap<String, String>,
+    skip_hash: &HashSet<String>,
+) -> Result<(Vec<(String, u64)>, Vec<String>, Vec<String>)> {
+    let mut managed_dirs: HashSet<String> = HashSet::new();
+    let mut dir_files: HashMap<String, (usize, usize)> = HashMap::new();
+    for m in managed.keys() {
+        for d in parent_dirs(m) {
+            managed_dirs.insert(d.clone());
+            let e = dir_files.entry(d).or_insert((0, 0));
+            e.0 += 1;
+            if skip_hash.contains(m) {
+                e.1 += 1;
+            }
+        }
+    }
+    let all_skip_dirs: HashSet<String> = dir_files
+        .iter()
+        .filter(|(d, (total, skipped))| !d.is_empty() && total == skipped)
+        .map(|(d, _)| d.clone())
+        .collect();
+    let mut walk = ScanWalk {
+        root: source,
+        managed,
+        managed_dirs: &managed_dirs,
+        all_skip_dirs: &all_skip_dirs,
+        stat: Vec::new(),
+        dirty: Vec::new(),
+        reparse: Vec::new(),
+    };
+    walk.walk(source, "").context("GET_METADATA_ERR")?;
+    Ok((walk.stat, walk.dirty, walk.reparse))
+}
+
 pub async fn check_local_files(
     source: String,
     hash_algorithm: String,
     file_list: Vec<String>,
     skip_hash: Vec<String>,
     notify: ProgressNotify,
-) -> Result<Vec<Metadata>> {
-    let source_path = Path::new(&source);
+) -> Result<LocalScan> {
+    let source_path = PathBuf::from(&source);
     if !source_path.exists() {
-        return Ok(Vec::new());
+        return Ok(LocalScan::default());
     }
-    let skip_hash: HashSet<String> = skip_hash
-        .into_iter()
-        .map(|name| {
-            name.replace('\\', "/")
-                .trim_start_matches('/')
-                .to_lowercase()
+    let skip_hash: HashSet<String> = skip_hash.iter().map(|n| norm_rel(n)).collect();
+    let managed: HashMap<String, String> = file_list
+        .iter()
+        .map(|n| {
+            (
+                norm_rel(n),
+                n.replace('\\', "/").trim_start_matches('/').to_string(),
+            )
         })
+        .filter(|(n, _)| !n.is_empty())
         .collect();
+
+    let (stat, dirty_dirs, reparse_dirs) = {
+        let source_path = source_path.clone();
+        let managed = managed.clone();
+        let skip_hash = skip_hash.clone();
+        tokio::task::spawn_blocking(move || enumerate(&source_path, &managed, &skip_hash))
+            .await
+            .context("SCAN_THREAD_ERR")??
+    };
+
     let mut files = Vec::new();
     let mut stated = Vec::new();
-    let mut seen_paths = HashSet::new();
-
-    for file in file_list {
-        let relative_path = file.trim_start_matches(['/', '\\']);
-        if relative_path.is_empty() {
-            continue;
-        }
-
-        let normalized_relative_path = relative_path.replace('\\', "/");
-        if !seen_paths.insert(normalized_relative_path.to_lowercase()) {
-            continue;
-        }
-
-        let mut target_path = PathBuf::from(&source);
-        for part in normalized_relative_path
-            .split('/')
-            .filter(|part| !part.is_empty())
-        {
-            target_path.push(part);
-        }
-
-        let metadata = match tokio::fs::metadata(&target_path).await {
-            Ok(metadata) if metadata.is_file() => metadata,
-            Ok(_) => continue,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(e) => return Err(anyhow::Error::new(e).context("GET_METADATA_ERR")),
-        };
-
+    for (rel, size) in stat {
         let item = Metadata {
-            file_name: target_path.to_string_lossy().to_string(),
-            hash: "".to_string(),
-            size: metadata.len(),
+            file_name: staging::join_rel(&source_path, &rel)
+                .to_string_lossy()
+                .to_string(),
+            hash: String::new(),
+            size,
             unwritable: false,
         };
-        if skip_hash.contains(&normalized_relative_path.to_lowercase()) {
+        if skip_hash.contains(&norm_rel(&rel)) {
             stated.push(item);
         } else {
             files.push(item);
@@ -546,15 +685,23 @@ pub async fn check_local_files(
         done: 0,
         total: len as u64,
     });
+    let scan = LocalScan {
+        files: Vec::new(),
+        dirty_dirs,
+        reparse_dirs,
+    };
     if len == 0 {
-        return Ok(Vec::new());
+        return Ok(scan);
     }
     if files.is_empty() {
         notify(Progress::CountOf {
             done: len as u64,
             total: len as u64,
         });
-        return Ok(stated);
+        return Ok(LocalScan {
+            files: stated,
+            ..scan
+        });
     }
 
     let hash_concurrency = std::thread::available_parallelism()
@@ -598,7 +745,10 @@ pub async fn check_local_files(
         }
     }
 
-    Ok(finished_hashes)
+    Ok(LocalScan {
+        files: finished_hashes,
+        ..scan
+    })
 }
 
 pub async fn probe_writable(file_list: Vec<String>) -> Vec<String> {
@@ -870,42 +1020,32 @@ pub async fn create_local_stream(
     Ok(Box::new(decoder))
 }
 
-pub async fn prepare_target(target: &str) -> Result<Option<PathBuf>, anyhow::Error> {
-    let target = Path::new(&target);
-    let exe_path = std::env::current_exe().context("GET_EXE_PATH_ERR")?;
-    let mut override_path = None;
-
-    // check if target is the same as exe path
-    if exe_path == target && exe_path.exists() {
-        // if same, rename the exe to exe.old
-        let old_exe = exe_path.with_extension("instbak");
-        // delete old_exe if exists
-        let _ = tokio::fs::remove_file(&old_exe).await;
-        // rename current exe to old_exe
-        tokio::fs::rename(&exe_path, &old_exe)
+/// Create a file under the staging directory (parents included). This is the
+/// only producer of files in the install pipeline; nothing writes into the
+/// install directory directly.
+pub async fn create_staged_file(
+    path: &Path,
+) -> Result<tokio::io::BufWriter<tokio::fs::File>, anyhow::Error> {
+    if let Some(parent) = path.parent() {
+        tokio::fs::create_dir_all(parent)
             .await
-            .context("RENAME_EXE_ERR")?;
-        override_path = Some(old_exe.clone());
-        DELETE_SELF_ON_EXIT_PATH
-            .write()
-            .unwrap()
-            .replace(old_exe.to_string_lossy().to_string());
+            .context("CREATE_PARENT_DIR_ERR")?;
     }
-
-    // ensure dir
-    let parent = target.parent().context("GET_PARENT_DIR_ERR")?;
-    tokio::fs::create_dir_all(parent)
-        .await
-        .context("CREATE_PARENT_DIR_ERR")?;
-    Ok(override_path)
-}
-
-pub async fn create_target_file(target: &str) -> Result<impl AsyncWrite, anyhow::Error> {
-    let target_file = tokio::fs::File::create(target)
+    let file = tokio::fs::File::create(path)
         .await
         .context("CREATE_TARGET_FILE_ERR")?;
-    let target_file = tokio::io::BufWriter::new(target_file);
-    Ok(target_file)
+    Ok(tokio::io::BufWriter::new(file))
+}
+
+/// `FlushFileBuffers` on a finished staged file: rename is atomic only for
+/// metadata, so an unflushed file swapped in right before power loss would
+/// come back truncated.
+pub async fn sync_staged_file(path: &Path) -> Result<(), anyhow::Error> {
+    let file = tokio::fs::File::open(path)
+        .await
+        .context("OPEN_TARGET_ERR")?;
+    file.sync_all().await.context("SYNC_TARGET_ERR")?;
+    Ok(())
 }
 
 pub async fn progressed_copy(
@@ -963,105 +1103,52 @@ pub async fn progressed_copy(
     Ok(downloaded)
 }
 
+/// Apply an hpatch diff stream to `old_path`, writing the result to
+/// `out_path` (under the staging directory). No renames: the caller decides
+/// what happens to the output.
 pub async fn progressed_hpatch(
-    source: Box<dyn AsyncRead + Unpin + Send>,
-    target: &str,
+    old_path: &Path,
+    diff: Box<dyn AsyncRead + Unpin + Send>,
     diff_size: usize,
+    out_path: &Path,
     on_progress: Box<dyn Fn(usize) + Send>,
-    override_old_path: Option<PathBuf>,
-    mut insight: Option<InsightItem>,
-) -> Result<(usize, Option<InsightItem>), anyhow::Error> {
-    let download_start = std::time::Instant::now();
+) -> Result<usize, anyhow::Error> {
     let mut downloaded = 0;
-
     let decoder = ReadWithCallback {
-        reader: source,
+        reader: diff,
         callback: move |chunk| {
             downloaded += chunk;
             on_progress(downloaded);
         },
     };
-    let target = target.to_string();
-    let target_cl = if let Some(override_old_path) = override_old_path.as_ref() {
-        Path::new(override_old_path)
-    } else {
-        Path::new(&target)
-    };
-    let target_ori = target.clone();
-    let old_target_old = target_cl.with_extension("patchold");
-    // try remove old_target_old, do not throw error if failed
-    let _ = tokio::fs::remove_file(old_target_old).await;
-    let new_target = target_cl.with_extension("patching");
-    let target_size = target_cl.metadata().context("GET_TARGET_SIZE_ERR")?;
-    let target_file = std::fs::File::create(new_target.clone()).context("CREATE_NEW_TARGET_ERR")?;
-    let old_target_file = std::fs::File::open(
-        if let Some(override_old_path) = override_old_path.as_ref() {
-            override_old_path.clone()
-        } else {
-            PathBuf::from(target.clone())
-        },
-    )
-    .context("OPEN_TARGET_ERR")?;
+    if let Some(parent) = out_path.parent() {
+        tokio::fs::create_dir_all(parent)
+            .await
+            .context("CREATE_PARENT_DIR_ERR")?;
+    }
+    let old_size = old_path.metadata().context("GET_TARGET_SIZE_ERR")?;
+    let out_file = std::fs::File::create(out_path).context("CREATE_NEW_TARGET_ERR")?;
+    let old_file = std::fs::File::open(old_path).context("OPEN_TARGET_ERR")?;
     let diff_file = tokio_util::io::SyncIoBridge::new(decoder);
     let res = tokio::task::spawn_blocking(move || {
         hpatch_sys::safe_patch_single_stream(
-            target_file,
+            out_file,
             diff_file,
             diff_size,
-            old_target_file,
-            target_size.file_size() as usize,
+            old_file,
+            old_size.file_size() as usize,
         )
     })
     .await
     .context("RUN_HPATCH_ERR")?;
-    if res == 1 {
-        // move target to target.old
-        let old_target = target_cl.with_extension("old");
-        let exe_path = std::env::current_exe().context("GET_EXE_PATH_ERR")?;
-        let target_path_ori = PathBuf::from(target_ori);
-        // if old file is not self
-        if exe_path != target_cl && exe_path != target_path_ori {
-            // rename to .old
-            tokio::fs::rename(target_cl, old_target.clone())
-                .await
-                .context("RENAME_TARGET_ERR")?;
-            // rename new file to original
-            tokio::fs::rename(new_target, target_cl)
-                .await
-                .context("RENAME_NEW_TARGET_ERR")?;
-            // delete old file
-            tokio::fs::remove_file(old_target)
-                .await
-                .context("REMOVE_OLD_TARGET_ERR")?;
-        } else {
-            if override_old_path.is_none() {
-                // rename to .old
-                tokio::fs::rename(target_cl, old_target.clone())
-                    .await
-                    .context("RENAME_TARGET_ERR")?;
-            }
-            // self is already renamed and cannot be deleted, just replace the new file
-            tokio::fs::rename(new_target, target_path_ori)
-                .await
-                .context("RENAME_NEW_TARGET_ERR")?;
-        }
-    } else {
-        // delete new target
-        tokio::fs::remove_file(new_target)
-            .await
-            .context("REMOVE_NEW_TARGET_ERR")?;
+    if res != 1 {
+        let _ = tokio::fs::remove_file(out_path).await;
         return Err(anyhow::Error::new(std::io::Error::other(format!(
             "Patch failed with code {res}"
         ))))
         .context("PATCH_FAILED_ERR");
     }
-    // 更新网络下载统计信息
-    if let Some(ref mut insight) = insight {
-        insight.time = download_start.elapsed().as_millis() as u32;
-        insight.size = diff_size as u32;
-    }
-
-    Ok((diff_size, insight))
+    Ok(diff_size)
 }
 
 pub async fn verify_hash(
@@ -1145,6 +1232,8 @@ mod tests {
         )
         .await
         .unwrap();
+        assert!(scanned.dirty_dirs.is_empty(), "{:?}", scanned.dirty_dirs);
+        let scanned = scanned.files;
 
         assert_eq!(scanned.len(), 1);
         assert!(!scanned[0].unwritable);
@@ -1179,6 +1268,9 @@ mod tests {
         )
         .await
         .unwrap();
+        // the user-data subtree is not entered and makes the root dirty
+        assert_eq!(scanned.dirty_dirs, vec![String::new()]);
+        let scanned = scanned.files;
         let user = scanned
             .iter()
             .find(|f| {
@@ -1195,6 +1287,92 @@ mod tests {
         assert_eq!(app.hash, "5d41402abc4b2a76b9719d911017c592");
         assert!(scanned.iter().all(|f| !f.unwritable));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    async fn scan(dir: &Path, managed: &[&str], skip: &[&str]) -> LocalScan {
+        check_local_files(
+            dir.to_string_lossy().to_string(),
+            "md5".to_string(),
+            managed.iter().map(|s| s.to_string()).collect(),
+            skip.iter().map(|s| s.to_string()).collect(),
+            progress_notify(|_| {}),
+        )
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn dirty_dirs_follow_unmanaged_content() {
+        let dir = temp_dir();
+        write_file(&dir, "app.exe", b"a");
+        write_file(&dir, "lib/a.dll", b"a");
+        write_file(&dir, "lib/b.dll", b"b");
+        write_file(&dir, "plugins/x/p.dll", b"p");
+        write_file(&dir, "notes.txt", b"user file at root");
+        let managed = ["app.exe", "lib/a.dll", "lib/b.dll", "plugins/x/p.dll"];
+
+        // an unmanaged file at the root dirties only the root
+        let s = scan(&dir, &managed, &[]).await;
+        assert_eq!(s.dirty_dirs, vec![String::new()]);
+        assert_eq!(s.files.len(), 4);
+
+        // an unmanaged file inside lib dirties lib and, through it, the root
+        write_file(&dir, "lib/user.cfg", b"mine");
+        let mut s = scan(&dir, &managed, &[]).await;
+        s.dirty_dirs.sort();
+        assert_eq!(s.dirty_dirs, vec![String::new(), "lib".to_string()]);
+        std::fs::remove_file(dir.join("lib/user.cfg")).unwrap();
+
+        // an empty unmanaged subdirectory dirties its parent
+        std::fs::create_dir_all(dir.join("plugins/empty")).unwrap();
+        let mut s = scan(&dir, &managed, &[]).await;
+        s.dirty_dirs.sort();
+        assert_eq!(s.dirty_dirs, vec![String::new(), "plugins".to_string()]);
+        assert!(!s.dirty_dirs.contains(&"plugins/x".to_string()));
+        std::fs::remove_dir(dir.join("plugins/empty")).unwrap();
+
+        // a fully hash-skipped subtree (user data) is dirty and not entered,
+        // but its files are still stat'd
+        write_file(&dir, "User/s.json", b"u");
+        let s = scan(
+            &dir,
+            &["app.exe", "lib/a.dll", "lib/b.dll", "plugins/x/p.dll", "User/s.json"],
+            &["User/s.json"],
+        )
+        .await;
+        assert!(s.files.iter().any(|f| f.file_name.ends_with("s.json") && f.hash.is_empty()));
+        assert!(s.dirty_dirs.contains(&String::new()));
+        assert!(!s.dirty_dirs.contains(&"lib".to_string()));
+
+        // a directory that is only managed files is clean; a missing install dir is clean
+        std::fs::remove_file(dir.join("notes.txt")).unwrap();
+        std::fs::remove_dir_all(dir.join("User")).unwrap();
+        let s = scan(&dir, &managed, &[]).await;
+        assert!(s.dirty_dirs.is_empty(), "{:?}", s.dirty_dirs);
+        let s = scan(&dir.join("nope"), &managed, &[]).await;
+        assert!(s.dirty_dirs.is_empty() && s.files.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn junction_subdir_is_reparse_and_dirty() {
+        let dir = temp_dir();
+        let real = temp_dir();
+        write_file(&real, "f.dll", b"f");
+        write_file(&dir, "app.exe", b"a");
+        let link = dir.join("link");
+        let out = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J", &link.to_string_lossy(), &real.to_string_lossy()])
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+        let s = scan(&dir, &["app.exe", "link/f.dll"], &[]).await;
+        assert_eq!(s.reparse_dirs, vec!["link".to_string()]);
+        assert_eq!(s.dirty_dirs, vec![String::new()]);
+        assert!(s.files.iter().any(|f| f.file_name.ends_with("f.dll") && !f.hash.is_empty()));
+        let _ = std::fs::remove_dir(&link);
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&real);
     }
 
     #[tokio::test]

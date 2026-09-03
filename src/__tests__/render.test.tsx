@@ -60,9 +60,18 @@ describe('screens', () => {
     expect(screen.getByText('同时删除用户数据')).toBeTruthy();
   });
 
-  it('renders running progress', async () => {
+  it('renders running progress with a cancel button', async () => {
     await mount(running());
     expect(screen.getByText(/下载 app.exe/)).toBeTruthy();
+    fireEvent.click(screen.getByText('取消'));
+    await waitFor(() => expect(lastIntent()).toEqual({ kind: 'cancel' }));
+  });
+
+  it('hides cancel during the swap', async () => {
+    const ui = running();
+    if (ui.phase.kind === 'running') ui.phase.stage = 'commit';
+    await mount(ui);
+    expect(screen.queryByText('取消')).toBeNull();
   });
 
   it('renders done variants', async () => {

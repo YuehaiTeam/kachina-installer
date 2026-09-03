@@ -47,8 +47,7 @@ pub async fn run(args: InstallArgs) -> anyhow::Result<NativeOutcome> {
     unsafe {
         let _ = windows::Win32::UI::WindowsAndMessaging::SetProcessDPIAware();
     }
-    let temp_dir = std::env::temp_dir();
-    if std::env::set_current_dir(&temp_dir).is_err() {
+    if crate::fs::staging::enter_neutral_cwd().is_err() {
         show_error(ErrorDialog::code(TEMP_DIR_UNAVAILABLE), desktop_hwnd());
         return Ok(NativeOutcome::Exit);
     }
@@ -495,8 +494,16 @@ async fn native_session(
         done: None,
         total: None,
     });
-    let dialog = ProgressDialog::show(&project.window_title, &heading, &prepare, false).await?;
-    let ui = NativeUi::new(dialog.hwnd_arc());
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let dialog = ProgressDialog::show_with_cancel(
+        &project.window_title,
+        &heading,
+        &prepare,
+        false,
+        Some(cancel.clone()),
+    )
+    .await?;
+    let ui = NativeUi::new(dialog.hwnd_arc(), cancel);
     ui.state(&sess.state);
     let mgr = ManagedElevate::new();
     let uninstall = matches!(sess.state.mode, Mode::Uninstall);
@@ -590,11 +597,12 @@ async fn show_finish(state: &UiState, exe_name: &str) {
 
 struct NativeUi {
     hwnd: Arc<ProgressHwnd>,
+    cancel: tokio_util::sync::CancellationToken,
 }
 
 impl NativeUi {
-    fn new(hwnd: Arc<ProgressHwnd>) -> Self {
-        Self { hwnd }
+    fn new(hwnd: Arc<ProgressHwnd>, cancel: tokio_util::sync::CancellationToken) -> Self {
+        Self { hwnd, cancel }
     }
 
     fn parent(&self) -> HwndParent {
@@ -662,6 +670,10 @@ impl SessionUi for NativeUi {
         tokio::task::spawn_blocking(move || {
             show_error_coded(&coded, parent.hwnd());
         });
+    }
+
+    fn cancel_token(&self) -> tokio_util::sync::CancellationToken {
+        self.cancel.clone()
     }
 }
 

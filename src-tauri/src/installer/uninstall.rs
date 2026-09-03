@@ -2,12 +2,41 @@ use anyhow::Context;
 use std::path::{Path, PathBuf};
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 
-use crate::utils::error::{return_ta_result, TAResult};
+use crate::fs::staging::{staging_root, Staging};
+use crate::utils::error::TAResult;
 use crate::utils::process;
 
 lazy_static::lazy_static!(
-    pub static ref DELETE_SELF_ON_EXIT_PATH: std::sync::RwLock<Option<String>> = std::sync::RwLock::new(None);
+    /// Staging directory to remove after this process exits. It holds the
+    /// running executable under `old\` (self-update or self-uninstall), which
+    /// can be renamed but not deleted while it runs.
+    static ref DELETE_SELF_ON_EXIT_PATH: std::sync::RwLock<Option<String>> = std::sync::RwLock::new(None);
 );
+
+/// The only writer of the exit-time cleanup path. Called once the swap that
+/// moved the running executable has fully succeeded.
+pub fn schedule_delete_on_exit(staging_root: &str) {
+    DELETE_SELF_ON_EXIT_PATH
+        .write()
+        .unwrap_or_else(|e| e.into_inner())
+        .replace(staging_root.to_string());
+}
+
+#[cfg(test)]
+pub fn delete_on_exit_path() -> Option<String> {
+    DELETE_SELF_ON_EXIT_PATH
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+}
+
+#[cfg(test)]
+pub fn clear_delete_on_exit() {
+    DELETE_SELF_ON_EXIT_PATH
+        .write()
+        .unwrap_or_else(|e| e.into_inner())
+        .take();
+}
 
 pub fn run_clear_empty_dirs(path: &Path) -> Result<(), std::io::Error> {
     let entries = std::fs::read_dir(path)?;
@@ -76,7 +105,16 @@ pub struct RunUninstallArgs {
     pub reg_name: String,
     pub uninstall_name: String,
 }
-pub async fn run_uninstall_with_args(args: RunUninstallArgs) -> TAResult<Vec<String>> {
+
+#[derive(serde::Deserialize, serde::Serialize, Clone, Debug, Default)]
+pub struct UninstallOutcome {
+    pub errors: Vec<String>,
+    /// Staging root the running uninstaller was parked in (`old\<name>`); the
+    /// session schedules it for deletion at exit.
+    pub self_moved_to: Option<String>,
+}
+
+pub async fn run_uninstall_with_args(args: RunUninstallArgs) -> TAResult<UninstallOutcome> {
     run_uninstall(
         args.source,
         args.files,
@@ -88,6 +126,21 @@ pub async fn run_uninstall_with_args(args: RunUninstallArgs) -> TAResult<Vec<Str
     .await
 }
 
+/// Park the running executable under the staging directory's `old\` so the
+/// install directory can be emptied. Same volume is guaranteed by
+/// `staging_root`; a drive-root install has nowhere to go and is refused.
+async fn park_self(exe_path: &Path, source: &str, uninstall_name: &str) -> anyhow::Result<String> {
+    let root = staging_root(source)?;
+    let staging = Staging::at(&root);
+    staging.ensure_layout()?;
+    let parked = staging.old_path(uninstall_name);
+    let _ = tokio::fs::remove_file(&parked).await;
+    tokio::fs::rename(exe_path, &parked)
+        .await
+        .context("SELF_UNINSTALL_ERR")?;
+    Ok(root.to_string_lossy().to_string())
+}
+
 pub async fn run_uninstall(
     source: String,
     files: Vec<String>,
@@ -95,42 +148,13 @@ pub async fn run_uninstall(
     extra_uninstall_path: Vec<String>,
     reg_name: String,
     uninstall_name: String,
-) -> TAResult<Vec<String>> {
+) -> TAResult<UninstallOutcome> {
     let exe_path = std::env::current_exe().context("GET_EXE_PATH_ERR")?;
-    // check if exe_path is in source
-    if DELETE_SELF_ON_EXIT_PATH.read().unwrap().is_none() && exe_path.starts_with(&source) {
-        let tmp_dir = std::env::temp_dir();
-        let mut tmp_uninstaller_path = tmp_dir.join(format!(
-            "kachina.uninst.{}.exe",
-            chrono::Utc::now().timestamp()
-        ));
-        // try to move current exe to tmp_uninstaller_path
-        let res = tokio::fs::rename(&exe_path, &tmp_uninstaller_path).await;
-        if res.is_err() {
-            // move fail, maybe exe and tempdir is not in the same partition
-            // try move to parent dir
-            let source_parent = Path::new(&source).parent();
-            if let Some(source_parent) = source_parent {
-                tmp_uninstaller_path = source_parent.join(format!(
-                    "kachina.uninst.{}.exe",
-                    chrono::Utc::now().timestamp()
-                ));
-                tokio::fs::rename(&exe_path, &tmp_uninstaller_path)
-                    .await
-                    .context("SELF_UNINSTALL_ERR")?;
-            } else {
-                return return_ta_result(
-                    "Insecure uninstall: installer is in root dir".to_string(),
-                    "INSECURE_UNINSTALL_ERR",
-                );
-            }
-        }
-        // write delete_on_exit value
-        DELETE_SELF_ON_EXIT_PATH
-            .write()
-            .unwrap()
-            .replace(tmp_uninstaller_path.to_string_lossy().to_string());
-    }
+    let self_moved_to = if exe_path.starts_with(&source) {
+        Some(park_self(&exe_path, &source, &uninstall_name).await?)
+    } else {
+        None
+    };
 
     let mut delete_list = files
         .iter()
@@ -176,7 +200,44 @@ pub async fn run_uninstall(
     let _ = windows_registry::LOCAL_MACHINE.remove_tree(&reg_path);
     let _ = windows_registry::CURRENT_USER.remove_tree(&reg_path);
 
-    Ok(res)
+    Ok(UninstallOutcome {
+        errors: res,
+        self_moved_to,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::windows::fs::OpenOptionsExt;
+
+    #[tokio::test]
+    async fn park_self_moves_running_image_into_staging_old() {
+        let base = crate::fs::staging::scratch_file(&format!("kachina-uninst-{}", uuid::Uuid::new_v4()));
+        let install = base.join("app");
+        std::fs::create_dir_all(&install).unwrap();
+        let exe = install.join("uninst.exe");
+        std::fs::write(&exe, b"MZ").unwrap();
+        // a running image: readable, renamable, not deletable
+        let _running = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0x1 | 0x4)
+            .open(&exe)
+            .unwrap();
+        let root = park_self(&exe, &install.to_string_lossy(), "uninst.exe")
+            .await
+            .unwrap();
+        assert!(!exe.exists());
+        let parked = Staging::at(&root).old_path("uninst.exe");
+        assert_eq!(std::fs::read(&parked).unwrap(), b"MZ");
+        assert_eq!(delete_on_exit_path(), None, "park does not schedule by itself");
+        schedule_delete_on_exit(&root);
+        assert_eq!(delete_on_exit_path().as_deref(), Some(root.as_str()));
+        clear_delete_on_exit();
+        drop(_running);
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&base);
+    }
 }
 
 pub fn delete_self_on_exit() {
@@ -185,7 +246,7 @@ pub fn delete_self_on_exit() {
         return;
     }
     let path = path.as_ref().unwrap();
-    // 子进程独立于本进程存活；ping 拖延约 1 秒等本进程退出后再删。
+    // 子进程独立于本进程存活；ping 拖延约 1 秒等本进程退出后再删整个暂存目录。
     let _ = process::spawn(
         "cmd",
         &[
@@ -195,8 +256,8 @@ pub fn delete_self_on_exit() {
             "-n",
             "2",
             "&",
-            "del",
-            "/f",
+            "rmdir",
+            "/s",
             "/q",
             path.as_str(),
         ],
@@ -204,51 +265,83 @@ pub fn delete_self_on_exit() {
     );
 }
 
+/// Stage the installer image (uninstaller / updater) under `new\` as phase-one
+/// products. `copy_from` names an existing file to duplicate (the updater the
+/// metadata shipped); otherwise the running executable's `base + config` is
+/// written and its packed index mark cleared.
 #[derive(serde::Deserialize, serde::Serialize, Clone, Debug)]
-pub struct CreateUninstallerArgs {
-    pub source: String,
-    pub uninstaller_name: String,
-    pub updater_name: String,
-}
-pub async fn create_uninstaller_with_args(args: CreateUninstallerArgs) -> TAResult<()> {
-    create_uninstaller(args.source, args.uninstaller_name, args.updater_name).await
+pub struct StageSelfImageArgs {
+    pub install_dir: String,
+    pub new_dir: String,
+    pub hash_algorithm: String,
+    pub names: Vec<String>,
+    pub copy_from: Option<String>,
 }
 
-pub async fn create_uninstaller(
-    source: String,
-    uninstaller_name: String,
-    updater_name: String,
-) -> TAResult<()> {
-    let source = Path::new(&source);
-    let uninstaller_path = source.join(uninstaller_name);
-    let updater_path = source.join(updater_name);
-    let current_exe_path = std::env::current_exe().context("GET_EXE_PATH_ERR")?;
-    let updater_is_self = current_exe_path == updater_path;
-    if !updater_is_self {
-        // else, overwrite uninstaller and updater
-        let mut self_configured_mmap = crate::local::get_base_with_config().await?;
-        let output_file = tokio::fs::File::create(&uninstaller_path)
-            .await
-            .context("CREATE_UNINSTALLER_ERR")?;
-        let mut output = tokio::io::BufWriter::new(output_file);
-        tokio::io::copy(&mut self_configured_mmap, &mut output)
-            .await
-            .context("CREATE_UNINSTALLER_ERR")?;
-        // flush
-        output.flush().await.context("CREATE_UNINSTALLER_ERR")?;
-        // drop
-        drop(output);
-        // open again with rw
-        clear_index_mark(&uninstaller_path).await?;
-        // find
-        tokio::fs::copy(&uninstaller_path, &updater_path)
-            .await
-            .context("CREATE_UPDATER_ERR")?;
-    } else {
-        // try modify updater, if fail, silently ignore
-        let _ = clear_index_mark(&updater_path).await;
+#[derive(serde::Deserialize, serde::Serialize, Clone, Debug, PartialEq, Eq)]
+pub struct StagedImage {
+    pub rel: String,
+    pub hash: String,
+    /// Hash of the file currently in the install directory, if any.
+    pub old: Option<String>,
+    /// The install directory already holds identical bytes; the staged copy
+    /// was removed and no unit is needed.
+    pub unchanged: bool,
+}
+
+pub async fn stage_self_image(args: StageSelfImageArgs) -> TAResult<Vec<StagedImage>> {
+    let new_dir = Path::new(&args.new_dir);
+    let install = Path::new(&args.install_dir);
+    let mut out = Vec::new();
+    for name in &args.names {
+        let staged = crate::fs::staging::join_rel(new_dir, name);
+        if let Some(parent) = staged.parent() {
+            tokio::fs::create_dir_all(parent)
+                .await
+                .context("CREATE_DIR_ERR")?;
+        }
+        match &args.copy_from {
+            Some(src) => {
+                tokio::fs::copy(src, &staged)
+                    .await
+                    .context("CREATE_UPDATER_ERR")?;
+            }
+            None => {
+                let mut image = crate::local::get_base_with_config().await?;
+                let file = tokio::fs::File::create(&staged)
+                    .await
+                    .context("CREATE_UNINSTALLER_ERR")?;
+                let mut writer = tokio::io::BufWriter::new(file);
+                tokio::io::copy(&mut image, &mut writer)
+                    .await
+                    .context("CREATE_UNINSTALLER_ERR")?;
+                writer.flush().await.context("CREATE_UNINSTALLER_ERR")?;
+                drop(writer);
+                clear_index_mark(&staged).await?;
+            }
+        }
+        crate::fs::sync_staged_file(&staged).await?;
+        let hash = crate::utils::hash::run_hash(&args.hash_algorithm, &staged.to_string_lossy()).await?;
+        let existing = crate::fs::staging::join_rel(install, name);
+        let old = if existing.is_file() {
+            crate::utils::hash::run_hash(&args.hash_algorithm, &existing.to_string_lossy())
+                .await
+                .ok()
+        } else {
+            None
+        };
+        let unchanged = old.as_deref() == Some(hash.as_str());
+        if unchanged {
+            let _ = tokio::fs::remove_file(&staged).await;
+        }
+        out.push(StagedImage {
+            rel: name.replace('\\', "/"),
+            hash,
+            old,
+            unchanged,
+        });
     }
-    Ok(())
+    Ok(out)
 }
 pub async fn clear_index_mark(path: &PathBuf) -> anyhow::Result<()> {
     // open again with rw

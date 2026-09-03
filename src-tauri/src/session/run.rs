@@ -8,12 +8,17 @@ use serde_json::{json, Value};
 use tokio::sync::Semaphore;
 
 use crate::dfs::InsightItem;
+use crate::fs::commit::{
+    journal_matches_target, CommitArgs, FileEntry, Journal, RecoverOutcome, Unit,
+};
+use crate::fs::staging::Staging;
+use crate::fs::LocalScan;
 use crate::installer::config::InstallerConfig;
 use crate::installer::lnk::get_dirs;
 use crate::installer::lnk::CreateLnkArgs;
 use crate::installer::registry::read_uninstall_metadata_raw;
 use crate::installer::registry::WriteRegistryParams;
-use crate::installer::uninstall::{CreateUninstallerArgs, RunUninstallArgs};
+use crate::installer::uninstall::{schedule_delete_on_exit, RunUninstallArgs};
 use crate::ipc::install_file::{
     InstallFileArgs, InstallFileMode, InstallFileSource, InstallMultiStreamArgs,
 };
@@ -26,8 +31,8 @@ use crate::session::dump::session_dump;
 use crate::session::merge::{dfs2_ranges, file_mode, plan_tasks, FileMode, FilePos, InstallTask};
 use crate::session::plan::{
     build_plan, collect_skip_hash, files_to_probe_writable, find_local, join_install,
-    mark_unwritable, strip_install_prefix, HashKey, InstallPlan, LocalFile, PlanAction, PlanInput,
-    SkipReason,
+    mark_unwritable, normalize_rel, strip_install_prefix, HashKey, InstallPlan, LocalFile,
+    PlanAction, PlanInput, SkipReason,
 };
 use crate::session::source::{
     cleanup_dfs2, ensure_dfs2_session, fetch_metadata, hash_of_item, needs_js_plugin, parse_source,
@@ -41,13 +46,13 @@ use crate::session::types::{
 use crate::session::ui::{send_ev_insight, SessionUi, SilentPluginUi};
 use crate::utils::code::{
     attach_download, attach_download_or, attach_metadata, coded_for_mirrorc_response,
-    coded_from_error, fail_kind, tag_session, Attach, Coded, FILE_IO_FAILED,
-    HASH_ALGORITHM_UNSUPPORTED,
-    METADATA_UNREACHABLE, MIRRORC_CDK_MISSING, MIRRORC_CONFIG_INVALID, MIRRORC_FAILED,
-    MIRRORC_UNREACHABLE, NO_DOWNLOAD_NODE, PKG_BROKEN, PROCESS_KILL_FAILED, REGISTRY_WRITE_FAILED,
-    RUNTIME_INSTALL_FAILED, SHORTCUT_FAILED, TEMP_DIR_UNAVAILABLE, UNINSTALL_INFO_MISSING,
-    WEBVIEW2_REQUIRED,
+    coded_from_error, extract, fail_kind, tag_session, Attach, Cancelled, Coded, Extracted,
+    DISK_FULL, FILE_IO_FAILED, HASH_ALGORITHM_UNSUPPORTED, METADATA_UNREACHABLE,
+    MIRRORC_CDK_MISSING, MIRRORC_CONFIG_INVALID, MIRRORC_FAILED, MIRRORC_UNREACHABLE,
+    NO_DOWNLOAD_NODE, PKG_BROKEN, PROCESS_KILL_FAILED, REGISTRY_WRITE_FAILED,
+    RUNTIME_INSTALL_FAILED, SHORTCUT_FAILED, UNINSTALL_INFO_MISSING, WEBVIEW2_REQUIRED,
 };
+use tokio_util::sync::CancellationToken;
 use crate::thirdparty::mirrorc::get_mirrorc_status;
 use crate::utils::error::IntoAnyhow;
 use crate::utils::metadata::{FileMeta, RepoMetadata};
@@ -163,6 +168,7 @@ fn merged_mode(
 struct LiveUi<'a> {
     inner: &'a dyn SessionUi,
     live: Mutex<UiState>,
+    cancel: CancellationToken,
 }
 
 impl<'a> LiveUi<'a> {
@@ -170,7 +176,458 @@ impl<'a> LiveUi<'a> {
         Self {
             inner,
             live: Mutex::new(base.clone()),
+            cancel: inner.cancel_token(),
         }
+    }
+
+    /// Phase-one checkpoint: `Err(Cancelled)` once the user asked to stop.
+    fn check_cancel(&self) -> anyhow::Result<()> {
+        if self.cancel.is_cancelled() {
+            Err(anyhow::Error::new(Cancelled))
+        } else {
+            Ok(())
+        }
+    }
+}
+
+fn is_cancelled(err: &anyhow::Error) -> bool {
+    matches!(extract(err), Extracted::Cancelled)
+}
+
+/// Staging directory of the running session, opened on the side that has
+/// write access (elevated when the install needs it).
+struct SessionStaging {
+    staging: Staging,
+    elevate: bool,
+}
+
+impl SessionStaging {
+    fn root(&self) -> String {
+        self.staging.root().to_string_lossy().to_string()
+    }
+
+    async fn discard(&self, mgr: &ManagedElevate) {
+        let _ = run_op(
+            mgr,
+            self.elevate,
+            IpcOperation::DiscardStaging(self.root()),
+            progress_noop(),
+        )
+        .await;
+    }
+}
+
+async fn open_staging(
+    settings: &Settings,
+    mgr: &ManagedElevate,
+) -> anyhow::Result<(SessionStaging, Option<String>)> {
+    let raw = run_op(
+        mgr,
+        settings.elevate,
+        IpcOperation::OpenStaging(settings.install_path.clone()),
+        progress_noop(),
+    )
+    .await?;
+    let IpcResult::OpenStaging(opened) = raw else {
+        bail!("IPC_SHAPE_ERR");
+    };
+    Ok((
+        SessionStaging {
+            staging: Staging::at(opened.root),
+            elevate: settings.elevate,
+        },
+        opened.journal,
+    ))
+}
+
+/// What to do with a journal left by an interrupted commit. Returns the
+/// staging to continue with (fresh when the journal was dropped) and whether
+/// the forward roll swapped the running executable.
+#[allow(clippy::too_many_arguments)]
+async fn recover_or_discard(
+    settings: &Settings,
+    project: &ProjectConfig,
+    staged: SessionStaging,
+    journal_text: String,
+    hash_algorithm: &str,
+    wanted: &std::collections::HashMap<String, String>,
+    deletes: &std::collections::HashSet<String>,
+    archive: Option<&str>,
+    ui: &LiveUi<'_>,
+    mgr: &ManagedElevate,
+) -> anyhow::Result<(SessionStaging, bool)> {
+    let reopen = |staged: SessionStaging| async move {
+        staged.discard(mgr).await;
+        let (fresh, _) = open_staging(settings, mgr).await?;
+        Ok::<_, anyhow::Error>((fresh, false))
+    };
+    let Some(journal) = Journal::parse(&journal_text) else {
+        tracing::info!("staging journal unreadable or wrong version, dropping");
+        return reopen(staged).await;
+    };
+    let self_images: std::collections::HashSet<String> =
+        [&project.uninstall_name, &project.updater_name]
+            .into_iter()
+            .map(|n| normalize_rel(n))
+            .collect();
+    if !journal_matches_target(&journal, hash_algorithm, wanted, deletes, archive, &self_images) {
+        tracing::info!("staging journal is for different content, dropping");
+        return reopen(staged).await;
+    }
+    tracing::info!("recovering interrupted commit ({} units)", journal.units.len());
+    progress(ui, 2, 95.0, "commit", None, None, None);
+    let args = CommitArgs {
+        staging_root: staged.root(),
+        install_dir: settings.install_path.clone(),
+        journal,
+    };
+    let raw = run_op_with_ui(
+        mgr,
+        settings.elevate,
+        IpcOperation::Recover(args),
+        ui,
+        |ui, p| {
+            if let Progress::CountOf { done, total } = p {
+                progress(ui, 2, 95.0, "commit", None, Some(*done), Some(*total));
+            }
+        },
+    )
+    .await?;
+    let IpcResult::Recover(outcome) = raw else {
+        bail!("IPC_SHAPE_ERR");
+    };
+    match outcome {
+        RecoverOutcome::Completed { self_replaced } => {
+            // journal is gone; the directory stays for this session's own writes
+            Ok((staged, self_replaced))
+        }
+        RecoverOutcome::Discarded => {
+            let (fresh, _) = open_staging(settings, mgr).await?;
+            Ok((fresh, false))
+        }
+    }
+}
+
+/// Whether the staging volume can hold this session's produced files.
+fn ensure_space(staged: &SessionStaging, needed: u64) -> anyhow::Result<()> {
+    if let Some(free) = crate::fs::staging::free_space(staged.staging.root()) {
+        if free < needed {
+            return Err(anyhow::anyhow!("need {needed} bytes, {free} free")
+                .attach_with(DISK_FULL, staged.root()));
+        }
+    }
+    Ok(())
+}
+
+fn rel_of(file_name: &str) -> String {
+    file_name.replace('\\', "/").trim_start_matches('/').to_string()
+}
+
+fn dir_of(rel: &str) -> String {
+    match rel.rsplit_once('/') {
+        Some((dir, _)) => dir.to_string(),
+        None => String::new(),
+    }
+}
+
+fn under_dir(rel_lower: &str, dir_lower: &str) -> bool {
+    dir_lower.is_empty() || rel_lower.starts_with(&format!("{dir_lower}/"))
+}
+
+/// Turn the plan into commit units: directory units where every managed file
+/// under a clean directory is being written, copy units under reparse points,
+/// file units otherwise, delete units for the plan's deletes.
+fn build_units(
+    plan: &InstallPlan,
+    hashed: &[crate::utils::metadata::FileMeta],
+    hash_key: HashKey,
+    local: &[LocalFile],
+    scan: &LocalScan,
+) -> Vec<Unit> {
+    let dirty: std::collections::HashSet<&str> = scan.dirty_dirs.iter().map(String::as_str).collect();
+    let installing: std::collections::HashMap<String, FileEntry> = plan
+        .files
+        .iter()
+        .filter(|f| f.action == PlanAction::Install)
+        .filter_map(|f| {
+            let meta = hashed
+                .iter()
+                .find(|h| normalize_rel(&h.file_name) == normalize_rel(&f.file_name))?;
+            let new = hash_of_item(meta, hash_key)?;
+            Some((
+                normalize_rel(&f.file_name),
+                FileEntry {
+                    rel: rel_of(&f.file_name),
+                    old: f.old_hash.clone(),
+                    new,
+                },
+            ))
+        })
+        .collect();
+    let is_copy = |rel_lower: &str| {
+        scan.reparse_dirs
+            .iter()
+            .any(|d| rel_lower.starts_with(&format!("{d}/")))
+    };
+
+    // candidate directories: every managed file under them is being written
+    let mut all_dirs: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for h in hashed {
+        let rel = normalize_rel(&h.file_name);
+        let mut d = dir_of(&rel);
+        loop {
+            all_dirs.insert(d.clone());
+            if d.is_empty() {
+                break;
+            }
+            d = dir_of(&d);
+        }
+    }
+    let mut candidates: Vec<String> = all_dirs
+        .into_iter()
+        .filter(|d| !dirty.contains(d.as_str()))
+        .filter(|d| {
+            let mut any = false;
+            for h in hashed {
+                let rel = normalize_rel(&h.file_name);
+                if !under_dir(&rel, d) {
+                    continue;
+                }
+                any = true;
+                if !installing.contains_key(&rel) || is_copy(&rel) {
+                    return false;
+                }
+            }
+            any
+        })
+        .collect();
+    // topmost wins
+    candidates.sort_by_key(|d| d.matches('/').count() + usize::from(!d.is_empty()));
+    let mut chosen: Vec<String> = Vec::new();
+    for d in candidates {
+        if !chosen.iter().any(|c| under_dir(&d, c) || c == &d) {
+            chosen.push(d);
+        }
+    }
+
+    let mut units = Vec::new();
+    let mut covered: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for dir in &chosen {
+        let mut files: Vec<FileEntry> = installing
+            .iter()
+            .filter(|(rel, _)| under_dir(rel, dir))
+            .map(|(rel, e)| {
+                covered.insert(rel.clone());
+                e.clone()
+            })
+            .collect();
+        files.sort_by(|a, b| a.rel.cmp(&b.rel));
+        units.push(Unit::Dir {
+            rel: dir.clone(),
+            files,
+        });
+    }
+    let mut rest: Vec<(&String, &FileEntry)> = installing
+        .iter()
+        .filter(|(rel, _)| !covered.contains(*rel))
+        .collect();
+    rest.sort_by(|a, b| a.0.cmp(b.0));
+    for (rel, entry) in rest {
+        if is_copy(rel) {
+            units.push(Unit::Copy(entry.clone()));
+        } else {
+            units.push(Unit::File(entry.clone()));
+        }
+    }
+    for del in &plan.deletes {
+        let rel = normalize_rel(del);
+        if chosen.iter().any(|c| under_dir(&rel, c)) {
+            continue;
+        }
+        units.push(Unit::Del {
+            rel: rel_of(del),
+            old: find_local(local, del).map(|l| l.hash.clone()),
+        });
+    }
+    units
+}
+
+/// Where this session gets its uninstaller / updater from (see the file
+/// commit note, "卸载器与更新器"). `list_has_updater`: the metadata (or the
+/// Mirror酱 archive) ships the updater itself; `updater_staged`: that copy is
+/// being written this session and sits under `new\`.
+struct SelfImagePlan {
+    names: Vec<String>,
+    copy_from: Option<String>,
+}
+
+fn self_image_plan(
+    settings: &Settings,
+    project: &ProjectConfig,
+    staging: &Staging,
+    list_has_updater: bool,
+    updater_staged: bool,
+) -> Option<SelfImagePlan> {
+    let uninstaller_path = join_install(&settings.install_path, &project.uninstall_name);
+    let updater_path = join_install(&settings.install_path, &project.updater_name);
+    let uninstaller_exists = std::path::Path::new(&uninstaller_path).is_file();
+    let mut names = Vec::new();
+    let mut copy_from = None;
+    if !settings.is_update {
+        names.push(project.uninstall_name.clone());
+        names.push(project.updater_name.clone());
+    } else if list_has_updater {
+        // the shipped updater is the freshest image around; refresh the
+        // uninstaller from it, never generate our own updater
+        if uninstaller_exists {
+            names.push(project.uninstall_name.clone());
+            copy_from = Some(if updater_staged {
+                staged_target(staging, &project.updater_name)
+            } else {
+                updater_path
+            });
+        }
+    } else if is_current_exe(&updater_path) {
+        // running as the installed updater: nothing newer than ourselves exists
+        if uninstaller_exists {
+            names.push(project.uninstall_name.clone());
+        }
+    } else {
+        // a foreign installer (online stub / packed): its image is the updater
+        names.push(project.updater_name.clone());
+        if uninstaller_exists {
+            names.push(project.uninstall_name.clone());
+        }
+    }
+    if names.is_empty() {
+        None
+    } else {
+        Some(SelfImagePlan { names, copy_from })
+    }
+}
+
+/// Stage the uninstaller / updater under `new\` and return the file units
+/// for the ones whose bytes differ from what the install directory holds.
+async fn self_image_units(
+    settings: &Settings,
+    project: &ProjectConfig,
+    staged: &SessionStaging,
+    algo: &str,
+    list_has_updater: bool,
+    updater_staged: bool,
+    mgr: &ManagedElevate,
+) -> anyhow::Result<Vec<Unit>> {
+    let Some(plan) = self_image_plan(settings, project, &staged.staging, list_has_updater, updater_staged)
+    else {
+        return Ok(Vec::new());
+    };
+    let raw = run_op(
+        mgr,
+        settings.elevate,
+        IpcOperation::StageSelfImage(crate::installer::uninstall::StageSelfImageArgs {
+            install_dir: settings.install_path.clone(),
+            new_dir: staged.staging.new_dir().to_string_lossy().to_string(),
+            hash_algorithm: algo.to_string(),
+            names: plan.names,
+            copy_from: plan.copy_from,
+        }),
+        progress_noop(),
+    )
+    .await
+    .map_err(|e| e.attach(FILE_IO_FAILED))?;
+    let IpcResult::StageSelfImage(staged_images) = raw else {
+        bail!("IPC_SHAPE_ERR");
+    };
+    Ok(staged_images
+        .into_iter()
+        .filter(|s| !s.unchanged)
+        .map(|s| {
+            Unit::File(FileEntry {
+                rel: s.rel,
+                old: s.old,
+                new: s.hash,
+            })
+        })
+        .collect())
+}
+
+/// Add the installer's own files to the unit list. When the whole install
+/// directory swaps as one root unit, they already sit inside `new\` and move
+/// with it, so they join that unit's file list instead of getting their own.
+fn merge_self_units(mut units: Vec<Unit>, self_units: Vec<Unit>) -> Vec<Unit> {
+    let root = units
+        .iter_mut()
+        .find_map(|u| match u {
+            Unit::Dir { rel, files } if rel.is_empty() => Some(files),
+            _ => None,
+        });
+    match root {
+        Some(files) => {
+            for unit in self_units {
+                if let Unit::File(f) = unit {
+                    files.retain(|e| normalize_rel(&e.rel) != normalize_rel(&f.rel));
+                    files.push(f);
+                }
+            }
+        }
+        None => units.extend(self_units),
+    }
+    units
+}
+
+fn list_has_updater(hashed: &[FileMeta], updater_name: &str) -> bool {
+    let want = normalize_rel(updater_name);
+    hashed.iter().any(|h| normalize_rel(&h.file_name) == want)
+}
+
+/// Phase two: swap the staged files in. Returns whether the running
+/// executable was among them.
+async fn commit_staged(
+    settings: &Settings,
+    staged: &SessionStaging,
+    journal: Journal,
+    ui: &LiveUi<'_>,
+    mgr: &ManagedElevate,
+) -> anyhow::Result<bool> {
+    progress(ui, 2, 95.0, "commit", None, Some(0), Some(journal.units.len() as u64));
+    let raw = run_op_with_ui(
+        mgr,
+        settings.elevate,
+        IpcOperation::Commit(CommitArgs {
+            staging_root: staged.root(),
+            install_dir: settings.install_path.clone(),
+            journal,
+        }),
+        ui,
+        |ui, p| {
+            if let Progress::CountOf { done, total } = p {
+                let total = (*total).max(1);
+                progress(
+                    ui,
+                    2,
+                    95.0 + (*done as f64 / total as f64) * 3.0,
+                    "commit",
+                    None,
+                    Some(*done),
+                    Some(total),
+                );
+            }
+        },
+    )
+    .await?;
+    let IpcResult::Commit(outcome) = raw else {
+        bail!("IPC_SHAPE_ERR");
+    };
+    Ok(outcome.self_replaced)
+}
+
+/// End-of-session staging cleanup: the directory outlives the process only
+/// when it parks the running executable.
+async fn finish_staging(staged: &SessionStaging, self_replaced: bool, mgr: &ManagedElevate) {
+    if self_replaced {
+        schedule_delete_on_exit(&staged.root());
+    } else {
+        staged.discard(mgr).await;
     }
 }
 
@@ -475,6 +932,14 @@ pub async fn run_install(
     } else {
         run_dfs_install(settings, config, project, &ui, mgr, &txn).await
     };
+    // a phase-one cancel is a user decision, not a failure
+    let result = match result {
+        Err(err) if is_cancelled(&err) => {
+            tracing::info!("install cancelled by the user");
+            Ok(SessionResult::cancelled(settings.is_update))
+        }
+        other => other,
+    };
     txn.finish(txn_status(&result));
     if let Err(err) = &result {
         // fail counter：低基数分类维度，不携带自由文本（见遥测通道职责收敛）
@@ -587,8 +1052,63 @@ async fn run_dfs_install(
         tracing::info!("install cancelled at process-running prompt");
         return Ok(SessionResult::cancelled(settings.is_update));
     }
+    ui.check_cancel()?;
 
     let hash_key = latest.hash_key()?;
+    let algo = match hash_key {
+        HashKey::Md5 => "md5",
+        HashKey::Xxh => "xxh",
+    };
+    // the staging directory is opened once the target is known: a journal left
+    // by an interrupted commit is only worth finishing if it still describes
+    // what this session is about to install
+    let (staged, journal) = open_staging(settings, mgr).await?;
+    let wanted: std::collections::HashMap<String, String> = latest
+        .hashed
+        .iter()
+        .filter_map(|h| Some((normalize_rel(&h.file_name), hash_of_item(h, hash_key)?)))
+        .collect();
+    let deletes: std::collections::HashSet<String> =
+        latest.deletes.iter().map(|d| normalize_rel(d)).collect();
+    let (staged, recovered_self) = match journal {
+        Some(text) => {
+            recover_or_discard(
+                settings, project, staged, text, algo, &wanted, &deletes, None, ui, mgr,
+            )
+            .await?
+        }
+        None => (staged, false),
+    };
+    let result = dfs_staged(
+        settings, config, project, ui, mgr, txn, &latest, hash_key, algo, &mut source_ctx,
+        used_online, &staged,
+    )
+    .await;
+    let self_replaced = recovered_self || matches!(result, Ok((_, true)));
+    finish_staging(&staged, self_replaced, mgr).await;
+    result.map(|(r, _)| r)
+}
+
+/// Everything between "target known" and "files swapped in", with the staging
+/// directory available. Returns the outcome and whether the swap replaced the
+/// running executable.
+#[allow(clippy::too_many_arguments)]
+// `used_online` only feeds the debug session dump
+#[cfg_attr(not(debug_assertions), allow(unused_variables))]
+async fn dfs_staged(
+    settings: &Settings,
+    config: &InstallerConfig,
+    project: &ProjectConfig,
+    ui: &LiveUi<'_>,
+    mgr: &ManagedElevate,
+    txn: &crate::utils::sentry::Transaction,
+    latest: &RepoMetadata,
+    hash_key: HashKey,
+    algo: &str,
+    source_ctx: &mut SourceCtx,
+    used_online: bool,
+    staged: &SessionStaging,
+) -> anyhow::Result<(SessionResult, bool)> {
     let mut ignore_nonempty = Vec::new();
     if settings.is_update {
         for folder in &project.ignore_folder_path {
@@ -609,13 +1129,13 @@ async fn run_dfs_install(
         }
     }
     progress(ui, 1, 5.0, "hash_scan", None, None, None);
-    let local = txn
+    let (local, scan) = txn
         .timed(
             "hash-scan",
             scan_local(
                 settings,
                 project,
-                &latest,
+                latest,
                 hash_key,
                 &ignore_nonempty,
                 ui,
@@ -623,6 +1143,7 @@ async fn run_dfs_install(
             ),
         )
         .await?;
+    ui.check_cancel()?;
     txn.set_measurement("hash_scan_files", local.len() as f64, "none");
     txn.set_measurement(
         "hash_scan_bytes",
@@ -699,13 +1220,40 @@ async fn run_dfs_install(
             Vec::<IpcOperation>::new()
         );
         tracing::info!("already latest, tag={}", latest.tag_name);
+        // nothing else to swap, but the uninstaller may still need a refresh
+        let units = self_image_units(
+            settings,
+            project,
+            staged,
+            algo,
+            list_has_updater(&latest.hashed, &project.updater_name),
+            false,
+            mgr,
+        )
+        .await?;
+        let self_replaced = if units.is_empty() {
+            false
+        } else {
+            commit_staged(
+                settings,
+                staged,
+                Journal {
+                    hash_algorithm: algo.to_string(),
+                    archive: None,
+                    units,
+                },
+                ui,
+                mgr,
+            )
+            .await?
+        };
         txn.timed(
             "finalize",
-            finish_install(settings, config, project, Some(&latest), ui, mgr),
+            finish_install(settings, config, project, Some(latest), ui, mgr),
         )
         .await?;
         progress(ui, 3, 100.0, "already_latest", None, None, None);
-        return Ok(SessionResult::install(true, settings.is_update));
+        return Ok((SessionResult::install(true, settings.is_update), self_replaced));
     }
 
     let occupied: Vec<String> = to_install
@@ -725,9 +1273,10 @@ async fn run_dfs_install(
             .await
         {
             tracing::info!("install cancelled at occupied-files prompt");
-            return Ok(SessionResult::cancelled(settings.is_update));
+            return Ok((SessionResult::cancelled(settings.is_update), false));
         }
     }
+    ui.check_cancel()?;
 
     let install_items: Vec<InstallItem> = to_install
         .iter()
@@ -741,11 +1290,10 @@ async fn run_dfs_install(
         })
         .collect();
     txn.set_measurement("download_files", install_items.len() as f64, "none");
-    txn.set_measurement(
-        "download_bytes",
-        install_items.iter().map(|i| i.item.size as f64).sum(),
-        "byte",
-    );
+    let download_bytes: u64 = install_items.iter().map(|i| i.item.size).sum();
+    txn.set_measurement("download_bytes", download_bytes as f64, "byte");
+    // phase one holds every produced file next to the existing install
+    ensure_space(staged, download_bytes)?;
 
     let tasks = plan_tasks(
         &install_items
@@ -755,24 +1303,24 @@ async fn run_dfs_install(
         hash_key,
         config.embedded_files.as_deref().unwrap_or(&[]),
         &latest.patches,
-        &source_ctx,
+        source_ctx,
     );
     let ranges = dfs2_ranges(
         &tasks,
-        &source_ctx,
+        source_ctx,
         hash_key,
         config.embedded_files.as_deref().unwrap_or(&[]),
         &latest.patches,
         &local,
     );
     if let Err(err) = ensure_dfs2_session(
-        &mut source_ctx,
+        source_ctx,
         ranges.clone(),
         settings.dfs_extras.as_deref(),
     )
     .await
     {
-        cleanup_dfs2(&mut source_ctx).await;
+        cleanup_dfs2(source_ctx).await;
         return Err(attach_download_or(err, NO_DOWNLOAD_NODE, None, None));
     }
     // Every failure from here on happened inside this DFS session; the id lets
@@ -783,7 +1331,7 @@ async fn run_dfs_install(
         None => err,
     };
     log_task_plan(&tasks, &ranges);
-    prefetch_chunk_urls(&source_ctx, ranges).await;
+    prefetch_chunk_urls(source_ctx, ranges).await;
 
     progress(ui, 2, 20.0, "plan", None, None, None);
     let ops = txn
@@ -792,17 +1340,18 @@ async fn run_dfs_install(
             install_files(
                 settings,
                 config,
-                &latest,
+                latest,
                 hash_key,
                 &tasks,
                 &local,
-                &source_ctx,
+                source_ctx,
+                &staged.staging,
                 ui,
                 mgr,
             ),
         )
         .await;
-    cleanup_dfs2(&mut source_ctx).await;
+    cleanup_dfs2(source_ctx).await;
     #[cfg_attr(not(debug_assertions), allow(unused_variables))]
     let ops = ops.map_err(tag_sid)?;
     tracing::info!(
@@ -812,37 +1361,62 @@ async fn run_dfs_install(
     );
     session_dump!(settings.dump_dir.as_deref(), "04-install-ops.json", ops);
 
-    if !plan.deletes.is_empty() {
-        progress(ui, 2, 95.0, "delete", None, None, None);
-        let list: Vec<String> = plan
-            .deletes
-            .iter()
-            .map(|e| join_install(&settings.install_path, e))
-            .collect();
-        let _ = run_op(
-            mgr,
-            settings.elevate,
-            IpcOperation::RmList(list),
-            progress_noop(),
+    // the installer's own files join the same journal
+    let updater_rel = normalize_rel(&project.updater_name);
+    let updater_staged = to_install
+        .iter()
+        .any(|f| normalize_rel(&f.file_name) == updater_rel);
+    let self_units = self_image_units(
+        settings,
+        project,
+        staged,
+        algo,
+        list_has_updater(&latest.hashed, &project.updater_name),
+        updater_staged,
+        mgr,
+    )
+    .await
+    .map_err(tag_sid)?;
+
+    // phase two: everything is staged and verified, swap it in
+    let units = merge_self_units(
+        build_units(&plan, &latest.hashed, hash_key, &local, &scan),
+        self_units,
+    );
+    session_dump!(settings.dump_dir.as_deref(), "05-commit-units.json", units);
+    let self_replaced = txn
+        .timed(
+            "commit",
+            commit_staged(
+                settings,
+                staged,
+                Journal {
+                    hash_algorithm: algo.to_string(),
+                    archive: None,
+                    units,
+                },
+                ui,
+                mgr,
+            ),
         )
-        .await;
-    }
+        .await
+        .map_err(tag_sid)?;
 
     txn.timed(
         "runtimes",
-        install_runtimes(settings, config, project, ui, mgr),
+        install_runtimes(settings, config, project, &staged.staging, ui, mgr),
     )
     .await
     .map_err(tag_sid)?;
     progress(ui, 3, 98.0, "finalize", None, None, None);
     txn.timed(
         "finalize",
-        finish_install(settings, config, project, Some(&latest), ui, mgr),
+        finish_install(settings, config, project, Some(latest), ui, mgr),
     )
     .await
     .map_err(tag_sid)?;
     progress(ui, 3, 100.0, "install_done", None, None, None);
-    Ok(SessionResult::install(false, settings.is_update))
+    Ok((SessionResult::install(false, settings.is_update), self_replaced))
 }
 
 struct InstallItem {
@@ -974,7 +1548,7 @@ async fn scan_local(
     ignore_nonempty: &[String],
     ui: &LiveUi<'_>,
     mgr: &ManagedElevate,
-) -> anyhow::Result<Vec<LocalFile>> {
+) -> anyhow::Result<(Vec<LocalFile>, LocalScan)> {
     let algo = match hash_key {
         HashKey::Md5 => "md5",
         HashKey::Xxh => "xxh",
@@ -1014,21 +1588,29 @@ async fn scan_local(
         }
     };
     progress(ui, 1, 20.0, "hash_scan", None, None, None);
-    let IpcResult::CheckLocalFiles(scanned) = raw else {
+    let IpcResult::CheckLocalFiles(scan) = raw else {
         bail!("IPC_SHAPE_ERR");
     };
-    Ok(scanned
-        .into_iter()
+    let files = scan
+        .files
+        .iter()
         .map(|e| {
             let file_name = strip_install_prefix(&e.file_name, &settings.install_path);
             LocalFile {
                 file_name,
-                hash: e.hash,
+                hash: e.hash.clone(),
                 size: e.size,
                 unwritable: e.unwritable,
             }
         })
-        .collect())
+        .collect();
+    Ok((
+        files,
+        LocalScan {
+            files: Vec::new(),
+            ..scan
+        },
+    ))
 }
 
 struct FileProg {
@@ -1230,6 +1812,7 @@ async fn install_files(
     tasks: &[InstallTask],
     disk_files: &[LocalFile],
     source_ctx: &SourceCtx,
+    staging: &Staging,
     ui: &LiveUi<'_>,
     mgr: &ManagedElevate,
 ) -> anyhow::Result<Vec<IpcOperation>> {
@@ -1237,6 +1820,7 @@ async fn install_files(
     let disk_files = Arc::new(disk_files.to_vec());
     let prog = Arc::new(Mutex::new(DownloadProg::from_tasks(tasks)));
     let has_error = Arc::new(AtomicBool::new(false));
+    let cancel = ui.cancel.clone();
     let sizes: Vec<u64> = tasks.iter().map(task_bytes).collect();
     let threshold = size_threshold(&sizes);
     let local_sem = Arc::new(Semaphore::new(16));
@@ -1277,9 +1861,10 @@ async fn install_files(
         let has_error = has_error.clone();
         let local_files = local_files.clone();
         let disk_files = disk_files.clone();
+        let cancel = cancel.clone();
         futs.push(async move {
             let _permit = sem.acquire().await;
-            if has_error.load(Ordering::Relaxed) {
+            if has_error.load(Ordering::Relaxed) || cancel.is_cancelled() {
                 return None;
             }
             handle.start();
@@ -1295,6 +1880,7 @@ async fn install_files(
                         hash_key,
                         item,
                         source_ctx,
+                        staging,
                         mgr,
                         false,
                         Some(handle.clone()),
@@ -1317,6 +1903,7 @@ async fn install_files(
                         *start,
                         *download_size,
                         source_ctx,
+                        staging,
                         mgr,
                         Some(handle.clone()),
                     )
@@ -1337,6 +1924,7 @@ async fn install_files(
                                 files,
                                 &merged.failed,
                                 source_ctx,
+                                staging,
                                 mgr,
                                 &handle,
                                 &has_error,
@@ -1355,6 +1943,7 @@ async fn install_files(
                                 *start,
                                 *download_size,
                                 source_ctx,
+                                staging,
                                 mgr,
                                 Some(handle.clone()),
                             )
@@ -1371,6 +1960,7 @@ async fn install_files(
                                         files,
                                         &merged.failed,
                                         source_ctx,
+                                        staging,
                                         mgr,
                                         &handle,
                                         &has_error,
@@ -1382,7 +1972,7 @@ async fn install_files(
                                     let all: Vec<usize> = (0..files.len()).collect();
                                     fallback_merged_files(
                                         settings, local_ref, disk_ref, latest, hash_key, files,
-                                        &all, source_ctx, mgr, &handle, &has_error,
+                                        &all, source_ctx, staging, mgr, &handle, &has_error,
                                     )
                                     .await
                                 }
@@ -1414,6 +2004,9 @@ async fn install_files(
                     progress(ui, 2, pct, "download", subject.as_deref(), Some(done), Some(total));
                 }
             }
+            // dropping `download` aborts every in-flight stream; the staged
+            // files are thrown away with the staging directory
+            _ = cancel.cancelled() => return Err(anyhow::Error::new(Cancelled)),
             results = &mut download => break results,
         }
     };
@@ -1449,6 +2042,7 @@ async fn fallback_merged_files(
     files: &[FilePos],
     failed: &[usize],
     source_ctx: &SourceCtx,
+    staging: &Staging,
     mgr: &ManagedElevate,
     handle: &ProgressHandle,
     has_error: &AtomicBool,
@@ -1470,6 +2064,7 @@ async fn fallback_merged_files(
                 hash_key,
                 &file.item,
                 source_ctx,
+                staging,
                 mgr,
                 false,
                 Some(handle.only(i)),
@@ -1488,6 +2083,7 @@ async fn install_one(
     hash_key: HashKey,
     item: &FileMeta,
     source_ctx: &SourceCtx,
+    staging: &Staging,
     mgr: &ManagedElevate,
     skip_patch_first: bool,
     handle: Option<ProgressHandle>,
@@ -1506,6 +2102,7 @@ async fn install_one(
             hash_key,
             item,
             source_ctx,
+            staging,
             skip_patch,
         )
         .await?;
@@ -1577,6 +2174,7 @@ async fn install_merged(
     start: usize,
     download_size: usize,
     source_ctx: &SourceCtx,
+    staging: &Staging,
     mgr: &ManagedElevate,
     handle: Option<ProgressHandle>,
 ) -> anyhow::Result<MergedResult> {
@@ -1597,7 +2195,8 @@ async fn install_merged(
                 skip_decompress: false,
                 request_range: Some(range.to_string()),
             }),
-            target: join_install(&settings.install_path, &file.item.file_name),
+            target: staged_target(staging, &file.item.file_name),
+            old: None,
             md5: file.item.md5.clone(),
             xxh: file.item.xxh.clone(),
             clear_installer_index_mark: None,
@@ -1674,12 +2273,19 @@ async fn build_install_op(
     hash_key: HashKey,
     item: &FileMeta,
     source_ctx: &SourceCtx,
+    staging: &Staging,
     skip_patch: bool,
 ) -> anyhow::Result<IpcOperation> {
-    let target = join_install(&settings.install_path, &item.file_name);
+    let target = staged_target(staging, &item.file_name);
+    // the file currently on disk, if any: the base for a patch
+    let old = find_local(disk_files, &item.file_name)
+        .map(|_| join_install(&settings.install_path, &item.file_name));
     let hash =
         hash_of_item(item, hash_key).ok_or_else(|| anyhow::Error::from(Coded::bare(HASH_ALGORITHM_UNSUPPORTED)))?;
-    let installer = item.installer.unwrap_or(false);
+    // the packed installer image carries an index mark that must be cleared
+    // once it lands as the app's updater; a self-update is the same case
+    let installer = item.installer.unwrap_or(false)
+        || is_current_exe(&join_install(&settings.install_path, &item.file_name));
     if !skip_patch {
         if let Some(local) = local_files.iter().find(|l| l.name == hash) {
             return Ok(IpcOperation::InstallFile(InstallFileArgs {
@@ -1689,6 +2295,7 @@ async fn build_install_op(
                     skip_decompress: false,
                 }),
                 target,
+                old: None,
                 md5: item.md5.clone(),
                 xxh: item.xxh.clone(),
                 clear_installer_index_mark: Some(installer),
@@ -1733,6 +2340,7 @@ async fn build_install_op(
                     return Ok(url_op(
                         loc,
                         &target,
+                        old,
                         item,
                         Some(patch.size as usize),
                         installer,
@@ -1744,7 +2352,7 @@ async fn build_install_op(
 
     let loc =
         resolve_file_location(source_ctx, &hash, settings.dfs_extras.as_deref(), installer).await?;
-    Ok(url_op(loc, &target, item, None, installer))
+    Ok(url_op(loc, &target, None, item, None, installer))
 }
 
 fn side_hash(side: &crate::utils::metadata::PatchSide, key: HashKey) -> Option<&str> {
@@ -1752,6 +2360,18 @@ fn side_hash(side: &crate::utils::metadata::PatchSide, key: HashKey) -> Option<&
         HashKey::Md5 => side.md5.as_deref(),
         HashKey::Xxh => side.xxh.as_deref(),
     }
+}
+
+/// Staged output path for a managed file (`new\<rel>` under the staging root).
+fn staged_target(staging: &Staging, file_name: &str) -> String {
+    staging.new_path(file_name).to_string_lossy().to_string()
+}
+
+fn is_current_exe(path: &str) -> bool {
+    std::env::current_exe().is_ok_and(|exe| {
+        crate::session::plan::normalize_full(&exe.to_string_lossy())
+            == crate::session::plan::normalize_full(path)
+    })
 }
 
 fn file_source(loc: FileLocation) -> InstallFileSource {
@@ -1775,6 +2395,7 @@ fn file_source(loc: FileLocation) -> InstallFileSource {
 fn url_op(
     loc: FileLocation,
     target: &str,
+    old: Option<String>,
     item: &FileMeta,
     diff_size: Option<usize>,
     installer: bool,
@@ -1788,6 +2409,7 @@ fn url_op(
     IpcOperation::InstallFile(InstallFileArgs {
         mode,
         target: target.to_string(),
+        old,
         md5: item.md5.clone(),
         xxh: item.xxh.clone(),
         clear_installer_index_mark: Some(installer),
@@ -1805,6 +2427,7 @@ fn hybrid_op(local: &Embedded, loc: FileLocation, target: &str, item: &FileMeta)
             },
         },
         target: target.to_string(),
+        old: None,
         md5: item.md5.clone(),
         xxh: item.xxh.clone(),
         clear_installer_index_mark: None,
@@ -1815,12 +2438,14 @@ async fn install_runtimes(
     settings: &Settings,
     config: &InstallerConfig,
     project: &ProjectConfig,
+    staging: &Staging,
     ui: &LiveUi<'_>,
     mgr: &ManagedElevate,
 ) -> anyhow::Result<()> {
     let Some(runtimes) = project.runtimes.as_ref() else {
         return Ok(());
     };
+    let dl_dir = staging.dl_dir().to_string_lossy().to_string();
     tracing::info!("latest_meta.runtimes {runtimes:?}");
     for tag in runtimes {
         tracing::info!("Installing runtime: {tag}");
@@ -1840,6 +2465,7 @@ async fn install_runtimes(
                     tag: tag.clone(),
                     offset: embed.map(|e| e.offset),
                     size: embed.map(|e| e.size),
+                    dl_dir: dl_dir.clone(),
                 },
                 progress_notify(move |p| {
                     let _ = tx.send(p);
@@ -1935,27 +2561,17 @@ async fn finish_install(
         )
         .await;
     }
-    if !settings.is_update || config.install_path_source.starts_with("REG") {
-        if let Err(err) = run_op(
-            mgr,
-            settings.elevate,
-            IpcOperation::CreateUninstaller(CreateUninstallerArgs {
-                source: settings.install_path.clone(),
-                uninstaller_name: project.uninstall_name.clone(),
-                updater_name: project.updater_name.clone(),
-            }),
-            progress_noop(),
-        )
-        .await
-        {
-            tracing::warn!("create uninstaller failed: {err:#}");
-            notify_error(ui, err.attach_with(FILE_IO_FAILED, project.uninstall_name.clone()));
-        }
+    // the uninstaller itself was swapped in with the commit (see
+    // `self_image_units`); only its shortcut is made here, and only if it exists
+    let uninstaller_path = join_install(&settings.install_path, &project.uninstall_name);
+    if (!settings.is_update || config.install_path_source.starts_with("REG"))
+        && std::path::Path::new(&uninstaller_path).is_file()
+    {
         create_lnk_or_notify(
             mgr,
             settings.elevate,
             CreateLnkArgs {
-                target: join_install(&settings.install_path, &project.uninstall_name),
+                target: uninstaller_path,
                 lnk: uninstall_lnk,
             },
             ui,
@@ -2070,21 +2686,64 @@ async fn run_mirrorc(
     if !prepare_process(settings, project, ui, mgr, &version_name).await? {
         return Ok(SessionResult::cancelled(settings.is_update));
     }
+    ui.check_cancel()?;
     let url = status
         .pointer("/data/url")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| Coded::bare(MIRRORC_FAILED))?;
+        .ok_or_else(|| Coded::bare(MIRRORC_FAILED))?
+        .to_string();
     tracing::info!("Mirrorc URL {url}");
     let sha256 = status
         .pointer("/data/sha256")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| Coded::bare(MIRRORC_FAILED))?;
-    let zip_path = join_install(
-        &settings.install_path,
-        &format!("KachinaInstaller_Mirrorc_{sha256}.zip"),
-    );
+        .ok_or_else(|| Coded::bare(MIRRORC_FAILED))?
+        .to_lowercase();
+
+    let (staged, journal) = open_staging(settings, mgr).await?;
+    let (staged, recovered_self) = match journal {
+        Some(text) => {
+            recover_or_discard(
+                settings,
+                project,
+                staged,
+                text,
+                "md5",
+                &std::collections::HashMap::new(),
+                &std::collections::HashSet::new(),
+                Some(&sha256),
+                ui,
+                mgr,
+            )
+            .await?
+        }
+        None => (staged, false),
+    };
+    let result = mirrorc_staged(settings, config, project, ui, mgr, &staged, &url, &sha256).await;
+    let self_replaced = recovered_self || matches!(result, Ok((_, true)));
+    finish_staging(&staged, self_replaced, mgr).await;
+    result.map(|(r, _)| r)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn mirrorc_staged(
+    settings: &Settings,
+    config: &InstallerConfig,
+    project: &ProjectConfig,
+    ui: &LiveUi<'_>,
+    mgr: &ManagedElevate,
+    staged: &SessionStaging,
+    url: &str,
+    sha256: &str,
+) -> anyhow::Result<(SessionResult, bool)> {
+    let zip_path = staged
+        .staging
+        .dl_dir()
+        .join(format!("{sha256}.zip"))
+        .to_string_lossy()
+        .to_string();
     progress(ui, 1, 5.0, "mirrorc_download", None, None, None);
-    run_op_with_ui(
+    let cancel = ui.cancel.clone();
+    let download = run_op_with_ui(
         mgr,
         settings.elevate,
         IpcOperation::RunMirrorcDownload {
@@ -2110,23 +2769,30 @@ async fn run_mirrorc(
                 );
             }
         },
-    )
-    .await?;
+    );
+    tokio::select! {
+        res = download => res?,
+        _ = cancel.cancelled() => return Err(anyhow::Error::new(Cancelled)),
+    };
+    ui.check_cancel()?;
     progress(ui, 2, 70.0, "mirrorc_verify", None, None, None);
+    let new_dir = staged.staging.new_dir().to_string_lossy().to_string();
     let installed = run_op_with_ui(
         mgr,
         settings.elevate,
         IpcOperation::RunMirrorcInstall {
             zip_path,
-            target_path: settings.install_path.clone(),
+            new_dir,
+            sha256: sha256.to_string(),
         },
         ui,
-        |ui, p| match p {
-            Progress::Extract {
+        |ui, p| {
+            if let Progress::Extract {
                 file,
                 done: count,
                 total,
-            } => {
+            } = p
+            {
                 let total = (*total).max(1);
                 progress(
                     ui,
@@ -2138,35 +2804,80 @@ async fn run_mirrorc(
                     Some(total),
                 );
             }
-            Progress::Delete(file) => {
-                progress(
-                    ui,
-                    2,
-                    97.0,
-                    "delete",
-                    Some(file),
-                    None,
-                    None,
-                );
-            }
-            _ => {}
         },
     )
     .await?;
-    let IpcResult::RunMirrorcInstall(meta) = installed else {
+    let IpcResult::RunMirrorcInstall(extracted) = installed else {
         bail!("IPC_SHAPE_ERR");
     };
-    let meta: Option<RepoMetadata> = match meta.as_deref() {
+    let meta: Option<RepoMetadata> = match extracted.metadata.as_deref() {
         Some(text) => Some(
             serde_json::from_str(text)
                 .map_err(|e| attach_metadata(e.into()))?,
         ),
         None => None,
     };
-    install_runtimes(settings, config, project, ui, mgr).await?;
+    ui.check_cancel()?;
+
+    // a package landing in a missing or empty directory is one root unit;
+    // anything else is swapped file by file (no per-file metadata to judge
+    // directories by)
+    let install_dir = std::path::Path::new(&settings.install_path);
+    let root_unit = !install_dir.exists()
+        || std::fs::read_dir(install_dir)
+            .map(|mut it| it.next().is_none())
+            .unwrap_or(false);
+    let files: Vec<FileEntry> = extracted
+        .files
+        .iter()
+        .map(|(rel, hash)| FileEntry {
+            rel: rel.clone(),
+            old: None,
+            new: hash.clone(),
+        })
+        .collect();
+    let updater_rel = normalize_rel(&project.updater_name);
+    let archive_has_updater = files.iter().any(|f| normalize_rel(&f.rel) == updater_rel);
+    let self_units = self_image_units(
+        settings,
+        project,
+        staged,
+        "md5",
+        archive_has_updater,
+        archive_has_updater,
+        mgr,
+    )
+    .await?;
+    let mut units = Vec::new();
+    if root_unit {
+        units.push(Unit::Dir {
+            rel: String::new(),
+            files,
+        });
+    } else {
+        units.extend(files.into_iter().map(Unit::File));
+        units.extend(extracted.deletes.iter().map(|rel| Unit::Del {
+            rel: rel.clone(),
+            old: None,
+        }));
+    }
+    let units = merge_self_units(units, self_units);
+    let self_replaced = commit_staged(
+        settings,
+        staged,
+        Journal {
+            hash_algorithm: "md5".into(),
+            archive: Some(sha256.to_string()),
+            units,
+        },
+        ui,
+        mgr,
+    )
+    .await?;
+    install_runtimes(settings, config, project, &staged.staging, ui, mgr).await?;
     finish_install(settings, config, project, meta.as_ref(), ui, mgr).await?;
     progress(ui, 3, 100.0, "install_done", None, None, None);
-    Ok(SessionResult::install(false, settings.is_update))
+    Ok((SessionResult::install(false, settings.is_update), self_replaced))
 }
 
 pub async fn run_uninstall(
@@ -2246,7 +2957,7 @@ async fn run_uninstall_inner(
         let _ = run_op(mgr, true, IpcOperation::Ping, progress_noop()).await;
     }
     progress(ui, 1, 40.0, "uninstall_delete", None, None, None);
-    run_op(
+    let raw = run_op(
         mgr,
         settings.elevate,
         IpcOperation::RunUninstall(RunUninstallArgs {
@@ -2260,16 +2971,22 @@ async fn run_uninstall_inner(
         progress_noop(),
     )
     .await?;
+    let IpcResult::RunUninstall(outcome) = raw else {
+        bail!("IPC_SHAPE_ERR");
+    };
+    for err in &outcome.errors {
+        tracing::warn!("uninstall: {err}");
+    }
+    if let Some(root) = outcome.self_moved_to.as_deref() {
+        schedule_delete_on_exit(root);
+    }
     progress(ui, 2, 100.0, "uninstall_done", None, None, None);
     let _ = config;
     Ok(SessionResult::uninstall())
 }
 
 pub async fn silent_main(args: crate::cli::arg::InstallArgs) -> anyhow::Result<()> {
-    let temp_dir = std::env::temp_dir();
-    if std::env::set_current_dir(&temp_dir).is_err() {
-        return Err(anyhow::Error::from(Coded::bare(TEMP_DIR_UNAVAILABLE)));
-    }
+    crate::fs::staging::enter_neutral_cwd()?;
     let config = crate::installer::config::resolve_installer_config(args.clone(), true).await?;
     let project = match config.embedded_config.as_ref() {
         Some(value) => ProjectConfig::from_value(value)?,
@@ -2325,4 +3042,238 @@ async fn silent_install(
     run_install(settings, config, project, ui, &UiState::default(), &mgr)
         .await
         .map(|_| ())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::session::plan::PlanFile;
+
+    fn meta(name: &str, md5: &str) -> FileMeta {
+        FileMeta {
+            file_name: name.into(),
+            size: 1,
+            md5: Some(md5.into()),
+            xxh: None,
+            installer: None,
+        }
+    }
+
+    fn plan_file(name: &str, action: PlanAction, old: Option<&str>) -> PlanFile {
+        PlanFile {
+            file_name: name.into(),
+            action,
+            skip_reason: None,
+            old_hash: old.map(str::to_string),
+            unwritable: false,
+            has_patch: false,
+            has_lpatch: false,
+        }
+    }
+
+    fn rels(units: &[Unit]) -> Vec<String> {
+        units
+            .iter()
+            .map(|u| match u {
+                Unit::Dir { rel, files } => format!("dir:{rel}[{}]", files.len()),
+                Unit::File(f) => format!("file:{}", f.rel),
+                Unit::Copy(f) => format!("copy:{}", f.rel),
+                Unit::Del { rel, .. } => format!("del:{rel}"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn units_root_dir_on_fresh_install() {
+        let hashed = vec![meta("app.exe", "a"), meta("lib/x.dll", "x")];
+        let plan = InstallPlan {
+            files: vec![
+                plan_file("app.exe", PlanAction::Install, None),
+                plan_file("lib/x.dll", PlanAction::Install, None),
+            ],
+            deletes: vec!["old.txt".into()],
+        };
+        let units = build_units(&plan, &hashed, HashKey::Md5, &[], &LocalScan::default());
+        // the whole install is one root unit; a delete under it is moot
+        assert_eq!(rels(&units), vec!["dir:[2]".to_string()]);
+    }
+
+    #[test]
+    fn units_subdir_when_root_is_dirty_or_partly_unchanged() {
+        let hashed = vec![
+            meta("app.exe", "a"),
+            meta("lib/x.dll", "x"),
+            meta("lib/y.dll", "y"),
+            meta("plugins/p.dll", "p"),
+        ];
+        let local = vec![LocalFile {
+            file_name: "app.exe".into(),
+            hash: "a".into(),
+            size: 1,
+            unwritable: false,
+        }];
+        let plan = InstallPlan {
+            files: vec![
+                plan_file("app.exe", PlanAction::Skip, Some("a")),
+                plan_file("lib/x.dll", PlanAction::Install, Some("x0")),
+                plan_file("lib/y.dll", PlanAction::Install, None),
+                plan_file("plugins/p.dll", PlanAction::Install, None),
+            ],
+            deletes: vec!["lib/gone.dll".into(), "plugins/old.dll".into()],
+        };
+        let scan = LocalScan {
+            files: vec![],
+            dirty_dirs: vec![String::new(), "plugins".into()],
+            reparse_dirs: vec![],
+        };
+        let units = build_units(&plan, &hashed, HashKey::Md5, &local, &scan);
+        assert_eq!(
+            rels(&units),
+            vec![
+                "dir:lib[2]".to_string(),
+                "file:plugins/p.dll".to_string(),
+                "del:plugins/old.dll".to_string(),
+            ]
+        );
+        let Unit::Dir { files, .. } = &units[0] else {
+            panic!()
+        };
+        assert_eq!(files[0].old.as_deref(), Some("x0"));
+        assert_eq!(files[1].old, None);
+    }
+
+    fn test_settings(install: &std::path::Path, is_update: bool) -> Settings {
+        Settings {
+            install_path: install.to_string_lossy().to_string(),
+            source_uri: String::new(),
+            create_lnk: false,
+            delete_user_data: false,
+            mirrorc_cdk: None,
+            online: false,
+            silent: true,
+            non_interactive: true,
+            dump_dir: None,
+            dfs_extras: None,
+            elevate: false,
+            is_update,
+            auto_answer: true,
+        }
+    }
+
+    #[test]
+    fn self_image_plan_follows_session_kind() {
+        let base = crate::fs::staging::scratch_file(&format!("kachina-selfimg-{}", uuid::Uuid::new_v4()));
+        let install = base.join("app");
+        std::fs::create_dir_all(&install).unwrap();
+        let staging = Staging::at(base.join("staged"));
+        let project = ProjectConfig::from_value(&json!({
+            "source": "https://x/meta.json",
+            "appName": "App",
+            "publisher": "P",
+            "regName": "App",
+            "exeName": "app.exe",
+            "uninstallName": "uninst.exe",
+            "updaterName": "updater.exe",
+            "programFilesPath": "App",
+            "title": "t",
+            "description": "d",
+            "windowTitle": "w",
+            "runtimes": null,
+            "windowBorderless": null
+        }))
+        .unwrap();
+        let names = |p: Option<SelfImagePlan>| p.map(|p| (p.names, p.copy_from));
+
+        // fresh install: both from self
+        let p = names(self_image_plan(&test_settings(&install, false), &project, &staging, false, false));
+        assert_eq!(p, Some((vec!["uninst.exe".into(), "updater.exe".into()], None)));
+
+        // update, nothing shipped, foreign installer, no uninstaller on disk: updater only
+        let p = names(self_image_plan(&test_settings(&install, true), &project, &staging, false, false));
+        assert_eq!(p, Some((vec!["updater.exe".into()], None)));
+
+        // ... with an uninstaller present it is refreshed too
+        std::fs::write(install.join("uninst.exe"), b"old").unwrap();
+        let p = names(self_image_plan(&test_settings(&install, true), &project, &staging, false, false));
+        assert_eq!(p, Some((vec!["updater.exe".into(), "uninst.exe".into()], None)));
+
+        // update, updater shipped and staged: uninstaller copied from the staged updater
+        let p = names(self_image_plan(&test_settings(&install, true), &project, &staging, true, true));
+        assert_eq!(
+            p,
+            Some((
+                vec!["uninst.exe".into()],
+                Some(staged_target(&staging, "updater.exe"))
+            ))
+        );
+        // ... shipped but unchanged on disk: copied from the installed updater
+        let p = names(self_image_plan(&test_settings(&install, true), &project, &staging, true, false));
+        assert_eq!(
+            p,
+            Some((
+                vec!["uninst.exe".into()],
+                Some(join_install(&install.to_string_lossy(), "updater.exe"))
+            ))
+        );
+        // ... shipped, no uninstaller on disk: nothing to do
+        std::fs::remove_file(install.join("uninst.exe")).unwrap();
+        assert!(self_image_plan(&test_settings(&install, true), &project, &staging, true, true).is_none());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn self_units_fold_into_root_unit_or_append() {
+        let selfs = || {
+            vec![Unit::File(FileEntry {
+                rel: "uninst.exe".into(),
+                old: None,
+                new: "u".into(),
+            })]
+        };
+        let root = vec![Unit::Dir {
+            rel: String::new(),
+            files: vec![FileEntry {
+                rel: "app.exe".into(),
+                old: None,
+                new: "a".into(),
+            }],
+        }];
+        let merged = merge_self_units(root, selfs());
+        assert_eq!(merged.len(), 1);
+        let Unit::Dir { files, .. } = &merged[0] else {
+            panic!()
+        };
+        assert_eq!(files.len(), 2);
+        assert!(files.iter().any(|f| f.rel == "uninst.exe"));
+
+        let flat = vec![Unit::File(FileEntry {
+            rel: "app.exe".into(),
+            old: None,
+            new: "a".into(),
+        })];
+        let merged = merge_self_units(flat, selfs());
+        assert_eq!(rels(&merged), vec!["file:app.exe".to_string(), "file:uninst.exe".to_string()]);
+    }
+
+    #[test]
+    fn units_copy_under_reparse_point() {
+        let hashed = vec![meta("link/f.dll", "f"), meta("app.exe", "a")];
+        let plan = InstallPlan {
+            files: vec![
+                plan_file("link/f.dll", PlanAction::Install, None),
+                plan_file("app.exe", PlanAction::Install, None),
+            ],
+            deletes: vec![],
+        };
+        let scan = LocalScan {
+            files: vec![],
+            dirty_dirs: vec![String::new()],
+            reparse_dirs: vec!["link".into()],
+        };
+        let units = build_units(&plan, &hashed, HashKey::Md5, &[], &scan);
+        assert_eq!(
+            rels(&units),
+            vec!["file:app.exe".to_string(), "copy:link/f.dll".to_string()]
+        );
+    }
 }

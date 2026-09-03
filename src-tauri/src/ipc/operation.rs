@@ -1,4 +1,5 @@
-use crate::ipc::{IpcResult, ProgressNotify};
+use crate::fs::commit::CommitArgs;
+use crate::ipc::{IpcResult, ProgressNotify, StagingOpened};
 use crate::utils::error::TAResult;
 
 // 外部标签（serde 默认）：内部标签/untagged 会拉进 serde 的 Content 缓冲机制，
@@ -15,15 +16,16 @@ pub enum IpcOperation {
     InstallMultichunkStream(super::install_file::InstallMultiStreamArgs),
     CreateLnk(crate::installer::lnk::CreateLnkArgs),
     WriteRegistry(crate::installer::registry::WriteRegistryParams),
-    CreateUninstaller(crate::installer::uninstall::CreateUninstallerArgs),
+    StageSelfImage(crate::installer::uninstall::StageSelfImageArgs),
     RunUninstall(crate::installer::uninstall::RunUninstallArgs),
     FindProcessByName(String),
     KillProcess(u32),
-    RmList(Vec<String>),
     InstallRuntime {
         tag: String,
         offset: Option<usize>,
         size: Option<usize>,
+        /// Staging `dl\` directory for the runtime installer download.
+        dl_dir: String,
     },
     CheckLocalFiles {
         source: String,
@@ -39,8 +41,17 @@ pub enum IpcOperation {
     },
     RunMirrorcInstall {
         zip_path: String,
-        target_path: String,
+        /// Staging `new\` directory the archive is extracted into.
+        new_dir: String,
+        /// Expected archive digest from the Mirror酱 API.
+        sha256: String,
     },
+    /// Find or create the staging directory for `install_dir`.
+    OpenStaging(String),
+    Commit(CommitArgs),
+    Recover(CommitArgs),
+    /// Delete a staging directory by root path.
+    DiscardStaging(String),
 }
 
 pub async fn run_opr(op: IpcOperation, notify: ProgressNotify) -> TAResult<IpcResult> {
@@ -50,16 +61,19 @@ pub async fn run_opr(op: IpcOperation, notify: ProgressNotify) -> TAResult<IpcRe
         IpcOperation::InstallMultichunkStream(_) => "InstallMultichunkStream",
         IpcOperation::CreateLnk(_) => "CreateLnk",
         IpcOperation::WriteRegistry(_) => "WriteRegistry",
-        IpcOperation::CreateUninstaller(_) => "CreateUninstaller",
+        IpcOperation::StageSelfImage(_) => "StageSelfImage",
         IpcOperation::RunUninstall(_) => "RunUninstall",
         IpcOperation::FindProcessByName(..) => "FindProcessByName",
         IpcOperation::KillProcess(..) => "KillProcess",
-        IpcOperation::RmList(..) => "RmList",
         IpcOperation::InstallRuntime { .. } => "InstallRuntime",
         IpcOperation::CheckLocalFiles { .. } => "CheckLocalFiles",
         IpcOperation::ProbeWritable(..) => "ProbeWritable",
         IpcOperation::RunMirrorcDownload { .. } => "RunMirrorcDownload",
         IpcOperation::RunMirrorcInstall { .. } => "RunMirrorcInstall",
+        IpcOperation::OpenStaging(..) => "OpenStaging",
+        IpcOperation::Commit(..) => "Commit",
+        IpcOperation::Recover(..) => "Recover",
+        IpcOperation::DiscardStaging(..) => "DiscardStaging",
     };
     tracing::info!("IPC operation: {}", op_name);
     match op {
@@ -74,10 +88,9 @@ pub async fn run_opr(op: IpcOperation, notify: ProgressNotify) -> TAResult<IpcRe
             crate::installer::registry::write_registry_with_params(params).await?;
             Ok(IpcResult::WriteRegistry)
         }
-        IpcOperation::CreateUninstaller(args) => {
-            crate::installer::uninstall::create_uninstaller_with_args(args).await?;
-            Ok(IpcResult::CreateUninstaller)
-        }
+        IpcOperation::StageSelfImage(args) => Ok(IpcResult::StageSelfImage(
+            crate::installer::uninstall::stage_self_image(args).await?,
+        )),
         IpcOperation::RunUninstall(args) => Ok(IpcResult::RunUninstall(
             crate::installer::uninstall::run_uninstall_with_args(args).await?,
         )),
@@ -92,14 +105,13 @@ pub async fn run_opr(op: IpcOperation, notify: ProgressNotify) -> TAResult<IpcRe
             crate::installer::kill_process(pid).await?;
             Ok(IpcResult::KillProcess)
         }
-        IpcOperation::RmList(list) => {
-            let list = list.into_iter().map(std::path::PathBuf::from).collect();
-            Ok(IpcResult::RmList(
-                crate::installer::uninstall::rm_list(list).await,
-            ))
-        }
-        IpcOperation::InstallRuntime { tag, offset, size } => Ok(IpcResult::InstallRuntime(
-            crate::installer::runtimes::install_runtime(tag, offset, size, notify).await?,
+        IpcOperation::InstallRuntime {
+            tag,
+            offset,
+            size,
+            dl_dir,
+        } => Ok(IpcResult::InstallRuntime(
+            crate::installer::runtimes::install_runtime(tag, offset, size, dl_dir, notify).await?,
         )),
         IpcOperation::CheckLocalFiles {
             source,
@@ -119,12 +131,34 @@ pub async fn run_opr(op: IpcOperation, notify: ProgressNotify) -> TAResult<IpcRe
         }
         IpcOperation::RunMirrorcInstall {
             zip_path,
-            target_path,
-        } => {
-            let meta =
-                crate::thirdparty::mirrorc::run_mirrorc_install(&zip_path, &target_path, notify)
-                    .await?;
-            Ok(IpcResult::RunMirrorcInstall(meta))
+            new_dir,
+            sha256,
+        } => Ok(IpcResult::RunMirrorcInstall(
+            crate::thirdparty::mirrorc::run_mirrorc_install(&zip_path, &new_dir, &sha256, notify)
+                .await?,
+        )),
+        IpcOperation::OpenStaging(install_dir) => {
+            let opened = tokio::task::spawn_blocking(move || {
+                crate::fs::staging::Staging::open(&install_dir)
+            })
+            .await
+            .map_err(anyhow::Error::from)??;
+            Ok(IpcResult::OpenStaging(StagingOpened {
+                root: opened.staging.root().to_string_lossy().to_string(),
+                journal: opened.journal,
+            }))
+        }
+        IpcOperation::Commit(args) => Ok(IpcResult::Commit(
+            crate::fs::commit::commit(args, notify).await?,
+        )),
+        IpcOperation::Recover(args) => Ok(IpcResult::Recover(
+            crate::fs::commit::recover(args, notify).await?,
+        )),
+        IpcOperation::DiscardStaging(root) => {
+            tokio::task::spawn_blocking(move || crate::fs::commit::discard(&root))
+                .await
+                .map_err(anyhow::Error::from)?;
+            Ok(IpcResult::DiscardStaging)
         }
     }
 }

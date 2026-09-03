@@ -6,6 +6,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::{oneshot, Mutex};
+use tokio_util::sync::CancellationToken;
 
 use crate::host::HostHandle;
 use crate::session::state::{Phase, Prompt, UiState};
@@ -58,6 +59,11 @@ pub trait SessionUi: Send + Sync {
     fn notify(&self, coded: &Coded);
     fn plugin_host(&self) -> Option<Arc<dyn PluginHost>> {
         None
+    }
+    /// Fired by `Intent::Cancel`; honoured during phase one (writes into the
+    /// staging directory), ignored during phase two (the swap).
+    fn cancel_token(&self) -> CancellationToken {
+        CancellationToken::new()
     }
 }
 
@@ -308,6 +314,7 @@ pub struct GuiUi {
     plugins: Arc<PluginHub>,
     auto_answer: bool,
     session: Arc<std::sync::Mutex<crate::session::state::UiSession>>,
+    cancel: CancellationToken,
 }
 
 impl GuiUi {
@@ -317,6 +324,7 @@ impl GuiUi {
         plugins: Arc<PluginHub>,
         auto_answer: bool,
         session: Arc<std::sync::Mutex<crate::session::state::UiSession>>,
+        cancel: CancellationToken,
     ) -> Self {
         Self {
             window,
@@ -324,6 +332,7 @@ impl GuiUi {
             plugins,
             auto_answer,
             session,
+            cancel,
         }
     }
 }
@@ -373,6 +382,10 @@ impl SessionUi for GuiUi {
             window: self.window.clone(),
             hub: self.plugins.clone(),
         }))
+    }
+
+    fn cancel_token(&self) -> CancellationToken {
+        self.cancel.clone()
     }
 }
 
