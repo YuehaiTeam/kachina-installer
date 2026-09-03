@@ -1,5 +1,9 @@
 // Prevents additional console window on Windows in release, DO NOT REMOVE!!
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+// The Send proof for on_message → handle_intent → run_install → run_dfs_install →
+// Transaction::timed exceeds the default depth (recursion_depth_exceeding_limit,
+// future-incompatible); raise it instead of boxing the chain.
+#![recursion_limit = "256"]
 
 pub mod capabilities;
 pub mod cli;
