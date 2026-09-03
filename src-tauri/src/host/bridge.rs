@@ -6,7 +6,9 @@ use super::{HostCtx, HostHandle, UiAction};
 use crate::session::state::Intent;
 use crate::utils::code::{extract, Extracted};
 use crate::utils::error::TACommandError;
-use crate::utils::taskdialog::{show_error, task_dialog, CommandLink, TaskDialogRequest};
+use crate::utils::taskdialog::{
+    show_error, task_dialog, CommandLink, ErrorDialog, TaskDialogRequest,
+};
 
 #[derive(Debug, serde::Deserialize)]
 struct InvokeMessage {
@@ -32,8 +34,8 @@ pub fn on_message(ctx: &Arc<HostCtx>, handle: &HostHandle, json: &str) {
         let (ok, data) = match result {
             Ok(data) => (true, data),
             Err(err) => {
-                err.report_if_needed();
-                (false, error_payload(&err))
+                let event_id = err.report_if_needed();
+                (false, error_payload(&err, event_id))
             }
         };
         handle.send(UiAction::Reply {
@@ -47,28 +49,30 @@ pub fn on_message(ctx: &Arc<HostCtx>, handle: &HostHandle, json: &str) {
     });
 }
 
-fn error_payload(err: &TACommandError) -> Value {
-    let (code, detail, subject) = match extract(&err.error) {
+/// Same shape as `Coded` plus `insight`, so the renderer can hand it straight to
+/// `error_dialog`. `code` is null for cancelled and uncoded errors.
+fn error_payload(err: &TACommandError, event_id: Option<String>) -> Value {
+    let (code, detail, subject, sid) = match extract(&err.error) {
         Extracted::Coded(c) => (
             Value::String(c.code.to_string()),
             json_opt(c.detail.as_deref()),
             json_opt(c.subject.as_deref()),
+            json_opt(c.sid.as_deref()),
         ),
-        Extracted::Cancelled => (Value::Null, Value::String("cancelled".into()), Value::Null),
-        Extracted::Uncoded { detail } => (
+        Extracted::Cancelled => (
             Value::Null,
-            if detail.is_empty() {
-                Value::Null
-            } else {
-                Value::String(detail)
-            },
+            Value::String("cancelled".into()),
+            Value::Null,
             Value::Null,
         ),
+        Extracted::Uncoded { detail } => (Value::Null, json_opt(Some(&detail)), Value::Null, Value::Null),
     };
     json!({
         "code": code,
         "detail": detail,
         "subject": subject,
+        "sid": sid,
+        "event_id": json_opt(event_id.as_deref()),
         "insight": err.insight,
     })
 }
@@ -151,15 +155,18 @@ async fn dispatch(
             let code = req_str(&args, &["code"])?;
             let detail = opt_str(&args, &["detail"]);
             let subject = opt_str(&args, &["subject"]);
+            let sid = opt_str(&args, &["sid"]);
+            let event_id = opt_str(&args, &["event_id", "eventId"]);
             let parent = handle.hwnd().0 as isize;
-            let code_owned = code;
-            let detail_owned = detail;
-            let subject_owned = subject;
             tokio::task::spawn_blocking(move || {
                 show_error(
-                    &code_owned,
-                    detail_owned.as_deref(),
-                    subject_owned.as_deref(),
+                    ErrorDialog {
+                        code: &code,
+                        detail: detail.as_deref(),
+                        subject: subject.as_deref(),
+                        sid: sid.as_deref(),
+                        event_id: event_id.as_deref(),
+                    },
                     windows::Win32::Foundation::HWND(parent as *mut _),
                 );
             })

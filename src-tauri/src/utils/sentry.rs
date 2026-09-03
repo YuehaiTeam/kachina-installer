@@ -172,8 +172,8 @@ fn base_event(event_id: &str) -> Value {
     })
 }
 
-/// 过滤（Expected 标记）由调用方负责，本函数无条件发送。
-pub fn capture_anyhow(err: &anyhow::Error) {
+/// 过滤由调用方负责，本函数无条件发送。返回事件 id，供错误对话框的复制内容携带。
+pub fn capture_anyhow(err: &anyhow::Error) -> String {
     // exception.values 按协议要求 root cause 在前、最外层（主异常）在后
     let mut values: Vec<Value> = err
         .chain()
@@ -186,6 +186,7 @@ pub fn capture_anyhow(err: &anyhow::Error) {
     event["exception"] = json!({ "values": values });
     event["breadcrumbs"] = breadcrumbs_snapshot();
     dispatch(envelope(&event_id, "event", &event), false);
+    event_id
 }
 
 /// `event_id` 由调用方生成——须在上报前就能交给崩溃提示进程展示。

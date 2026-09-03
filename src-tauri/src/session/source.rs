@@ -12,9 +12,9 @@ use crate::dfs::{
 };
 use crate::local::Embedded;
 use crate::utils::code::{
-    attach_download, attach_metadata, is_retryable_network, Attach, Coded, NO_DOWNLOAD_NODE,
-    PLUGIN_NOT_FOUND, PLUGIN_NO_UI, REMOTE_FILE_MISSING, SOURCE_INVALID, SOURCE_NEEDS_VERIFICATION,
-    MIRRORC_UNREACHABLE,
+    attach_download_or, attach_metadata, is_retryable_network, Attach, Coded,
+    MIRRORC_CONFIG_INVALID, NO_DOWNLOAD_NODE, PLUGIN_NOT_FOUND, PLUGIN_NO_UI, REMOTE_FILE_MISSING,
+    SOURCE_INVALID, SOURCE_NEEDS_VERIFICATION,
 };
 use crate::session::plan::HashKey;
 use crate::session::plugin::{
@@ -118,6 +118,11 @@ pub struct SourceCtx {
 }
 
 impl SourceCtx {
+    /// DFS2 session id once a session exists; hung on session errors as `DfsSession`.
+    pub fn dfs2_session_id(&self) -> Option<String> {
+        self.dfs2.as_ref().map(|s| s.session_id.clone())
+    }
+
     pub fn from_embedded(files: &[Embedded]) -> Self {
         let mut index = HashMap::new();
         for file in files {
@@ -196,12 +201,14 @@ impl SourceCtx {
 
 pub fn parse_source(source: &str) -> anyhow::Result<ParsedSource> {
     if source.starts_with("mirrorc://") {
-        let url = url::Url::parse(source).map_err(|e| {
-            anyhow::Error::from(e).attach(MIRRORC_UNREACHABLE)
-        })?;
+        let url = url::Url::parse(source)
+            .map_err(|e| anyhow::Error::from(e).attach_with(MIRRORC_CONFIG_INVALID, source))?;
         let resource_id = url.host_str().unwrap_or_default().to_string();
         if resource_id.is_empty() {
-            return Err(anyhow::Error::from(Coded::bare(MIRRORC_UNREACHABLE)));
+            return Err(anyhow::Error::from(Coded::bare_with(
+                MIRRORC_CONFIG_INVALID,
+                source,
+            )));
         }
         let params = url.query_pairs();
         let mut channel = "stable".to_string();
@@ -293,7 +300,11 @@ async fn fetch_hashed_metadata(url: &str) -> anyhow::Result<RepoMetadata> {
         .await
         .map_err(|e| attach_metadata(e.into()))?;
     if !res.status().is_success() {
-        return Err(anyhow!("hashed metadata http {}", res.status()).attach(crate::utils::code::METADATA_HTTP_ERROR));
+        let status = res.status().as_u16();
+        let body = res.text().await.unwrap_or_default();
+        return Err(attach_metadata(anyhow::Error::new(
+            crate::dfs::HttpStatus::new(status, body),
+        )));
     }
     let body = res.text().await.map_err(|e| attach_metadata(e.into()))?;
     serde_json::from_str(&body).map_err(|e| attach_metadata(e.into()))
@@ -646,7 +657,7 @@ pub async fn resolve_range_url(
                 let range = format!("{start}-{end}");
                 dfs2_chunk_url(ctx, &session_api, &range)
                     .await
-                    .map_err(|e| attach_download(e.into(), None, None).attach(NO_DOWNLOAD_NODE))
+                    .map_err(|e| attach_download_or(e, NO_DOWNLOAD_NODE, None, None))
             }
         },
     }
@@ -695,7 +706,7 @@ pub async fn ensure_dfs2_session(
             return Err(err);
         }
     };
-    let parsed = url::Url::parse(&url).map_err(|e| attach_download(e.into(), None, None).attach(NO_DOWNLOAD_NODE))?;
+    let parsed = url::Url::parse(&url).map_err(|e| anyhow::Error::from(e).attach(NO_DOWNLOAD_NODE))?;
     let base_url = format!("{}://{}", parsed.scheme(), parsed.host_str().unwrap_or(""));
     let res_id = parsed
         .path_segments()
@@ -741,11 +752,13 @@ async fn create_dfs2_session_with_challenge(
                     last_err = Some(err);
                     continue;
                 }
-                return Err(err);
+                return Err(attach_download_or(err, NO_DOWNLOAD_NODE, None, None));
             }
         }
     }
-    Err(last_err.unwrap_or_else(|| anyhow::Error::from(Coded::bare(NO_DOWNLOAD_NODE))))
+    Err(last_err
+        .map(|e| attach_download_or(e, NO_DOWNLOAD_NODE, None, None))
+        .unwrap_or_else(|| anyhow::Error::from(Coded::bare(NO_DOWNLOAD_NODE))))
 }
 
 async fn create_dfs2_session_once(
@@ -955,7 +968,7 @@ async fn ensure_plugin_session(
         }
         Err(err) => {
             tracing::error!("Failed to create plugin session: {err}");
-            Err(attach_download(err, None, None).attach(NO_DOWNLOAD_NODE))
+            Err(attach_download_or(err, NO_DOWNLOAD_NODE, None, None))
         }
     }
 }
@@ -1034,7 +1047,7 @@ async fn resolve_dfs_file_url(
     let range = length.map(|len| format!("{}-{}", start, start + len.saturating_sub(1)));
     let dfs = get_dfs(apiurl.to_string(), range, extras.map(|s| s.to_string()))
         .await
-        .map_err(|e| attach_download(e, None, None))?;
+        .map_err(|e| attach_download_or(e, NO_DOWNLOAD_NODE, None, None))?;
     if let Some(url) = dfs.url {
         return Ok(url);
     }
@@ -1112,7 +1125,7 @@ async fn prefetch_batch_urls(
     );
     let resp = get_dfs2_batch_chunk_urls(session_api, ranges)
         .await
-        .map_err(|e| attach_download(e, None, None))?;
+        .map_err(|e| attach_download_or(e, NO_DOWNLOAD_NODE, None, None))?;
     let mut out = HashMap::new();
     for (k, v) in resp.urls {
         if let Some(url) = v.url {

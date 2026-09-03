@@ -8,10 +8,9 @@ use serde_json::Value;
 use tokio::sync::{oneshot, Mutex};
 
 use crate::host::HostHandle;
-use crate::session::state::{Phase, Progress, Prompt, UiState};
+use crate::session::state::{Phase, Prompt, UiState};
 use crate::session::types::PluginEvent;
-use crate::utils::code::{Coded, Extracted};
-use crate::utils::i18n::{self, format_size};
+use crate::utils::code::Coded;
 
 #[derive(Debug, Clone, Copy)]
 pub enum PromptKind {
@@ -186,68 +185,6 @@ pub async fn send_ev_insight(url: &str, event: &str, data: Option<Value>) {
     }
 }
 
-pub fn notice_text(coded: &Coded) -> (String, String) {
-    let subject = coded.subject.clone().unwrap_or_default();
-    let title = i18n::t("dialog.error", &[]);
-    let body = i18n::t(coded.code, &[("subject", subject.as_str())]);
-    let message = match coded.detail.as_deref().filter(|d| !d.is_empty()) {
-        Some(d) => format!("{body}\n{d}"),
-        None => body,
-    };
-    (title, message)
-}
-
-pub fn notice_from_error(err: &anyhow::Error) -> (String, String) {
-    match crate::utils::code::extract(err) {
-        Extracted::Coded(c) => notice_text(c),
-        Extracted::Cancelled => (
-            i18n::t("dialog.error", &[]),
-            "cancelled".to_string(),
-        ),
-        Extracted::Uncoded { detail } => {
-            let body = i18n::t(crate::utils::code::INTERNAL_ERROR, &[]);
-            (
-                i18n::t("dialog.error", &[]),
-                if detail.is_empty() {
-                    body
-                } else {
-                    format!("{body}\n{detail}")
-                },
-            )
-        }
-    }
-}
-
-pub(crate) fn progress_current(p: &Progress) -> String {
-    let subject = p.subject.clone().unwrap_or_default();
-    let done = p.done.map(format_size).unwrap_or_default();
-    let total = p.total.map(format_size).unwrap_or_default();
-    i18n::t(
-        &format!("progress.{}", p.stage),
-        &[
-            ("subject", subject.as_str()),
-            ("done", done.as_str()),
-            ("total", total.as_str()),
-        ],
-    )
-}
-
-pub(crate) fn prompt_copy(prompt: &Prompt) -> (String, String) {
-    let items = prompt.items.join("\n");
-    let mut owned: Vec<(String, String)> = vec![("items".into(), items)];
-    for (k, v) in &prompt.params {
-        owned.push(((*k).to_string(), v.clone()));
-    }
-    let params: Vec<(&str, &str)> = owned
-        .iter()
-        .map(|(k, v)| (k.as_str(), v.as_str()))
-        .collect();
-    (
-        i18n::t(&format!("prompt.{}.title", prompt.kind), &params),
-        i18n::t(&format!("prompt.{}.message", prompt.kind), &params),
-    )
-}
-
 #[derive(Default)]
 pub struct PromptHub {
     pending: Mutex<HashMap<String, oneshot::Sender<bool>>>,
@@ -356,7 +293,12 @@ impl PluginHost for GuiPluginHost {
             return Ok(PluginResult::Unimplemented);
         }
         if !reply.ok {
-            return Err(anyhow::Error::from(Coded::bare(crate::utils::code::PLUGIN_FAILED)));
+            let coded = Coded::bare(crate::utils::code::PLUGIN_FAILED);
+            // The plugin's own message is the raw detail.
+            return Err(match reply.error.filter(|s| !s.is_empty()) {
+                Some(msg) => coded.wrap(anyhow::anyhow!(msg)),
+                None => anyhow::Error::from(coded),
+            });
         }
         Ok(PluginResult::Value(
             reply.data.unwrap_or_else(|| "null".to_string()),
@@ -392,16 +334,15 @@ impl GuiUi {
 
 #[async_trait]
 impl SessionUi for GuiUi {
+    /// The GUI session object stays authoritative (it is what `window_show`
+    /// re-emits and what `confirm` decorates with `pending`), so only `phase`
+    /// is taken from the running session's copy.
     fn state(&self, state: &UiState) {
-        if let Phase::Running(p) = &state.phase {
-            let mut sess = self.session.lock().unwrap_or_else(|e| e.into_inner());
-            sess.state.phase = Phase::Running(p.clone());
-            let snap = sess.state.clone();
-            drop(sess);
-            self.window.emit("ui-state", &snap);
-            return;
-        }
-        self.window.emit("ui-state", state);
+        let mut sess = self.session.lock().unwrap_or_else(|e| e.into_inner());
+        sess.state.phase = state.phase.clone();
+        let snap = sess.state.clone();
+        drop(sess);
+        self.window.emit("ui-state", &snap);
     }
 
     async fn confirm(&self, mut prompt: Prompt) -> bool {

@@ -1,5 +1,6 @@
-//! Locale table parser. Bytes come from tests or (later) `host/assets`.
-//! Native/silent code must not call `t` yet except tests.
+//! Locale table. The bytes are the `i18n.tsv` asset that the WebView also
+//! fetches, so both renderers read one table. Only renderers (native, silent,
+//! `show_error`) and the session's few user-visible filesystem names call `t`.
 
 use std::collections::BTreeMap;
 
@@ -92,18 +93,13 @@ use std::sync::OnceLock;
 static CATALOG: OnceLock<Catalog> = OnceLock::new();
 static LANG: OnceLock<String> = OnceLock::new();
 
-fn embedded_bytes() -> &'static [u8] {
-    static DECODED: OnceLock<Vec<u8>> = OnceLock::new();
-    DECODED
-        .get_or_init(|| {
-            let compressed = include_bytes!(concat!(env!("OUT_DIR"), "/i18n.tsv.zst"));
-            zstd::decode_all(&compressed[..]).unwrap_or_default()
-        })
-        .as_slice()
-}
-
 pub fn catalog() -> &'static Catalog {
-    CATALOG.get_or_init(|| Catalog::parse(embedded_bytes()))
+    CATALOG.get_or_init(|| {
+        let bytes = crate::host::assets::lookup("i18n.tsv")
+            .map(|(b, _)| b)
+            .unwrap_or_default();
+        Catalog::parse(bytes)
+    })
 }
 
 pub fn lang() -> &'static str {

@@ -634,50 +634,133 @@ pub struct TaskDialogRequest {
     pub buttons: Vec<CommandLink>,
 }
 
-/// TaskDialog error: title = locale[code], main = subject, expanded = detail,
-/// footer = code, Copy keeps the dialog open.
-pub fn show_error(code: &str, detail: Option<&str>, subject: Option<&str>, parent: HWND) {
-    let title = crate::utils::i18n::t("dialog.error", &[]);
-    let instruction = crate::utils::i18n::t(code, &[("subject", subject.unwrap_or(""))]);
-    let content = subject.unwrap_or("").to_string();
-    let expanded = detail.unwrap_or("").to_string();
-    let copy_text = format!(
-        "code: {code}\nsubject: {}\ndetail: {}",
-        subject.unwrap_or(""),
-        detail.unwrap_or("")
-    );
-    let copy_label = crate::utils::i18n::t("dialog.copy", &[]);
-    let ok_label = crate::utils::i18n::t("dialog.ok", &[]);
-    let _ = show_task_dialog(
-        TaskDialogSpec {
-            title,
-            instruction,
-            content,
-            expanded,
-            footer: code.to_string(),
-            buttons: vec![
-                CommandLink {
-                    id: ID_COPY,
-                    text: copy_label,
-                },
-                CommandLink {
-                    id: IDOK.0,
-                    text: ok_label,
-                },
-            ],
-            parent,
-            copy: Some(copy_text),
-        },
-    );
+/// What the default error dialog shows. `code` is never displayed (the copy
+/// table translates it); it only goes into the copied text.
+#[derive(Default)]
+pub struct ErrorDialog<'a> {
+    pub code: &'a str,
+    pub detail: Option<&'a str>,
+    pub subject: Option<&'a str>,
+    pub sid: Option<&'a str>,
+    pub event_id: Option<&'a str>,
+}
+
+impl<'a> ErrorDialog<'a> {
+    pub fn code(code: &'a str) -> Self {
+        Self {
+            code,
+            ..Self::default()
+        }
+    }
+
+    pub fn from_coded(coded: &'a crate::utils::code::Coded) -> Self {
+        Self {
+            code: coded.code,
+            detail: coded.detail.as_deref(),
+            subject: coded.subject.as_deref(),
+            sid: coded.sid.as_deref(),
+            event_id: coded.event_id.as_deref(),
+        }
+    }
+}
+
+fn non_empty(s: Option<&str>) -> Option<&str> {
+    s.filter(|s| !s.trim().is_empty())
+}
+
+/// Layout: instruction = copy[code], content = subject then detail, footer =
+/// the ids the other side can look up (DFS session, Sentry event). The Copy
+/// button appears only for errors someone else can act on (`copy_useful`) and
+/// keeps the dialog open.
+pub fn show_error(dialog: ErrorDialog<'_>, parent: HWND) {
+    use crate::utils::i18n::t;
+    let subject = non_empty(dialog.subject);
+    let detail = non_empty(dialog.detail);
+    let sid = non_empty(dialog.sid);
+    let event_id = non_empty(dialog.event_id);
+
+    // When the copy already names the subject ("安装{subject}失败"), repeating it
+    // in the body would read as a second, unrelated fact.
+    let raw_copy = t(dialog.code, &[]);
+    let instruction = t(dialog.code, &[("subject", subject.unwrap_or(""))]);
+    let body_subject = if raw_copy.contains("{subject}") {
+        None
+    } else {
+        subject
+    };
+    let content = [body_subject, detail]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    let footer = [
+        sid.map(|s| t("dialog.session_id", &[("sid", s)])),
+        event_id.map(|e| t("dialog.event_id", &[("event_id", e)])),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>()
+    .join("\n");
+
+    let mut buttons = Vec::new();
+    let copy = if crate::utils::code::copy_useful(dialog.code) {
+        buttons.push(CommandLink {
+            id: ID_COPY,
+            text: t("dialog.copy", &[]),
+        });
+        Some(copy_body(dialog.code, subject, sid, event_id, detail))
+    } else {
+        None
+    };
+    buttons.push(CommandLink {
+        id: IDOK.0,
+        text: t("dialog.ok", &[]),
+    });
+
+    let _ = show_task_dialog(TaskDialogSpec {
+        title: t("dialog.error", &[]),
+        instruction,
+        content,
+        expanded: String::new(),
+        footer,
+        buttons,
+        parent,
+        copy,
+    });
 }
 
 pub fn show_error_coded(coded: &crate::utils::code::Coded, parent: HWND) {
-    show_error(
-        coded.code,
-        coded.detail.as_deref(),
-        coded.subject.as_deref(),
-        parent,
-    );
+    show_error(ErrorDialog::from_coded(coded), parent);
+}
+
+/// One `key: value` per line, empty fields omitted; the UTC time lets the DFS
+/// side (which has no Sentry event) find the matching server log by `sid`.
+fn copy_body(
+    code: &str,
+    subject: Option<&str>,
+    sid: Option<&str>,
+    event_id: Option<&str>,
+    detail: Option<&str>,
+) -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let mut lines = vec![format!("code: {code}")];
+    if let Some(s) = subject {
+        lines.push(format!("subject: {s}"));
+    }
+    if let Some(s) = sid {
+        lines.push(format!("sid: {s}"));
+    }
+    if let Some(e) = event_id {
+        lines.push(format!("event: {e}"));
+    }
+    lines.push(format!("time: {}", crate::utils::sentry::rfc3339(now)));
+    if let Some(d) = detail {
+        lines.push(format!("detail: {d}"));
+    }
+    lines.join("\n")
 }
 
 pub fn task_dialog(req: TaskDialogRequest, parent: HWND) -> i32 {

@@ -1,17 +1,13 @@
 use windows::Win32::Foundation::HWND;
 
-use crate::utils::code::{Coded, WEBVIEW2_FAILED};
+use crate::utils::code::{coded_from_error, Attach, WEBVIEW2_FAILED};
 use crate::utils::i18n;
-use crate::utils::taskdialog::{show_error, ProgressDialog};
+use crate::utils::taskdialog::{show_error_coded, ProgressDialog};
 use crate::utils::url::HttpContextExt;
 use crate::REQUEST_CLIENT;
 
 fn parent_hwnd(dialog: &ProgressDialog) -> HWND {
     dialog.hwnd().unwrap_or_default()
-}
-
-fn show_wv2_error(detail: Option<&str>, parent: HWND) {
-    show_error(WEBVIEW2_FAILED, detail, None, parent);
 }
 
 pub async fn install_webview2() -> anyhow::Result<()> {
@@ -27,28 +23,32 @@ pub async fn install_webview2() -> anyhow::Result<()> {
     let dialog = match ProgressDialog::show(&title, &heading, &downloading, true).await {
         Ok(dialog) => dialog,
         Err(err) => {
-            let detail = format!("{err:#}");
-            tokio::task::spawn_blocking(move || {
-                show_wv2_error(Some(&detail), HWND::default());
-            })
-            .await
-            .ok();
+            let err = err.attach(WEBVIEW2_FAILED);
+            if let Some(coded) = coded_from_error(&err) {
+                tokio::task::spawn_blocking(move || {
+                    show_error_coded(&coded, HWND::default());
+                })
+                .await
+                .ok();
+            }
             return Err(err);
         }
     };
 
-    let fail = async |dialog: ProgressDialog, detail: String| -> anyhow::Result<()> {
+    // The dialog is closed before the error is shown; the coded error is both displayed
+    // here (no WebView exists yet) and returned to the caller.
+    let fail = async |dialog: ProgressDialog, err: anyhow::Error| -> anyhow::Result<()> {
         let parent = parent_hwnd(&dialog).0 as isize;
         dialog.close().await;
-        let shown = detail.clone();
-        tokio::task::spawn_blocking(move || {
-            show_wv2_error(Some(&shown), HWND(parent as *mut _));
-        })
-        .await
-        .ok();
-        let mut coded = Coded::bare(WEBVIEW2_FAILED);
-        coded.detail = Some(detail);
-        Err(anyhow::Error::from(coded))
+        let err = err.attach(WEBVIEW2_FAILED);
+        if let Some(coded) = coded_from_error(&err) {
+            tokio::task::spawn_blocking(move || {
+                show_error_coded(&coded, HWND(parent as *mut _));
+            })
+            .await
+            .ok();
+        }
+        Err(err)
     };
 
     let wv2_url = "https://go.microsoft.com/fwlink/p/?LinkId=2124703";
@@ -59,7 +59,7 @@ pub async fn install_webview2() -> anyhow::Result<()> {
         .with_http_context("install_webview2", wv2_url);
     let res = match res {
         Ok(res) => res,
-        Err(e) => return fail(dialog, format!("{e:#}")).await,
+        Err(e) => return fail(dialog, e).await,
     };
     let wv2_installer_blob = res
         .bytes()
@@ -67,12 +67,12 @@ pub async fn install_webview2() -> anyhow::Result<()> {
         .with_http_context("install_webview2", wv2_url);
     let wv2_installer_blob = match wv2_installer_blob {
         Ok(bytes) => bytes,
-        Err(e) => return fail(dialog, format!("{e:#}")).await,
+        Err(e) => return fail(dialog, e).await,
     };
 
     let installer_path = std::env::temp_dir().join("kachina.MicrosoftEdgeWebview2Setup.exe");
     if let Err(e) = tokio::fs::write(&installer_path, wv2_installer_blob).await {
-        return fail(dialog, format!("{e}")).await;
+        return fail(dialog, e.into()).await;
     }
 
     dialog.set_content(&i18n::t("webview2.progress_installing", &[]));
@@ -86,7 +86,7 @@ pub async fn install_webview2() -> anyhow::Result<()> {
             dialog.close().await;
             Ok(())
         }
-        Ok(status) => fail(dialog, format!("{status}")).await,
-        Err(e) => fail(dialog, format!("{e}")).await,
+        Ok(status) => fail(dialog, anyhow::anyhow!("exit status {status}")).await,
+        Err(e) => fail(dialog, e.into()).await,
     }
 }

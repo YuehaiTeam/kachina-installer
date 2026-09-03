@@ -40,11 +40,12 @@ use crate::session::types::{
 };
 use crate::session::ui::{send_ev_insight, SessionUi, SilentPluginUi};
 use crate::utils::code::{
-    attach_download, attach_metadata, code_for_mirrorc_status, fail_kind, Attach, Coded,
-    FILE_IO_FAILED, HASH_ALGORITHM_UNSUPPORTED, METADATA_UNREACHABLE, MIRRORC_CDK_MISSING,
-    MIRRORC_FAILED, MIRRORC_UNREACHABLE, NO_DOWNLOAD_NODE, PKG_BROKEN, PROCESS_KILL_FAILED,
-    REGISTRY_WRITE_FAILED, RUNTIME_INSTALL_FAILED, SHORTCUT_FAILED, TEMP_DIR_UNAVAILABLE,
-    UNINSTALL_INFO_MISSING, WEBVIEW2_REQUIRED,
+    attach_download, attach_download_or, attach_metadata, coded_for_mirrorc_response,
+    coded_from_error, fail_kind, tag_session, Attach, Coded, FILE_IO_FAILED,
+    HASH_ALGORITHM_UNSUPPORTED,
+    METADATA_UNREACHABLE, MIRRORC_CDK_MISSING, MIRRORC_CONFIG_INVALID, MIRRORC_FAILED,
+    MIRRORC_UNREACHABLE, NO_DOWNLOAD_NODE, PKG_BROKEN, PROCESS_KILL_FAILED, REGISTRY_WRITE_FAILED,
+    RUNTIME_INSTALL_FAILED, TEMP_DIR_UNAVAILABLE, UNINSTALL_INFO_MISSING, WEBVIEW2_REQUIRED,
 };
 use crate::thirdparty::mirrorc::get_mirrorc_status;
 use crate::utils::error::IntoAnyhow;
@@ -156,17 +157,25 @@ fn merged_mode(
     }
 }
 
+/// The session's copy of `UiState` while it runs: the caller's snapshot with
+/// `phase` replaced on every progress step, pushed whole to the renderer.
 struct LiveUi<'a> {
     inner: &'a dyn SessionUi,
     live: Mutex<UiState>,
 }
 
 impl<'a> LiveUi<'a> {
-    fn new(inner: &'a dyn SessionUi) -> Self {
+    fn new(inner: &'a dyn SessionUi, base: &UiState) -> Self {
         Self {
             inner,
-            live: Mutex::new(UiState::default()),
+            live: Mutex::new(base.clone()),
         }
+    }
+}
+
+fn notify_error(ui: &LiveUi<'_>, err: anyhow::Error) {
+    if let Some(coded) = coded_from_error(&err) {
+        ui.notify(&coded);
     }
 }
 
@@ -415,7 +424,6 @@ fn txn_status(result: &anyhow::Result<SessionResult>) -> &'static str {
 }
 
 fn emit_insight(
-    _ui: &dyn SessionUi,
     project: &ProjectConfig,
     settings: &Settings,
     config: &InstallerConfig,
@@ -435,10 +443,11 @@ pub async fn run_install(
     config: &InstallerConfig,
     project: &ProjectConfig,
     ui: &dyn SessionUi,
+    base: &UiState,
     mgr: &ManagedElevate,
 ) -> anyhow::Result<SessionResult> {
     log_session_start("install", settings, config, project);
-    let ui = LiveUi::new(ui);
+    let ui = LiveUi::new(ui, base);
     let txn = crate::utils::sentry::Transaction::start(
         if settings.is_update {
             "update"
@@ -456,7 +465,6 @@ pub async fn run_install(
     if let Err(err) = &result {
         // fail counter：低基数分类维度，不携带自由文本（见遥测通道职责收敛）
         emit_insight(
-            &ui,
             project,
             settings,
             config,
@@ -548,7 +556,6 @@ async fn run_dfs_install(
         let _ = run_op(mgr, true, IpcOperation::Ping, progress_noop()).await;
     }
     emit_insight(
-        ui,
         project,
         settings,
         config,
@@ -683,7 +690,7 @@ async fn run_dfs_install(
             finish_install(settings, config, project, Some(&latest), ui, mgr),
         )
         .await?;
-        progress(ui, 2, 100.0, "done", None, None, None);
+        progress(ui, 3, 100.0, "already_latest", None, None, None);
         return Ok(SessionResult::install(true, settings.is_update));
     }
 
@@ -752,12 +759,19 @@ async fn run_dfs_install(
     .await
     {
         cleanup_dfs2(&mut source_ctx).await;
-        return Err(err.attach(NO_DOWNLOAD_NODE));
+        return Err(attach_download_or(err, NO_DOWNLOAD_NODE, None, None));
     }
+    // Every failure from here on happened inside this DFS session; the id lets
+    // the DFS side find the matching server log.
+    let sid = source_ctx.dfs2_session_id();
+    let tag_sid = |err: anyhow::Error| match &sid {
+        Some(sid) => tag_session(err, sid.clone()),
+        None => err,
+    };
     log_task_plan(&tasks, &ranges);
     prefetch_chunk_urls(&source_ctx, ranges).await;
 
-    progress(ui, 2, 20.0, "download", None, None, None);
+    progress(ui, 2, 20.0, "plan", None, None, None);
     let ops = txn
         .timed(
             "download",
@@ -776,7 +790,7 @@ async fn run_dfs_install(
         .await;
     cleanup_dfs2(&mut source_ctx).await;
     #[cfg_attr(not(debug_assertions), allow(unused_variables))]
-    let ops = ops?;
+    let ops = ops.map_err(tag_sid)?;
     tracing::info!(
         "All tasks completed successfully: files={} ops={}",
         to_install.len(),
@@ -804,14 +818,16 @@ async fn run_dfs_install(
         "runtimes",
         install_runtimes(settings, config, project, ui, mgr),
     )
-    .await?;
+    .await
+    .map_err(tag_sid)?;
     progress(ui, 3, 98.0, "finalize", None, None, None);
     txn.timed(
         "finalize",
         finish_install(settings, config, project, Some(&latest), ui, mgr),
     )
-    .await?;
-    progress(ui, 3, 100.0, "done", None, None, None);
+    .await
+    .map_err(tag_sid)?;
+    progress(ui, 3, 100.0, "install_done", None, None, None);
     Ok(SessionResult::install(false, settings.is_update))
 }
 
@@ -1529,7 +1545,7 @@ async fn install_one(
         false,
         Some(&err.to_string()),
     );
-    Err(attach_download(err, Some(&file_name), None).attach_with(FILE_IO_FAILED, file_name))
+    Err(attach_download(err, Some(&file_name), None))
 }
 
 struct MergedResult {
@@ -1792,7 +1808,6 @@ async fn install_runtimes(
         return Ok(());
     };
     tracing::info!("latest_meta.runtimes {runtimes:?}");
-    progress(ui, 3, 96.0, "runtime_install", None, None, None);
     for tag in runtimes {
         tracing::info!("Installing runtime: {tag}");
         let embed = config
@@ -1852,9 +1867,7 @@ async fn install_runtimes(
         }
         if let Some(err) = last_err {
             tracing::error!("runtime {name} failed: {err:#}");
-            let mut coded = Coded::bare_with(RUNTIME_INSTALL_FAILED, name.to_string());
-            coded.detail = Some(format!("{err:#}"));
-            ui.notify(&coded);
+            notify_error(ui, err.attach_with(RUNTIME_INSTALL_FAILED, name));
         }
     }
     Ok(())
@@ -1883,6 +1896,7 @@ async fn finish_install(
         "{}\\{}\\{}.lnk",
         program, project.app_name, uninstall_name
     );
+    progress(ui, 3, 98.0, "shortcut", None, None, None);
     if settings.create_lnk && !settings.is_update {
         let _ = run_op(
             mgr,
@@ -1921,9 +1935,7 @@ async fn finish_install(
         .await
         {
             tracing::warn!("create uninstaller failed: {err:#}");
-            let mut coded = Coded::bare(SHORTCUT_FAILED);
-            coded.detail = Some(format!("{err:#}"));
-            ui.notify(&coded);
+            notify_error(ui, err.attach_with(FILE_IO_FAILED, project.uninstall_name.clone()));
         }
         let _ = run_op(
             mgr,
@@ -1937,6 +1949,7 @@ async fn finish_install(
         .await;
     }
     if let Some(latest) = latest {
+        progress(ui, 3, 99.0, "registry", None, None, None);
         let size: u64 = latest.hashed.iter().map(|e| e.size).sum();
         if let Err(err) = run_op(
             mgr,
@@ -1957,12 +1970,10 @@ async fn finish_install(
         .await
         {
             tracing::warn!("write registry failed: {err:#}");
-            let mut coded = Coded::bare(REGISTRY_WRITE_FAILED);
-            coded.detail = Some(format!("{err:#}"));
-            ui.notify(&coded);
+            notify_error(ui, err.attach(REGISTRY_WRITE_FAILED));
         }
     }
-    emit_insight(ui, project, settings, config, "finish", None, false);
+    emit_insight(project, settings, config, "finish", None, false);
     Ok(())
 }
 
@@ -1986,7 +1997,10 @@ async fn run_mirrorc(
         os,
     } = parsed
     else {
-        return Err(anyhow::Error::from(Coded::bare(MIRRORC_UNREACHABLE)));
+        return Err(anyhow::Error::from(Coded::bare_with(
+            MIRRORC_CONFIG_INVALID,
+            settings.source_uri.clone(),
+        )));
     };
     progress(ui, 0, 2.0, "mirrorc_metadata", None, None, None);
     let current_version = win32_version_info::VersionInfo::from_file(join_install(
@@ -2006,7 +2020,7 @@ async fn run_mirrorc(
     .await
     .into_anyhow()
     .map_err(|e| e.attach(MIRRORC_UNREACHABLE))?;
-    if let Some(coded) = mirrorc_error(&status) {
+    if let Some(coded) = coded_for_mirrorc_response(&status) {
         return Err(anyhow::Error::from(coded));
     }
     let version_name = status
@@ -2026,7 +2040,6 @@ async fn run_mirrorc(
         return Ok(SessionResult::install(true, settings.is_update));
     }
     emit_insight(
-        ui,
         project,
         settings,
         config,
@@ -2138,21 +2151,8 @@ async fn run_mirrorc(
     };
     install_runtimes(settings, config, project, ui, mgr).await?;
     finish_install(settings, config, project, meta.as_ref(), ui, mgr).await?;
-    progress(ui, 3, 100.0, "done", None, None, None);
+    progress(ui, 3, 100.0, "install_done", None, None, None);
     Ok(SessionResult::install(false, settings.is_update))
-}
-
-fn mirrorc_error(status: &Value) -> Option<Coded> {
-    let code = status.get("code").and_then(|v| v.as_i64())?;
-    let mapped = code_for_mirrorc_status(code)?;
-    let detail = status
-        .get("msg")
-        .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty())
-        .map(|s| s.to_string());
-    let mut coded = Coded::bare(mapped);
-    coded.detail = detail;
-    Some(coded)
 }
 
 pub async fn run_uninstall(
@@ -2160,16 +2160,16 @@ pub async fn run_uninstall(
     config: &InstallerConfig,
     project: &ProjectConfig,
     ui: &dyn SessionUi,
+    base: &UiState,
     mgr: &ManagedElevate,
 ) -> anyhow::Result<SessionResult> {
-    let ui = LiveUi::new(ui);
+    let ui = LiveUi::new(ui, base);
     let txn = crate::utils::sentry::Transaction::start("uninstall", "session");
-    emit_insight(&ui, project, settings, config, "uninstall", None, true);
+    emit_insight(project, settings, config, "uninstall", None, true);
     let result = run_uninstall_inner(settings, config, project, &ui, mgr).await;
     txn.finish(txn_status(&result));
     if let Err(err) = &result {
         emit_insight(
-            &ui,
             project,
             settings,
             config,
@@ -2246,7 +2246,7 @@ async fn run_uninstall_inner(
         progress_noop(),
     )
     .await?;
-    progress(ui, 2, 100.0, "done", None, None, None);
+    progress(ui, 2, 100.0, "uninstall_done", None, None, None);
     let _ = config;
     Ok(SessionResult::uninstall())
 }
@@ -2283,7 +2283,7 @@ pub async fn silent_main(args: crate::cli::arg::InstallArgs) -> anyhow::Result<(
                 crate::session::types::elevate_from_state(&dir.state, &project.uac_strategy);
         }
         let mgr = ManagedElevate::new();
-        return run_uninstall(&settings, &config, &project, &ui, &mgr)
+        return run_uninstall(&settings, &config, &project, &ui, &UiState::default(), &mgr)
             .await
             .map(|_| ());
     }
@@ -2308,7 +2308,7 @@ async fn silent_install(
     ui: &dyn SessionUi,
 ) -> anyhow::Result<()> {
     let mgr = ManagedElevate::new();
-    run_install(settings, config, project, ui, &mgr)
+    run_install(settings, config, project, ui, &UiState::default(), &mgr)
         .await
         .map(|_| ())
 }

@@ -1,4 +1,4 @@
-use crate::utils::code::Attach;
+use crate::utils::code::{code_for_network_type, Attach};
 use async_compression::tokio::bufread::ZstdDecoder as TokioZstdDecoder;
 use bytes::Bytes;
 use fmmap::tokio::AsyncMmapFileExt;
@@ -20,7 +20,7 @@ use std::{
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader, ReadBuf};
 
 use crate::{
-    dfs::{apply_insight_error, InsightItem},
+    dfs::{apply_insight_io_error, InsightItem},
     installer::uninstall::DELETE_SELF_ON_EXIT_PATH,
     ipc::{Progress, ProgressNotify},
     local::mmap,
@@ -214,7 +214,9 @@ impl<S: AsyncRead + Unpin> AsyncRead for NetworkInsightStream<S> {
                     if let Err(classified_error) = self.check_download_health() {
                         // Update insight with classified error
                         if let Ok(mut insight) = self.insight.try_lock() {
-                            insight.error = Some(classified_error.context.clone());
+                            insight.error = Some(
+                                code_for_network_type(&classified_error.error_type).to_string(),
+                            );
                             insight.time = self.response_received_time.elapsed().as_millis() as u32;
                             insight.size = self.network_bytes.load(Ordering::Relaxed) as u32;
                         }
@@ -239,7 +241,8 @@ impl<S: AsyncRead + Unpin> AsyncRead for NetworkInsightStream<S> {
 
                     // 更新insight
                     if let Ok(mut insight) = self.insight.try_lock() {
-                        insight.error = Some(classified_error.context.clone());
+                        insight.error =
+                            Some(code_for_network_type(&classified_error.error_type).to_string());
                         insight.time = self.response_received_time.elapsed().as_millis() as u32;
                         insight.size = self.network_bytes.load(Ordering::Relaxed) as u32;
                     }
@@ -249,7 +252,7 @@ impl<S: AsyncRead + Unpin> AsyncRead for NetworkInsightStream<S> {
                 } else {
                     // 非网络错误：更新insight，然后保持原始错误传播
                     if let Ok(mut insight) = self.insight.try_lock() {
-                        apply_insight_error(&mut insight, &e.to_string());
+                        apply_insight_io_error(&mut insight, &e);
                         insight.time = self.response_received_time.elapsed().as_millis() as u32;
                         insight.size = self.network_bytes.load(Ordering::Relaxed) as u32;
                     }
@@ -299,23 +302,9 @@ where
                 // 更新insight
                 if let Ok(mut insight) = self.insight.try_lock() {
                     if is_network_error {
-                        let context = match &error_type {
-                            NetworkErrorType::ConnectionReset => "ERR_CONNECTION_RESET",
-                            NetworkErrorType::ConnectionTimeout => "ERR_CONNECTION_TIMEOUT",
-                            NetworkErrorType::StreamError => "ERR_STREAM_ERROR",
-                            NetworkErrorType::DnsResolutionFailed => "ERR_DNS_RESOLUTION_FAILED",
-                            NetworkErrorType::TlsHandshakeError => "ERR_TLS_HANDSHAKE_ERROR",
-                            NetworkErrorType::HttpProtocolError => "ERR_HTTP_PROTOCOL_ERROR",
-                            NetworkErrorType::NetworkUnreachable => "ERR_NETWORK_UNREACHABLE",
-                            NetworkErrorType::RequestTimeout => "ERR_REQUEST_TIMEOUT",
-                            NetworkErrorType::ResponseBodyError => "ERR_RESPONSE_BODY_ERROR",
-                            NetworkErrorType::DownloadStalled => "ERR_DOWNLOAD_STALLED",
-                            NetworkErrorType::DownloadTooSlow => "ERR_DOWNLOAD_TOO_SLOW",
-                            NetworkErrorType::Other(_) => "ERR_NETWORK_OTHER",
-                        };
-                        insight.error = Some(context.to_string());
+                        insight.error = Some(code_for_network_type(&error_type).to_string());
                     } else {
-                        apply_insight_error(&mut insight, &io_error.to_string());
+                        apply_insight_io_error(&mut insight, &io_error);
                     }
                     insight.time = self.response_received_time.elapsed().as_millis() as u32;
                     insight.size = self.network_bytes.load(Ordering::Relaxed) as u32;
@@ -694,7 +683,7 @@ pub async fn create_http_stream(
                 ttfb: request_start_time.elapsed().as_millis() as u32,
                 time: 0,
                 size: 0,
-                error: Some(crate::dfs::apply_insight_error_code(&format!("{e:#}"))),
+                error: Some(crate::utils::code::insight_code(&e).to_string()),
                 range: insight_range.clone(),
                 mode: None,
             }));
@@ -710,20 +699,16 @@ pub async fn create_http_stream(
             ttfb: request_start_time.elapsed().as_millis() as u32,
             time: 0,
             size: 0,
-            error: Some("HTTP_STATUS_ERR".to_string()),
+            error: Some(crate::utils::code::SERVER_HTTP_ERROR.to_string()),
             range: insight_range.clone(),
             mode: None,
         }));
-        let error = anyhow::Error::new(std::io::Error::other(format!(
-            "URL {} returned {}",
-            crate::utils::url::sanitize_url_for_logging(url),
-            code
-        )))
-        .context(crate::utils::url::create_reqwest_context(
-            "create_http_stream",
-            url,
-            "HTTP_STATUS_ERR",
-        ));
+        let error = anyhow::Error::new(crate::dfs::HttpStatus::new(code.as_u16(), ""))
+            .context(crate::utils::url::create_reqwest_context(
+                "create_http_stream",
+                url,
+                "HTTP_STATUS_ERR",
+            ));
         return Err(TACommandError::with_insight_handle(error, insight));
     }
 
@@ -810,7 +795,7 @@ pub async fn create_multi_http_stream(
                 ttfb: request_start_time.elapsed().as_millis() as u32,
                 time: 0,
                 size: 0,
-                error: Some(crate::dfs::apply_insight_error_code(&format!("{e:#}"))),
+                error: Some(crate::utils::code::insight_code(&e).to_string()),
                 range: range_info.clone(),
                 mode: None,
             }));
@@ -828,15 +813,11 @@ pub async fn create_multi_http_stream(
             ttfb: request_start_time.elapsed().as_millis() as u32,
             time: 0,
             size: 0,
-            error: Some("HTTP_STATUS_ERR".to_string()),
+            error: Some(crate::utils::code::SERVER_HTTP_ERROR.to_string()),
             range: range_info,
             mode: None,
         }));
-        let error = anyhow::Error::new(std::io::Error::other(format!(
-            "URL {} returned {}",
-            crate::utils::url::sanitize_url_for_logging(url),
-            code
-        )))
+        let error = anyhow::Error::new(crate::dfs::HttpStatus::new(code.as_u16(), ""))
         .context(crate::utils::url::create_reqwest_context(
             "create_multi_http_stream",
             url,

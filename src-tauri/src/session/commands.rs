@@ -20,10 +20,10 @@ use crate::session::types::{
 use crate::session::ui::{GuiUi, PluginHub, PromptHub};
 use crate::session::ProjectConfig;
 use crate::utils::code::{
-    extract, code_for_mirrorc_status, Coded, Extracted, INTERNAL_ERROR,
-    PKG_BROKEN, UNINSTALL_INFO_MISSING,
+    coded_for_mirrorc_response, coded_from_error, Attach, Coded, MIRRORC_CONFIG_INVALID,
+    MIRRORC_UNREACHABLE, PKG_BROKEN, UNINSTALL_INFO_MISSING,
 };
-use crate::utils::error::{TACommandError, TAResult};
+use crate::utils::error::{IntoAnyhow, TACommandError, TAResult};
 
 #[derive(Clone, Default)]
 pub struct SessionState {
@@ -36,6 +36,9 @@ pub struct GuiRuntime {
     pub config: Arc<InstallerConfig>,
     pub project: Option<Arc<ProjectConfig>>,
     pub running: AtomicBool,
+    /// Startup already failed (broken package, missing uninstall metadata):
+    /// there is no usable Ready page, so `Dismiss` closes the window instead.
+    pub fatal: bool,
 }
 
 impl GuiRuntime {
@@ -197,6 +200,7 @@ async fn ready_runtime(
     if is_uninstall {
         sess.state.mode = Mode::Uninstall;
     }
+    let fatal = failed.is_some();
     if let Some(coded) = failed {
         sess.state.phase = Phase::Failed(coded);
     }
@@ -206,6 +210,7 @@ async fn ready_runtime(
         config: Arc::new(config),
         project: Some(Arc::new(project)),
         running: AtomicBool::new(false),
+        fatal,
     })
 }
 
@@ -233,6 +238,7 @@ fn failed_runtime(args: InstallArgs, coded: Coded) -> Arc<GuiRuntime> {
         config: Arc::new(config),
         project: None,
         running: AtomicBool::new(false),
+        fatal: true,
     })
 }
 
@@ -245,6 +251,7 @@ fn failed_runtime_with_config(config: InstallerConfig, coded: Coded) -> Arc<GuiR
         config: Arc::new(config),
         project: None,
         running: AtomicBool::new(false),
+        fatal: true,
     })
 }
 
@@ -420,6 +427,10 @@ pub async fn handle_intent(
             handle.close();
             ok(())
         }
+        Intent::Dismiss if gui.fatal => {
+            handle.close();
+            ok(())
+        }
         Intent::SetPath { path } => {
             apply_locked(&gui, Intent::SetPath { path });
             gui.emit(handle);
@@ -471,7 +482,8 @@ async fn handle_start(
     };
 
     let settings = settings_from_gui(&gui, &ctx.args);
-    let uninstall = matches!(gui.snapshot().mode, Mode::Uninstall);
+    let base = gui.snapshot();
+    let uninstall = matches!(base.mode, Mode::Uninstall);
     let ui = GuiUi::new(
         handle.clone(),
         ctx.session.prompts.clone(),
@@ -480,25 +492,26 @@ async fn handle_start(
         gui.session.clone(),
     );
     let result = if uninstall {
-        run_uninstall(&settings, &gui.config, &project, &ui, &ctx.elevate).await
+        run_uninstall(&settings, &gui.config, &project, &ui, &base, &ctx.elevate).await
     } else {
-        run_install(&settings, &gui.config, &project, &ui, &ctx.elevate).await
+        run_install(&settings, &gui.config, &project, &ui, &base, &ctx.elevate).await
     };
     {
         let mut sess = gui.session.lock().unwrap_or_else(|e| e.into_inner());
+        sess.state.pending = None;
         match result {
-            Ok(r) if r.cancelled => {
-                sess.state.phase = Phase::Ready;
-                sess.state.pending = None;
-            }
-            Ok(r) => {
-                sess.state.phase = Phase::Done(r);
-                sess.state.pending = None;
-            }
+            Ok(r) if r.cancelled => sess.state.phase = Phase::Ready,
+            Ok(r) => sess.state.phase = Phase::Done(r),
             Err(err) => {
                 let coded = coded_from_error(&err);
-                TACommandError::new(err).report_if_needed();
-                sess.state.phase = Phase::Failed(coded);
+                let event_id = TACommandError::new(err).report_if_needed();
+                sess.state.phase = match coded {
+                    Some(mut coded) => {
+                        coded.event_id = event_id;
+                        Phase::Failed(coded)
+                    }
+                    None => Phase::Ready,
+                };
             }
         }
     }
@@ -530,31 +543,35 @@ async fn handle_set_cdk(gui: Arc<GuiRuntime>, cdk: String, handle: &HostHandle) 
         sess.state.cdk = CdkStatus::Checking;
     }
     gui.emit(handle);
-    let parsed = parse_source(&uri);
-    let status = match parsed {
+    // parse_source hangs MIRRORC_CONFIG_INVALID itself; a non-mirrorc parse is the same class.
+    let status: anyhow::Result<Value> = match parse_source(&uri) {
         Ok(ParsedSource::Mirrorc {
             resource_id,
             channel,
             arch,
             os,
-        }) => {
-            crate::thirdparty::mirrorc::get_mirrorc_status(
-                &resource_id,
-                "",
-                &cdk,
-                &channel,
-                arch.as_deref(),
-                os.as_deref(),
-            )
-            .await
-        }
-        _ => Err(TACommandError::new(anyhow::anyhow!("invalid mirrorc uri"))),
+        }) => crate::thirdparty::mirrorc::get_mirrorc_status(
+            &resource_id,
+            "",
+            &cdk,
+            &channel,
+            arch.as_deref(),
+            os.as_deref(),
+        )
+        .await
+        .into_anyhow()
+        .map_err(|e| e.attach(MIRRORC_UNREACHABLE)),
+        Ok(_) => Err(anyhow::Error::from(Coded::bare_with(
+            MIRRORC_CONFIG_INVALID,
+            uri.clone(),
+        ))),
+        Err(err) => Err(err),
     };
     {
         let mut sess = gui.session.lock().unwrap_or_else(|e| e.into_inner());
         match status {
             Ok(value) => {
-                if let Some(coded) = mirrorc_status_coded(&value) {
+                if let Some(coded) = coded_for_mirrorc_response(&value) {
                     sess.state.cdk = CdkStatus::Invalid(coded);
                 } else {
                     sess.state.cdk = CdkStatus::Ok;
@@ -568,40 +585,13 @@ async fn handle_set_cdk(gui: Arc<GuiRuntime>, cdk: String, handle: &HostHandle) 
                 }
             }
             Err(err) => {
-                let mut coded = Coded::bare(crate::utils::code::MIRRORC_UNREACHABLE);
-                coded.detail = Some(format!("{:#}", err.error));
-                sess.state.cdk = CdkStatus::Invalid(coded);
+                if let Some(coded) = coded_from_error(&err) {
+                    sess.state.cdk = CdkStatus::Invalid(coded);
+                }
             }
         }
     }
     gui.emit(handle);
-}
-
-fn mirrorc_status_coded(status: &Value) -> Option<Coded> {
-    let code = status.get("code").and_then(|v| v.as_i64())?;
-    let mapped = code_for_mirrorc_status(code)?;
-    let detail = status
-        .get("msg")
-        .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty())
-        .map(|s| s.to_string());
-    let mut coded = Coded::bare(mapped);
-    coded.detail = detail;
-    Some(coded)
-}
-
-fn coded_from_error(err: &anyhow::Error) -> Coded {
-    match extract(err) {
-        Extracted::Coded(c) => c.clone(),
-        Extracted::Cancelled => Coded::bare("cancelled"),
-        Extracted::Uncoded { detail } => {
-            let mut c = Coded::bare(INTERNAL_ERROR);
-            if !detail.is_empty() {
-                c.detail = Some(detail);
-            }
-            c
-        }
-    }
 }
 
 fn ok<T: serde::Serialize>(value: T) -> TAResult<Value> {
