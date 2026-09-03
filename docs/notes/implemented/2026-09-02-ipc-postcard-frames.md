@@ -33,6 +33,7 @@ Status: implemented
 | 帧编解码往返 | PASS：`ipc::tests::pipe_msg_shapes_roundtrip`（`Result`/`Option`/嵌套 `InsightItem`/元组变体）、`operation_with_default_fields_roundtrip`（`#[serde(default)]` 字段）、`read_frame_splits_stream_and_reports_eof`（连续两帧、干净 EOF、截断帧报错、超长帧头报错） |
 | 真实命名管道端到端 | PASS：`ipc::manager::tests::pipe_roundtrip_and_disconnect` 在本进程内创建 ACL 管道，客户端跑 `uac_ipc_main`，服务端跑 `handle_pipe`；`Ping` 回 `Ok`、`KillProcess(u32::MAX)` 回 `Err` 且 message 含 `OPEN_PROCESS_ERR`、丢弃 `mpsc` 发送端后等待方收到 `Disconnect`、客户端在 5 秒内退出 |
 | 体积 | PASS：3,102,208 → 3,047,424 字节（−54,784；本机 x86_64-pc-windows-msvc、opt-level=z + LTO、非 build-std） |
+| CI 产物（x86_64-win7-windows-msvc + build-std + optimize_for_size） | PASS：2,806,784 → 2,753,536 字节（−53,248）。该 CI 构建同时包含 [Native 重构 CR 第二轮遗留](./2026-09-02-native-refactor-cr-followup.md) 的两次修复提交，其新增代码计入其中，本改动单独的降幅不低于此数 |
 | 单测 | PASS：`cargo test` 13 passed（kachina-builder）+ 63 passed, 1 ignored（kachina-installer） |
 
 ## Consequences
