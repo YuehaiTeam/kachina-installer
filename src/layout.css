@@ -188,6 +188,10 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.current-stat {
+  margin-left: 1em;
+  white-space: nowrap;
+}
 .controls {
   app-region: no-drag;
   position: absolute;

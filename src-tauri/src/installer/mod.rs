@@ -58,61 +58,84 @@ pub async fn select_dir(
     inspect_dir(pathstr, exe_name).await
 }
 
-pub async fn inspect_dir(pathstr: String, exe_name: String) -> Option<SelectDirRes> {
-    let mut empty = true;
-    let mut upgrade = false;
-    let path = std::path::Path::new(&pathstr);
-    let mut state = DirState::Writable;
+/// What the installer knows about a target directory. Single source for the
+/// GUI/native `UiState.path`, `Settings.elevate` / `is_update`, and the
+/// directory picker; `None` when the path is an existing file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DirProbe {
+    pub exists: bool,
+    pub empty: bool,
+    /// The project's exe is already there.
+    pub upgrade: bool,
+    pub writable: bool,
+    pub private: bool,
+}
+
+impl DirProbe {
+    pub fn state(&self) -> DirState {
+        if !self.writable {
+            DirState::Unwritable
+        } else if self.private {
+            DirState::Private
+        } else {
+            DirState::Writable
+        }
+    }
+}
+
+/// Writability is tested by creating and removing a probe file in the directory,
+/// or in the nearest existing ancestor when the directory does not exist yet.
+pub fn probe_dir(path: &std::path::Path, exe_name: &str) -> Option<DirProbe> {
     if path.is_file() {
         return None;
     }
-    if path.exists() {
-        let handle = tokio::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .create_new(true)
-            .open(path)
-            .await;
-        if handle.is_err() {
-            state = DirState::Unwritable;
-        }
-        drop(handle);
-        let exe_path = path.join(exe_name);
-        if exe_path.exists() {
-            upgrade = true;
-            empty = false;
-        } else {
-            let entries = tokio::fs::read_dir(path).await;
-            if let Ok(mut entries) = entries {
-                if let Ok(Some(_entry)) = entries.next_entry().await {
-                    empty = false;
-                }
-            }
-        }
+    let exists = path.is_dir();
+    let (empty, upgrade) = if exists {
+        let upgrade = !exe_name.is_empty() && path.join(exe_name).is_file();
+        let empty = !upgrade
+            && std::fs::read_dir(path)
+                .map(|mut it| it.next().is_none())
+                .unwrap_or(true);
+        (empty, upgrade)
     } else {
-        let parent = path.parent()?;
-        let handle = tokio::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .create_new(true)
-            .open(parent)
-            .await;
-        if handle.is_err() {
-            state = DirState::Unwritable;
-        }
-    }
-    if in_private_folder(path) {
-        state = DirState::Private;
-    }
-    Some(SelectDirRes {
-        path: pathstr,
-        state,
+        (true, false)
+    };
+    let writable = path
+        .ancestors()
+        .find(|p| p.is_dir())
+        .is_some_and(can_create_probe_file);
+    Some(DirProbe {
+        exists,
         empty,
         upgrade,
+        writable,
+        private: in_private_folder(path),
+    })
+}
+
+fn can_create_probe_file(dir: &std::path::Path) -> bool {
+    let p = dir.join(format!(".kachina-write-probe-{}", std::process::id()));
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&p)
+    {
+        Ok(f) => {
+            drop(f);
+            let _ = std::fs::remove_file(&p);
+            true
+        }
+        Err(_) => false,
+    }
+}
+
+pub async fn inspect_dir(pathstr: String, exe_name: String) -> Option<SelectDirRes> {
+    let probe = probe_dir(std::path::Path::new(&pathstr), &exe_name)?;
+    Some(SelectDirRes {
+        path: pathstr,
+        state: probe.state(),
+        empty: probe.empty,
+        upgrade: probe.upgrade,
     })
 }
 

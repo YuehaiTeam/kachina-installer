@@ -14,21 +14,22 @@ use crate::session::commands::{mirrorc_target, settings_from_input, visible_sour
 use crate::session::run::{run_install, run_uninstall};
 use crate::session::source::needs_js_plugin;
 use crate::session::state::{
-    CdkStatus, Intent, Mode, Options, Phase, Progress, Renderer, UiSession, UiState,
+    CdkStatus, Intent, Mode, Options, Phase, Progress, Prompt, Renderer, UiSession, UiState,
+    BYTE_STAGES,
 };
 use crate::session::types::{settings_from_cli, SessionInput};
-use crate::session::ui::{progress_current, prompt_copy, SessionUi};
+use crate::session::ui::SessionUi;
 use crate::session::ProjectConfig;
 use crate::utils::code::{
-    extract, should_report_error, Coded, Extracted, INTERNAL_ERROR, MIRRORC_CDK_BANNED,
+    coded_from_error, extract, should_report_error, Coded, Extracted, MIRRORC_CDK_BANNED,
     MIRRORC_CDK_EXPIRED, MIRRORC_CDK_INVALID, MIRRORC_CDK_MISMATCH, MIRRORC_CDK_MISSING,
     PKG_BROKEN, TEMP_DIR_UNAVAILABLE, WEBVIEW2_REQUIRED,
 };
 use crate::utils::i18n;
 use crate::utils::taskdialog::{
     prompt_text, show_error, show_error_coded, show_ready, task_dialog, CommandLink,
-    ProgressDialog, ProgressHwnd, ReadySpec, TaskDialogRequest, ID_ADVANCED, ID_CHANGE_PATH,
-    ID_CLOSE, ID_INSTALL, ID_LAUNCH, ID_RADIO_BASE,
+    ErrorDialog, ProgressDialog, ProgressHwnd, ReadySpec, TaskDialogRequest, ID_ADVANCED,
+    ID_CHANGE_PATH, ID_CLOSE, ID_INSTALL, ID_LAUNCH, ID_RADIO_BASE,
 };
 
 pub enum NativeOutcome {
@@ -48,7 +49,7 @@ pub async fn run(args: InstallArgs) -> anyhow::Result<NativeOutcome> {
     }
     let temp_dir = std::env::temp_dir();
     if std::env::set_current_dir(&temp_dir).is_err() {
-        show_error(TEMP_DIR_UNAVAILABLE, None, None, desktop_hwnd());
+        show_error(ErrorDialog::code(TEMP_DIR_UNAVAILABLE), desktop_hwnd());
         return Ok(NativeOutcome::Exit);
     }
 
@@ -56,7 +57,7 @@ pub async fn run(args: InstallArgs) -> anyhow::Result<NativeOutcome> {
     let project = match config.embedded_config.as_ref() {
         Some(value) => ProjectConfig::from_value(value)?,
         None => {
-            show_error(PKG_BROKEN, None, None, desktop_hwnd());
+            show_error(ErrorDialog::code(PKG_BROKEN), desktop_hwnd());
             return Ok(NativeOutcome::Exit);
         }
     };
@@ -81,7 +82,7 @@ pub async fn run(args: InstallArgs) -> anyhow::Result<NativeOutcome> {
             && !project.need_web_view2
             && needs_js_plugin(&sess.state.options.source_uri)
         {
-            show_error(WEBVIEW2_REQUIRED, None, None, desktop_hwnd());
+            show_error(ErrorDialog::code(WEBVIEW2_REQUIRED), desktop_hwnd());
             continue;
         }
 
@@ -500,9 +501,9 @@ async fn native_session(
     let mgr = ManagedElevate::new();
     let uninstall = matches!(sess.state.mode, Mode::Uninstall);
     let result = if uninstall {
-        run_uninstall(&settings, config, project, &ui, &mgr).await
+        run_uninstall(&settings, config, project, &ui, &sess.state, &mgr).await
     } else {
-        run_install(&settings, config, project, &ui, &mgr).await
+        run_install(&settings, config, project, &ui, &sess.state, &mgr).await
     };
     dialog.close().await;
 
@@ -519,14 +520,20 @@ async fn native_session(
             Ok(NativeOutcome::Exit)
         }
         Err(err) => {
-            if should_report_error(&err) {
-                crate::utils::sentry::capture_anyhow(&err);
-            }
-            let coded = coded_from_error(&err);
+            let event_id = if should_report_error(&err) {
+                Some(crate::utils::sentry::capture_anyhow(&err))
+            } else {
+                None
+            };
             let reopen = cdk_should_reopen(&err);
-            show_error_coded(&coded, desktop_hwnd());
-            sess.state.phase = Phase::Failed(coded);
-            sess.apply(Intent::Dismiss);
+            if let Some(mut coded) = coded_from_error(&err) {
+                coded.event_id = event_id;
+                show_error_coded(&coded, desktop_hwnd());
+                sess.state.phase = Phase::Failed(coded);
+                sess.apply(Intent::Dismiss);
+            } else {
+                sess.state.phase = Phase::Ready;
+            }
             Ok(NativeOutcome::Again {
                 reopen_source: reopen,
             })
@@ -609,20 +616,6 @@ fn cdk_should_reopen(err: &anyhow::Error) -> bool {
     }
 }
 
-fn coded_from_error(err: &anyhow::Error) -> Coded {
-    match extract(err) {
-        Extracted::Coded(c) => c.clone(),
-        Extracted::Cancelled => Coded::bare("cancelled"),
-        Extracted::Uncoded { detail } => {
-            let mut c = Coded::bare(INTERNAL_ERROR);
-            if !detail.is_empty() {
-                c.detail = Some(detail);
-            }
-            c
-        }
-    }
-}
-
 #[async_trait]
 impl SessionUi for NativeUi {
     fn state(&self, state: &UiState) {
@@ -633,7 +626,7 @@ impl SessionUi for NativeUi {
         }
     }
 
-    async fn confirm(&self, prompt: crate::session::state::Prompt) -> bool {
+    async fn confirm(&self, prompt: Prompt) -> bool {
         let (title, message) = prompt_copy(&prompt);
         let parent = self.parent();
         let ok = i18n::t("dialog.ok", &[]);
@@ -670,6 +663,43 @@ impl SessionUi for NativeUi {
             show_error_coded(&coded, parent.hwnd());
         });
     }
+}
+
+/// Copy line from the table, plus a `done / total` line when the stage reports
+/// one (bytes for `BYTE_STAGES`, item counts otherwise).
+fn progress_current(p: &Progress) -> String {
+    let subject = p.subject.clone().unwrap_or_default();
+    let mut text = i18n::t(
+        &format!("progress.{}", p.stage),
+        &[("subject", subject.as_str())],
+    );
+    if let (Some(done), Some(total)) = (p.done, p.total) {
+        let fmt = |n: u64| {
+            if BYTE_STAGES.contains(&p.stage) {
+                i18n::format_size(n)
+            } else {
+                n.to_string()
+            }
+        };
+        text.push_str(&format!("\n{} / {}", fmt(done), fmt(total)));
+    }
+    text
+}
+
+fn prompt_copy(prompt: &Prompt) -> (String, String) {
+    let items = prompt.items.join("\n");
+    let mut owned: Vec<(String, String)> = vec![("items".into(), items)];
+    for (k, v) in &prompt.params {
+        owned.push(((*k).to_string(), v.clone()));
+    }
+    let params: Vec<(&str, &str)> = owned
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect();
+    (
+        i18n::t(&format!("prompt.{}.title", prompt.kind), &params),
+        i18n::t(&format!("prompt.{}.message", prompt.kind), &params),
+    )
 }
 
 fn set_progress_hwnd(hwnd: HWND, percent: f64, text: &str) {

@@ -34,7 +34,7 @@ function lastIntent() {
     (m): m is { cmd: string; args: { kind: string } } =>
       typeof m === 'object' && m !== null && (m as { cmd?: string }).cmd === 'intent',
   );
-  return msgs.at(-1)?.args;
+  return msgs[msgs.length - 1]?.args;
 }
 
 describe('screens', () => {
@@ -102,7 +102,7 @@ describe('screens', () => {
 
   it('renders version_mismatch prompt', async () => {
     await mount(pendingVersion());
-    expect(screen.getByText('版本不一致')).toBeTruthy();
+    expect(screen.getByText(/当前安装包不是最新版本/)).toBeTruthy();
   });
 });
 

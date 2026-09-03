@@ -7,9 +7,9 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use crate::session::types::SessionResult;
+use crate::installer::{probe_dir, DirState};
+use crate::session::types::{elevate_from_state, SessionResult};
 use crate::utils::code::{Coded, MIRRORC_CDK_MISSING};
-use crate::utils::dir::in_private_folder;
 
 /// Progress `stage` values. Locale keys are `progress.<stage>`.
 pub const STAGE_KEYS: &[&str] = &[
@@ -31,8 +31,14 @@ pub const STAGE_KEYS: &[&str] = &[
     "progress.mirrorc_metadata",
     "progress.mirrorc_download",
     "progress.mirrorc_verify",
-    "progress.done",
+    "progress.install_done",
+    "progress.already_latest",
+    "progress.uninstall_done",
 ];
+
+/// Stages whose `done` / `total` are byte counts; every other stage counts items.
+/// `src/screens/Running.tsx` keeps the same list for the WebView renderer.
+pub const BYTE_STAGES: &[&str] = &["download", "runtime_download", "mirrorc_download"];
 
 pub const PROMPT_KEYS: &[&str] = &[
     "prompt.process_running.title",
@@ -281,13 +287,11 @@ impl UiSession {
                 }
                 // run_install / run_uninstall are step 2.
             }
-            Intent::Answer { ok, .. } => {
-                let pending = self.state.pending.take();
-                if let Some(prompt) = pending {
-                    if prompt.kind == "occupied_files" && !ok {
-                        let is_update = matches!(self.state.mode, Mode::Update);
-                        self.state.phase = Phase::Done(SessionResult::cancelled(is_update));
-                    }
+            // The answer itself goes to `PromptHub`; the running session decides what
+            // follows (cancelled → `Ready`), so only the modal is cleared here.
+            Intent::Answer { id, .. } => {
+                if self.state.pending.as_ref().is_some_and(|p| p.id == id) {
+                    self.state.pending = None;
                 }
             }
             Intent::Dismiss => {
@@ -311,99 +315,36 @@ impl UiSession {
             .collect();
     }
 
+    /// Same probe as `Settings` uses (`installer::probe_dir`), so what the
+    /// renderer shows and what the session runs with cannot disagree. A path
+    /// that is an existing file is treated as unwritable.
     fn recompute_path(&mut self) {
-        let probed = probe_path(Path::new(&self.state.options.install_path), &self.exe_name);
+        let probe = probe_dir(Path::new(&self.state.options.install_path), &self.exe_name);
+        let state = probe.map(|p| p.state()).unwrap_or(DirState::Unwritable);
+        let upgrade = probe.is_some_and(|p| p.upgrade);
         if matches!(self.state.mode, Mode::Uninstall) {
-            // Uninstall is a session kind, not derived from the path marker.
-        } else if probed.upgrade {
+            // Uninstall is a session kind, not derived from the path.
+        } else if upgrade {
             self.state.mode = Mode::Update;
         } else {
             self.state.mode = Mode::Install;
         }
-        self.state.needs_elevate = compute_elevate(probed.writable, &self.uac_strategy);
-        self.state.path = probed;
+        self.state.needs_elevate = elevate_from_state(&state, &self.uac_strategy);
+        self.state.path = PathState {
+            writable: PathWritable::from(state),
+            exists: probe.is_some_and(|p| p.exists),
+            upgrade,
+        };
     }
 }
 
-/// Path probe used by `SetPath`.
-///
-/// * `exists` — `path.exists()`
-/// * `writable` — try to create (and delete) a unique `.kachina-write-probe-<pid>`
-///   file inside the directory, or inside the nearest existing ancestor if the
-///   path does not exist yet. `Private` if that write succeeds and the path is
-///   under a per-user folder (`in_private_folder`). `Unwritable` if the write
-///   fails.
-/// * `upgrade` — a `.kachina-upgrade` marker file, or `installer-meta.json`
-///   (uninstall-metadata-like). Existing-install detection in production still
-///   uses the project's exe name; this probe stays independent of `ProjectConfig`
-///   so unit tests can set the marker.
-fn compute_elevate(writable: PathWritable, strategy: &str) -> bool {
-    if strategy.is_empty() {
-        return !matches!(writable, PathWritable::Writable);
-    }
-    crate::session::types::elevate_from_state(&dir_state(writable), strategy)
-}
-
-fn dir_state(w: PathWritable) -> crate::installer::DirState {
-    match w {
-        PathWritable::Writable => crate::installer::DirState::Writable,
-        PathWritable::Unwritable => crate::installer::DirState::Unwritable,
-        PathWritable::Private => crate::installer::DirState::Private,
-    }
-}
-
-fn probe_path(path: &Path, exe_name: &str) -> PathState {
-    let exists = path.exists();
-    let upgrade = exists
-        && (path.join(".kachina-upgrade").is_file()
-            || path.join("installer-meta.json").is_file()
-            || (!exe_name.is_empty() && path.join(exe_name).is_file()));
-    let writable = classify_writable(path);
-    PathState {
-        writable,
-        exists,
-        upgrade,
-    }
-}
-
-fn classify_writable(path: &Path) -> PathWritable {
-    let private = in_private_folder(path);
-    let can_write = can_create_probe(path);
-    if !can_write {
-        PathWritable::Unwritable
-    } else if private {
-        PathWritable::Private
-    } else {
-        PathWritable::Writable
-    }
-}
-
-fn can_create_probe(path: &Path) -> bool {
-    if path.exists() {
-        return path.is_dir() && try_probe_file(path);
-    }
-    for anc in path.ancestors().skip(1) {
-        if anc.exists() {
-            return anc.is_dir() && try_probe_file(anc);
+impl From<DirState> for PathWritable {
+    fn from(state: DirState) -> Self {
+        match state {
+            DirState::Writable => PathWritable::Writable,
+            DirState::Unwritable => PathWritable::Unwritable,
+            DirState::Private => PathWritable::Private,
         }
-    }
-    false
-}
-
-fn try_probe_file(dir: &Path) -> bool {
-    let name = format!(".kachina-write-probe-{}", std::process::id());
-    let p = dir.join(name);
-    match std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&p)
-    {
-        Ok(f) => {
-            drop(f);
-            let _ = std::fs::remove_file(&p);
-            true
-        }
-        Err(_) => false,
     }
 }
 
@@ -456,24 +397,31 @@ mod tests {
         UiSession::new(state)
     }
 
+    /// `prefer-user` is the strategy where writability decides elevation; the
+    /// default `prefer-admin` elevates for every non-private directory.
     #[test]
     fn set_path_readonly_needs_elevate_and_mode_follows_upgrade() {
         let dir = scratch_dir();
-        let mut sess = UiSession::new(UiState::default());
+        let mut sess = UiSession::with_project(
+            UiState::default(),
+            Renderer::Native,
+            "app.exe".into(),
+            "App".into(),
+            "prefer-user".into(),
+        );
 
         sess.apply(Intent::SetPath {
             path: dir.to_string_lossy().into_owned(),
         });
         assert!(
             !sess.state.needs_elevate,
-            "fresh dir on V: should be writable, writable={:?} private_probe={:?}",
-            sess.state.path.writable,
+            "fresh scratch dir should be writable, path={:?}",
             sess.state.path
         );
         assert_eq!(sess.state.mode, Mode::Install);
         assert!(!sess.state.path.upgrade);
 
-        std::fs::write(dir.join(".kachina-upgrade"), b"1").unwrap();
+        std::fs::write(dir.join("app.exe"), b"1").unwrap();
         sess.apply(Intent::SetPath {
             path: dir.to_string_lossy().into_owned(),
         });
@@ -481,7 +429,7 @@ mod tests {
         assert!(sess.state.path.upgrade);
         assert!(
             !sess.state.needs_elevate,
-            "upgrade marker must not force elevate on a writable dir"
+            "an existing install must not force elevate on a writable dir"
         );
 
         deny_write(&dir);
@@ -544,8 +492,17 @@ mod tests {
     }
 
     #[test]
-    fn answer_occupied_files_no_cancels_session() {
+    fn answer_clears_matching_prompt_and_leaves_phase_to_the_session() {
         let mut sess = UiSession::new(UiState::default());
+        let running = Phase::Running(Progress {
+            sub_step: 1,
+            percent: 10.0,
+            stage: "hash_scan",
+            subject: None,
+            done: None,
+            total: None,
+        });
+        sess.state.phase = running.clone();
         sess.state.pending = Some(Prompt {
             id: "p1".into(),
             kind: "occupied_files",
@@ -553,19 +510,20 @@ mod tests {
             params: BTreeMap::new(),
         });
         sess.apply(Intent::Answer {
+            id: "other".into(),
+            ok: false,
+        });
+        assert!(sess.state.pending.is_some(), "answer for another prompt is ignored");
+        sess.apply(Intent::Answer {
             id: "p1".into(),
             ok: false,
         });
-        match &sess.state.phase {
-            Phase::Done(r) => {
-                assert!(r.cancelled);
-                assert!(!r.already_latest);
-                assert!(!r.is_update);
-                assert!(!r.is_uninstall);
-            }
-            other => panic!("expected Done(cancelled), got {other:?}"),
-        }
         assert!(sess.state.pending.is_none());
+        assert!(
+            matches!(sess.state.phase, Phase::Running(_)),
+            "phase is owned by run_install; got {:?}",
+            sess.state.phase
+        );
     }
 
     #[test]

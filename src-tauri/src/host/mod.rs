@@ -24,7 +24,7 @@ use crate::installer::uninstall::delete_self_on_exit;
 use crate::ipc::manager::ManagedElevate;
 use crate::session::commands::{GuiRuntime, SessionState};
 use crate::utils::code::{Coded, PLUGIN_FAILED, TEMP_DIR_UNAVAILABLE, WEBVIEW2_FAILED};
-use crate::utils::taskdialog::show_error;
+use crate::utils::taskdialog::{show_error, ErrorDialog};
 use crate::session::types::SessionInput;
 use crate::APP_BOOT_SIGNAL;
 
@@ -138,7 +138,7 @@ pub fn run(
 
     let temp_dir = std::env::temp_dir();
     if std::env::set_current_dir(&temp_dir).is_err() {
-        show_error(TEMP_DIR_UNAVAILABLE, None, None, HWND::default());
+        show_error(ErrorDialog::code(TEMP_DIR_UNAVAILABLE), HWND::default());
         return Ok(());
     }
 
@@ -177,7 +177,7 @@ pub fn run(
                 tracing::info!("Webview2 is alive");
                 return;
             }
-            show_error(WEBVIEW2_FAILED, None, None, HWND::default());
+            show_error(ErrorDialog::code(WEBVIEW2_FAILED), HWND::default());
             tracing::error!("Webview2 fault detected");
             std::process::exit(1);
         }

@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'preact/hooks';
 import { t } from '../i18n';
 import { invoke } from '../host';
-import { intent, isCdkInvalid, type UiState } from '../state';
+import { errorDialogArgs, intent, isCdkInvalid, type UiState } from '../state';
 import { Dialog } from '../ui/Dialog';
 import { Input } from '../ui/Input';
 import { Spinner } from '../ui/Spinner';
@@ -12,11 +12,7 @@ export function CdkPanel({ ui, onClose }: { ui: UiState; onClose: () => void }) 
 
   useEffect(() => {
     if (isCdkInvalid(ui.cdk)) {
-      void invoke('error_dialog', {
-        code: ui.cdk.code,
-        detail: ui.cdk.detail,
-        subject: ui.cdk.subject,
-      });
+      void invoke('error_dialog', errorDialogArgs(ui.cdk));
     }
   }, [ui.cdk]);
 
@@ -53,11 +49,6 @@ export function CdkPanel({ ui, onClose }: { ui: UiState; onClose: () => void }) 
         value={value}
         placeholder={t('dialog.mirrorc_cdk_placeholder')}
         onInput={setValue}
-        onBlur={() => {
-          if (value !== (ui.options.mirrorc_cdk ?? '')) {
-            void intent({ kind: 'set_cdk', cdk: value });
-          }
-        }}
       />
       <div class="desc">
         <a

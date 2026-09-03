@@ -9,8 +9,20 @@ export type Coded = {
   code: string;
   detail: string | null;
   subject: string | null;
-  sid?: string | null;
+  sid: string | null;
+  event_id: string | null;
 };
+
+/** Arguments of the `error_dialog` command: the `Coded` fields the dialog renders. */
+export function errorDialogArgs(coded: Coded) {
+  return {
+    code: coded.code,
+    detail: coded.detail,
+    subject: coded.subject,
+    sid: coded.sid,
+    event_id: coded.event_id,
+  };
+}
 
 export type Progress = {
   sub_step: number;

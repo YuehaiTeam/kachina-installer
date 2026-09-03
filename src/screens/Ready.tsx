@@ -16,7 +16,8 @@ export function Ready({
 }) {
   const uninstall = ui.mode === 'uninstall';
   const update = ui.mode === 'update';
-  const [agree, setAgree] = useState(update || uninstall);
+  // Renderer-local view state (not in UiState); pre-checked as the Vue UI was.
+  const [agree, setAgree] = useState(true);
   const source = ui.sources.find((s) => s.uri === ui.options.source_uri);
   const mirrorc = ui.options.source_uri.startsWith('mirrorc://');
   const markedKey = ui.options.mirrorc_cdk

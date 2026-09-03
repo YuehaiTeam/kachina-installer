@@ -115,7 +115,7 @@ fn fail_with_insight(
 ) -> crate::utils::error::TACommandError {
     if let Some(handle) = handle {
         if let Ok(mut insight) = handle.lock() {
-            apply_insight_error(&mut insight, &err.to_string());
+            apply_insight_error(&mut insight, &err);
         }
         crate::utils::error::TACommandError::with_insight_handle(err, handle.clone())
     } else {
@@ -142,10 +142,11 @@ async fn verify_hash_keep_insight(
     match verify_hash(target, md5, xxh).await {
         Ok(()) => Ok(()),
         Err(e) => {
-            let e = e.attach(crate::utils::code::HASH_MISMATCH);
+            // verify_hash hangs HASH_MISMATCH itself; anything else here is a read failure.
+            let e = e.attach(crate::utils::code::FILE_IO_FAILED);
             if let Some(handle) = handle {
                 if let Ok(mut insight) = handle.lock() {
-                    crate::dfs::apply_insight_error(&mut insight, &format!("{e:#}"));
+                    apply_insight_error(&mut insight, &e);
                 }
                 return Err(crate::utils::error::TACommandError::with_insight_handle(
                     e,
@@ -498,10 +499,10 @@ pub async fn ipc_install_multichunk_stream(
                 let to_read = std::cmp::min(buffer.len(), remaining);
                 let bytes_read = reader.read(&mut buffer[..to_read]).await.map_err(|e| {
                     if let Ok(mut insight) = insight_handle.lock() {
-                        apply_insight_error(&mut insight, &e.to_string());
+                        crate::dfs::apply_insight_io_error(&mut insight, &e);
                     }
                     crate::utils::error::TACommandError::with_insight_handle(
-                        anyhow::anyhow!("Failed to skip bytes: {}", e),
+                        anyhow::Error::new(e).context("skip bytes"),
                         insight_handle.clone(),
                     )
                 })?;
@@ -526,10 +527,10 @@ pub async fn ipc_install_multichunk_stream(
         let mut chunk_buffer = vec![0u8; chunk_size];
         reader.read_exact(&mut chunk_buffer).await.map_err(|e| {
             if let Ok(mut insight) = insight_handle.lock() {
-                apply_insight_error(&mut insight, &e.to_string());
+                crate::dfs::apply_insight_io_error(&mut insight, &e);
             }
             crate::utils::error::TACommandError::with_insight_handle(
-                anyhow::anyhow!("Failed to read chunk data: {}", e),
+                anyhow::Error::new(e).context("read chunk data"),
                 insight_handle.clone(),
             )
         })?;
@@ -557,7 +558,7 @@ pub async fn ipc_install_multichunk_stream(
         // Handle chunk result and update insight if there's an error
         let final_result = chunk_result.inspect_err(|e| {
             if let Ok(mut insight) = insight_handle.lock() {
-                apply_insight_error(&mut insight, &e.to_string());
+                apply_insight_error(&mut insight, &e.error);
             }
         });
 

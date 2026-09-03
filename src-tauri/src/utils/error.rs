@@ -1,7 +1,6 @@
 // This file is part of the `anyhow-tauri` library.
 
 use crate::dfs::InsightItem;
-use serde::Serialize;
 use std::sync::{Arc, Mutex};
 
 // Download error constants
@@ -18,30 +17,6 @@ impl std::error::Error for TACommandError {}
 impl std::fmt::Display for TACommandError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{:#}", self.error)
-    }
-}
-
-// Every "renspose" from a tauri command needs to be serializeable into json with serde.
-// This is why we cannot use `anyhow` directly. This piece of code fixes that.
-impl Serialize for TACommandError {
-    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        #[derive(Serialize)]
-        struct ErrorWithInsight {
-            message: String,
-            insight: Option<InsightItem>,
-        }
-
-        let response = ErrorWithInsight {
-            message: command_message(&self.error),
-            insight: self.insight.clone(),
-        };
-
-        // 过滤规则见遥测通道职责收敛，与 `report_if_needed` 共用。
-        self.report_if_needed();
-        response.serialize(serializer)
     }
 }
 
@@ -186,40 +161,15 @@ impl TACommandError {
         Self { error, insight }
     }
 
-    /// 会话失败上报咽喉。非 pipe、无 insight、且 `classify.report` 时发错误事件。
-    /// 提权进程把错误送回主进程再报；带 insight 的走 DFS；Expected 不进后端。
-    pub fn report_if_needed(&self) {
+    /// 会话失败上报咽喉。非 pipe、无 insight、且码的类要求上报时发错误事件，
+    /// 返回事件 id。提权进程把错误送回主进程再报；带 insight 的走 DFS。
+    pub fn report_if_needed(&self) -> Option<String> {
         if !crate::utils::sentry::is_pipe_mode()
             && self.insight.is_none()
             && crate::utils::code::should_report_error(&self.error)
         {
-            super::sentry::capture_anyhow(&self.error);
+            return Some(super::sentry::capture_anyhow(&self.error));
         }
+        None
     }
 }
-
-fn command_message(err: &anyhow::Error) -> String {
-    use crate::utils::code::{extract, Extracted, INTERNAL_ERROR};
-    use crate::utils::i18n;
-    match extract(err) {
-        Extracted::Cancelled => "cancelled".to_string(),
-        Extracted::Coded(c) => {
-            let subject = c.subject.clone().unwrap_or_default();
-            let copy = i18n::t(c.code, &[("subject", subject.as_str())]);
-            match c.detail.as_deref().filter(|d| !d.is_empty()) {
-                Some(d) if copy != c.code => format!("{copy}\n{d}"),
-                Some(d) => d.to_string(),
-                None => copy,
-            }
-        }
-        Extracted::Uncoded { detail } => {
-            let copy = i18n::t(INTERNAL_ERROR, &[]);
-            if detail.is_empty() {
-                copy
-            } else {
-                format!("{copy}\n{detail}")
-            }
-        }
-    }
-}
-

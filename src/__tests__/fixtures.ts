@@ -116,7 +116,14 @@ export function doneUninstall(): UiState {
 
 export function failed(code = 'PKG_BROKEN'): UiState {
   return ready({
-    phase: { kind: 'failed', code, detail: 'boom', subject: null },
+    phase: {
+      kind: 'failed',
+      code,
+      detail: 'boom',
+      subject: null,
+      sid: null,
+      event_id: null,
+    },
   });
 }
 
