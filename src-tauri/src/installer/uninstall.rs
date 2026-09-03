@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 
 use crate::fs::staging::{staging_root, Staging};
+use crate::utils::code::{Coded, FILE_IO_FAILED};
 use crate::utils::error::TAResult;
 use crate::utils::process;
 
@@ -294,6 +295,9 @@ pub async fn stage_self_image(args: StageSelfImageArgs) -> TAResult<Vec<StagedIm
     let install = Path::new(&args.install_dir);
     let mut out = Vec::new();
     for name in &args.names {
+        if !crate::fs::staging::is_safe_rel(name) {
+            return Err(anyhow::Error::from(Coded::bare(FILE_IO_FAILED)).into());
+        }
         let staged = crate::fs::staging::join_rel(new_dir, name);
         if let Some(parent) = staged.parent() {
             tokio::fs::create_dir_all(parent)

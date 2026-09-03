@@ -6,8 +6,10 @@
 //! files, `dl\` scratch downloads (runtimes, WebView2 bootstrapper, Mirror酱
 //! archive), `journal` the commit manifest, `lock` the owning pid.
 //!
-//! This module is the only place that touches `%TEMP%` or the process cwd.
+//! This module owns the process cwd and staging under `%TEMP%`. The log file
+//! path in `main.rs` is the other `%TEMP%` write.
 
+use std::io::Write;
 use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
@@ -242,8 +244,7 @@ impl Staging {
         };
         let staging = Staging::at(root);
         staging.ensure_layout()?;
-        std::fs::write(staging.lock_path(), std::process::id().to_string())
-            .context("write staging lock")?;
+        claim_lock(&staging.lock_path(), install_dir)?;
         let journal = std::fs::read_to_string(staging.journal_path()).ok();
         Ok(Opened { staging, journal })
     }
@@ -264,12 +265,70 @@ impl Staging {
     }
 }
 
-pub fn join_rel(base: &Path, rel: &str) -> PathBuf {
+fn in_use(install_dir: &str) -> anyhow::Error {
+    anyhow::Error::from(Coded::bare_with(STAGING_IN_USE, install_dir))
+}
+
+fn claim_lock(path: &Path, install_dir: &str) -> anyhow::Result<()> {
+    let pid = std::process::id();
+    let create = || -> std::io::Result<()> {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)?;
+        file.write_all(pid.to_string().as_bytes())?;
+        Ok(())
+    };
+    match create() {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+            if let Some(holder) = lock_holder(path.parent().unwrap_or(path)) {
+                if holder != pid && pid_alive(holder) {
+                    return Err(in_use(install_dir));
+                }
+            }
+            let _ = std::fs::remove_file(path);
+            match create() {
+                Ok(()) => Ok(()),
+                Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+                    Err(in_use(install_dir))
+                }
+                Err(err) => Err(err).context("write staging lock"),
+            }
+        }
+        Err(err) => Err(err).context("write staging lock"),
+    }
+}
+
+/// Relative path that cannot escape `base` when joined: no absolute form,
+/// drive prefix, `.`, or `..` components. Empty is the directory itself.
+pub fn is_safe_rel(rel: &str) -> bool {
+    let n = rel.replace('/', "\\");
+    if n.starts_with('\\') || n.contains(':') {
+        return false;
+    }
+    let n = n.trim_end_matches('\\');
+    if n.is_empty() {
+        return true;
+    }
+    n.split('\\')
+        .filter(|p| !p.is_empty())
+        .all(|p| p != "." && p != "..")
+}
+
+pub fn try_join_rel(base: &Path, rel: &str) -> Option<PathBuf> {
+    if !is_safe_rel(rel) {
+        return None;
+    }
     let mut out = base.to_path_buf();
     for part in rel.split(['/', '\\']).filter(|p| !p.is_empty()) {
         out.push(part);
     }
-    out
+    Some(out)
+}
+
+pub fn join_rel(base: &Path, rel: &str) -> PathBuf {
+    try_join_rel(base, rel).unwrap_or_else(|| base.to_path_buf())
 }
 
 pub fn remove_tree(path: &Path) {
@@ -362,6 +421,40 @@ mod tests {
         ));
         let _ = child.wait_blocking();
         remove_tree(&root);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn join_rel_rejects_escape() {
+        assert!(!is_safe_rel("..\\x"));
+        assert!(!is_safe_rel("../x"));
+        assert!(!is_safe_rel("foo/../bar"));
+        assert!(!is_safe_rel("C:\\abs"));
+        assert!(!is_safe_rel("/abs"));
+        assert!(is_safe_rel(""));
+        assert!(is_safe_rel("lib/a.dll"));
+        let base = Path::new(r"D:\app");
+        assert!(try_join_rel(base, "../x").is_none());
+        assert_eq!(
+            try_join_rel(base, "lib/a.dll").unwrap(),
+            PathBuf::from(r"D:\app\lib\a.dll")
+        );
+    }
+
+    #[test]
+    fn open_replaces_stale_lock() {
+        let base = tmp();
+        let install = base.join("app3");
+        let install_s = install.to_string_lossy().to_string();
+        let root = temp_candidate(&install_s);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join(LOCK), "1").unwrap();
+        let opened = Staging::open(&install_s).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(opened.staging.lock_path()).unwrap(),
+            std::process::id().to_string()
+        );
+        opened.staging.discard();
         let _ = std::fs::remove_dir_all(&base);
     }
 }

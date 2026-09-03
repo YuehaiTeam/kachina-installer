@@ -207,6 +207,7 @@ impl SessionStaging {
     }
 
     async fn discard(&self, mgr: &ManagedElevate) {
+        mgr.wait_idle().await;
         let _ = run_op(
             mgr,
             self.elevate,
@@ -2664,8 +2665,37 @@ async fn run_mirrorc(
         "Mirrorc update mode {:?}",
         status.pointer("/data/update_type")
     );
+    let url = status
+        .pointer("/data/url")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    let sha256 = status
+        .pointer("/data/sha256")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_lowercase());
+
+    let (staged, journal) = open_staging(settings, mgr).await?;
+    let (staged, recovered_self) = match journal {
+        Some(text) => {
+            recover_or_discard(
+                settings,
+                project,
+                staged,
+                text,
+                "md5",
+                &std::collections::HashMap::new(),
+                &std::collections::HashSet::new(),
+                sha256.as_deref(),
+                ui,
+                mgr,
+            )
+            .await?
+        }
+        None => (staged, false),
+    };
     if version_name == current_version {
         tracing::info!("already latest, tag={version_name}");
+        finish_staging(&staged, recovered_self, mgr).await;
         finish_install(settings, config, project, None, ui, mgr).await?;
         return Ok(SessionResult::install(true, settings.is_update));
     }
@@ -2684,40 +2714,19 @@ async fn run_mirrorc(
         false,
     );
     if !prepare_process(settings, project, ui, mgr, &version_name).await? {
+        finish_staging(&staged, recovered_self, mgr).await;
         return Ok(SessionResult::cancelled(settings.is_update));
     }
-    ui.check_cancel()?;
-    let url = status
-        .pointer("/data/url")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| Coded::bare(MIRRORC_FAILED))?
-        .to_string();
-    tracing::info!("Mirrorc URL {url}");
-    let sha256 = status
-        .pointer("/data/sha256")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| Coded::bare(MIRRORC_FAILED))?
-        .to_lowercase();
-
-    let (staged, journal) = open_staging(settings, mgr).await?;
-    let (staged, recovered_self) = match journal {
-        Some(text) => {
-            recover_or_discard(
-                settings,
-                project,
-                staged,
-                text,
-                "md5",
-                &std::collections::HashMap::new(),
-                &std::collections::HashSet::new(),
-                Some(&sha256),
-                ui,
-                mgr,
-            )
-            .await?
-        }
-        None => (staged, false),
+    if ui.check_cancel().is_err() {
+        finish_staging(&staged, recovered_self, mgr).await;
+        return Err(anyhow::Error::new(Cancelled));
+    }
+    let (Some(url), Some(sha256)) = (url, sha256) else {
+        finish_staging(&staged, recovered_self, mgr).await;
+        return Err(anyhow::Error::from(Coded::bare(MIRRORC_FAILED)));
     };
+    tracing::info!("Mirrorc URL {url}");
+
     let result = mirrorc_staged(settings, config, project, ui, mgr, &staged, &url, &sha256).await;
     let self_replaced = recovered_self || matches!(result, Ok((_, true)));
     finish_staging(&staged, self_replaced, mgr).await;

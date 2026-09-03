@@ -209,6 +209,23 @@ impl ManagedElevate {
             }
         }
     }
+
+    /// Block until every in-flight elevate request has a result. Pending
+    /// entries stay until the elevate side replies, even if the local `run`
+    /// future was dropped (phase-one cancel).
+    pub async fn wait_idle(&self) {
+        loop {
+            let empty = self
+                .pending
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .is_empty();
+            if empty {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
 }
 
 fn fail_all_pending(pending: &Pending) {
