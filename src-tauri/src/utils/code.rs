@@ -37,7 +37,6 @@ pub const MIRRORC_CDK_MISMATCH: &str = "MIRRORC_CDK_MISMATCH";
 pub const MIRRORC_CDK_QUOTA_EXCEEDED: &str = "MIRRORC_CDK_QUOTA_EXCEEDED";
 pub const MIRRORC_CDK_BANNED: &str = "MIRRORC_CDK_BANNED";
 pub const INSTALL_PATH_INVALID: &str = "INSTALL_PATH_INVALID";
-pub const PLUGIN_FAILED: &str = "PLUGIN_FAILED";
 
 // --- C: packager config, report ---
 pub const PKG_BROKEN: &str = "PKG_BROKEN";
@@ -46,6 +45,8 @@ pub const VERSION_REGEX_INVALID: &str = "VERSION_REGEX_INVALID";
 pub const MIRRORC_CONFIG_INVALID: &str = "MIRRORC_CONFIG_INVALID";
 pub const PLUGIN_NO_UI: &str = "PLUGIN_NO_UI";
 pub const PLUGIN_NOT_FOUND: &str = "PLUGIN_NOT_FOUND";
+pub const PLUGIN_FAILED: &str = "PLUGIN_FAILED";
+pub const PLUGIN_HOST_FAILED: &str = "PLUGIN_HOST_FAILED";
 pub const RUNTIME_UNSUPPORTED: &str = "RUNTIME_UNSUPPORTED";
 pub const UNINSTALL_INFO_MISSING: &str = "UNINSTALL_INFO_MISSING";
 pub const HASH_ALGORITHM_UNSUPPORTED: &str = "HASH_ALGORITHM_UNSUPPORTED";
@@ -95,13 +96,14 @@ pub const ALL_CODES: &[&str] = &[
     MIRRORC_CDK_QUOTA_EXCEEDED,
     MIRRORC_CDK_BANNED,
     INSTALL_PATH_INVALID,
-    PLUGIN_FAILED,
     PKG_BROKEN,
     SOURCE_INVALID,
     VERSION_REGEX_INVALID,
     MIRRORC_CONFIG_INVALID,
     PLUGIN_NO_UI,
     PLUGIN_NOT_FOUND,
+    PLUGIN_FAILED,
+    PLUGIN_HOST_FAILED,
     RUNTIME_UNSUPPORTED,
     UNINSTALL_INFO_MISSING,
     HASH_ALGORITHM_UNSUPPORTED,
@@ -393,14 +395,15 @@ pub fn class_of(code: &str) -> Option<Class> {
         | MIRRORC_CDK_MISMATCH
         | MIRRORC_CDK_QUOTA_EXCEEDED
         | MIRRORC_CDK_BANNED
-        | INSTALL_PATH_INVALID
-        | PLUGIN_FAILED => Some(Class::U),
+        | INSTALL_PATH_INVALID => Some(Class::U),
         PKG_BROKEN
         | SOURCE_INVALID
         | VERSION_REGEX_INVALID
         | MIRRORC_CONFIG_INVALID
         | PLUGIN_NO_UI
         | PLUGIN_NOT_FOUND
+        | PLUGIN_FAILED
+        | PLUGIN_HOST_FAILED
         | RUNTIME_UNSUPPORTED
         | UNINSTALL_INFO_MISSING
         | HASH_ALGORITHM_UNSUPPORTED => Some(Class::C),
@@ -785,6 +788,10 @@ mod tests {
 
         assert_eq!(class_of(PKG_BROKEN), Some(Class::C));
         assert!(should_report(PKG_BROKEN));
+        assert_eq!(class_of(PLUGIN_FAILED), Some(Class::C));
+        assert!(should_report(PLUGIN_FAILED));
+        assert_eq!(class_of(PLUGIN_HOST_FAILED), Some(Class::C));
+        assert!(should_report(PLUGIN_HOST_FAILED));
 
         assert_eq!(class_of(NO_DOWNLOAD_NODE), Some(Class::S));
         assert!(should_report(NO_DOWNLOAD_NODE));
@@ -916,6 +923,18 @@ mod tests {
         assert!(!copy_useful(PERMISSION_DENIED));
         assert!(!copy_useful(MIRRORC_CDK_EXPIRED));
         assert!(!copy_useful(PKG_BROKEN));
+    }
+
+    #[test]
+    fn log_line_code_colon_detail() {
+        let with_detail = anyhow::anyhow!("http 502").attach(METADATA_HTTP_ERROR);
+        assert_eq!(log_line(&with_detail), "METADATA_HTTP_ERROR: http 502");
+        let bare = anyhow::Error::from(Coded::bare(PKG_BROKEN));
+        assert_eq!(log_line(&bare), "PKG_BROKEN");
+        let cancelled = anyhow::Error::new(Cancelled);
+        assert_eq!(log_line(&cancelled), "cancelled");
+        let uncoded = anyhow::anyhow!("ipc protocol violation");
+        assert_eq!(log_line(&uncoded), "ipc protocol violation");
     }
 
     #[test]
