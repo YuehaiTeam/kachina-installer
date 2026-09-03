@@ -1,4 +1,5 @@
 import crypto from 'crypto';
+import { spawn } from 'child_process';
 import fs from 'fs-extra';
 import path from 'path';
 import os from 'os';
@@ -178,6 +179,54 @@ export async function runInstaller(exe, args, label, timeout = '3m') {
     }
     throw error;
   }
+}
+
+export function assertDfs2BatchCoverage(state, label) {
+  if (state.batchRequests.length === 0) {
+    throw new Error(`${label}: DFS2 batch endpoint was not called`);
+  }
+  if (state.singleRequests.length !== 0) {
+    throw new Error(
+      `${label}: fell back to ${state.singleRequests.length} single DFS2 URL requests`,
+    );
+  }
+  const batchRanges = new Set(
+    state.batchRequests.flatMap((request) => request.ranges),
+  );
+  const missing = state.downloadRequests
+    .map((request) => request.range)
+    .filter((range) => !batchRanges.has(range));
+  if (missing.length > 0) {
+    throw new Error(
+      `${label}: downloads were not covered by batch URLs: ${missing.join(', ')}`,
+    );
+  }
+}
+
+export function spawnInstaller(exe, args) {
+  return spawn(exe, args, {
+    windowsHide: true,
+    stdio: 'ignore',
+  });
+}
+
+export function waitForProcess(child, timeout = 180000) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      child.kill();
+      reject(
+        new Error(`Process ${child.pid ?? '<unknown>'} did not exit in time`),
+      );
+    }, timeout);
+    child.once('error', (error) => {
+      clearTimeout(timer);
+      reject(error);
+    });
+    child.once('exit', (code, signal) => {
+      clearTimeout(timer);
+      resolve({ exitCode: code, signal });
+    });
+  });
 }
 
 export function assertExitOk(result, label) {

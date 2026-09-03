@@ -13,6 +13,10 @@
     "test:online-install": "cd tests && node online-install.mjs",
     "test:offline-update": "cd tests && node offline-update.mjs",
     "test:online-update": "cd tests && node online-update.mjs",
+    "test:online-install-dfs2": "cd tests && node dfs2.mjs online-install-dfs2",
+    "test:online-update-dfs2": "cd tests && node dfs2.mjs online-update-dfs2",
+    "test:dfs2": "pnpm run test:online-install-dfs2 && pnpm run test:online-update-dfs2",
+    "test:updater-survival": "cd tests && node updater-survival.mjs",
     "test:already-latest": "cd tests && node already-latest.mjs",
     "test:uninstall": "cd tests && node uninstall.mjs",
     "test:userdata-ignore": "cd tests && node userdata-ignore.mjs",
@@ -20,7 +24,7 @@
     "test:builder-extract-replace": "cd tests && node builder-extract-replace.mjs",
     "test:plugin-stub": "cd tests && node plugin-stub.mjs",
     "test:dump-offline-install": "cd tests && node dump-offline-install.mjs",
-    "test:all": "npm run test:prepare && npm run test:offline-install && npm run test:online-install && npm run test:offline-update && npm run test:online-update && npm run test:already-latest && npm run test:uninstall && npm run test:userdata-ignore && npm run test:occupied-process && npm run test:builder-extract-replace && npm run test:plugin-stub",
+    "test:all": "npm run test:prepare && npm run test:offline-install && npm run test:online-install && npm run test:offline-update && npm run test:online-update && npm run test:dfs2 && npm run test:updater-survival && npm run test:already-latest && npm run test:uninstall && npm run test:userdata-ignore && npm run test:occupied-process && npm run test:builder-extract-replace && npm run test:plugin-stub",
     "test": "vitest run"
   },
   "dependencies": {

@@ -58,8 +58,30 @@ jobs:
           path: |
             src-tauri/target/x86_64-win7-windows-msvc/release/*.exe
             src-tauri/target/x86_64-win7-windows-msvc/release/*.pdb
+  unit-test:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Override rust-toolchain for CI
+        run: |
+          foreach ($f in @('rust-toolchain.toml', 'src-tauri/rust-toolchain.toml')) {
+            (Get-Content $f) -replace 'channel = "nightly"', 'channel = "${{ env.RUST_NIGHTLY_VERSION }}"' | Set-Content $f
+          }
+      - run: |
+          rustup toolchain install ${{ env.RUST_NIGHTLY_VERSION }} --profile minimal
+          rustup component add rust-src --toolchain ${{ env.RUST_NIGHTLY_VERSION }}
+          rustup default ${{ env.RUST_NIGHTLY_VERSION }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-targets: false
+          workspaces: 'src-tauri'
+      - name: Rust unit tests
+        run: cargo test --manifest-path src-tauri/Cargo.toml
+
   release:
-    needs: [build, test]
+    needs: [build, test, unit-test]
     runs-on: windows-2022
     if: startsWith(github.ref, 'refs/tags/')
     steps:
@@ -107,7 +129,7 @@ jobs:
     runs-on: windows-2022
     strategy:
       matrix:
-        test: [offline-install, online-install, offline-update, online-update, already-latest, uninstall, userdata-ignore, occupied-process, builder-extract-replace, plugin-stub]
+        test: [offline-install, online-install, offline-update, online-update, dfs2, updater-survival, already-latest, uninstall, userdata-ignore, occupied-process, builder-extract-replace, plugin-stub]
       fail-fast: false
     steps:
       - uses: actions/checkout@v4

@@ -52,14 +52,15 @@ pub async fn run_hash(hash_algorithm: &str, path: &str) -> Result<String> {
 mod tests {
     use super::*;
     use std::io::Write;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static TEMP_FILE_ID: AtomicU64 = AtomicU64::new(0);
 
     fn temp_file(bytes: &[u8]) -> (std::path::PathBuf, String) {
         let dir = std::env::temp_dir().join(format!(
-            "kachina-hash-{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
+            "kachina-hash-{}-{}",
+            std::process::id(),
+            TEMP_FILE_ID.fetch_add(1, Ordering::Relaxed)
         ));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("sample.bin");
