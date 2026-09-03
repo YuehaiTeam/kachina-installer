@@ -380,6 +380,9 @@ fn same_path(a: &Path, b: &Path) -> bool {
 
 fn apply_file(ctx: &Ctx, rel: &str, state: &mut FileState) -> anyhow::Result<()> {
     let target = ctx.target(rel);
+    if !target.exists() && ctx.old_of(rel).exists() {
+        state.old_moved = true;
+    }
     if target.exists() {
         rename_retry(&target, &ctx.old_of(rel), ctx.backoff).map_err(|e| local_err(e, rel))?;
         state.old_moved = true;
@@ -422,6 +425,9 @@ fn apply_copy(ctx: &Ctx, entry: &FileEntry, state: &mut FileState) -> anyhow::Re
     if got != entry.new {
         let _ = std::fs::remove_file(&tmp);
         return Err(anyhow::anyhow!("copy verify mismatch").attach_with(FILE_IO_FAILED, &entry.rel));
+    }
+    if !target.exists() && old.exists() {
+        state.old_moved = true;
     }
     if target.exists() {
         let _ = std::fs::remove_file(&old);
@@ -491,6 +497,9 @@ fn apply_dir(ctx: &Ctx, rel: &str, files: &[FileEntry]) -> anyhow::Result<UnitSt
     let target = ctx.target(rel);
     let mut old_moved = false;
     let mut removed_empty_root = false;
+    if !target.exists() && ctx.old_of(rel).exists() {
+        old_moved = true;
+    }
     if target.exists() {
         let empty = std::fs::read_dir(&target)
             .map(|mut it| it.next().is_none())
@@ -1235,6 +1244,37 @@ mod tests {
         ));
         drop(_hold);
         fx.assert_old();
+        assert!(!fx.staging.root().exists());
+    }
+
+    #[test]
+    fn recovery_failure_rolls_back_unit_that_was_mid_swap() {
+        let fx = Fixture::new();
+        let mut units = fx.three_files();
+        write(&fx.target("b.txt"), b"b-old");
+        if let Unit::File(f) = &mut units[1] {
+            f.old = Some(md5(b"b-old"));
+        }
+        let args = fx.args(units);
+        let _ = commit_sync(args.clone(), progress_notify(|_| {}), FAST, Some(0));
+        std::fs::rename(fx.target("a.txt"), fx.staging.old_path("a.txt")).unwrap();
+        let journal =
+            Journal::parse(&std::fs::read_to_string(fx.staging.journal_path()).unwrap()).unwrap();
+        let _hold = lock(&fx.target("b.txt"));
+        let err = recover_sync(
+            CommitArgs { journal, ..args },
+            progress_notify(|_| {}),
+            FAST,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            crate::utils::code::extract(&err),
+            crate::utils::code::Extracted::Coded(c) if c.code == crate::utils::code::FILE_IN_USE
+        ));
+        drop(_hold);
+        assert_eq!(read(&fx.target("a.txt")), Some(b"a-old".to_vec()));
+        assert_eq!(read(&fx.target("b.txt")), Some(b"b-old".to_vec()));
+        assert_eq!(read(&fx.target("c.txt")), Some(b"c-old".to_vec()));
         assert!(!fx.staging.root().exists());
     }
 
