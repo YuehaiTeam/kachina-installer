@@ -8,7 +8,7 @@ Status: implemented
 
 ## Decision
 
-reqwest 依赖不启用 `http2` feature，客户端 ALPN 只协商 http/1.1。`h2` 的唯一进图路径是本 crate 的 reqwest feature 列表（sentry 只启用 blocking/json/native-tls，reqwest-middleware 只启用 json，直接依赖的 hyper 只启用 client/http1），删除后无 feature unification 回流。h3://、h3wt:// 传输走 msquic，与 reqwest 无关。
+reqwest 依赖不启用 `http2` 与 `native-tls-alpn` feature，客户端只使用 HTTP/1.1。`h2` 的唯一进图路径是本 crate 的 reqwest feature 列表（sentry 只启用 blocking/json/native-tls，reqwest-middleware 只启用 json，直接依赖的 hyper 只启用 client/http1），删除后无 feature unification 回流。h3://、h3wt:// 传输走 msquic，与 reqwest 无关。
 
 ## Alternatives considered
 
@@ -20,6 +20,7 @@ reqwest 依赖不启用 `http2` feature，客户端 ALPN 只协商 http/1.1。`h
 | 判据 | 结果 |
 |---|---|
 | `cargo tree -i h2` 无匹配 | PASS：`package ID specification 'h2' did not match any packages` |
+| `hyper-util` 不含 `http2` 时不协商 H2 | PASS：`cargo tree -e features -i hyper-util@0.1.20` 仅含 `http1`，不含 `http2` 或 `native-tls-alpn` |
 | `.text` 体积下降 | PASS：4.1MiB → 3.9MiB（约 -205KiB；`cargo bloat --release --crates`，本机 x86_64-pc-windows-msvc、opt-level=s + LTO、非 build-std）；`h2`、`hyper` 退出 crate 榜前 15 |
 | 代码无 http2 API 引用 | PASS：`rg "http2|prior_knowledge|adaptive_window" src/` 无匹配 |
 | release 完整构建通过 | PASS：`cargo bloat` 前置构建成功 |
