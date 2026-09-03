@@ -20,6 +20,7 @@ pub const STAGE_KEYS: &[&str] = &[
     "progress.hash_scan",
     "progress.plan",
     "progress.download",
+    "progress.commit",
     "progress.patch",
     "progress.extract",
     "progress.delete",

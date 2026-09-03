@@ -1,4 +1,4 @@
-DISK_FULL	磁盘空间不足
+DISK_FULL	磁盘空间不足，无法完成安装/更新
 DOWNLOAD_FAILED	连接下载服务器失败，请重试或更换下载源
 DOWNLOAD_REFUSED	下载服务器出现问题，请重试或更换下载源
 DOWNLOAD_STALLED	检测到下载速度异常，请检查你的网络连接或更换下载源
@@ -41,6 +41,7 @@ SHORTCUT_FAILED	创建快捷方式失败
 SOURCE_INVALID	安装源无效
 SOURCE_METADATA_INVALID	更新信息无效
 SOURCE_NEEDS_VERIFICATION	安装源需要验证
+STAGING_IN_USE	另一个安装程序正在处理此目录
 TEMP_DIR_UNAVAILABLE	无法访问临时文件夹
 UNINSTALL_INFO_MISSING	未找到卸载配置文件，请重新安装后再卸载
 VERSION_REGEX_INVALID	版本号规则无效
@@ -68,6 +69,7 @@ done.launch	启动
 done.uninstall	卸载成功
 done.update	更新完成
 progress.already_latest	已是最新版本
+progress.commit	正在应用更新……
 progress.delete	删除旧版残留文件……
 progress.download	下载 {subject}
 progress.extract	解压 {subject}

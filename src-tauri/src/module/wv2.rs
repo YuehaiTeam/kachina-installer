@@ -70,7 +70,8 @@ pub async fn install_webview2() -> anyhow::Result<()> {
         Err(e) => return fail(dialog, e).await,
     };
 
-    let installer_path = std::env::temp_dir().join("kachina.MicrosoftEdgeWebview2Setup.exe");
+    let installer_path =
+        crate::fs::staging::scratch_file("kachina.MicrosoftEdgeWebview2Setup.exe");
     if let Err(e) = tokio::fs::write(&installer_path, wv2_installer_blob).await {
         return fail(dialog, e.into()).await;
     }

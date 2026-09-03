@@ -1,5 +1,6 @@
+import { useState } from 'preact/hooks';
 import { formatSize, t } from '../i18n';
-import type { Progress, UiState } from '../state';
+import { intent, type Progress, type UiState } from '../state';
 import { CircleSuccess } from '../ui/icons';
 import { Spinner } from '../ui/Spinner';
 
@@ -22,15 +23,33 @@ function counter(progress: Progress): string | null {
   return `${fmt(progress.done)} / ${fmt(progress.total)}`;
 }
 
+// Phase two (the swap) cannot be interrupted; Rust ignores a late cancel anyway,
+// but the button should not promise one.
+const NO_CANCEL = new Set(['commit', 'finalize', 'shortcut', 'registry', 'install_done']);
+
 export function Running({ ui, progress }: { ui: UiState; progress: Progress }) {
+  const [cancelling, setCancelling] = useState(false);
   const mirrorc = ui.options.source_uri.startsWith('mirrorc://');
   const prefix = mirrorc ? 'step.mirrorc.' : 'step.default.';
   // The step titles describe the install pipeline; uninstall only has a status line.
   const steps = ui.mode === 'uninstall' ? [] : [0, 1, 2, 3].map((i) => t(prefix + i));
   const status = t('progress.' + progress.stage, { subject: progress.subject ?? '' });
   const stat = counter(progress);
+  const canCancel = ui.mode !== 'uninstall' && !NO_CANCEL.has(progress.stage);
   return (
     <div class="progress">
+      {canCancel ? (
+        <button
+          class="btn btn-install btn-install-2rd neutral btn-cancel"
+          disabled={cancelling}
+          onClick={() => {
+            setCancelling(true);
+            void intent({ kind: 'cancel' });
+          }}
+        >
+          {t('dialog.cancel')}
+        </button>
+      ) : null}
       <div class="step-desc">
         {steps.map((label, i) =>
           i <= progress.sub_step ? (

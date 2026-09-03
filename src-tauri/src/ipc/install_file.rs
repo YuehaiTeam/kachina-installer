@@ -2,8 +2,8 @@ use crate::utils::code::Attach;
 use crate::{
     dfs::{apply_insight_error, InsightItem},
     fs::{
-        create_http_stream, create_local_stream, create_multi_http_stream, create_target_file,
-        prepare_target, progressed_copy, progressed_hpatch, verify_hash,
+        create_http_stream, create_local_stream, create_multi_http_stream, create_staged_file,
+        progressed_copy, progressed_hpatch, sync_staged_file, verify_hash,
     },
     ipc::{progress_notify, IpcError, Progress, ProgressNotify},
     utils::error::{IntoTAResult, TAResult},
@@ -13,9 +13,10 @@ use anyhow::Result;
 use async_compression::tokio::bufread::ZstdDecoder as TokioZstdDecoder;
 use futures::TryStreamExt;
 use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncReadExt, BufReader};
-use tracing::{info, warn};
+use tracing::info;
 
 fn default_as_false() -> bool {
     false
@@ -98,11 +99,43 @@ pub enum InstallFileMode {
 #[derive(serde::Deserialize, serde::Serialize, Clone, Debug)]
 pub struct InstallFileArgs {
     pub mode: InstallFileMode,
+    /// Output path under the staging directory's `new\`. Never a path inside
+    /// the install directory.
     pub target: String,
+    /// The file currently in the install directory; the base for `Patch`.
+    pub old: Option<String>,
     pub md5: Option<String>,
     pub xxh: Option<String>,
     pub clear_installer_index_mark: Option<bool>,
 }
+
+/// Post-write steps shared by every mode: clear the packed index mark when
+/// asked, verify the hash, flush to disk. Any failure deletes the staged file.
+async fn finalize_staged(args: &InstallFileArgs, target: &Path) -> Result<()> {
+    let res = async {
+        if args.md5.is_some() || args.xxh.is_some() {
+            if args.clear_installer_index_mark.unwrap_or(false) {
+                info!("Clearing installer index mark for: {}", target.display());
+                crate::installer::uninstall::clear_index_mark(&target.to_path_buf()).await?;
+            }
+            verify_hash(&target.to_string_lossy(), args.md5.clone(), args.xxh.clone()).await?;
+        }
+        sync_staged_file(target).await
+    }
+    .await;
+    if res.is_err() {
+        let _ = tokio::fs::remove_file(target).await;
+    }
+    res
+}
+
+fn old_path(args: &InstallFileArgs) -> Result<PathBuf> {
+    args.old
+        .as_deref()
+        .map(PathBuf::from)
+        .ok_or_else(|| anyhow::anyhow!("patch without an old file"))
+}
+
 fn snapshot_insight(handle: &Option<Arc<Mutex<InsightItem>>>) -> Option<InsightItem> {
     handle
         .as_ref()
@@ -123,26 +156,15 @@ fn fail_with_insight(
     }
 }
 
-fn attach_insight(
-    mut err: crate::utils::error::TACommandError,
-    handle: &Option<Arc<Mutex<InsightItem>>>,
-) -> crate::utils::error::TACommandError {
-    if err.insight.is_none() {
-        err.insight = snapshot_insight(handle);
-    }
-    err
-}
-
-async fn verify_hash_keep_insight(
-    target: &str,
-    md5: Option<String>,
-    xxh: Option<String>,
+async fn finalize_keep_insight(
+    args: &InstallFileArgs,
+    target: &Path,
     handle: &Option<Arc<Mutex<InsightItem>>>,
 ) -> TAResult<()> {
-    match verify_hash(target, md5, xxh).await {
+    match finalize_staged(args, target).await {
         Ok(()) => Ok(()),
         Err(e) => {
-            // verify_hash hangs HASH_MISMATCH itself; anything else here is a read failure.
+            // verify_hash hangs HASH_MISMATCH itself; anything else here is a local io failure.
             let e = e.attach(crate::utils::code::FILE_IO_FAILED);
             if let Some(handle) = handle {
                 if let Ok(mut insight) = handle.lock() {
@@ -196,128 +218,83 @@ pub async fn ipc_install_file(
     args: InstallFileArgs,
     notify: ProgressNotify,
 ) -> TAResult<InstallResult> {
-    let target = args.target;
-    let override_old_path = prepare_target(&target).await?;
+    let target = PathBuf::from(&args.target);
     let progress_noti = move |downloaded: usize| {
         notify(Progress::Bytes(downloaded as u64));
     };
-    match args.mode {
+    match args.mode.clone() {
         InstallFileMode::Direct(source) => {
             let (mut stream, insight_handle) = create_stream_by_source(source).await?;
-            let mut target_fs = create_target_file(&target).await?;
+            let mut target_fs = create_staged_file(&target).await?;
             let bytes_transferred =
                 match crate::fs::progressed_copy(stream.as_mut(), &mut target_fs, &progress_noti)
                     .await
                 {
                     Ok(bytes) => bytes,
-                    Err(e) => return Err(fail_with_insight(e, &insight_handle)),
-                };
-
-            let final_insight = snapshot_insight(&insight_handle);
-
-            if args.md5.is_some() || args.xxh.is_some() {
-                if args.clear_installer_index_mark.unwrap_or(false) || override_old_path.is_some() {
-                    info!("Clearing installer index mark for: {}", target);
-                    if let Err(e) = crate::installer::uninstall::clear_index_mark(
-                        &std::path::PathBuf::from(&target),
-                    )
-                    .await
-                    .into_ta_result()
-                    {
-                        warn!("Failed to clear index mark: {:?}", e);
-                        return Err(attach_insight(e, &insight_handle));
+                    Err(e) => {
+                        drop(target_fs);
+                        let _ = tokio::fs::remove_file(&target).await;
+                        return Err(fail_with_insight(e, &insight_handle));
                     }
-                    info!("Index mark cleared successfully");
-                }
-                verify_hash_keep_insight(&target, args.md5, args.xxh, &insight_handle).await?;
-            }
-
+                };
+            drop(target_fs);
+            let final_insight = snapshot_insight(&insight_handle);
+            finalize_keep_insight(&args, &target, &insight_handle).await?;
             Ok(InstallResult {
                 bytes_transferred,
                 insight: final_insight,
             })
         }
         InstallFileMode::Patch { source, diff_size } => {
-            let is_self_update = override_old_path.is_some();
+            let old = old_path(&args)?;
             let (stream, insight_handle) = create_stream_by_source(source).await?;
-            let (bytes_transferred, _) = match progressed_hpatch(
+            let bytes_transferred = match progressed_hpatch(
+                &old,
                 stream,
-                &target,
                 diff_size,
+                &target,
                 Box::new(progress_noti),
-                override_old_path,
-                None,
             )
             .await
             {
                 Ok(v) => v,
                 Err(e) => return Err(fail_with_insight(e, &insight_handle)),
             };
-
             let final_insight = snapshot_insight(&insight_handle);
-
-            if args.md5.is_some() || args.xxh.is_some() {
-                if args.clear_installer_index_mark.unwrap_or(false) || is_self_update {
-                    info!("Clearing installer index mark for: {}", target);
-                    if let Err(e) = crate::installer::uninstall::clear_index_mark(
-                        &std::path::PathBuf::from(&target),
-                    )
-                    .await
-                    .into_ta_result()
-                    {
-                        warn!("Failed to clear index mark: {:?}", e);
-                        return Err(attach_insight(e, &insight_handle));
-                    }
-                    info!("Index mark cleared successfully");
-                }
-                verify_hash_keep_insight(&target, args.md5, args.xxh, &insight_handle).await?;
-            }
-
+            finalize_keep_insight(&args, &target, &insight_handle).await?;
             Ok(InstallResult {
                 bytes_transferred,
                 insight: final_insight,
             })
         }
         InstallFileMode::HybridPatch { diff, source } => {
-            // first extract source (local file, no insight needed)
+            // first extract the packed base next to the output (local, no insight)
+            let mut base = target.as_os_str().to_owned();
+            base.push(".hybrid-base");
+            let base = PathBuf::from(base);
             let (mut source_stream, _) = create_stream_by_source(source).await?;
-            let mut target_fs = create_target_file(&target).await?;
-            let _source_bytes =
-                progressed_copy(source_stream.as_mut(), &mut target_fs, &progress_noti).await?;
+            let mut base_fs = create_staged_file(&base).await?;
+            let copied = progressed_copy(source_stream.as_mut(), &mut base_fs, &progress_noti).await;
+            drop(base_fs);
+            if let Err(e) = copied {
+                let _ = tokio::fs::remove_file(&base).await;
+                return Err(e.into());
+            }
 
-            // then apply patch (only consider diff as URL)
             let size: usize = match diff {
                 InstallFileSource::Url { size, .. } => size,
                 InstallFileSource::Local { size, .. } => size,
             };
             let (diff_stream, insight_handle) = create_stream_by_source(diff).await?;
-            let (diff_bytes, _) =
-                match progressed_hpatch(diff_stream, &target, size, Box::new(|_| {}), None, None)
-                    .await
-                {
-                    Ok(v) => v,
-                    Err(e) => return Err(fail_with_insight(e, &insight_handle)),
-                };
-
+            let patched =
+                progressed_hpatch(&base, diff_stream, size, &target, Box::new(|_| {})).await;
+            let _ = tokio::fs::remove_file(&base).await;
+            let diff_bytes = match patched {
+                Ok(v) => v,
+                Err(e) => return Err(fail_with_insight(e, &insight_handle)),
+            };
             let final_insight = snapshot_insight(&insight_handle);
-
-            if args.md5.is_some() || args.xxh.is_some() {
-                if args.clear_installer_index_mark.unwrap_or(false) || override_old_path.is_some() {
-                    info!("Clearing installer index mark for: {}", target);
-                    if let Err(e) = crate::installer::uninstall::clear_index_mark(
-                        &std::path::PathBuf::from(&target),
-                    )
-                    .await
-                    .into_ta_result()
-                    {
-                        warn!("Failed to clear index mark: {:?}", e);
-                        return Err(attach_insight(e, &insight_handle));
-                    }
-                    info!("Index mark cleared successfully");
-                }
-                verify_hash_keep_insight(&target, args.md5, args.xxh, &insight_handle).await?;
-            }
-
+            finalize_keep_insight(&args, &target, &insight_handle).await?;
             Ok(InstallResult {
                 bytes_transferred: diff_bytes,
                 insight: final_insight,
@@ -331,65 +308,35 @@ pub async fn install_file_by_reader(
     reader: &mut (dyn tokio::io::AsyncRead + Unpin + Send),
     notify: ProgressNotify,
 ) -> Result<usize> {
-    let target = args.target;
-    let override_old_path = prepare_target(&target).await?;
+    let target = PathBuf::from(&args.target);
     let progress_noti = move |downloaded: usize| {
         notify(Progress::Bytes(downloaded as u64));
     };
-    match args.mode {
+    match args.mode.clone() {
         InstallFileMode::Direct(..) => {
-            let mut target_fs = create_target_file(&target).await?;
-            let res = progressed_copy(reader, &mut target_fs, &progress_noti).await?;
-            if args.md5.is_some() || args.xxh.is_some() {
-                // 如果需要清理installer索引标记，先清理再进行hash校验
-                if args.clear_installer_index_mark.unwrap_or(false) || override_old_path.is_some() {
-                    info!("Clearing installer index mark for: {}", target);
-                    if let Err(e) = crate::installer::uninstall::clear_index_mark(
-                        &std::path::PathBuf::from(&target),
-                    )
-                    .await
-                    {
-                        warn!("Failed to clear index mark: {:?}", e);
-                        return Err(e);
-                    }
-                    info!("Index mark cleared successfully");
+            let mut target_fs = create_staged_file(&target).await?;
+            let copied = progressed_copy(reader, &mut target_fs, &progress_noti).await;
+            drop(target_fs);
+            let res = match copied {
+                Ok(n) => n,
+                Err(e) => {
+                    let _ = tokio::fs::remove_file(&target).await;
+                    return Err(e);
                 }
-                verify_hash(&target, args.md5, args.xxh).await?;
-            }
+            };
+            finalize_staged(&args, &target).await?;
             Ok(res)
         }
         InstallFileMode::Patch { diff_size, .. } => {
+            let old = old_path(&args)?;
             // copy to local buffer using progressed_copy
             let mut buffer: Vec<u8> = vec![0; diff_size];
             progressed_copy(reader, &mut buffer, &progress_noti).await?;
             let reader = std::io::Cursor::new(buffer);
-            let is_self_update = override_old_path.is_some();
-            let res = progressed_hpatch(
-                Box::new(reader),
-                &target,
-                diff_size,
-                Box::new(|_| {}),
-                override_old_path,
-                None,
-            )
-            .await?
-            .0;
-            if args.md5.is_some() || args.xxh.is_some() {
-                // 如果需要清理installer索引标记，先清理再进行hash校验
-                if args.clear_installer_index_mark.unwrap_or(false) || is_self_update {
-                    info!("Clearing installer index mark for: {}", target);
-                    if let Err(e) = crate::installer::uninstall::clear_index_mark(
-                        &std::path::PathBuf::from(&target),
-                    )
-                    .await
-                    {
-                        warn!("Failed to clear index mark: {:?}", e);
-                        return Err(e);
-                    }
-                    info!("Index mark cleared successfully");
-                }
-                verify_hash(&target, args.md5, args.xxh).await?;
-            }
+            let res =
+                progressed_hpatch(&old, Box::new(reader), diff_size, &target, Box::new(|_| {}))
+                    .await?;
+            finalize_staged(&args, &target).await?;
             Ok(res)
         }
         InstallFileMode::HybridPatch { .. } => {

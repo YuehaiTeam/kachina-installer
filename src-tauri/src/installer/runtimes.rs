@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 
-use crate::fs::{create_http_stream, create_local_stream, create_target_file, progressed_copy};
+use crate::fs::{create_http_stream, create_local_stream, create_staged_file, progressed_copy};
 use crate::ipc::{Progress, ProgressNotify};
 use crate::utils::process;
 
@@ -61,18 +61,22 @@ pub fn dotnet_runtime_installed(framework: &str, major: &str) -> bool {
     false
 }
 
+/// `dl_dir` is the staging `dl\` directory the installer package is downloaded
+/// into; it goes away with the staging directory.
 pub async fn install_runtime(
     tag: String,
     offset: Option<usize>,
     size: Option<usize>,
+    dl_dir: String,
     notify: ProgressNotify,
 ) -> Result<String> {
+    let dl_dir = PathBuf::from(dl_dir);
     // if tag startswith Microsoft.DotNet, install .NET runtime
     if tag.starts_with("Microsoft.DotNet") {
-        return install_dotnet(tag, offset, size, notify).await;
+        return install_dotnet(tag, offset, size, &dl_dir, notify).await;
     }
     if tag.starts_with("Microsoft.VCRedist") {
-        return install_vcredist(tag, offset, size, notify).await;
+        return install_vcredist(tag, offset, size, &dl_dir, notify).await;
     }
     // else not supported
     Err(anyhow::anyhow!("UNSUPPORTED_RUNTIME"))
@@ -89,6 +93,7 @@ pub async fn install_dotnet(
     tag: String,
     offset: Option<usize>,
     size: Option<usize>,
+    dl_dir: &std::path::Path,
     notify: ProgressNotify,
 ) -> Result<String> {
     let tag_without_version = tag.split('.').take(3).collect::<Vec<&str>>().join(".");
@@ -114,12 +119,8 @@ pub async fn install_dotnet(
     if dotnet_runtime_installed(runtime.2, version_primary) {
         return Ok("ALREADY_INSTALLED".to_string());
     }
-    // download to tmp folder
-    let temp_dir = std::env::temp_dir();
-    let installer_path = temp_dir
-        .as_path()
-        .join(format!("Kachina.RuntimePackage.{tag}.exe"));
-    let mut target = create_target_file(installer_path.as_os_str().to_str().unwrap())
+    let installer_path = dl_dir.join(format!("Kachina.RuntimePackage.{tag}.exe"));
+    let mut target = create_staged_file(&installer_path)
         .await
         .context("CREATE_TARGET_FILE_ERR")?;
     let (mut stream, len) = if offset.is_some() || size.is_some() {
@@ -199,6 +200,7 @@ pub async fn install_vcredist(
     tag: String,
     offset: Option<usize>,
     size: Option<usize>,
+    dl_dir: &std::path::Path,
     notify: ProgressNotify,
 ) -> Result<String> {
     let x64_prefix = "SOFTWARE\\Microsoft\\VisualStudio\\14.0\\VC\\Runtimes\\";
@@ -220,11 +222,7 @@ pub async fn install_vcredist(
     if check_vcredist(&reg) {
         return Ok("ALREADY_INSTALLED".to_string());
     }
-    // download to tmp folder
-    let temp_dir = std::env::temp_dir();
-    let installer_path = temp_dir
-        .as_path()
-        .join(format!("Kachina.RuntimePackage.{tag}.exe"));
+    let installer_path = dl_dir.join(format!("Kachina.RuntimePackage.{tag}.exe"));
     let (mut stream, len) = if offset.is_some() || size.is_some() {
         // runtime packed, just extract and run
         let stream = create_local_stream(offset.unwrap(), size.unwrap(), true)
@@ -244,7 +242,7 @@ pub async fn install_vcredist(
             .context("RUNTIME_DOWNLOAD_ERR")?;
         (stream, len.try_into().unwrap_or(0))
     };
-    let mut target = create_target_file(installer_path.as_os_str().to_str().unwrap())
+    let mut target = create_staged_file(&installer_path)
         .await
         .context("CREATE_TARGET_FILE_ERR")?;
     let progress_noti = move |downloaded: usize| {
