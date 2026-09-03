@@ -5,7 +5,9 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
+use anyhow::Context;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::installer::{probe_dir, DirState};
 use crate::session::types::{elevate_from_state, SessionResult};
@@ -164,8 +166,8 @@ pub struct Prompt {
     pub params: BTreeMap<&'static str, String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+/// Wire shape is `{ "kind": "<snake_case variant>", ...fields }`.
+#[derive(Debug, Clone)]
 pub enum Intent {
     SetPath { path: String },
     SetSource { uri: String },
@@ -179,6 +181,54 @@ pub enum Intent {
     Launch,
     Advanced,
     Close,
+}
+
+impl Intent {
+    /// Hand-written instead of `#[derive(Deserialize)]` with `tag = "kind"`: an
+    /// internally tagged derive drags serde's `Content` buffering in (about
+    /// 14 KiB of .text for this enum alone). Keep `intent_from_value_covers_every_variant`
+    /// in sync when adding a variant.
+    pub fn from_value(v: &Value) -> anyhow::Result<Self> {
+        let kind = v
+            .get("kind")
+            .and_then(Value::as_str)
+            .context("intent: missing kind")?;
+        let text = |name: &str| -> anyhow::Result<String> {
+            v.get(name)
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+                .with_context(|| format!("intent {kind}: missing string field {name}"))
+        };
+        let flag = |name: &str| -> anyhow::Result<bool> {
+            v.get(name)
+                .and_then(Value::as_bool)
+                .with_context(|| format!("intent {kind}: missing bool field {name}"))
+        };
+        Ok(match kind {
+            "set_path" => Intent::SetPath {
+                path: text("path")?,
+            },
+            "set_source" => Intent::SetSource { uri: text("uri")? },
+            "set_create_lnk" => Intent::SetCreateLnk {
+                value: flag("value")?,
+            },
+            "set_delete_user_data" => Intent::SetDeleteUserData {
+                value: flag("value")?,
+            },
+            "set_cdk" => Intent::SetCdk { cdk: text("cdk")? },
+            "start" => Intent::Start,
+            "cancel" => Intent::Cancel,
+            "answer" => Intent::Answer {
+                id: text("id")?,
+                ok: flag("ok")?,
+            },
+            "dismiss" => Intent::Dismiss,
+            "launch" => Intent::Launch,
+            "advanced" => Intent::Advanced,
+            "close" => Intent::Close,
+            other => anyhow::bail!("intent: unknown kind {other}"),
+        })
+    }
 }
 
 /// Holds `UiState` and applies user intents. `apply` is sync this step:
@@ -539,5 +589,49 @@ mod tests {
         sess.apply(Intent::Dismiss);
         assert!(matches!(sess.state.phase, Phase::Ready));
         assert_eq!(sess.state.options, before);
+    }
+
+    #[test]
+    fn intent_from_value_covers_every_variant() {
+        use serde_json::json;
+        let parse = |v: Value| Intent::from_value(&v).unwrap();
+        assert!(matches!(
+            parse(json!({"kind": "set_path", "path": "C:\\App"})),
+            Intent::SetPath { path } if path == "C:\\App"
+        ));
+        assert!(matches!(
+            parse(json!({"kind": "set_source", "uri": "https://x/y.json"})),
+            Intent::SetSource { uri } if uri == "https://x/y.json"
+        ));
+        assert!(matches!(
+            parse(json!({"kind": "set_create_lnk", "value": false})),
+            Intent::SetCreateLnk { value: false }
+        ));
+        assert!(matches!(
+            parse(json!({"kind": "set_delete_user_data", "value": true})),
+            Intent::SetDeleteUserData { value: true }
+        ));
+        assert!(matches!(
+            parse(json!({"kind": "set_cdk", "cdk": "abc"})),
+            Intent::SetCdk { cdk } if cdk == "abc"
+        ));
+        assert!(matches!(parse(json!({"kind": "start"})), Intent::Start));
+        assert!(matches!(parse(json!({"kind": "cancel"})), Intent::Cancel));
+        assert!(matches!(
+            parse(json!({"kind": "answer", "id": "p1", "ok": true})),
+            Intent::Answer { id, ok: true } if id == "p1"
+        ));
+        assert!(matches!(parse(json!({"kind": "dismiss"})), Intent::Dismiss));
+        assert!(matches!(parse(json!({"kind": "launch"})), Intent::Launch));
+        assert!(matches!(
+            parse(json!({"kind": "advanced"})),
+            Intent::Advanced
+        ));
+        assert!(matches!(parse(json!({"kind": "close"})), Intent::Close));
+
+        assert!(Intent::from_value(&json!({"kind": "nope"})).is_err());
+        assert!(Intent::from_value(&json!({"kind": "set_path"})).is_err());
+        assert!(Intent::from_value(&json!({"kind": "answer", "id": "p1", "ok": "yes"})).is_err());
+        assert!(Intent::from_value(&json!({"path": "C:\\App"})).is_err());
     }
 }

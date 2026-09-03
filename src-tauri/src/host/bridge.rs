@@ -119,8 +119,7 @@ async fn dispatch(
             ok(())
         }
         "intent" => {
-            let intent: Intent = serde_json::from_value(args)
-                .map_err(|e| TACommandError::new(anyhow::anyhow!(e)))?;
+            let intent = Intent::from_value(&args).map_err(TACommandError::new)?;
             crate::session::commands::handle_intent(intent, ctx, handle).await
         }
         "pick_path" => {
