@@ -116,8 +116,8 @@ pub struct Coded {
 |---|---|---|
 | N 不上报 | `DOWNLOAD_TIMEOUT` `DOWNLOAD_REFUSED` `DOWNLOAD_FAILED` `DOWNLOAD_STALLED` `SERVER_HTTP_ERROR` `HASH_MISMATCH` `SOURCE_NEEDS_VERIFICATION` | host / 文件名 |
 | E 不上报 | `PERMISSION_DENIED` `DISK_FULL` `FILE_IN_USE` `FILE_IO_FAILED` `TEMP_DIR_UNAVAILABLE` `PROCESS_KILL_FAILED` `REGISTRY_WRITE_FAILED` `SHORTCUT_FAILED` `ELEVATE_FAILED` `RUNTIME_INSTALL_FAILED` `WEBVIEW2_REQUIRED` `WEBVIEW2_FAILED` `SELF_UPDATE_FAILED` | 文件 / 键 / 运行库名 |
-| U 不上报 | `MIRRORC_CDK_MISSING` `MIRRORC_CDK_EXPIRED` `MIRRORC_CDK_INVALID` `MIRRORC_CDK_MISMATCH` `MIRRORC_CDK_QUOTA_EXCEEDED` `MIRRORC_CDK_BANNED` `INSTALL_PATH_INVALID` `PLUGIN_FAILED` | — |
-| C 上报 | `PKG_BROKEN` `SOURCE_INVALID` `VERSION_REGEX_INVALID` `MIRRORC_CONFIG_INVALID` `PLUGIN_NO_UI` `PLUGIN_NOT_FOUND` `RUNTIME_UNSUPPORTED` `UNINSTALL_INFO_MISSING` `HASH_ALGORITHM_UNSUPPORTED` | 源 uri / 插件名 |
+| U 不上报 | `MIRRORC_CDK_MISSING` `MIRRORC_CDK_EXPIRED` `MIRRORC_CDK_INVALID` `MIRRORC_CDK_MISMATCH` `MIRRORC_CDK_QUOTA_EXCEEDED` `MIRRORC_CDK_BANNED` `INSTALL_PATH_INVALID` | — |
+| C 上报 | `PKG_BROKEN` `SOURCE_INVALID` `VERSION_REGEX_INVALID` `MIRRORC_CONFIG_INVALID` `PLUGIN_NO_UI` `PLUGIN_NOT_FOUND` `PLUGIN_FAILED` `PLUGIN_HOST_FAILED` `RUNTIME_UNSUPPORTED` `UNINSTALL_INFO_MISSING` `HASH_ALGORITHM_UNSUPPORTED` | 源 uri / 插件名 |
 | S 上报 | `SOURCE_METADATA_INVALID` `REMOTE_FILE_MISSING` `NO_DOWNLOAD_NODE` `EXTRACT_FAILED` `MIRRORC_FAILED` `MIRRORC_UNREACHABLE` | 文件名 |
 | M 上报 | `METADATA_UNREACHABLE` `METADATA_HTTP_ERROR` `METADATA_INVALID` | — |
 | 缺陷 上报 | `INTERNAL_ERROR`（仅文案键，不作为挂码目标） | — |
@@ -156,7 +156,7 @@ bridge 暴露两层：`error_dialog({ code, detail, subject, sid, event_id })` �
 
 ### 插件宿主
 
-插件宿主加载与主界面同一份 HTML（`plugin_runtime_setup` 的 `index.html?pluginHost=1`），插件在前端 bundle 内注册；自定义 HTML 替换 `index.html` 后同时成为插件宿主，只改 HTML 就能引入新插件。协议：宿主监听 `session-plugin` 事件（`PluginEvent { id, method, name, url, range, diffchunks, insights }`），以 `answer_session_plugin({ id, ok, data?, error?, unimplemented? })` 应答，启动完成后调用 `plugin_host_ready`。插件 `ok: false` 时的 `error` 文本作为 `PLUGIN_FAILED` 的 `detail`。这是自定义 HTML 必须实现的两条契约之一（另一条是 `ui-state` / `intent`），最小实现见 [前端重写为 Preact 渲染器](./2026-09-02-frontend-preact-renderer.md)。
+插件宿主加载与主界面同一份 HTML（`plugin_runtime_setup` 的 `index.html?pluginHost=1`），插件在前端 bundle 内注册；自定义 HTML 替换 `index.html` 后同时成为插件宿主，只改 HTML 就能引入新插件。协议：宿主监听 `session-plugin` 事件（`PluginEvent { id, method, name, url, range, diffchunks, insights }`），以 `answer_session_plugin({ id, ok, data?, error?, unimplemented? })` 应答，启动完成后调用 `plugin_host_ready`。`spawn_plugin_runtime` 线程失败、setup 失败或 10s 内未收到 `plugin_host_ready` 挂 `PLUGIN_HOST_FAILED`；插件 `ok: false` 时的 `error` 文本作为 `PLUGIN_FAILED` 的 `detail`。两者均为 C 类、上报。这是自定义 HTML 必须实现的两条契约之一（另一条是 `ui-state` / `intent`），最小实现见 [前端重写为 Preact 渲染器](./2026-09-02-frontend-preact-renderer.md)。
 
 ## Alternatives considered
 
@@ -181,10 +181,10 @@ bridge 暴露两层：`error_dialog({ code, detail, subject, sid, event_id })` �
 |---|---|
 | `rg -n --pcre2 "[\x{4e00}-\x{9fff}]" src-tauri/src --glob '!**/tests/**'` 排除注释后，命中仅限 `utils/i18n.rs` 的测试夹具 | PASS：其余命中均为 `//` / `//!` 注释；`session/`、`utils/error.rs`、`utils/code.rs`、`dfs.rs`、`fs.rs`、`module/wv2.rs`、`main.rs`、`host/native.rs` 零命中 |
 | `SessionUi` 只有 `state`、`confirm`、`notify`、`plugin_host`；`ProgressEvent.current`、`PromptEvent`、`session-progress` / `session-prompt` / `session-insight` / `session-reopen-source` 在仓库中不存在 | PASS |
-| `utils/code.rs` 单测：`attach` 幂等、`extract` 三态、类表与上报判定、`Cancelled` 优先、`detail` 剥 URL、`subject` / `sid` 透传 | PASS：`cargo test --bin kachina-installer` 81 passed / 1 ignored |
+| `utils/code.rs` 单测：`attach` 幂等、`extract` 三态、类表与上报判定、`Cancelled` 优先、`detail` 剥 URL、`subject` / `sid` 透传 | PASS：`cargo test --bin kachina-installer` 82 passed / 1 ignored |
 | `session/state.rs` 单测：`SetPath` 到只读目录后 `needs_elevate == true` 且 `mode` 随 `upgrade` 变化；`SetSource` 切到 `mirrorc://` 后 `cdk == Idle` 且 `Start` 在 `cdk != Ok` 时进入 `Failed(MIRRORC_CDK_MISSING)`；`Answer { ok: false }` 于 `occupied_files` 后的相位；`Dismiss` 从 `Failed` 回 `Ready` 且 `options` 保持 | PASS，其中 `Answer` 一条按落地语义断言 `pending` 清空、`phase` 不变（相位由 `run_install` 返回值决定，不由 `apply` 决定） |
 | `Intent` 逐变体解析与拒绝未知 kind / 缺字段 / 类型错 | PASS：`intent_from_value_covers_every_variant` |
-| silent 路径 `Phase::Failed` 日志末行为 `code: detail`，退出码 1 | `SilentUi::state` 的 `Failed` 分支与 `silent_main` 的返回值按此实现；未做注入 `METADATA_HTTP_ERROR` 的单独验证 |
+| silent 路径 `Phase::Failed` 日志末行为 `code: detail`，退出码 1 | PASS：`SilentUi` 的 `Failed` / `notify` 与 `silent_main` 的失败出口均走 `log_line`；`log_line_code_colon_detail` 覆盖有/无 detail、Cancelled、Uncoded |
 | `locales/zh-CN.tsv` 覆盖全部码常量与全部 `stage` / `prompt.<kind>` 键；宽表列名等于 `locales/` 下文件名 | PASS：`locale_covers_codes_stages_prompts` |
 | 提权路径的 `Coded` 经 postcard 帧往返后 `code` / `detail` / `subject` / `sid` 不变 | PASS：`ipc/mod.rs::coded_error_survives_pipe`；e2e `test:online-install` 走真实提权管道通过 |
 | e2e 十项（`test:all`）全绿 | PASS：CI（windows-2022，`x86_64-win7-windows-msvc` 产物）十项通过 |
@@ -197,8 +197,8 @@ bridge 暴露两层：`error_dialog({ code, detail, subject, sid, event_id })` �
 - 收益：三个界面共用一份状态机与一张文案表；错误在代码里只有码，文案、上报、`fail` 维度、insight 码都从码派生，文本匹配消失；自定义 HTML 只需实现 `ui-state` / `intent` 与插件宿主两条契约。
 - `Uncoded` 上报是发现漏挂码的机制：真实用户错误若以 `INTERNAL_ERROR` 呈现并上报，按错误上报后端的分组补码。`attach` 只在知道操作语义的层调用，评审时对新增 `attach` 保持敏感。
 - `prefer-user` 策略下可写目录不再提权：这是 `probe_dir` 取代旧 `inspect_dir` 后的行为变化，旧实现对已存在目录恒报 `Unwritable`。
-- `PLUGIN_FAILED` 一码两用：插件宿主启动失败与插件执行失败共用此码，文案按前者写；若两者需要区分呈现，应拆出 `PLUGIN_HOST_FAILED` 并改码表。`SHORTCUT_FAILED` 目前没有挂码点（卸载快捷方式创建失败挂 `FILE_IO_FAILED` + subject）。`MIRRORC_UNREACHABLE` 的文案是新写的，旧代码在此路径抛原始错误。
-- `Intent::Cancel` 在会话层是空操作，`Cancelled` 只由用户拒绝确认的路径构造；进行中取消未实现。
+- `PLUGIN_HOST_FAILED` 覆盖宿主线程 / setup / `plugin_host_ready` 超时；`PLUGIN_FAILED` 覆盖插件 `ok: false`。两者均为 C 类、上报；对话框无复制按钮（C 类规则）。`SHORTCUT_FAILED` 挂在 `CreateLnk`（subject 为 `.lnk` 路径），经 `notify` 弹窗后安装继续。`MIRRORC_UNREACHABLE` 覆盖 `get_mirrorc_status` 在未挂更具体码时的连接失败。
+- `Intent::Cancel` 在会话层是空操作，`Cancelled` 只由用户拒绝确认的路径构造；进行中取消依赖 rollback，接口预留。
 - 错误上报事件仍以整条链逐个 `to_string` 作 `exception.values`、无 fingerprint，分组尚未按 `code` 收敛；`detail` / `subject` 进入 extra 也未做。C 类继续上报但对话框无复制按钮。
 - `Coded.detail` 含路径、Win32 错误文本、HTTP body 片段，进入上报 extra 与用户可复制的对话框：URL 已剥除，body 截断 512 字节；Mirror酱 API 的 `msg` 不回显 CDK。
 - `UiState` 携带 `mirrorc_cdk` 明文推给前端，自定义 HTML 能读到它；凭据写入仍只在 Rust。
@@ -206,3 +206,4 @@ bridge 暴露两层：`error_dialog({ code, detail, subject, sid, event_id })` �
 - `UiSession::apply` 集中了原本散在两个前端的推导，是新的复杂点，由逐意图单测覆盖；`run_install` / `run_uninstall` 本体只多了 `base` 参数。
 - 自定义 HTML 若只实现 `ui-state` / `intent` 而不实现插件宿主协议，以插件源打包的安装器会在 `session-plugin` 上等待超时。
 - serde `Content` 机制在二进制中仅剩 `SourceField` 的 untagged 残余（约 2.4 KiB）；新增需要反序列化的公开形状时沿用手写解析或外部标签，不再引入内部标签派生。
+- 静态 CRT 的 cargo 配置在仓库根 `.cargo/config.toml`：仓库根 `pnpm build`（`--manifest-path`）与 `src-tauri` 内构建都能沿目录向上加载。

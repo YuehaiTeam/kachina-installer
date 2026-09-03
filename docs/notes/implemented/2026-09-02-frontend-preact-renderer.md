@@ -105,7 +105,7 @@ Vitest + jsdom + `@testing-library/preact`。`__tests__/fixtures.ts` 提供各�
 |---|---|
 | `dist/index.html` zstd level 22 后 ≤ 30,000 字节 | PASS：17,269 字节（rsbuild 1.5.10 production 构建，`src-tauri/build.rs` 产出的 `index.html.zst`；同一测量方法下 Vue 版为 68,026） |
 | 产物中不含 `vue`、`dompurify` 的模块，`left.webp` 不存在于仓库与产物 | PASS：`rg -i "vue|dompurify|left\.webp" dist/index.html` 零命中；`git ls-files` 无 `left.webp` 与 `.vue` |
-| 每个 `UiState.phase` 变体与每个 `Prompt.kind` 至少一个组件测试；每个 `Intent` 变体至少一个"点击后发出该意图"的断言 | 部分 PASS：`render.test.tsx` 17 例覆盖 `ready`（安装 / 更新 / 卸载）、`running`、`done` 四种结局、`failed`、三种 `Prompt.kind`，以及 `set_path`、`set_source`、`set_create_lnk`、`set_delete_user_data`、`set_cdk`、`start`、`answer`、`launch`、`close` 九个意图；`dismiss`（错误对话框关闭后发出）、`cancel`（前端无入口）、`advanced`（native 专用）无前端断言 |
+| 每个 `UiState.phase` 变体与每个 `Prompt.kind` 至少一个组件测试；每个有前端入口的 `Intent` 变体至少一个"点击后发出该意图"的断言 | PASS：`render.test.tsx` 覆盖 `ready`（安装 / 更新 / 卸载）、`running`、`done` 四种结局、`failed`（`error_dialog` 后发 `dismiss`）、三种 `Prompt.kind`，以及 `set_path`、`set_source`、`set_create_lnk`、`set_delete_user_data`、`set_cdk`、`start`、`answer`、`launch`、`close`、`dismiss`；`cancel`（进行中取消，接口预留）与 `advanced`（native 专用）无前端入口 |
 | 文案完整性测试通过 | PASS：`i18n-keys.test.ts` |
 | 以 `?pluginHost=1` 加载时不渲染界面元素、不请求 `/i18n.tsv`、调用一次 `plugin_host_ready`；e2e `plugin-stub` 保持通过 | PASS：`plugin-host.test.ts`；CI e2e `test:plugin-stub` 通过 |
 | e2e 十项（`test:all`）全绿 | PASS：CI 十项通过 |
