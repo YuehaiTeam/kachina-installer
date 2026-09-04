@@ -6,9 +6,46 @@ import {
   runInstaller,
   assertExitOk,
 } from './utils.mjs';
+import crypto from 'crypto';
+import fs from 'fs-extra';
+import os from 'os';
+import path from 'path';
 import 'zx/globals';
 import { usePwsh } from 'zx';
 usePwsh();
+
+function stagingCandidates(installDir) {
+  const normalized = installDir
+    .replaceAll('/', '\\')
+    .replace(/[\\]+$/, '')
+    .toLowerCase();
+  const hash = crypto
+    .createHash('sha256')
+    .update(normalized)
+    .digest('hex')
+    .slice(0, 16);
+  return [
+    path.join(
+      path.dirname(installDir),
+      `${path.basename(installDir)}.kachina-staged`,
+    ),
+    path.join(os.tmpdir(), 'kachina-staged', hash),
+  ];
+}
+
+async function assertStagingRemoved(installDir) {
+  const leftovers = [];
+  for (const candidate of stagingCandidates(installDir)) {
+    if (await fs.pathExists(candidate)) {
+      leftovers.push(candidate);
+    }
+  }
+  if (leftovers.length > 0) {
+    throw new Error(
+      `Installation left staging directories: ${leftovers.join(', ')}`,
+    );
+  }
+}
 
 async function test() {
   const testDir = getTestDir('offline-install');
@@ -42,6 +79,7 @@ async function test() {
 
     // 输出结果
     if (verification.failed.length === 0) {
+      await assertStagingRemoved(testDir);
       console.log(chalk.green('✓ All files installed correctly'));
       console.log(chalk.gray(`  Verified: ${verification.passed.join(', ')}`));
     } else {
