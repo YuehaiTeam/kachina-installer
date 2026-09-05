@@ -214,7 +214,8 @@ mod tests {
 
     #[tokio::test]
     async fn park_self_moves_running_image_into_staging_old() {
-        let base = crate::fs::staging::scratch_file(&format!("kachina-uninst-{}", uuid::Uuid::new_v4()));
+        let base =
+            crate::fs::staging::scratch_file(&format!("kachina-uninst-{}", uuid::Uuid::new_v4()));
         let install = base.join("app");
         std::fs::create_dir_all(&install).unwrap();
         let exe = install.join("uninst.exe");
@@ -231,7 +232,11 @@ mod tests {
         assert!(!exe.exists());
         let parked = Staging::at(&root).old_path("uninst.exe");
         assert_eq!(std::fs::read(&parked).unwrap(), b"MZ");
-        assert_eq!(delete_on_exit_path(), None, "park does not schedule by itself");
+        assert_eq!(
+            delete_on_exit_path(),
+            None,
+            "park does not schedule by itself"
+        );
         schedule_delete_on_exit(&root);
         assert_eq!(delete_on_exit_path().as_deref(), Some(root.as_str()));
         clear_delete_on_exit();
@@ -325,7 +330,8 @@ pub async fn stage_self_image(args: StageSelfImageArgs) -> TAResult<Vec<StagedIm
             }
         }
         crate::fs::sync_staged_file(&staged).await?;
-        let hash = crate::utils::hash::run_hash(&args.hash_algorithm, &staged.to_string_lossy()).await?;
+        let hash =
+            crate::utils::hash::run_hash(&args.hash_algorithm, &staged.to_string_lossy()).await?;
         let existing = crate::fs::staging::join_rel(install, name);
         let old = if existing.is_file() {
             crate::utils::hash::run_hash(&args.hash_algorithm, &existing.to_string_lossy())

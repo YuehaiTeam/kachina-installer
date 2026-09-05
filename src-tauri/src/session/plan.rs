@@ -122,9 +122,7 @@ pub fn strip_install_prefix(path: &str, install_path: &str) -> String {
         let offset = file_l.len() - rest.len();
         return file[offset..].replace('\\', "/");
     }
-    path.replace('\\', "/")
-        .trim_start_matches('/')
-        .to_string()
+    path.replace('\\', "/").trim_start_matches('/').to_string()
 }
 
 fn hash_of(info: &FileMeta, key: HashKey) -> Option<&str> {

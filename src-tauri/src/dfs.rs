@@ -221,8 +221,7 @@ pub async fn get_dfs(
         .body(extras.clone())
         .send()
         .await
-        .with_http_context("get_dfs", &url_with_range_in_query)
-        ?;
+        .with_http_context("get_dfs", &url_with_range_in_query)?;
     // 401 carries the challenge in the body
     if res.status() != reqwest::StatusCode::OK && res.status() != reqwest::StatusCode::UNAUTHORIZED
     {
@@ -266,8 +265,7 @@ pub async fn get_dfs(
         .body(extras)
         .send()
         .await
-        .with_http_context("get_dfs", &url)
-        ?;
+        .with_http_context("get_dfs", &url)?;
     if res.status() != reqwest::StatusCode::OK && res.status() != reqwest::StatusCode::UNAUTHORIZED
     {
         return Err(status_error(res).await);
@@ -296,8 +294,7 @@ pub async fn get_dfs2_metadata(api_url: String) -> anyhow::Result<Dfs2Metadata> 
         .get(&url_with_metadata)
         .send()
         .await
-        .with_http_context("get_dfs2_metadata", &url_with_metadata)
-        ?;
+        .with_http_context("get_dfs2_metadata", &url_with_metadata)?;
 
     if !res.status().is_success() {
         return Err(status_error(res).await);
@@ -333,8 +330,7 @@ pub async fn create_dfs2_session(
         .json(&request_body)
         .send()
         .await
-        .with_http_context("create_dfs2_session", &api_url)
-        ?;
+        .with_http_context("create_dfs2_session", &api_url)?;
 
     let status = res.status();
     let body_text = res
@@ -347,7 +343,10 @@ pub async fn create_dfs2_session(
 
     // 402 carries the challenge in the body
     if !status.is_success() && status != reqwest::StatusCode::PAYMENT_REQUIRED {
-        return Err(anyhow::Error::new(HttpStatus::new(status.as_u16(), body_text)));
+        return Err(anyhow::Error::new(HttpStatus::new(
+            status.as_u16(),
+            body_text,
+        )));
     }
 
     parse_json(&body_text)
@@ -363,8 +362,7 @@ pub async fn get_dfs2_chunk_url(
         .get(&url)
         .send()
         .await
-        .with_http_context("get_dfs2_chunk_url", &url)
-        ?;
+        .with_http_context("get_dfs2_chunk_url", &url)?;
 
     if !res.status().is_success() {
         return Err(status_error(res).await);
@@ -390,8 +388,7 @@ pub async fn get_dfs2_batch_chunk_urls(
         .json(&request_body)
         .send()
         .await
-        .with_http_context("get_dfs2_batch_chunk_urls", &session_api_url)
-        ?;
+        .with_http_context("get_dfs2_batch_chunk_urls", &session_api_url)?;
 
     if !res.status().is_success() {
         return Err(status_error(res).await);
@@ -417,8 +414,7 @@ pub async fn end_dfs2_session(
         .json(&request_body)
         .send()
         .await
-        .with_http_context("end_dfs2_session", &session_api_url)
-        ?;
+        .with_http_context("end_dfs2_session", &session_api_url)?;
 
     if !res.status().is_success() {
         return Err(status_error(res).await);
@@ -541,8 +537,7 @@ pub async fn http_get_request(
         }
         rb.send()
             .await
-            .with_http_context("http_get_request", &url)
-            ?
+            .with_http_context("http_get_request", &url)?
     } else {
         let mut rb = REQUEST_CLIENT.get(&url);
         if let Some(timeout) = timeout_ms {
@@ -555,8 +550,7 @@ pub async fn http_get_request(
         }
         rb.send()
             .await
-            .with_http_context("http_get_request", &url)
-            ?
+            .with_http_context("http_get_request", &url)?
     };
 
     // Get final URL (after redirects)
@@ -619,7 +613,10 @@ mod tests {
             range: vec![],
             mode: None,
         };
-        apply_insight_error(&mut item, &anyhow::anyhow!("mismatch").attach(HASH_MISMATCH));
+        apply_insight_error(
+            &mut item,
+            &anyhow::anyhow!("mismatch").attach(HASH_MISMATCH),
+        );
         assert_eq!(item.error.as_deref(), Some(HASH_MISMATCH));
         apply_insight_error(&mut item, &anyhow::anyhow!("x").attach(DOWNLOAD_STALLED));
         assert_eq!(item.error.as_deref(), Some(HASH_MISMATCH));
@@ -629,8 +626,14 @@ mod tests {
         assert_eq!(item.error.as_deref(), Some(INTERNAL_ERROR));
 
         item.error = None;
-        apply_insight_io_error(&mut item, &std::io::Error::from(std::io::ErrorKind::TimedOut));
-        assert_eq!(item.error.as_deref(), Some(crate::utils::code::DOWNLOAD_TIMEOUT));
+        apply_insight_io_error(
+            &mut item,
+            &std::io::Error::from(std::io::ErrorKind::TimedOut),
+        );
+        assert_eq!(
+            item.error.as_deref(),
+            Some(crate::utils::code::DOWNLOAD_TIMEOUT)
+        );
 
         let status = HttpStatus::new(503, "a".repeat(1000));
         assert_eq!(status.body.len(), 512);

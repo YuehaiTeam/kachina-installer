@@ -11,16 +11,16 @@ use crate::dfs::{
     InsightItem,
 };
 use crate::local::Embedded;
-use crate::utils::code::{
-    attach_download_or, attach_metadata, is_retryable_network, Attach, Coded,
-    MIRRORC_CONFIG_INVALID, NO_DOWNLOAD_NODE, PLUGIN_NOT_FOUND, PLUGIN_NO_UI, REMOTE_FILE_MISSING,
-    SOURCE_INVALID, SOURCE_NEEDS_VERIFICATION,
-};
 use crate::session::plan::HashKey;
 use crate::session::plugin::{
     clean_plugin_url, forced_plugin_name, is_github_source, resolve_github_file_url,
 };
 use crate::session::ui::{PluginArgs, PluginHost, PluginResult};
+use crate::utils::code::{
+    attach_download_or, attach_metadata, is_retryable_network, Attach, Coded,
+    MIRRORC_CONFIG_INVALID, NO_DOWNLOAD_NODE, PLUGIN_NOT_FOUND, PLUGIN_NO_UI, REMOTE_FILE_MISSING,
+    SOURCE_INVALID, SOURCE_NEEDS_VERIFICATION,
+};
 use crate::utils::error::IntoAnyhow;
 use crate::utils::metadata::{FileMeta, RepoMetadata};
 use crate::REQUEST_CLIENT;
@@ -267,7 +267,8 @@ pub fn parse_source(source: &str) -> anyhow::Result<ParsedSource> {
     let storage = if let Some(s) = storage_hint {
         s
     } else {
-        let url = url::Url::parse(&rest).map_err(|_| anyhow!("Invalid dfs source: {source}").attach(SOURCE_INVALID))?;
+        let url = url::Url::parse(&rest)
+            .map_err(|_| anyhow!("Invalid dfs source: {source}").attach(SOURCE_INVALID))?;
         if url.path().ends_with(".exe") {
             StorageKind::Packed
         } else if url.path().ends_with(".json") {
@@ -314,9 +315,9 @@ async fn fetch_dfs2_metadata(api_url: &str, ctx: &mut SourceCtx) -> anyhow::Resu
     let dfs2 = get_dfs2_metadata(api_url.to_string())
         .await
         .map_err(|e| attach_metadata(e.into()))?;
-    let data = dfs2
-        .data
-        .ok_or_else(|| anyhow!("dfs2 metadata is null").attach(crate::utils::code::METADATA_INVALID))?;
+    let data = dfs2.data.ok_or_else(|| {
+        anyhow!("dfs2 metadata is null").attach(crate::utils::code::METADATA_INVALID)
+    })?;
     ctx.index.clear();
     for (name, info) in data.index {
         ctx.index.insert(
@@ -349,8 +350,9 @@ async fn refresh_packed_index(
     let (_status, pre) = get_http_with_range(binurl.clone(), 0, 256)
         .await
         .into_anyhow()?;
-    let header_offset = find_subslice(&pre, b"!KachinaInstaller!")
-        .ok_or_else(|| anyhow!("invalid remote index header").attach(crate::utils::code::METADATA_INVALID))?;
+    let header_offset = find_subslice(&pre, b"!KachinaInstaller!").ok_or_else(|| {
+        anyhow!("invalid remote index header").attach(crate::utils::code::METADATA_INVALID)
+    })?;
     let index_offset = header_offset + 18;
     let index_start = read_u32be(&pre, index_offset)? as u64;
     let config_sz = read_u32be(&pre, index_offset + 4)? as u64;
@@ -404,7 +406,9 @@ async fn refresh_packed_index(
         }
     }
     ctx.installer_end = (index_start + config_sz + theme_sz) as usize;
-    metadata.ok_or_else(|| anyhow!("packed index has no metadata").attach(crate::utils::code::METADATA_INVALID))
+    metadata.ok_or_else(|| {
+        anyhow!("packed index has no metadata").attach(crate::utils::code::METADATA_INVALID)
+    })
 }
 
 fn parse_packed_index(
@@ -447,7 +451,8 @@ pub async fn fetch_metadata(
     ctx.parsed = Some(parsed.clone());
     match parsed {
         ParsedSource::Plugin { name, raw } => fetch_plugin_metadata(&name, &raw, extras, ctx).await,
-        ParsedSource::Mirrorc { .. } => Err(anyhow!("mirrorc metadata is handled separately").attach(crate::utils::code::SOURCE_INVALID)),
+        ParsedSource::Mirrorc { .. } => Err(anyhow!("mirrorc metadata is handled separately")
+            .attach(crate::utils::code::SOURCE_INVALID)),
         ParsedSource::GitHub { raw, storage } => match storage {
             StorageKind::Hashed => {
                 let url = resolve_github_file_url(&raw).await?;
@@ -487,7 +492,8 @@ pub async fn resolve_file_location(
         ParsedSource::Plugin { name, raw } => {
             resolve_plugin_location(ctx, name, raw, hash, installer).await
         }
-        ParsedSource::Mirrorc { .. } => Err(anyhow!("mirrorc does not resolve hashed files").attach(crate::utils::code::SOURCE_INVALID)),
+        ParsedSource::Mirrorc { .. } => Err(anyhow!("mirrorc does not resolve hashed files")
+            .attach(crate::utils::code::SOURCE_INVALID)),
         ParsedSource::GitHub { raw, storage } => {
             let file_url = resolve_github_file_url(raw).await?;
             match storage {
@@ -619,9 +625,7 @@ async fn dfs2_chunk_url(ctx: &SourceCtx, session_api: &str, range: &str) -> anyh
     if let Some(url) = ctx.chunk_url(range) {
         return Ok(url);
     }
-    let resp = get_dfs2_chunk_url(session_api.to_string(), range.to_string())
-        .await
-        ?;
+    let resp = get_dfs2_chunk_url(session_api.to_string(), range.to_string()).await?;
     Ok(resp.url)
 }
 
@@ -639,7 +643,9 @@ pub async fn resolve_range_url(
             let end = start + size.saturating_sub(1);
             plugin_chunk_url(ctx, name, raw, &format!("{start}-{end}")).await
         }
-        ParsedSource::Mirrorc { .. } => Err(anyhow!("mirrorc has no range url").attach(crate::utils::code::SOURCE_INVALID)),
+        ParsedSource::Mirrorc { .. } => {
+            Err(anyhow!("mirrorc has no range url").attach(crate::utils::code::SOURCE_INVALID))
+        }
         ParsedSource::GitHub { raw, .. } => resolve_github_file_url(raw).await,
         ParsedSource::Http { remote, url, .. } => match remote {
             RemoteKind::Direct => Ok(url.clone()),
@@ -706,7 +712,8 @@ pub async fn ensure_dfs2_session(
             return Err(err);
         }
     };
-    let parsed = url::Url::parse(&url).map_err(|e| anyhow::Error::from(e).attach(NO_DOWNLOAD_NODE))?;
+    let parsed =
+        url::Url::parse(&url).map_err(|e| anyhow::Error::from(e).attach(NO_DOWNLOAD_NODE))?;
     let mut authority = parsed.host_str().unwrap_or("").to_string();
     if let Some(port) = parsed.port() {
         authority.push_str(&format!(":{port}"));
@@ -782,8 +789,7 @@ async fn create_dfs2_session_once(
             session_id.clone(),
             extras.clone(),
         )
-        .await
-        ?;
+        .await?;
         if let Some(sid) = resp.sid.clone() {
             if resp.challenge.is_none() {
                 return Ok(sid);
@@ -1001,14 +1007,15 @@ async fn plugin_chunk_url(
     )
     .await?
     {
-        PluginResult::Unimplemented => Err(anyhow::Error::from(Coded::bare_with(PLUGIN_NOT_FOUND, name))),
+        PluginResult::Unimplemented => Err(anyhow::Error::from(Coded::bare_with(
+            PLUGIN_NOT_FOUND,
+            name,
+        ))),
         PluginResult::Value(data) => serde_json::from_str::<PluginChunkUrl>(&data)
             .ok()
             .map(|c| c.url)
             .filter(|s| !s.is_empty())
-            .ok_or_else(|| {
-anyhow!("plugin getChunkUrl returned no url").attach(NO_DOWNLOAD_NODE)
-            }),
+            .ok_or_else(|| anyhow!("plugin getChunkUrl returned no url").attach(NO_DOWNLOAD_NODE)),
     }
 }
 
@@ -1100,7 +1107,9 @@ fn find_subslice(hay: &[u8], needle: &[u8]) -> Option<usize> {
 fn read_u32be(data: &[u8], offset: usize) -> anyhow::Result<u32> {
     let bytes: [u8; 4] = data
         .get(offset..offset + 4)
-        .ok_or_else(|| anyhow!("invalid remote index").attach(crate::utils::code::METADATA_INVALID))?
+        .ok_or_else(|| {
+            anyhow!("invalid remote index").attach(crate::utils::code::METADATA_INVALID)
+        })?
         .try_into()
         .unwrap();
     Ok(u32::from_be_bytes(bytes))

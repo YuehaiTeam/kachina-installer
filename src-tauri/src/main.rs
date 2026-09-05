@@ -178,7 +178,10 @@ fn main() {
                 .block_on(async move {
                     if install.silent {
                         if let Err(err) = session::run::silent_main(install).await {
-                            tracing::error!("silent install failed: {}", utils::code::log_line(&err));
+                            tracing::error!(
+                                "silent install failed: {}",
+                                utils::code::log_line(&err)
+                            );
                             if utils::code::should_report_error(&err) {
                                 let event_id = utils::sentry::capture_anyhow(&err);
                                 tracing::error!("reported as event {event_id}");
@@ -202,7 +205,10 @@ fn crash_dialog(event_id: Option<&str>) {
     task_dialog(
         TaskDialogRequest {
             title: t("dialog.error", &[]),
-            content: t("dialog.crash", &[("event_id", event_id.unwrap_or(&unknown))]),
+            content: t(
+                "dialog.crash",
+                &[("event_id", event_id.unwrap_or(&unknown))],
+            ),
             expanded: None,
             footer: None,
             buttons: vec![CommandLink {
@@ -227,9 +233,9 @@ async fn native_entry(args: InstallArgs) {
     match host::native::run(args).await {
         Ok(host::native::NativeOutcome::Exit) | Ok(host::native::NativeOutcome::Again { .. }) => {}
         Ok(host::native::NativeOutcome::Web { args, preset }) => {
-                let gui = session::commands::prepare_gui(args.clone(), Some(preset.clone())).await;
-                host_main(args, Some(preset), Some(gui));
-            }
+            let gui = session::commands::prepare_gui(args.clone(), Some(preset.clone())).await;
+            host_main(args, Some(preset), Some(gui));
+        }
         Err(err) => {
             tracing::error!("native ui failed: {err:#}");
             fatal_error(&err);

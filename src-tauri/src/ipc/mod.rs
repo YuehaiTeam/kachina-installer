@@ -279,7 +279,9 @@ mod tests {
 
     #[test]
     fn coded_error_survives_pipe() {
-        use crate::utils::code::{extract, Attach, Coded, Extracted, DOWNLOAD_TIMEOUT, PERMISSION_DENIED};
+        use crate::utils::code::{
+            extract, Attach, Coded, Extracted, DOWNLOAD_TIMEOUT, PERMISSION_DENIED,
+        };
 
         let err = TACommandError::new(
             Coded::bare_with(DOWNLOAD_TIMEOUT, "cdn.example")
@@ -306,7 +308,9 @@ mod tests {
 
         let plain = TACommandError::new(anyhow::anyhow!("ipc shape"));
         let ta = IpcError::from_ta(&plain).into_ta();
-        assert!(matches!(extract(&ta.error), Extracted::Uncoded { detail } if detail.contains("ipc shape")));
+        assert!(
+            matches!(extract(&ta.error), Extracted::Uncoded { detail } if detail.contains("ipc shape"))
+        );
     }
 
     #[test]

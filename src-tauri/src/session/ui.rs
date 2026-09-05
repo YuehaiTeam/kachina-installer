@@ -389,7 +389,6 @@ impl SessionUi for GuiUi {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;

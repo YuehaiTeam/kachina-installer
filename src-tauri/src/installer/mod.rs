@@ -351,7 +351,10 @@ mod tests {
     fn drive_root_is_never_an_install_dir() {
         for root in ["C:\\", "d:/", "E:", "C:\\\\"] {
             assert!(is_drive_root(root), "{root}");
-            assert!(probe_dir(std::path::Path::new(root), "app.exe").is_none(), "{root}");
+            assert!(
+                probe_dir(std::path::Path::new(root), "app.exe").is_none(),
+                "{root}"
+            );
         }
         assert!(!is_drive_root("C:\\App"));
         assert!(!is_drive_root("\\\\server\\share"));
@@ -361,7 +364,8 @@ mod tests {
     #[test]
     fn install_dir_that_is_a_junction_is_rejected() {
         let dir = std::env::temp_dir().join(format!("kachina-probe-{}", uuid::Uuid::new_v4()));
-        let real = std::env::temp_dir().join(format!("kachina-probe-real-{}", uuid::Uuid::new_v4()));
+        let real =
+            std::env::temp_dir().join(format!("kachina-probe-real-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&real).unwrap();
         let out = std::process::Command::new("cmd")
             .args([
@@ -373,13 +377,16 @@ mod tests {
             ])
             .output()
             .unwrap();
-        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
         assert!(probe_dir(&dir, "app.exe").is_none());
         let _ = std::fs::remove_dir(&dir);
         let _ = std::fs::remove_dir_all(&real);
     }
 }
-
 
 pub fn log(data: String) {
     tracing::info!("{}", data);

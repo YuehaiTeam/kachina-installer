@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 use crate::ipc::PipeMsg;
 
@@ -301,12 +301,12 @@ pub fn flush(timeout: Duration) {
 }
 
 fn hide_process_windows() {
+    use windows::core::BOOL;
     use windows::Win32::Foundation::LPARAM;
     use windows::Win32::System::Threading::GetCurrentProcessId;
     use windows::Win32::UI::WindowsAndMessaging::{
-        EnumWindows, GetWindowThreadProcessId, SW_HIDE, ShowWindow,
+        EnumWindows, GetWindowThreadProcessId, ShowWindow, SW_HIDE,
     };
-    use windows::core::BOOL;
 
     unsafe extern "system" fn hide_window(
         hwnd: windows::Win32::Foundation::HWND,
