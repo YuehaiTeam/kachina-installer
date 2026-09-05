@@ -221,7 +221,7 @@ impl Staging {
             if !cand.exists() {
                 continue;
             }
-            if let Some(pid) = lock_holder(&cand) {
+            if let Some(pid) = lock_holder(cand) {
                 if pid != std::process::id() && pid_alive(pid) {
                     return Err(anyhow::Error::from(Coded::bare_with(
                         STAGING_IN_USE,

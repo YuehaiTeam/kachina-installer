@@ -1,6 +1,9 @@
 #![allow(non_upper_case_globals)]
 #![allow(non_camel_case_types)]
 #![allow(non_snake_case)]
+// binding.rs 由 bindgen 生成，memcmp/memcpy 等 CRT 符号声明用 c_ulonglong；
+// x86_64 Windows 上与 stdlib 期望的 usize ABI 一致。
+#![allow(suspicious_runtime_symbol_definitions)]
 
 use std::{ffi::c_void, mem::ManuallyDrop};
 

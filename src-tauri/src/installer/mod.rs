@@ -343,6 +343,18 @@ pub async fn apply_path_choice(
     Some(seldir.path)
 }
 
+pub fn log(data: String) {
+    tracing::info!("{}", data);
+}
+
+pub fn warn(data: String) {
+    tracing::warn!("{}", data);
+}
+
+pub fn error(data: String) {
+    tracing::error!("{}", data);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -386,16 +398,4 @@ mod tests {
         let _ = std::fs::remove_dir(&dir);
         let _ = std::fs::remove_dir_all(&real);
     }
-}
-
-pub fn log(data: String) {
-    tracing::info!("{}", data);
-}
-
-pub fn warn(data: String) {
-    tracing::warn!("{}", data);
-}
-
-pub fn error(data: String) {
-    tracing::error!("{}", data);
 }

@@ -239,7 +239,7 @@ mod tests {
         let mut data = b"MZ\x90\x00".to_vec();
         data.extend_from_slice(&[0u8; 32]);
         data.extend_from_slice(marker);
-        data.extend(std::iter::repeat(0u8).take(pad));
+        data.extend(std::iter::repeat_n(0u8, pad));
         data
     }
 

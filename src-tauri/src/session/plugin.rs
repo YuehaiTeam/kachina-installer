@@ -155,7 +155,7 @@ async fn resolve_version(
 ) -> anyhow::Result<String> {
     let response = http_get_request(releases_latest_url.to_string(), Some(true), None, None)
         .await
-        .map_err(|e| attach_metadata(e.into()))?;
+        .map_err(attach_metadata)?;
     let redirect = if !response.final_url.is_empty() {
         response.final_url
     } else {
@@ -235,7 +235,7 @@ async fn resolve_direct_url(original_url: &str, cache_time: Option<u64>) -> anyh
     }
     let response = http_get_request(original_url.to_string(), Some(true), None, None)
         .await
-        .map_err(|e| attach_metadata(e.into()))?;
+        .map_err(attach_metadata)?;
     let mut redirect = response
         .headers
         .get("location")
