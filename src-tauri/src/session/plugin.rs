@@ -127,13 +127,14 @@ fn parse_github_url(url: &str) -> anyhow::Result<GitHubUrl> {
             }
         }
     }
-    let releases_index = base_url
-        .find("/releases/")
-        .ok_or_else(|| anyhow::anyhow!("URL must contain /releases/").attach(crate::utils::code::SOURCE_INVALID))?;
+    let releases_index = base_url.find("/releases/").ok_or_else(|| {
+        anyhow::anyhow!("URL must contain /releases/").attach(crate::utils::code::SOURCE_INVALID)
+    })?;
     let releases_prefix = format!("{}{}", &base_url[..releases_index], "/releases");
     let releases_latest_url = format!("{releases_prefix}/latest");
-    let (owner, repo) = owner_repo_from_releases_url(&base_url)
-        .ok_or_else(|| anyhow::anyhow!("Invalid releases URL format").attach(crate::utils::code::SOURCE_INVALID))?;
+    let (owner, repo) = owner_repo_from_releases_url(&base_url).ok_or_else(|| {
+        anyhow::anyhow!("Invalid releases URL format").attach(crate::utils::code::SOURCE_INVALID)
+    })?;
     let host_ok = url::Url::parse(&base_url)
         .ok()
         .and_then(|u| u.host_str().map(|h| h == "github.com"))
@@ -165,13 +166,17 @@ async fn resolve_version(
             .unwrap_or_default()
     };
     if redirect.is_empty() {
-        return Err(anyhow::anyhow!("No redirect found for GitHub latest release").attach(crate::utils::code::METADATA_UNREACHABLE));
+        return Err(
+            anyhow::anyhow!("No redirect found for GitHub latest release")
+                .attach(crate::utils::code::METADATA_UNREACHABLE),
+        );
     }
     if let Some(custom) = version_regex {
         return capture_version(custom, &redirect);
     }
     tag_from_releases_redirect(&redirect).ok_or_else(|| {
-        anyhow::anyhow!("Failed to extract tag from {redirect}").attach(crate::utils::code::METADATA_INVALID)
+        anyhow::anyhow!("Failed to extract tag from {redirect}")
+            .attach(crate::utils::code::METADATA_INVALID)
     })
 }
 
@@ -211,8 +216,10 @@ fn capture_version(pattern: &str, text: &str) -> anyhow::Result<String> {
     })?;
     let m = caps.get(1).unwrap_or_else(|| caps.get(0).unwrap());
     if m.is_empty() {
-        return Err(anyhow::anyhow!("versionRegex {pattern:?} matched empty version in {text}")
-            .attach(crate::utils::code::METADATA_INVALID));
+        return Err(
+            anyhow::anyhow!("versionRegex {pattern:?} matched empty version in {text}")
+                .attach(crate::utils::code::METADATA_INVALID),
+        );
     }
     Ok(m.as_str().to_string())
 }

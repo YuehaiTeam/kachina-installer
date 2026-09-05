@@ -118,7 +118,12 @@ async fn finalize_staged(args: &InstallFileArgs, target: &Path) -> Result<()> {
                 info!("Clearing installer index mark for: {}", target.display());
                 crate::installer::uninstall::clear_index_mark(&target.to_path_buf()).await?;
             }
-            verify_hash(&target.to_string_lossy(), args.md5.clone(), args.xxh.clone()).await?;
+            verify_hash(
+                &target.to_string_lossy(),
+                args.md5.clone(),
+                args.xxh.clone(),
+            )
+            .await?;
         }
         sync_staged_file(target).await
     }
@@ -248,18 +253,13 @@ pub async fn ipc_install_file(
         InstallFileMode::Patch { source, diff_size } => {
             let old = old_path(&args)?;
             let (stream, insight_handle) = create_stream_by_source(source).await?;
-            let bytes_transferred = match progressed_hpatch(
-                &old,
-                stream,
-                diff_size,
-                &target,
-                Box::new(progress_noti),
-            )
-            .await
-            {
-                Ok(v) => v,
-                Err(e) => return Err(fail_with_insight(e, &insight_handle)),
-            };
+            let bytes_transferred =
+                match progressed_hpatch(&old, stream, diff_size, &target, Box::new(progress_noti))
+                    .await
+                {
+                    Ok(v) => v,
+                    Err(e) => return Err(fail_with_insight(e, &insight_handle)),
+                };
             let final_insight = snapshot_insight(&insight_handle);
             finalize_keep_insight(&args, &target, &insight_handle).await?;
             Ok(InstallResult {
@@ -274,7 +274,8 @@ pub async fn ipc_install_file(
             let base = PathBuf::from(base);
             let (mut source_stream, _) = create_stream_by_source(source).await?;
             let mut base_fs = create_staged_file(&base).await?;
-            let copied = progressed_copy(source_stream.as_mut(), &mut base_fs, &progress_noti).await;
+            let copied =
+                progressed_copy(source_stream.as_mut(), &mut base_fs, &progress_noti).await;
             drop(base_fs);
             if let Err(e) = copied {
                 let _ = tokio::fs::remove_file(&base).await;

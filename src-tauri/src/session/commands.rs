@@ -1,6 +1,6 @@
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::path::Path;
 
 use base64::Engine;
 use serde_json::Value;
@@ -14,9 +14,7 @@ use crate::session::state::{
     CdkStatus, Intent, Mode, Options, PathState, PathWritable, Phase, Progress, ProjectView,
     Renderer, SourceItem, Theme, UiSession, UiState,
 };
-use crate::session::types::{
-    elevate_from_state, SessionInput, Settings, SourceField,
-};
+use crate::session::types::{elevate_from_state, SessionInput, Settings, SourceField};
 use crate::session::ui::{GuiUi, PluginHub, PromptHub};
 use crate::session::ProjectConfig;
 use crate::utils::code::{
@@ -139,7 +137,9 @@ async fn ready_runtime(
     let mut source_uri = if let Some(p) = preset.as_ref() {
         p.source_uri.clone()
     } else {
-        project.source_uri(args.source.as_deref()).unwrap_or_default()
+        project
+            .source_uri(args.source.as_deref())
+            .unwrap_or_default()
     };
     let all_sources = visible_sources(&project, &source_uri);
     if !all_sources.is_empty() && !all_sources.iter().any(|s| s.uri == source_uri) {
@@ -208,9 +208,7 @@ async fn ready_runtime(
         project.app_name.clone(),
         project.uac_strategy.clone(),
     );
-    sess.apply(Intent::SetPath {
-        path: install_path,
-    });
+    sess.apply(Intent::SetPath { path: install_path });
     if is_uninstall {
         sess.state.mode = Mode::Uninstall;
     }
@@ -249,7 +247,10 @@ fn failed_runtime(args: InstallArgs, coded: Coded) -> Arc<GuiRuntime> {
         preset: None,
     };
     Arc::new(GuiRuntime {
-        session: Arc::new(Mutex::new(UiSession::with_renderer(state, Renderer::WebView))),
+        session: Arc::new(Mutex::new(UiSession::with_renderer(
+            state,
+            Renderer::WebView,
+        ))),
         config: Arc::new(config),
         project: None,
         running: AtomicBool::new(false),
@@ -263,7 +264,10 @@ fn failed_runtime_with_config(config: InstallerConfig, coded: Coded) -> Arc<GuiR
     state.phase = Phase::Failed(coded);
     state.project.lang = crate::utils::i18n::lang().to_string();
     Arc::new(GuiRuntime {
-        session: Arc::new(Mutex::new(UiSession::with_renderer(state, Renderer::WebView))),
+        session: Arc::new(Mutex::new(UiSession::with_renderer(
+            state,
+            Renderer::WebView,
+        ))),
         config: Arc::new(config),
         project: None,
         running: AtomicBool::new(false),
@@ -360,7 +364,9 @@ pub(crate) async fn settings_from_input(
     let inspected =
         crate::installer::inspect_dir(input.install_path.clone(), project.exe_name.clone())
             .await
-            .ok_or_else(|| anyhow::Error::from(Coded::bare(crate::utils::code::INSTALL_PATH_INVALID)))?;
+            .ok_or_else(|| {
+                anyhow::Error::from(Coded::bare(crate::utils::code::INSTALL_PATH_INVALID))
+            })?;
     Ok((
         Settings {
             install_path: input.install_path.clone(),

@@ -23,9 +23,11 @@ use crate::cli::arg::InstallArgs;
 use crate::installer::uninstall::delete_self_on_exit;
 use crate::ipc::manager::ManagedElevate;
 use crate::session::commands::{GuiRuntime, SessionState};
-use crate::utils::code::{Attach, Coded, PLUGIN_HOST_FAILED, TEMP_DIR_UNAVAILABLE, WEBVIEW2_FAILED};
-use crate::utils::taskdialog::{show_error, ErrorDialog};
 use crate::session::types::SessionInput;
+use crate::utils::code::{
+    Attach, Coded, PLUGIN_HOST_FAILED, TEMP_DIR_UNAVAILABLE, WEBVIEW2_FAILED,
+};
+use crate::utils::taskdialog::{show_error, ErrorDialog};
 use crate::APP_BOOT_SIGNAL;
 
 pub use window::HwndParent;
@@ -187,8 +189,8 @@ pub fn run(
     } else {
         format!("{UI_HOST}/index.html")
     };
-    let webview =
-        webview::attach(hwnd, handle.clone(), ctx.clone(), is_win11, &start).context("attach webview2")?;
+    let webview = webview::attach(hwnd, handle.clone(), ctx.clone(), is_win11, &start)
+        .context("attach webview2")?;
     if let Some(gui) = ctx.gui.lock().unwrap_or_else(|e| e.into_inner()).clone() {
         let st = gui.snapshot();
         handle.send(UiAction::SetTitle(st.project.window_title.clone()));

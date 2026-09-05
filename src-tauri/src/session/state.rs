@@ -359,9 +359,7 @@ impl UiSession {
         self.state.sources = self
             .all_sources
             .iter()
-            .filter(|s| {
-                !(matches!(self.renderer, Renderer::Native) && s.requires_webview)
-            })
+            .filter(|s| !(matches!(self.renderer, Renderer::Native) && s.requires_webview))
             .cloned()
             .collect();
     }
@@ -417,10 +415,7 @@ mod tests {
         let user = whoami::username();
         let status = Command::new("icacls")
             .arg(dir)
-            .args([
-                "/deny",
-                &format!("{user}:(W,DC,AD)"),
-            ])
+            .args(["/deny", &format!("{user}:(W,DC,AD)")])
             .status()
             .expect("icacls deny");
         assert!(status.success(), "icacls deny failed: {status}");
@@ -501,7 +496,11 @@ mod tests {
             matches!(writable, PathWritable::Unwritable | PathWritable::Private),
             "expected Unwritable/Private, got {writable:?}"
         );
-        assert_eq!(mode, Mode::Update, "mode still follows upgrade after readonly");
+        assert_eq!(
+            mode,
+            Mode::Update,
+            "mode still follows upgrade after readonly"
+        );
     }
 
     #[test]
@@ -564,7 +563,10 @@ mod tests {
             id: "other".into(),
             ok: false,
         });
-        assert!(sess.state.pending.is_some(), "answer for another prompt is ignored");
+        assert!(
+            sess.state.pending.is_some(),
+            "answer for another prompt is ignored"
+        );
         sess.apply(Intent::Answer {
             id: "p1".into(),
             ok: false,

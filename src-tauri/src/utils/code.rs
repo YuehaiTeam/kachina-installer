@@ -508,7 +508,6 @@ fn strip_urls(input: &str) -> String {
     out
 }
 
-
 impl Class {
     pub fn as_str(self) -> &'static str {
         match self {
@@ -549,7 +548,6 @@ pub fn log_line(err: &anyhow::Error) -> String {
         Extracted::Uncoded { detail } => detail,
     }
 }
-
 
 fn reqwest_ref<'a>(err: &'a (dyn std::error::Error + 'static)) -> Option<&'a reqwest::Error> {
     if let Some(e) = err.downcast_ref::<reqwest::Error>() {
@@ -885,12 +883,14 @@ mod tests {
         assert!(matches!(extract(&garbage), Extracted::Coded(c) if c.code == NO_DOWNLOAD_NODE));
 
         let stalled = attach_download(
-            anyhow::Error::new(std::io::Error::from(crate::fs::ClassifiedNetworkError::new(
-                crate::fs::NetworkErrorType::DownloadStalled,
-                Box::new(std::io::Error::other("stalled")),
-                "https://x".into(),
-                vec![],
-            ))),
+            anyhow::Error::new(std::io::Error::from(
+                crate::fs::ClassifiedNetworkError::new(
+                    crate::fs::NetworkErrorType::DownloadStalled,
+                    Box::new(std::io::Error::other("stalled")),
+                    "https://x".into(),
+                    vec![],
+                ),
+            )),
             None,
             None,
         );

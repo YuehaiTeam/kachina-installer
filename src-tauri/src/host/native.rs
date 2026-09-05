@@ -27,9 +27,9 @@ use crate::utils::code::{
 };
 use crate::utils::i18n;
 use crate::utils::taskdialog::{
-    prompt_text, show_error, show_error_coded, show_ready, task_dialog, CommandLink,
-    ErrorDialog, ProgressDialog, ProgressHwnd, ReadySpec, TaskDialogRequest, ID_ADVANCED,
-    ID_CHANGE_PATH, ID_CLOSE, ID_INSTALL, ID_LAUNCH, ID_RADIO_BASE,
+    prompt_text, show_error, show_error_coded, show_ready, task_dialog, CommandLink, ErrorDialog,
+    ProgressDialog, ProgressHwnd, ReadySpec, TaskDialogRequest, ID_ADVANCED, ID_CHANGE_PATH,
+    ID_CLOSE, ID_INSTALL, ID_LAUNCH, ID_RADIO_BASE,
 };
 
 pub enum NativeOutcome {

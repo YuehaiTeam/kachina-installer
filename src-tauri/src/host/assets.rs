@@ -34,7 +34,8 @@ pub fn lookup(path: &str) -> Option<(&'static [u8], &'static str)> {
     }
     if path == "i18n.tsv" {
         let (compressed, mime) = get("i18n.tsv")?;
-        let bytes = I18N.get_or_init(|| zstd::decode_all(compressed).expect("decode embedded i18n"));
+        let bytes =
+            I18N.get_or_init(|| zstd::decode_all(compressed).expect("decode embedded i18n"));
         return Some((bytes.as_slice(), mime));
     }
     if path == "theme.webp" {

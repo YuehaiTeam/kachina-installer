@@ -41,8 +41,9 @@ fn main() {
         "        \"i18n.tsv\" => Some((include_bytes!(r\"{abs}\"), \"text/tab-separated-values; charset=utf-8\")),"
     ));
 
-    let mut code =
-        String::from("pub fn get(path: &str) -> Option<(&'static [u8], &'static str)> {\n    match path {\n");
+    let mut code = String::from(
+        "pub fn get(path: &str) -> Option<(&'static [u8], &'static str)> {\n    match path {\n",
+    );
     for arm in &arms {
         code.push_str(arm);
         code.push('\n');
@@ -67,7 +68,8 @@ fn merge_locales(locales: &Path, dst_zst: &Path) {
                 .file_stem()
                 .map(|s| s.to_string_lossy().into_owned())
                 .unwrap_or_default();
-            let text = fs::read_to_string(&f).unwrap_or_else(|e| panic!("read {}: {e}", f.display()));
+            let text =
+                fs::read_to_string(&f).unwrap_or_else(|e| panic!("read {}: {e}", f.display()));
             let mut map = BTreeMap::new();
             for line in text.lines() {
                 if line.is_empty() || line.starts_with('#') {

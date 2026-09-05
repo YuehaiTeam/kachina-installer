@@ -16,7 +16,9 @@ impl Catalog {
     /// anonymous column (used for `locales/<lang>.tsv`).
     pub fn parse(bytes: &[u8]) -> Self {
         let text = String::from_utf8_lossy(bytes);
-        let mut lines = text.lines().filter(|l| !l.is_empty() && !l.starts_with('#'));
+        let mut lines = text
+            .lines()
+            .filter(|l| !l.is_empty() && !l.starts_with('#'));
         let Some(first) = lines.next() else {
             return Self {
                 langs: Vec::new(),
@@ -49,11 +51,7 @@ impl Catalog {
     /// Look up `key` in `lang`'s column (no match → first language column).
     /// Missing key returns the key. `{name}` placeholders are replaced.
     pub fn t(&self, lang: &str, key: &str, params: &[(&str, &str)]) -> String {
-        let col = self
-            .langs
-            .iter()
-            .position(|l| l == lang)
-            .unwrap_or(0);
+        let col = self.langs.iter().position(|l| l == lang).unwrap_or(0);
         let Some(vals) = self.rows.get(key) else {
             return key.to_string();
         };
@@ -86,7 +84,6 @@ fn interpolate(text: &str, params: &[(&str, &str)]) -> String {
     }
     s
 }
-
 
 use std::sync::OnceLock;
 
@@ -153,7 +150,12 @@ mod tests {
     fn locale_covers_codes_stages_prompts() {
         let cat = Catalog::parse(&zh_cn_bytes());
         let mut missing = Vec::new();
-        for key in ALL_CODES.iter().copied().chain(STAGE_KEYS.iter().copied()).chain(PROMPT_KEYS.iter().copied()) {
+        for key in ALL_CODES
+            .iter()
+            .copied()
+            .chain(STAGE_KEYS.iter().copied())
+            .chain(PROMPT_KEYS.iter().copied())
+        {
             if !cat.has_key(key) {
                 missing.push(key);
             }
@@ -166,7 +168,8 @@ mod tests {
 
     #[test]
     fn t_picks_column_interpolates_and_falls_back() {
-        let bytes = "KEY\tzh-CN\ten-US\nhello\t你好{name}\tHello {name}\nonly_zh\t仅中文\t\n".as_bytes();
+        let bytes =
+            "KEY\tzh-CN\ten-US\nhello\t你好{name}\tHello {name}\nonly_zh\t仅中文\t\n".as_bytes();
         let cat = Catalog::parse(bytes);
         assert_eq!(cat.langs(), &["zh-CN".to_string(), "en-US".to_string()]);
         assert_eq!(cat.t("zh-CN", "hello", &[("name", "A")]), "你好A");

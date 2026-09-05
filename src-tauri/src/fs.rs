@@ -856,12 +856,9 @@ pub async fn create_http_stream(
             range: insight_range.clone(),
             mode: None,
         }));
-        let error = anyhow::Error::new(crate::dfs::HttpStatus::new(code.as_u16(), ""))
-            .context(crate::utils::url::create_reqwest_context(
-                "create_http_stream",
-                url,
-                "HTTP_STATUS_ERR",
-            ));
+        let error = anyhow::Error::new(crate::dfs::HttpStatus::new(code.as_u16(), "")).context(
+            crate::utils::url::create_reqwest_context("create_http_stream", url, "HTTP_STATUS_ERR"),
+        );
         return Err(TACommandError::with_insight_handle(error, insight));
     }
 
@@ -970,12 +967,13 @@ pub async fn create_multi_http_stream(
             range: range_info,
             mode: None,
         }));
-        let error = anyhow::Error::new(crate::dfs::HttpStatus::new(code.as_u16(), ""))
-        .context(crate::utils::url::create_reqwest_context(
-            "create_multi_http_stream",
-            url,
-            "HTTP_STATUS_ERR",
-        ));
+        let error = anyhow::Error::new(crate::dfs::HttpStatus::new(code.as_u16(), "")).context(
+            crate::utils::url::create_reqwest_context(
+                "create_multi_http_stream",
+                url,
+                "HTTP_STATUS_ERR",
+            ),
+        );
         return Err(crate::utils::error::TACommandError::with_insight_handle(
             error, insight,
         ));
@@ -1343,11 +1341,20 @@ mod tests {
         write_file(&dir, "User/s.json", b"u");
         let s = scan(
             &dir,
-            &["app.exe", "lib/a.dll", "lib/b.dll", "plugins/x/p.dll", "User/s.json"],
+            &[
+                "app.exe",
+                "lib/a.dll",
+                "lib/b.dll",
+                "plugins/x/p.dll",
+                "User/s.json",
+            ],
             &["User/s.json"],
         )
         .await;
-        assert!(s.files.iter().any(|f| f.file_name.ends_with("s.json") && f.hash.is_empty()));
+        assert!(s
+            .files
+            .iter()
+            .any(|f| f.file_name.ends_with("s.json") && f.hash.is_empty()));
         assert!(s.dirty_dirs.contains(&String::new()));
         assert!(!s.dirty_dirs.contains(&"lib".to_string()));
 
@@ -1369,14 +1376,23 @@ mod tests {
         write_file(&dir, "app.exe", b"a");
         let link = dir.join("link");
         let out = std::process::Command::new("cmd")
-            .args(["/C", "mklink", "/J", &link.to_string_lossy(), &real.to_string_lossy()])
+            .args([
+                "/C",
+                "mklink",
+                "/J",
+                &link.to_string_lossy(),
+                &real.to_string_lossy(),
+            ])
             .output()
             .unwrap();
         assert!(out.status.success());
         let s = scan(&dir, &["app.exe", "link/f.dll"], &[]).await;
         assert_eq!(s.reparse_dirs, vec!["link".to_string()]);
         assert_eq!(s.dirty_dirs, vec![String::new()]);
-        assert!(s.files.iter().any(|f| f.file_name.ends_with("f.dll") && !f.hash.is_empty()));
+        assert!(s
+            .files
+            .iter()
+            .any(|f| f.file_name.ends_with("f.dll") && !f.hash.is_empty()));
         let _ = std::fs::remove_dir(&link);
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&real);

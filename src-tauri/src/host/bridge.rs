@@ -65,7 +65,12 @@ fn error_payload(err: &TACommandError, event_id: Option<String>) -> Value {
             Value::Null,
             Value::Null,
         ),
-        Extracted::Uncoded { detail } => (Value::Null, json_opt(Some(&detail)), Value::Null, Value::Null),
+        Extracted::Uncoded { detail } => (
+            Value::Null,
+            json_opt(Some(&detail)),
+            Value::Null,
+            Value::Null,
+        ),
     };
     json!({
         "code": code,

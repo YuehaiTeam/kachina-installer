@@ -75,9 +75,11 @@ impl ProjectConfig {
                         return Ok(item.uri.clone());
                     }
                 }
-                list.first()
-                    .map(|s| s.uri.clone())
-                    .ok_or_else(|| anyhow::Error::from(crate::utils::code::Coded::bare(crate::utils::code::PKG_BROKEN)))
+                list.first().map(|s| s.uri.clone()).ok_or_else(|| {
+                    anyhow::Error::from(crate::utils::code::Coded::bare(
+                        crate::utils::code::PKG_BROKEN,
+                    ))
+                })
             }
         }
     }
@@ -91,7 +93,9 @@ impl RepoMetadata {
         } else if self.hashed.iter().all(|e| e.xxh.is_some()) {
             Ok(HashKey::Xxh)
         } else {
-            Err(anyhow::Error::from(crate::utils::code::Coded::bare(crate::utils::code::HASH_ALGORITHM_UNSUPPORTED)))
+            Err(anyhow::Error::from(crate::utils::code::Coded::bare(
+                crate::utils::code::HASH_ALGORITHM_UNSUPPORTED,
+            )))
         }
     }
 
@@ -149,7 +153,11 @@ pub async fn settings_from_cli(
     let source_uri = project.source_uri(args.source.as_deref())?;
     let inspected = crate::installer::inspect_dir(install_path.clone(), project.exe_name.clone())
         .await
-        .ok_or_else(|| anyhow::Error::from(crate::utils::code::Coded::bare(crate::utils::code::INSTALL_PATH_INVALID)))?;
+        .ok_or_else(|| {
+            anyhow::Error::from(crate::utils::code::Coded::bare(
+                crate::utils::code::INSTALL_PATH_INVALID,
+            ))
+        })?;
     Ok(Settings {
         install_path,
         source_uri,

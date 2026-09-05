@@ -76,9 +76,11 @@ pub fn run_mirrorc_install_sync(
         let got = sha256_file(Path::new(zip_path))?;
         if !got.eq_ignore_ascii_case(sha256) {
             let _ = std::fs::remove_file(zip_path);
-            return Err(anyhow::anyhow!("archive sha256 mismatch: expected {sha256}, got {got}")
-                .attach(MIRRORC_FAILED)
-                .into());
+            return Err(
+                anyhow::anyhow!("archive sha256 mismatch: expected {sha256}, got {got}")
+                    .attach(MIRRORC_FAILED)
+                    .into(),
+            );
         }
     }
     let file = std::fs::File::open(zip_path).into_ta_result()?;
@@ -181,7 +183,10 @@ pub fn run_mirrorc_install_sync(
                 .context(format!("WRITE_FILE_ERR: {}", out_path.display()))?;
         }
         out_file.sync_all().into_ta_result()?;
-        files.push((file_name.replace('\\', "/"), hasher.digest().to_hex_lowercase()));
+        files.push((
+            file_name.replace('\\', "/"),
+            hasher.digest().to_hex_lowercase(),
+        ));
         notify(Progress::Extract {
             file: file_name,
             done: (i + 1) as u64,
@@ -287,7 +292,8 @@ mod tests {
     use std::io::Write;
 
     fn tmp() -> std::path::PathBuf {
-        let dir = crate::fs::staging::scratch_file(&format!("kachina-mirrorc-{}", uuid::Uuid::new_v4()));
+        let dir =
+            crate::fs::staging::scratch_file(&format!("kachina-mirrorc-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         dir
     }
@@ -337,7 +343,10 @@ mod tests {
         )
         .unwrap();
         assert_eq!(std::fs::read(new_dir.join("app.exe")).unwrap(), b"app");
-        assert_eq!(std::fs::read(new_dir.join("sub").join("lib.dll")).unwrap(), b"lib");
+        assert_eq!(
+            std::fs::read(new_dir.join("sub").join("lib.dll")).unwrap(),
+            b"lib"
+        );
         assert_eq!(std::fs::read(new_dir.join(&exe_name)).unwrap(), b"self");
         assert_eq!(std::fs::read(install.join("app.exe")).unwrap(), b"before");
         assert_eq!(out.deletes, vec!["old.dll".to_string()]);
@@ -355,7 +364,10 @@ mod tests {
         make_zip(
             &zip_path,
             &[
-                (".metadata.json", br#"{"tag_name":"v2","hashed":[],"deletes":["x.dll"]}"#),
+                (
+                    ".metadata.json",
+                    br#"{"tag_name":"v2","hashed":[],"deletes":["x.dll"]}"#,
+                ),
                 ("a.txt", b"a"),
             ],
         );
