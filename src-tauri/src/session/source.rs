@@ -314,7 +314,7 @@ async fn fetch_hashed_metadata(url: &str) -> anyhow::Result<RepoMetadata> {
 async fn fetch_dfs2_metadata(api_url: &str, ctx: &mut SourceCtx) -> anyhow::Result<RepoMetadata> {
     let dfs2 = get_dfs2_metadata(api_url.to_string())
         .await
-        .map_err(|e| attach_metadata(e.into()))?;
+        .map_err(attach_metadata)?;
     let data = dfs2.data.ok_or_else(|| {
         anyhow!("dfs2 metadata is null").attach(crate::utils::code::METADATA_INVALID)
     })?;
@@ -721,7 +721,7 @@ pub async fn ensure_dfs2_session(
     let base_url = format!("{}://{authority}", parsed.scheme());
     let res_id = parsed
         .path_segments()
-        .and_then(|s| s.last())
+        .and_then(|mut s| s.next_back())
         .unwrap_or("")
         .to_string();
     ctx.dfs2 = Some(Dfs2Session {

@@ -1038,21 +1038,22 @@ async fn run_dfs_install(
         );
     }
 
-    if settings.is_update && latest.installer.is_some() && config.enbedded_metadata.is_none() {
-        if !latest
+    if settings.is_update
+        && latest.installer.is_some()
+        && config.enbedded_metadata.is_none()
+        && !latest
             .hashed
             .iter()
             .any(|e| e.file_name == project.updater_name)
-        {
-            let installer = latest.installer.clone().unwrap();
-            latest.hashed.push(FileMeta {
-                file_name: project.updater_name.clone(),
-                size: installer.size,
-                md5: installer.md5,
-                xxh: installer.xxh,
-                installer: Some(true),
-            });
-        }
+    {
+        let installer = latest.installer.clone().unwrap();
+        latest.hashed.push(FileMeta {
+            file_name: project.updater_name.clone(),
+            size: installer.size,
+            md5: installer.md5,
+            xxh: installer.xxh,
+            installer: Some(true),
+        });
     }
 
     if settings.elevate {

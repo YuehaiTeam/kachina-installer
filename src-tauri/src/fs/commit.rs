@@ -842,14 +842,14 @@ fn recover_sync(
     };
     let units = &args.journal.units;
     let statuses: Vec<Status> = units.iter().map(|u| classify(&ctx, u)).collect();
-    if statuses.iter().any(|s| *s == Status::Changed) {
+    if statuses.contains(&Status::Changed) {
         tracing::info!(
             "recovery: directory changed since the journal was written, dropping staging"
         );
         staging.discard();
         return Ok(RecoverOutcome::Discarded);
     }
-    if statuses.iter().any(|s| *s == Status::Unrecoverable) {
+    if statuses.contains(&Status::Unrecoverable) {
         tracing::info!("recovery: staged files missing, undoing the swapped units");
         let done: Vec<UnitState> = units
             .iter()

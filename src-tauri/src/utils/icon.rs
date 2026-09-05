@@ -149,7 +149,7 @@ pub fn extract_icon_from_exe(exe_path: &Path) -> Option<(Vec<u8>, u32, u32)> {
 fn bgra_to_rgba(bgra: Vec<u8>) -> Vec<u8> {
     let mut rgba = Vec::with_capacity(bgra.len());
 
-    for chunk in bgra.chunks_exact(4) {
+    for chunk in bgra.as_chunks::<4>().0 {
         rgba.push(chunk[2]); // R (从 B 位置)
         rgba.push(chunk[1]); // G (保持不变)
         rgba.push(chunk[0]); // B (从 R 位置)

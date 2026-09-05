@@ -276,13 +276,29 @@ pub async fn run_mirrorc_download(
     let on_progress = |downloaded| {
         notify(Progress::BytesOf {
             done: downloaded as u64,
-            total: len as u64,
+            total: len,
         });
     };
     progressed_copy(stream.as_mut(), &mut target, &on_progress)
         .await
         .context("MIRRORC_DOWNLOAD_ERR")?;
     Ok(())
+}
+
+pub fn longest_common_prefix(strs: Vec<String>) -> String {
+    if strs.is_empty() {
+        return String::new();
+    }
+    let mut prefix = strs[0].clone();
+    for s in strs.iter() {
+        while !s.starts_with(&prefix) {
+            if prefix.is_empty() {
+                return String::new();
+            }
+            prefix.pop();
+        }
+    }
+    prefix
 }
 
 #[cfg(test)]
@@ -408,20 +424,4 @@ mod tests {
         .is_err());
         let _ = std::fs::remove_dir_all(&dir);
     }
-}
-
-pub fn longest_common_prefix(strs: Vec<String>) -> String {
-    if strs.is_empty() {
-        return String::new();
-    }
-    let mut prefix = strs[0].clone();
-    for s in strs.iter() {
-        while !s.starts_with(&prefix) {
-            if prefix.is_empty() {
-                return String::new();
-            }
-            prefix.pop();
-        }
-    }
-    prefix
 }

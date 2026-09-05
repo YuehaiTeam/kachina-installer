@@ -324,10 +324,9 @@ fn parse_pin_from_fragment(url: &url::Url) -> Option<PinConfig> {
     // cert takes priority over spki
     let (hex_str, make_target): (&str, fn([u8; 32]) -> PinTarget) = if let Some(h) = cert_hex {
         (h, PinTarget::Cert)
-    } else if let Some(h) = spki_hex {
-        (h, PinTarget::Spki)
     } else {
-        return None;
+        let h = spki_hex?;
+        (h, PinTarget::Spki)
     };
 
     // Guard: SHA-256 hex must be exactly 64 chars, reject early to avoid large alloc

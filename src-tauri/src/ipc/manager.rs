@@ -501,7 +501,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn pipe_roundtrip_and_disconnect() {
         let pipe_id = uuid::Uuid::new_v4().to_string();
-        let mut server =
+        let server =
             ManagedElevate::create_pipe(&format!(r"\\.\pipe\Kachina-Elevate-{pipe_id}")).unwrap();
         let client = tokio::spawn(uac_ipc_main(UacArgs { pipe_id }));
         server.connect().await.unwrap();
