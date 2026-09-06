@@ -18,6 +18,7 @@ import { Done } from './screens/Done';
 import { Failed } from './screens/Failed';
 import { SourcePanel } from './panels/SourcePanel';
 import { CdkPanel } from './panels/CdkPanel';
+import { registerPluginBridge } from './plugin-host';
 import { Dialog } from './ui/Dialog';
 import { IconClose, IconMinimize } from './ui/icons';
 import { Spinner } from './ui/Spinner';
@@ -101,13 +102,19 @@ export function App() {
     void i18nReady().then(() => setCopyReady(true));
     void invoke('window_show');
     let unsub: (() => void) | undefined;
-    void listen<Coded>('ui-notice', (coded) => {
-      void invoke('error_dialog', errorDialogArgs(coded));
-    }).then((fn) => {
-      unsub = fn;
-      // 监听已就绪，向 host 看门狗上报页面可用。
-      void invoke('frontend_ready');
-    });
+    // session-plugin 监听必须先于 frontend_ready 就位，否则自动启动的
+    // 会话发出插件请求时无人应答，只能等 60s 超时。
+    void registerPluginBridge()
+      .then(() =>
+        listen<Coded>('ui-notice', (coded) => {
+          void invoke('error_dialog', errorDialogArgs(coded));
+        }),
+      )
+      .then((fn) => {
+        unsub = fn;
+        // 监听已就绪，向 host 看门狗上报页面可用。
+        void invoke('frontend_ready');
+      });
     return () => unsub?.();
   }, []);
 

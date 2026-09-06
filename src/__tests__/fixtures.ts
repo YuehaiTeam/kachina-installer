@@ -39,6 +39,7 @@ export function ready(over: Partial<UiState> = {}): UiState {
   return {
     phase: { kind: 'ready' },
     mode: 'install',
+    offline: false,
     project,
     options,
     sources,
