@@ -247,11 +247,15 @@ mod tests {
 }
 
 pub fn delete_self_on_exit() {
-    let path = DELETE_SELF_ON_EXIT_PATH.read().unwrap();
-    if path.is_none() {
+    // 幂等：WebView 消息循环（WM_CLOSE / WM_QUIT）与 main 的最终收尾都会调用，
+    // 只清理一次。
+    let Some(path) = DELETE_SELF_ON_EXIT_PATH
+        .write()
+        .unwrap_or_else(|e| e.into_inner())
+        .take()
+    else {
         return;
-    }
-    let path = path.as_ref().unwrap();
+    };
     // 子进程独立于本进程存活；ping 拖延约 1 秒等本进程退出后再删整个暂存目录。
     let _ = process::spawn(
         "cmd",

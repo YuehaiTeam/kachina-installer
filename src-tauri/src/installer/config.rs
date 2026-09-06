@@ -2,7 +2,6 @@ use crate::{
     cli::arg::InstallArgs,
     local::{get_config_from_embedded, get_embedded, mmap, Embedded},
     utils::{error::TAResult, uac::check_elevated},
-    APP_BOOT_SIGNAL,
 };
 use anyhow::Context;
 use serde::Serialize;
@@ -212,7 +211,6 @@ pub async fn resolve_installer_config(
 }
 
 pub async fn get_installer_config(args: &InstallArgs, scan_exe: bool) -> TAResult<InstallerConfig> {
-    APP_BOOT_SIGNAL.store(true, std::sync::atomic::Ordering::SeqCst);
     resolve_installer_config(args.clone(), scan_exe)
         .await
         .map_err(crate::utils::error::TACommandError::new)

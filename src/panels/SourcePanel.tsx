@@ -24,7 +24,7 @@ export function SourcePanel({
 }: {
   ui: UiState;
   onClose: () => void;
-  onMirrorc: () => void;
+  onMirrorc: (previousUri: string) => void;
 }) {
   return (
     <Dialog
@@ -44,7 +44,9 @@ export function SourcePanel({
             onClick={() => {
               void intent({ kind: 'set_source', uri: s.uri });
               if (s.uri.startsWith('mirrorc://')) {
-                onMirrorc();
+                // Mirror酱还要过 CDK 确认；把当前来源交给外层暂存，
+                // 取消时恢复，保证"取消不改变原选择"。
+                onMirrorc(ui.options.source_uri);
               } else {
                 onClose();
               }

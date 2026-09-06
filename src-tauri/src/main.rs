@@ -87,7 +87,10 @@ lazy_static::lazy_static! {
 
     /// Legacy alias - will be removed after migration
     pub static ref REQUEST_CLIENT: &'static reqwest_middleware::ClientWithMiddleware = &*API_CLIENT;
-    pub static ref APP_BOOT_SIGNAL: AtomicBool = AtomicBool::new(false);
+    /// 前端页面已完成监听并就绪（host/bridge 的 `frontend_ready` 置位）。
+    /// 30s WebView 看门狗据此判断页面是否成功初始化；配置准备完成不代表
+    /// 页面可用，两者必须是不同的状态。
+    pub static ref FRONTEND_READY: AtomicBool = AtomicBool::new(false);
 }
 
 fn main() {
@@ -196,6 +199,10 @@ fn main() {
                 });
         }
     }
+
+    // 所有入口共用的最终收尾：成功替换过自身的会话（Native / 静默）在此
+    // 安排 staging 清理；WebView 路径若已在消息循环里清理过，这里为空操作。
+    installer::uninstall::delete_self_on_exit();
 }
 
 fn crash_dialog(event_id: Option<&str>) {
