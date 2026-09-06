@@ -338,6 +338,61 @@ async fn extract_by_meta_name(
     Ok(())
 }
 
+/// 归档 metadata 派生的相对路径只允许 Normal 组件（子目录合法）；`..`、
+/// 绝对路径、盘符、UNC 一律拒绝，防止包内路径把文件写到输出根之外。
+fn relative_under_root(root: &Path, relative: &str) -> Result<std::path::PathBuf, String> {
+    let mut path = root.to_path_buf();
+    let mut normal_count = 0;
+    for component in Path::new(relative).components() {
+        match component {
+            std::path::Component::Normal(part) => {
+                path.push(part);
+                normal_count += 1;
+            }
+            _ => return Err(format!("unsafe path in archive: {relative:?}")),
+        }
+    }
+    if normal_count == 0 {
+        return Err(format!("empty path in archive: {relative:?}"));
+    }
+    Ok(path)
+}
+
+/// 解析 symlink/junction 后仍须位于 root 内。从已 canonicalize 的 root 逐
+/// 组件向下走，已存在的部分就地 canonicalize 并检查前缀；不存在的部分只
+/// 可能挂在已验证位于 root 内的父目录下，由后续 create 落盘。
+async fn verify_within_root(root: &Path, path: &Path) -> Result<(), String> {
+    let root_canonical = tokio::fs::canonicalize(root).await.map_err(|e| {
+        format!(
+            "Failed to resolve output directory {}: {}",
+            root.display(),
+            e
+        )
+    })?;
+    let relative = path.strip_prefix(root).map_err(|_| {
+        format!(
+            "path {:?} is not under {:?}",
+            path.display(),
+            root.display()
+        )
+    })?;
+    let mut current = root_canonical.clone();
+    for component in relative.components() {
+        current.push(component);
+        if let Ok(resolved) = tokio::fs::canonicalize(&current).await {
+            if !resolved.starts_with(&root_canonical) {
+                return Err(format!(
+                    "archive path escapes output directory: {} -> {}",
+                    path.display(),
+                    resolved.display()
+                ));
+            }
+            current = resolved;
+        }
+    }
+    Ok(())
+}
+
 // 实现提取所有文件
 async fn extract_all_files(
     file: &AsyncMmapFile,
@@ -361,7 +416,10 @@ async fn extract_all_files(
         HashMap::new()
     };
 
-    for embedded_file in embedded {
+    // 先完成全部路径解析与安全校验，再落盘：任何一条越界即整体失败，
+    // 不留下半次提取。
+    let mut plan: Vec<(String, std::path::PathBuf, &Embedded)> = Vec::new();
+    for embedded_file in &embedded {
         // 跳过内部文件
         if embedded_file.name.starts_with('\0') {
             continue;
@@ -374,8 +432,12 @@ async fn extract_all_files(
             embedded_file.name.clone()
         };
 
-        let output_path = output_dir.join(&file_name);
+        let output_path = relative_under_root(output_dir, &file_name)?;
+        verify_within_root(output_dir, &output_path).await?;
+        plan.push((file_name, output_path, embedded_file));
+    }
 
+    for (file_name, output_path, embedded_file) in plan {
         // 确保父目录存在
         if let Some(parent) = output_path.parent() {
             tokio::fs::create_dir_all(parent)
@@ -516,5 +578,27 @@ mod tests {
     #[test]
     fn sanitize_null_internal_names() {
         assert_eq!(sanitize_output_name("\0CONFIG"), "_CONFIG");
+    }
+
+    #[test]
+    fn relative_paths_stay_under_root() {
+        let root = Path::new("out");
+        assert!(relative_under_root(root, "app.exe").is_ok());
+        assert!(relative_under_root(root, "User/settings.json").is_ok());
+
+        for evil in [
+            "../outside.txt",
+            "a/../../outside.txt",
+            "..\\outside.txt",
+            "C:\\Windows\\evil.exe",
+            "\\\\server\\share\\evil.exe",
+            "/abs/path.txt",
+            "",
+        ] {
+            assert!(
+                relative_under_root(root, evil).is_err(),
+                "must reject {evil:?}"
+            );
+        }
     }
 }
