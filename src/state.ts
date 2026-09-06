@@ -92,6 +92,8 @@ export type Prompt = {
 export type UiState = {
   phase: Phase;
   mode: Mode;
+  /** 离线整包（带 embedded_index）：不提供安装源选择入口。 */
+  offline: boolean;
   project: ProjectView;
   options: Options;
   sources: SourceItem[];

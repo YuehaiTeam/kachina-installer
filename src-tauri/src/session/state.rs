@@ -62,6 +62,9 @@ pub enum Renderer {
 pub struct UiState {
     pub phase: Phase,
     pub mode: Mode,
+    /// 离线整包（带 embedded_index）不含联网下载路径，渲染端据此隐藏
+    /// 安装源选择入口，避免切到需要联网/CDK 的源。
+    pub offline: bool,
     pub project: ProjectView,
     pub options: Options,
     pub sources: Vec<SourceItem>,
@@ -265,6 +268,7 @@ impl Default for UiState {
                 mirrorc_cdk: None,
             },
             sources: Vec::new(),
+            offline: false,
             path: PathState {
                 writable: PathWritable::Writable,
                 exists: false,

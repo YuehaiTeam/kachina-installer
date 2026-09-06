@@ -189,6 +189,7 @@ async fn ready_runtime(
             mirrorc_cdk: cdk.filter(|s| !s.is_empty()),
         },
         sources: all_sources.clone(),
+        offline: config.embedded_index.is_some(),
         path: PathState {
             writable: PathWritable::Writable,
             exists: false,

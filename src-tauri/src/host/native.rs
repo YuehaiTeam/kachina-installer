@@ -163,6 +163,7 @@ async fn ui_session_from(
             mirrorc_cdk: cdk.filter(|s| !s.is_empty()),
         },
         sources,
+        offline: config.embedded_index.is_some(),
         path: crate::session::state::PathState {
             writable: crate::session::state::PathWritable::Writable,
             exists: false,
@@ -236,7 +237,8 @@ async fn show_ready_page(
                 uri: sources[0].uri.clone(),
             });
         }
-        let show_radios = sources.len() > 1;
+        // 离线整包不提供源选择：切到需要联网/CDK 的源没有意义。
+        let show_radios = sources.len() > 1 && !sess.state.offline;
         let default_radio = if show_radios {
             sources
                 .iter()

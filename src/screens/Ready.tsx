@@ -21,7 +21,7 @@ export function Ready({
   const markedKey = ui.options.mirrorc_cdk
     ? ui.options.mirrorc_cdk.slice(0, 4) + '****'
     : t('ready.no_cdk');
-  const showSources = ui.sources.length > 1 && !uninstall;
+  const showSources = ui.sources.length > 1 && !uninstall && !ui.offline;
 
   async function pickPath() {
     const path = await invoke<string>('pick_path');
