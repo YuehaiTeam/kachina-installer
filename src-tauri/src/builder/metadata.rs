@@ -4,11 +4,42 @@ use futures::StreamExt;
 
 use crate::utils::{hash::run_hash, metadata::FileMeta};
 
+/// 校验源路径存在且是目录，区分三种情况：不存在、不是目录必须报错，
+/// 只有合法的空目录才允许返回空列表——否则写错的源路径会静默生成
+/// hashed=[] 的 metadata，旧文件还会被错列进 deletes。
+async fn ensure_source_dir(source: &Path) -> Result<(), String> {
+    let meta = tokio::fs::metadata(source).await.map_err(|e| {
+        format!(
+            "Source directory does not exist or is unreadable: {}: {e}",
+            source.display()
+        )
+    })?;
+    if !meta.is_dir() {
+        return Err(format!(
+            "Source path is not a directory: {}",
+            source.display()
+        ));
+    }
+    Ok(())
+}
+
+/// walkdir 给出的完整路径去掉 source 前缀得到相对路径，再统一为 `/` 分隔。
+/// 用 strip_prefix 而非字符串替换：source 带尾分隔符时字符串匹配会失效，
+/// 导致相对路径错误甚至把绝对路径写进 metadata。
+fn relativize(entry_path: &Path, source: &Path) -> Result<String, String> {
+    let relative = entry_path.strip_prefix(source).map_err(|e| {
+        format!(
+            "Failed to relativize {} against {}: {e}",
+            entry_path.display(),
+            source.display()
+        )
+    })?;
+    Ok(relative.to_string_lossy().replace('\\', "/"))
+}
+
 pub async fn deep_generate_metadata(source: &PathBuf) -> Result<Vec<FileMeta>, String> {
     let path = Path::new(&source);
-    if !path.exists() {
-        return Ok(Vec::new());
-    }
+    ensure_source_dir(path).await?;
     let mut entries = async_walkdir::WalkDir::new(source);
     let mut files = Vec::new();
     loop {
@@ -20,17 +51,7 @@ pub async fn deep_generate_metadata(source: &PathBuf) -> Result<Vec<FileMeta>, S
                 }
                 let f = f.unwrap();
                 if f.is_file() {
-                    let path = entry.path();
-                    let path = path.to_str();
-                    if path.is_none() {
-                        return Err("Failed to convert path to string".to_string());
-                    }
-                    let path = path.unwrap();
-                    let fin_path = path.replace("\\", "/").replacen(
-                        format!("{}/", source.to_str().unwrap().replace("\\", "/")).as_str(),
-                        "",
-                        1,
-                    );
+                    let fin_path = relativize(&entry.path(), path)?;
                     let size = entry.metadata().await.unwrap().len();
                     files.push(FileMeta {
                         file_name: fin_path,
@@ -82,9 +103,7 @@ pub async fn deep_generate_metadata(source: &PathBuf) -> Result<Vec<FileMeta>, S
 
 pub async fn deep_get_filelist(source: &PathBuf) -> Result<Vec<String>, String> {
     let path = Path::new(&source);
-    if !path.exists() {
-        return Ok(Vec::new());
-    }
+    ensure_source_dir(path).await?;
     let mut entries = async_walkdir::WalkDir::new(source);
     let mut files = Vec::new();
     loop {
@@ -96,17 +115,7 @@ pub async fn deep_get_filelist(source: &PathBuf) -> Result<Vec<String>, String> 
                 }
                 let f = f.unwrap();
                 if f.is_file() {
-                    let path = entry.path();
-                    let path = path.to_str();
-                    if path.is_none() {
-                        return Err("Failed to convert path to string".to_string());
-                    }
-                    let path = path.unwrap();
-                    let fin_path = path.replace("\\", "/").replacen(
-                        format!("{}/", source.to_str().unwrap().replace("\\", "/")).as_str(),
-                        "",
-                        1,
-                    );
+                    let fin_path = relativize(&entry.path(), path)?;
                     files.push(fin_path);
                 }
             }

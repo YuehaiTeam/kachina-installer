@@ -143,6 +143,21 @@ async fn update_pe_header(output: &mut File, new_index_header: &[u8]) -> Result<
     Ok(())
 }
 
+/// 输入与输出可能经相对路径、符号链接或硬链接指向同一文件（仅比较字符串
+/// 路径覆盖不了），先创建输出会截断输入。因此一律写同目录临时文件，全部
+/// 成功后再替换正式输出；失败时清理临时文件，输入不受影响。
+fn temp_sibling(output: &Path) -> Result<std::path::PathBuf, String> {
+    let file_name = output
+        .file_name()
+        .ok_or_else(|| format!("Invalid output path: {}", output.display()))?;
+    let parent = output.parent().unwrap_or_else(|| Path::new("."));
+    Ok(parent.join(format!(
+        ".{}.tmp{}",
+        file_name.to_string_lossy(),
+        std::process::id()
+    )))
+}
+
 pub async fn replace_base(
     input: &Path,
     output: &Path,
@@ -170,32 +185,52 @@ pub async fn replace_base(
         }
     }
 
-    let mut output_file = File::create(output).await.map_err(|e| e.to_string())?;
-    output_file
-        .write_all(new_base)
-        .await
-        .map_err(|e| e.to_string())?;
-    copy_data_range(input, &mut output_file, start, total_size - start).await?;
-    output_file.flush().await.map_err(|e| e.to_string())?;
-    drop(output_file);
+    let temp_output = temp_sibling(output)?;
+    let write_result = async {
+        let mut output_file = File::create(&temp_output)
+            .await
+            .map_err(|e| e.to_string())?;
+        output_file
+            .write_all(new_base)
+            .await
+            .map_err(|e| e.to_string())?;
+        copy_data_range(input, &mut output_file, start, total_size - start).await?;
+        output_file.flush().await.map_err(|e| e.to_string())?;
+        drop(output_file);
 
-    let new_layout = PackLayout {
-        base_end: new_base.len() as u32,
-        config_len: old_layout.config_len,
-        theme_len: old_layout.theme_len,
-        index_len: old_layout.index_len,
-        manifest_len: old_layout.manifest_len,
-    };
+        let new_layout = PackLayout {
+            base_end: new_base.len() as u32,
+            config_len: old_layout.config_len,
+            theme_len: old_layout.theme_len,
+            index_len: old_layout.index_len,
+            manifest_len: old_layout.manifest_len,
+        };
 
-    let mut output_file = File::options()
-        .read(true)
-        .write(true)
-        .open(output)
-        .await
-        .map_err(|e| e.to_string())?;
-    update_pe_header(&mut output_file, &new_layout.to_header()).await?;
-    output_file.flush().await.map_err(|e| e.to_string())?;
-    Ok(new_layout)
+        let mut output_file = File::options()
+            .read(true)
+            .write(true)
+            .open(&temp_output)
+            .await
+            .map_err(|e| e.to_string())?;
+        update_pe_header(&mut output_file, &new_layout.to_header()).await?;
+        output_file.flush().await.map_err(|e| e.to_string())?;
+        Ok(new_layout)
+    }
+    .await;
+
+    match write_result {
+        Ok(new_layout) => {
+            tokio::fs::rename(&temp_output, output).await.map_err(|e| {
+                let _ = std::fs::remove_file(&temp_output);
+                format!("Failed to replace output {}: {e}", output.display())
+            })?;
+            Ok(new_layout)
+        }
+        Err(e) => {
+            let _ = tokio::fs::remove_file(&temp_output).await;
+            Err(e)
+        }
+    }
 }
 
 pub async fn replace_bin_cli(args: ReplaceBinArgs) -> Result<(), String> {
@@ -323,6 +358,61 @@ mod tests {
         let parsed = parse_pack_layout(&output[..8192.min(output.len())]).unwrap();
         assert_eq!(parsed, new_layout);
         assert!(find_dos_stub(&output).is_err());
+
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    #[tokio::test]
+    async fn replace_in_place_does_not_destroy_input() {
+        let config = config_tlv(br#"{"appName":"Demo"}"#);
+        let mut old_base = pe_with(DOS_STUB, 16);
+        let old_layout = PackLayout {
+            base_end: old_base.len() as u32,
+            config_len: config.len() as u32,
+            theme_len: 0,
+            index_len: 0,
+            manifest_len: 0,
+        };
+        let header = old_layout.to_header();
+        let pos = find_dos_stub(&old_base).unwrap();
+        old_base[pos..pos + header.len()].copy_from_slice(&header);
+
+        let mut input = old_base;
+        input.extend_from_slice(&config);
+
+        let new_base = pe_with(DOS_STUB, 64);
+
+        let dir = std::env::temp_dir().join(format!(
+            "kachina-replace-inplace-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let input_path = dir.join("old.exe");
+        tokio::fs::write(&input_path, &input).await.unwrap();
+
+        // 输入与输出是同一个文件：不得先截断再复制，结果必须等价于正常替换
+        let new_layout = replace_base(&input_path, &input_path, &new_base)
+            .await
+            .unwrap();
+        assert_eq!(new_layout.base_end, new_base.len() as u32);
+
+        let output = tokio::fs::read(&input_path).await.unwrap();
+        assert_eq!(&output[new_base.len()..], config.as_slice());
+        // DOS stub 位置已被覆写为索引头，说明临时文件完成后才替换正式输出
+        let parsed = parse_pack_layout(&output[..8192.min(output.len())]).unwrap();
+        assert_eq!(parsed, new_layout);
+        assert!(find_dos_stub(&output).is_err());
+
+        // 成功后不残留临时文件
+        let mut entries = tokio::fs::read_dir(&dir).await.unwrap();
+        let mut names = Vec::new();
+        while let Some(entry) = entries.next_entry().await.unwrap() {
+            names.push(entry.file_name().to_string_lossy().into_owned());
+        }
+        assert_eq!(names, vec!["old.exe".to_string()]);
 
         let _ = tokio::fs::remove_dir_all(&dir).await;
     }

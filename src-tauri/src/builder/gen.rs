@@ -15,6 +15,15 @@ use crate::{
     },
 };
 
+/// diff/压缩的任务模型：`meta.file_name` 是安装后的逻辑路径，`source_path`
+/// 才是本次生成的物理输入——`-u` 指定的 updater（可用 `-p` 改名安装）与
+/// input_dir 下的同名文件不是同一个文件，补丁必须从 source_path 读新数据。
+#[derive(Clone)]
+struct GenTask {
+    meta: FileMeta,
+    source_path: std::path::PathBuf,
+}
+
 pub async fn gen_cli(args: GenArgs) {
     let pb_style = ProgressStyle::with_template("[{elapsed_precise}] {bar:20.cyan/blue} {msg} ")
         .unwrap()
@@ -50,6 +59,32 @@ pub async fn gen_cli(args: GenArgs) {
     if let Some(installer) = installer.as_ref() {
         // remove updater from metadata
         metadata.retain(|x| x.xxh.as_ref().unwrap() != installer.xxh.as_ref().unwrap());
+    }
+    let mut tasks: Vec<GenTask> = metadata
+        .iter()
+        .map(|file| GenTask {
+            meta: file.clone(),
+            source_path: args.input_dir.join(&file.file_name),
+        })
+        .collect();
+    if let (Some(updater), Some(installer)) = (args.updater.as_ref(), installer.as_ref()) {
+        let file_name = if let Some(name) = args.updater_name.as_ref() {
+            name.clone()
+        } else if let Some(name) = updater.file_name() {
+            name.to_string_lossy().to_string()
+        } else {
+            panic!("failed to get updater name");
+        };
+        tasks.push(GenTask {
+            meta: FileMeta {
+                file_name,
+                size: installer.size,
+                md5: installer.md5.clone(),
+                xxh: installer.xxh.clone(),
+                installer: None,
+            },
+            source_path: updater.clone(),
+        });
     }
     println!("Writting metadata to {:?}", args.output_metadata);
     let mut repometa = RepoMetadata {
@@ -193,22 +228,7 @@ pub async fn gen_cli(args: GenArgs) {
     }
     // check diffs
     if let Some(diff_vers) = args.diff_vers {
-        let mut metadata_with_installer = metadata.clone();
-        if let Some(installer) = repometa.installer.as_ref() {
-            metadata_with_installer.push(FileMeta {
-                file_name: if let Some(name) = args.updater_name.as_ref() {
-                    name.clone()
-                } else if let Some(name) = args.updater.as_ref().unwrap().file_name() {
-                    name.to_string_lossy().to_string()
-                } else {
-                    panic!("failed to get updater name");
-                },
-                size: installer.size,
-                md5: installer.md5.clone(),
-                xxh: installer.xxh.clone(),
-                installer: None,
-            });
-        }
+        let task_metas: Vec<FileMeta> = tasks.iter().map(|t| t.meta.clone()).collect();
         if !diff_vers.is_empty() {
             let mut ignore = ignore::gitignore::GitignoreBuilder::new("/");
             if let Some(diff_ignore) = args.diff_ignore {
@@ -225,7 +245,7 @@ pub async fn gen_cli(args: GenArgs) {
                 let multi_pg = MultiProgress::new();
 
                 // create a progress bar to track overall status
-                let pb_main = multi_pg.add(ProgressBar::new(metadata_with_installer.len() as u64));
+                let pb_main = multi_pg.add(ProgressBar::new(tasks.len() as u64));
                 pb_main.set_style(pb_style_total.clone());
                 pb_main.set_message(format!("DIFF TOTAL {diff_ver}"));
 
@@ -237,22 +257,18 @@ pub async fn gen_cli(args: GenArgs) {
                 // setup the JoinSet to manage the join handles for our futures
                 let mut set = JoinSet::new();
 
-                let mut last_item = false;
+                for (index, task) in tasks.iter().enumerate() {
+                    let last_item = index + 1 == tasks.len();
 
-                for (index, file) in metadata_with_installer.iter().enumerate() {
-                    if index == metadata.len() - 1 {
-                        last_item = true;
-                    }
-
-                    let input_dir = args.input_dir.clone();
                     let output_dir = args.output_dir.clone();
                     let diff_ver = diff_ver.clone();
 
                     // spawns a background task immediatly no matter if the future is awaited
                     // https://docs.rs/tokio/latest/tokio/task/struct.JoinSet.html#method.spawn
-                    let file = file.clone();
+                    let task = task.clone();
                     let ignore = ignore.clone();
                     set.spawn(async move {
+                        let file = task.meta;
                         if ignore
                             .matched_path_or_any_parents(&file.file_name, false)
                             .is_ignore()
@@ -294,7 +310,9 @@ pub async fn gen_cli(args: GenArgs) {
                         let old_data = tokio::fs::read(&diff_file)
                             .await
                             .expect("failed to read old data");
-                        let new_data = tokio::fs::read(input_dir.join(&file.file_name))
+                        // 新数据必须读本任务的真实输入（-u 指定的 updater 等），
+                        // 而不是 input_dir 下同名或改名的文件。
+                        let new_data = tokio::fs::read(&task.source_path)
                             .await
                             .expect("failed to read new data");
                         let output_file = std::fs::File::create(&output_path)
@@ -387,7 +405,7 @@ pub async fn gen_cli(args: GenArgs) {
                 println!("Checking for deleted files in {diff_ver}...");
                 for file in diff_filelist.iter() {
                     // check if file exists in current metadata
-                    if !metadata_with_installer.iter().any(|x| x.file_name == *file) {
+                    if !task_metas.iter().any(|x| x.file_name == *file) {
                         // file not found in current metadata, add to deletes
                         println!("File {file:?} not found in current metadata, added to deletes");
                         deletes.push(file.clone());
@@ -398,8 +416,7 @@ pub async fn gen_cli(args: GenArgs) {
             // 生成打包优化信息（在移动 diffs 之前）
             let diff_vers_pathbuf: Vec<std::path::PathBuf> =
                 diff_vers.iter().map(std::path::PathBuf::from).collect();
-            let packing_info =
-                generate_packing_info(&metadata_with_installer, &diffs, &diff_vers_pathbuf).await;
+            let packing_info = generate_packing_info(&task_metas, &diffs, &diff_vers_pathbuf).await;
 
             repometa.patches = diffs;
             repometa.packing_info = packing_info;
@@ -412,29 +429,12 @@ pub async fn gen_cli(args: GenArgs) {
                 .expect("failed to write metadata");
         }
     } else {
-        // 即使没有diff版本，如果指定了diff_vers参数，也生成基础的packing_info
+        // 即使没有diff版本，也生成基础的packing_info
         println!("Generating packing info for first release...");
-        let mut metadata_with_installer = metadata.clone();
-        if let Some(installer) = repometa.installer.as_ref() {
-            metadata_with_installer.push(FileMeta {
-                file_name: if let Some(name) = args.updater_name.as_ref() {
-                    name.clone()
-                } else if let Some(name) = args.updater.as_ref().unwrap().file_name() {
-                    name.to_string_lossy().to_string()
-                } else {
-                    panic!("failed to get updater name");
-                },
-                size: installer.size,
-                md5: installer.md5.clone(),
-                xxh: installer.xxh.clone(),
-                installer: None,
-            });
-        }
-
+        let task_metas: Vec<FileMeta> = tasks.iter().map(|t| t.meta.clone()).collect();
         let empty_diffs = Vec::new();
         let empty_diff_vers = Vec::new();
-        let packing_info =
-            generate_packing_info(&metadata_with_installer, &empty_diffs, &empty_diff_vers).await;
+        let packing_info = generate_packing_info(&task_metas, &empty_diffs, &empty_diff_vers).await;
         repometa.packing_info = packing_info;
 
         // write metadata again

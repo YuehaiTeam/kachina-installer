@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use fmmap::tokio::{AsyncMmapFile, AsyncMmapFileExt};
@@ -118,24 +118,52 @@ fn classify_file_type(name: &str) -> FileType {
     }
 }
 
-// 构建hash到文件名的映射
-fn build_hash_to_name_map(metadata: &RepoMetadata) -> HashMap<String, String> {
-    let mut map = HashMap::new();
-
+/// hash → 所有声明该数据块的目标路径。相同内容只保存一个数据块，所以一个
+/// hash 可以对应多个安装路径；补丁块不进这张表，避免占用完整文件的路径。
+fn build_hash_to_names_map(metadata: &RepoMetadata) -> HashMap<String, Vec<String>> {
+    let mut map: HashMap<String, Vec<String>> = HashMap::new();
     for file in &metadata.hashed {
         if let Some(hash) = preferred_file_hash(&file.md5, &file.xxh) {
-            map.insert(hash.clone(), file.file_name.clone());
+            let names = map.entry(hash.clone()).or_default();
+            if !names.contains(&file.file_name) {
+                names.push(file.file_name.clone());
+            }
+        }
+    }
+    map
+}
+
+/// 补丁块名 → 文件名，仅用于 `--list` 展示；导出路径规划不使用它。
+fn build_patch_display_map(metadata: &RepoMetadata) -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    for patch in &metadata.patches {
+        let from_hash = preferred_file_hash(&patch.from.md5, &patch.from.xxh);
+        let to_hash = preferred_file_hash(&patch.to.md5, &patch.to.xxh);
+        if let (Some(from), Some(to)) = (from_hash, to_hash) {
+            map.insert(format!("{from}_{to}"), patch.file_name.clone());
+        }
+    }
+    map
+}
+
+/// name → hash，供 `--meta-name` 反查。完整文件优先于补丁块：同名时
+/// `--meta-name` 应还原完整数据而不是补丁内容。
+fn build_name_to_hash_map(metadata: &RepoMetadata) -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    for file in &metadata.hashed {
+        if let Some(hash) = preferred_file_hash(&file.md5, &file.xxh) {
+            map.entry(file.file_name.clone())
+                .or_insert_with(|| hash.clone());
         }
     }
     for patch in &metadata.patches {
         let from_hash = preferred_file_hash(&patch.from.md5, &patch.from.xxh);
         let to_hash = preferred_file_hash(&patch.to.md5, &patch.to.xxh);
         if let (Some(from), Some(to)) = (from_hash, to_hash) {
-            let patch_name = format!("{}_{}", from, to);
-            map.insert(patch_name, patch.file_name.clone());
+            map.entry(patch.file_name.clone())
+                .or_insert_with(|| format!("{from}_{to}"));
         }
     }
-
     map
 }
 
@@ -146,16 +174,16 @@ async fn collect_file_info(file: &AsyncMmapFile) -> Result<Vec<FileInfo>, String
 
     let mut file_infos = Vec::new();
 
-    // 构建hash到metadata name的映射
-    let hash_to_name = if let Some(ref meta) = metadata {
-        build_hash_to_name_map(meta)
-    } else {
-        HashMap::new()
-    };
+    let hash_to_names = metadata.as_ref().map(build_hash_to_names_map);
+    let patch_names = metadata.as_ref().map(build_patch_display_map);
 
     for emb in embedded {
         let file_type = classify_file_type(&emb.name);
-        let metadata_name = hash_to_name.get(&emb.name).cloned();
+        let metadata_name = hash_to_names
+            .as_ref()
+            .and_then(|m| m.get(&emb.name))
+            .and_then(|names| names.first().cloned())
+            .or_else(|| patch_names.as_ref().and_then(|m| m.get(&emb.name)).cloned());
 
         file_infos.push(FileInfo {
             file_type,
@@ -188,10 +216,11 @@ fn format_file_size(size: usize) -> String {
 
 // 字符串截断
 fn truncate_string(s: &str, max_len: usize) -> String {
-    if s.len() <= max_len {
+    if s.chars().count() <= max_len {
         s.to_string()
     } else {
-        format!("{}...", &s[..max_len.saturating_sub(3)])
+        let truncated: String = s.chars().take(max_len.saturating_sub(3)).collect();
+        format!("{truncated}...")
     }
 }
 
@@ -282,13 +311,7 @@ async fn extract_by_meta_name(
     input_path: &std::path::Path,
 ) -> Result<(), String> {
     let embedded = get_embedded(file).await.map_err(|e| e.to_string())?;
-    let hash_to_name = build_hash_to_name_map(metadata);
-
-    // 构建name到hash的反向映射
-    let mut name_to_hash = HashMap::new();
-    for (hash, name) in hash_to_name {
-        name_to_hash.insert(name, hash);
-    }
+    let name_to_hash = build_name_to_hash_map(metadata);
 
     for (i, meta_name) in meta_names.iter().enumerate() {
         let hash = name_to_hash
@@ -410,31 +433,51 @@ async fn extract_all_files(
         )
     })?;
 
-    let hash_to_name = if let Some(meta) = metadata {
-        build_hash_to_name_map(meta)
-    } else {
-        HashMap::new()
-    };
+    let hash_to_names = metadata.map(build_hash_to_names_map);
+    let claimed: HashSet<&str> = hash_to_names
+        .as_ref()
+        .map(|m| m.keys().map(String::as_str).collect())
+        .unwrap_or_default();
 
     // 先完成全部路径解析与安全校验，再落盘：任何一条越界即整体失败，
     // 不留下半次提取。
     let mut plan: Vec<(String, std::path::PathBuf, &Embedded)> = Vec::new();
+    let mut planned_paths: HashSet<String> = HashSet::new();
+
+    // 以 metadata.hashed 的文件路径为主：一个数据块可服务多个目标路径
+    // （pack 对相同内容去重存储），补丁块不会占用完整文件的输出路径。
+    if let Some(hash_to_names) = hash_to_names.as_ref() {
+        for (block_name, names) in hash_to_names {
+            let Some(embedded_file) = embedded.iter().find(|e| &e.name == block_name) else {
+                for file_name in names {
+                    println!("Skipped (block not packed): {file_name}");
+                }
+                continue;
+            };
+            for file_name in names {
+                let output_path = relative_under_root(output_dir, file_name)?;
+                verify_within_root(output_dir, &output_path).await?;
+                if planned_paths.insert(output_path.to_string_lossy().into_owned()) {
+                    plan.push((file_name.clone(), output_path, embedded_file));
+                }
+            }
+        }
+    }
+
+    // 未被 hashed 引用的数据块（追加的资源、补丁块）按自身名称导出。
     for embedded_file in &embedded {
         // 跳过内部文件
         if embedded_file.name.starts_with('\0') {
             continue;
         }
-
-        // 确定输出文件名和路径
-        let file_name = if let Some(meta_name) = hash_to_name.get(&embedded_file.name) {
-            meta_name.clone()
-        } else {
-            embedded_file.name.clone()
-        };
-
-        let output_path = relative_under_root(output_dir, &file_name)?;
+        if claimed.contains(embedded_file.name.as_str()) {
+            continue;
+        }
+        let output_path = relative_under_root(output_dir, &embedded_file.name)?;
         verify_within_root(output_dir, &output_path).await?;
-        plan.push((file_name, output_path, embedded_file));
+        if planned_paths.insert(output_path.to_string_lossy().into_owned()) {
+            plan.push((embedded_file.name.clone(), output_path, embedded_file));
+        }
     }
 
     for (file_name, output_path, embedded_file) in plan {
@@ -532,17 +575,26 @@ mod tests {
     }
 
     #[test]
-    fn hash_map_prefers_md5_like_pack() {
+    fn hash_maps_prefer_md5_like_pack() {
         let metadata = RepoMetadata {
             repo_name: "r".into(),
             tag_name: "t".into(),
-            hashed: vec![FileMeta {
-                file_name: "app.exe".into(),
-                size: 1,
-                md5: Some("md5hash".into()),
-                xxh: Some("xxhhash".into()),
-                installer: None,
-            }],
+            hashed: vec![
+                FileMeta {
+                    file_name: "app.exe".into(),
+                    size: 1,
+                    md5: Some("md5hash".into()),
+                    xxh: Some("xxhhash".into()),
+                    installer: None,
+                },
+                FileMeta {
+                    file_name: "two/app.exe".into(),
+                    size: 1,
+                    md5: Some("md5hash".into()),
+                    xxh: Some("xxhhash".into()),
+                    installer: None,
+                },
+            ],
             patches: vec![PatchInfo {
                 file_name: "app.exe".into(),
                 size: 1,
@@ -554,18 +606,43 @@ mod tests {
                 to: PatchSide {
                     size: 1,
                     md5: Some("tomd5".into()),
-                    xxh: Some("toxxh".into()),
+                    xxh: Some("tomd5xxh".into()),
                 },
             }],
             installer: None,
             deletes: Vec::new(),
             packing_info: Vec::new(),
         };
-        let map = build_hash_to_name_map(&metadata);
-        assert_eq!(map.get("md5hash").map(String::as_str), Some("app.exe"));
-        assert!(map.get("xxhhash").is_none());
-        assert!(map.contains_key("frommd5_tomd5"));
-        assert!(!map.contains_key("fromxxh_toxxh"));
+        // 一个数据块映射到多个目标路径；补丁块不占用完整文件路径
+        let names = build_hash_to_names_map(&metadata);
+        assert_eq!(
+            names.get("md5hash").map(Vec::as_slice),
+            Some(&["app.exe".to_string(), "two/app.exe".to_string()][..])
+        );
+        assert!(!names.contains_key("xxhhash"));
+        assert!(!names.contains_key("frommd5_tomd5"));
+
+        // --meta-name 反查时完整文件优先于补丁块
+        let name_to_hash = build_name_to_hash_map(&metadata);
+        assert_eq!(
+            name_to_hash.get("app.exe").map(String::as_str),
+            Some("md5hash")
+        );
+
+        let patch_display = build_patch_display_map(&metadata);
+        assert_eq!(
+            patch_display.get("frommd5_tomd5").map(String::as_str),
+            Some("app.exe")
+        );
+    }
+
+    #[test]
+    fn truncate_respects_char_boundaries() {
+        assert_eq!(truncate_string("short", 32), "short");
+        let long = "中文文件名很长很长很长很长很长很长很长";
+        let truncated = truncate_string(long, 17);
+        assert!(truncated.ends_with("..."));
+        assert_eq!(truncated.chars().count(), 17);
     }
 
     #[test]
