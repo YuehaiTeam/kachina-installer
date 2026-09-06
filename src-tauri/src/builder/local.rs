@@ -104,7 +104,9 @@ pub fn preferred_file_hash<'a>(
     md5.as_ref().or(xxh.as_ref())
 }
 
-fn is_embedded_name(name: &str) -> bool {
+/// 读取器（`get_embedded`）只接受内置 `\0` 名称与 ASCII 字母/数字/`.`/`_`/`-`
+/// 组成的名称；append 写入端必须使用同一规则，否则数据进了包却永远读不到。
+pub fn is_embedded_name(name: &str) -> bool {
     matches!(
         name,
         "\0CONFIG" | "\0META" | "\0INDEX" | "\0IMAGE" | "\0THEME"

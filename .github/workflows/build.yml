@@ -51,7 +51,7 @@ jobs:
       - name: Build
         run: pnpm build
       - name: Copy Binary
-        run: copy src-tauri/target/x86_64-win7-windows-msvc/release/kachina-builder.exe kachina-builder.exe
+        run: copy src-tauri\target\x86_64-win7-windows-msvc\release\kachina-builder-bundle.exe kachina-builder.exe
       - name: Artifact
         uses: actions/upload-artifact@v4.6.0
         with:
@@ -153,6 +153,9 @@ jobs:
           Copy-Item "artifacts/artifact/*.pdb" "src-tauri/target/x86_64-win7-windows-msvc/release/" -Force
           Copy-Item "artifacts/artifact/*.exe" "src-tauri/target/release/" -Force
           Copy-Item "artifacts/artifact/*.pdb" "src-tauri/target/release/" -Force
+          # 产物名保持 kachina-builder.exe（内容已是 bundle），为测试补 bundle 别名
+          Copy-Item "artifacts/artifact/kachina-builder.exe" "src-tauri/target/x86_64-win7-windows-msvc/release/kachina-builder-bundle.exe" -Force
+          Copy-Item "artifacts/artifact/kachina-builder.exe" "src-tauri/target/release/kachina-builder-bundle.exe" -Force
       - name: Prepare test fixtures
         run: npm run test:prepare
       - name: Run ${{ matrix.test }} test

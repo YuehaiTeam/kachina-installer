@@ -2,6 +2,7 @@ use tokio::io::AsyncSeekExt;
 
 use crate::{
     cli::AppendArgs,
+    local::is_embedded_name,
     pack::{write_file, PackFile},
 };
 
@@ -28,6 +29,13 @@ pub async fn append_cli(args: AppendArgs) {
         } else {
             file.file_name().and_then(|s| s.to_str()).unwrap()
         };
+        // 与读取器同一规则；不合规的名称会被 get_embedded 静默过滤，
+        // 数据还在包里但 --list / --name 都看不到，必须在写入时拒绝。
+        if !is_embedded_name(name) {
+            panic!(
+                "Invalid embedded name {name:?}: only ASCII letters, digits, '.', '_' and '-' are allowed; pass --name to override the file name"
+            );
+        }
         let input_stream = tokio::fs::File::open(file)
             .await
             .expect("Failed to open input file");

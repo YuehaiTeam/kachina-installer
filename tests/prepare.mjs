@@ -241,7 +241,7 @@ async function buildCompletePackages() {
     'src-tauri',
     'target',
     dev ? 'debug' : 'x86_64-win7-windows-msvc/release',
-    dev ? 'kachina-builder-bundle.exe' : 'kachina-builder.exe',
+    'kachina-builder-bundle.exe',
   );
   const iconPath = path.resolve('../src-tauri/icons/icon.ico');
   if (!(await fs.pathExists(iconPath))) {

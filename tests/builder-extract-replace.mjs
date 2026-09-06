@@ -16,7 +16,7 @@ const builderPath = path.resolve(
   'target',
   'x86_64-win7-windows-msvc',
   'release',
-  'kachina-builder.exe',
+  'kachina-builder-bundle.exe',
 );
 
 async function runBuilder(args, label) {
