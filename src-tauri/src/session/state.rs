@@ -314,8 +314,11 @@ impl UiSession {
                 self.recompute_path();
             }
             Intent::SetSource { uri } => {
+                // 仅在换到（不同的）mirrorc 源时作废旧校验；同 URI 重选/恢复
+                // 原选择不改变已验证状态，否则取消 CDK 面板也会丢掉 Ok。
+                let changed = self.state.options.source_uri != uri;
                 self.state.options.source_uri = uri;
-                if self.state.options.source_uri.starts_with("mirrorc://") {
+                if changed && self.state.options.source_uri.starts_with("mirrorc://") {
                     self.state.cdk = CdkStatus::Idle;
                 }
                 self.refresh_sources();
@@ -331,7 +334,11 @@ impl UiSession {
                 self.state.options.mirrorc_cdk = if cdk.is_empty() { None } else { Some(cdk) };
             }
             Intent::Start => {
-                if self.state.options.source_uri.starts_with("mirrorc://")
+                // 卸载不下载任何文件（静默卸载直接走 run_uninstall），CDK 校验
+                // 只属于确实需要下载的安装/更新路径，否则 GUI 卸载会被卡在
+                // CDK 面板，三个入口行为不一致。
+                if !matches!(self.state.mode, Mode::Uninstall)
+                    && self.state.options.source_uri.starts_with("mirrorc://")
                     && !matches!(self.state.cdk, CdkStatus::Ok)
                 {
                     self.state.phase = Phase::Failed(Coded::bare(MIRRORC_CDK_MISSING));

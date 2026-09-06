@@ -225,7 +225,9 @@ async fn show_ready_page(
 ) -> anyhow::Result<Option<Intent>> {
     loop {
         let sources = sess.state.sources.clone();
-        if sources.len() > 1
+        // 只要可见源非空而当前选择不在其中就必须改选——与是否显示单选框
+        // 无关；否则过滤后恰好剩一个源时会带着不可用的源直接进 Start。
+        if !sources.is_empty()
             && !sources
                 .iter()
                 .any(|s| s.uri == sess.state.options.source_uri)

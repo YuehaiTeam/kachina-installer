@@ -8,11 +8,9 @@ import { IconEdit, IconShield } from '../ui/icons';
 export function Ready({
   ui,
   onOpenSource,
-  onOpenCdk,
 }: {
   ui: UiState;
   onOpenSource: () => void;
-  onOpenCdk: () => void;
 }) {
   const uninstall = ui.mode === 'uninstall';
   const update = ui.mode === 'update';
@@ -75,10 +73,9 @@ export function Ready({
           {showSources ? (
             <>
               <span>{t('ready.from')} </span>
-              <a
-                onClick={() => (mirrorc ? onOpenCdk() : onOpenSource())}
-                title={t('ready.select_source')}
-              >
+              {/* 无论当前是否 Mirror酱 都打开源列表，否则选了 Mirror酱
+                  之后没有入口切回其他源；CDK 编辑走源列表里的确认流程。 */}
+              <a onClick={onOpenSource} title={t('ready.select_source')}>
                 {source?.name ?? ui.options.source_uri}
                 {mirrorc ? `(${markedKey})` : null}
                 <IconEdit />

@@ -28,7 +28,7 @@ use crate::utils::code::{
     Attach, Coded, PLUGIN_HOST_FAILED, TEMP_DIR_UNAVAILABLE, WEBVIEW2_FAILED,
 };
 use crate::utils::taskdialog::{show_error, ErrorDialog};
-use crate::APP_BOOT_SIGNAL;
+use crate::FRONTEND_READY;
 
 pub use window::HwndParent;
 
@@ -174,12 +174,12 @@ pub fn run(
     tokio::spawn({
         async move {
             tokio::time::sleep(std::time::Duration::from_secs(30)).await;
-            if APP_BOOT_SIGNAL.load(std::sync::atomic::Ordering::SeqCst) {
-                tracing::info!("Webview2 is alive");
+            if FRONTEND_READY.load(std::sync::atomic::Ordering::SeqCst) {
+                tracing::info!("Frontend is ready");
                 return;
             }
             show_error(ErrorDialog::code(WEBVIEW2_FAILED), HWND::default());
-            tracing::error!("Webview2 fault detected");
+            tracing::error!("Frontend failed to become ready within 30s");
             std::process::exit(1);
         }
     });

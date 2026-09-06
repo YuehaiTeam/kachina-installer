@@ -6,7 +6,15 @@ import { Dialog } from '../ui/Dialog';
 import { Input } from '../ui/Input';
 import { Spinner } from '../ui/Spinner';
 
-export function CdkPanel({ ui, onClose }: { ui: UiState; onClose: () => void }) {
+export function CdkPanel({
+  ui,
+  onCancel,
+  onConfirmed,
+}: {
+  ui: UiState;
+  onCancel: () => void;
+  onConfirmed: () => void;
+}) {
   const [value, setValue] = useState(ui.options.mirrorc_cdk ?? '');
   const checking = ui.cdk.kind === 'checking';
 
@@ -19,10 +27,10 @@ export function CdkPanel({ ui, onClose }: { ui: UiState; onClose: () => void }) 
   const prevKind = useRef(ui.cdk.kind);
   useEffect(() => {
     if (prevKind.current === 'checking' && ui.cdk.kind === 'ok') {
-      onClose();
+      onConfirmed();
     }
     prevKind.current = ui.cdk.kind;
-  }, [ui.cdk, onClose]);
+  }, [ui.cdk, onConfirmed]);
 
   function submit() {
     void intent({ kind: 'set_cdk', cdk: value });
@@ -34,7 +42,7 @@ export function CdkPanel({ ui, onClose }: { ui: UiState; onClose: () => void }) 
       desc={<div class="desc">{t('dialog.mirrorc_cdk_hint')}</div>}
       footer={
         <>
-          <button class="btn btn-install btn-install-2rd neutral" onClick={onClose}>
+          <button class="btn btn-install btn-install-2rd neutral" onClick={onCancel}>
             {t('dialog.cancel')}
           </button>
           <button class="btn btn-install" disabled={checking} onClick={submit}>

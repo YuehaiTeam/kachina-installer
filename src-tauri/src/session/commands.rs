@@ -68,7 +68,6 @@ impl GuiRuntime {
 }
 
 pub async fn prepare_gui(args: InstallArgs, preset: Option<SessionInput>) -> Arc<GuiRuntime> {
-    crate::APP_BOOT_SIGNAL.store(true, Ordering::SeqCst);
     let config = match resolve_installer_config(args.clone(), true).await {
         Ok(c) => c,
         Err(err) => {

@@ -75,7 +75,7 @@ function Screen({
 }) {
   const { phase } = ui;
   if (phase.kind === 'ready') {
-    return <Ready ui={ui} onOpenSource={onOpenSource} onOpenCdk={onOpenCdk} />;
+    return <Ready ui={ui} onOpenSource={onOpenSource} />;
   }
   if (isRunning(phase)) {
     return <Running ui={ui} progress={phase} />;
@@ -92,6 +92,9 @@ function Screen({
 export function App() {
   const ui = state.value;
   const [panel, setPanel] = useState<Panel>(null);
+  // Mirror酱走"确认后才生效"：记录打开 CDK 面板前的来源，取消时恢复，
+  // 保证取消不会改变原本的选择。
+  const [cdkFrom, setCdkFrom] = useState<string | null>(null);
   const [copyReady, setCopyReady] = useState(false);
 
   useEffect(() => {
@@ -102,6 +105,8 @@ export function App() {
       void invoke('error_dialog', errorDialogArgs(coded));
     }).then((fn) => {
       unsub = fn;
+      // 监听已就绪，向 host 看门狗上报页面可用。
+      void invoke('frontend_ready');
     });
     return () => unsub?.();
   }, []);
@@ -154,10 +159,29 @@ export function App() {
         <SourcePanel
           ui={ui}
           onClose={() => setPanel(null)}
-          onMirrorc={() => setPanel('cdk')}
+          onMirrorc={(from) => {
+            setCdkFrom(from);
+            setPanel('cdk');
+          }}
         />
       ) : null}
-      {panel === 'cdk' ? <CdkPanel ui={ui} onClose={() => setPanel(null)} /> : null}
+      {panel === 'cdk' ? (
+        <CdkPanel
+          ui={ui}
+          onCancel={() => {
+            const from = cdkFrom;
+            setCdkFrom(null);
+            setPanel(null);
+            if (from) {
+              void intent({ kind: 'set_source', uri: from });
+            }
+          }}
+          onConfirmed={() => {
+            setCdkFrom(null);
+            setPanel(null);
+          }}
+        />
+      ) : null}
       {ui.pending ? <PromptModal ui={ui} /> : null}
     </div>
   );

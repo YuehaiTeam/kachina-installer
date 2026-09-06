@@ -123,6 +123,11 @@ async fn dispatch(
             }
             ok(())
         }
+        "frontend_ready" => {
+            // 前端完成监听后上报；host 的 30s WebView 看门狗据此放行。
+            crate::FRONTEND_READY.store(true, std::sync::atomic::Ordering::SeqCst);
+            ok(())
+        }
         "intent" => {
             let intent = Intent::from_value(&args).map_err(TACommandError::new)?;
             crate::session::commands::handle_intent(intent, ctx, handle).await
