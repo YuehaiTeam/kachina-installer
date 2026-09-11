@@ -191,16 +191,25 @@ pub async fn pack(
     mut config: PackConfig,
 ) {
     println!("Generating exe with version info...");
-    // write base to tmp file
-    let tmppath = std::env::temp_dir().join("kachina_installer_tmp.exe");
-    let mut tmpfile = tokio::fs::File::create(tmppath.clone()).await.unwrap();
+    let tmppath = std::env::temp_dir().join(format!(
+        "kachina_installer_tmp_{}_{}.exe",
+        std::process::id(),
+        uuid::Uuid::new_v4()
+    ));
+    let mut tmpfile = tokio::fs::File::create(&tmppath).await.unwrap();
     tokio::io::copy(&mut base, &mut tmpfile).await.unwrap();
-    // close tmp file
+    tmpfile.sync_all().await.unwrap();
     tmpfile.shutdown().await.unwrap();
     drop(tmpfile);
-    // open resource file
+    let tmp_len = tokio::fs::metadata(&tmppath).await.unwrap().len();
     let mut updater = rcedit::ResourceUpdater::new();
-    updater.load(&tmppath).unwrap();
+    if let Err(e) = updater.load(&tmppath) {
+        panic!(
+            "rcedit load {} ({} bytes): {e:?}",
+            tmppath.display(),
+            tmp_len
+        );
+    }
     let unwrapped_config = config.config.as_object().unwrap();
     let title = unwrapped_config
         .get("windowTitle")
