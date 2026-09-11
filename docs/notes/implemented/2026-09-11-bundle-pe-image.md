@@ -23,8 +23,13 @@ Status: implemented
 | 体内假 `MZ\x90\x00` 不改变 installer 起点 | PASS：`bundle_uses_last_real_pe_not_last_mz90` |
 | 无 `PE\0\0` 的 DOS 魔数不是映像 | PASS：`pe_at_requires_pe_signature` |
 | builder 单测 | PASS：`cargo test --bin kachina-builder` 18 passed |
+| 失败 CI 产物上的真 bundle 能 `test:prepare` | PASS：`.cache/ci-fail/artifact/kachina-builder-bundle.exe`（5,729,792 字节，PE 起点 `0,2769408`）放到 `target/x86_64-win7-windows-msvc/release/` 后 `npm run test:prepare` 通过 |
+| 用同一次产物的 `kachina-builder.exe` 覆盖 bundle 复现 CI | PASS：2,769,408 字节、仅 PE `[0]`，pack 打印 `Failed to find packed exe` |
+| 失败产物走新测试 job 拷贝逻辑 | PASS：bundle 仍是 5,729,792，cargo builder 仍是 2,769,408 |
+| 本地 CI 矩阵 e2e | PASS：`test:prepare` 后 offline/online install+update、dfs2、updater-survival、already-latest、uninstall、userdata-ignore、occupied-process、builder-extract-replace、plugin-stub |
 
 ## Consequences
 
-- 只拼了一个 PE 的文件（未 merge 的 builder）会在 pack 时明确报找不到第二个映像，而不是把体内魔数交给 rcedit。
+- 只拼了一个 PE 的文件（未 merge 的 builder）会在 pack 时明确报找不到第二个映像并以退出码 1 结束，而不是把体内魔数交给 rcedit。
 - `e_lfanew` 超过 4KiB 的非典型 PE 不会被当成映像起点。
+- CI 上传的 `kachina-builder.exe` 必须是 bundle（builder+installer），不能是 cargo 的单文件 builder。测试 job 只在产物里还没有更大的 `kachina-builder-bundle.exe` 时，才用 `kachina-builder.exe` 补这个别名。

@@ -25,7 +25,7 @@ pub async fn pack_cli(args: PackArgs) {
     let reader = get_reader_for_bundle().await;
     if reader.is_err() {
         eprintln!("Failed to get reader: {:?}", reader.err());
-        return;
+        std::process::exit(1);
     }
     let reader = reader.unwrap();
     let config = tokio::fs::read(&args.config).await;
