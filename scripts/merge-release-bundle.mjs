@@ -2,7 +2,6 @@ import fs from 'fs/promises';
 import path from 'path';
 
 const releaseDir = path.resolve(
-  'src-tauri',
   'target',
   'x86_64-win7-windows-msvc',
   'release',

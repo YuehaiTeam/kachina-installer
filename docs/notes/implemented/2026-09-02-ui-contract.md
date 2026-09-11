@@ -91,7 +91,7 @@ pub trait SessionUi: Send + Sync {
 | 文案 | 文案表按码查得 | 不在 Rust 源码中 |
 
 ```rust
-// src-tauri/src/utils/code.rs
+// native/utils/code.rs
 pub struct Coded {
     pub code: &'static str,
     pub detail: Option<String>,    // 源错误链 {:#}，剥除 URL；无源错误时 None
@@ -144,7 +144,7 @@ bridge 暴露两层：`error_dialog({ code, detail, subject, sid, event_id })` �
 
 仓库形态：`locales/<lang>.tsv`，每行 `KEY\t文案`，一个语言一个文件。错误码直接作 key；其它字串用带前缀的 key（`progress.*`、`step.*`、`prompt.<kind>.title` / `.message`、`ready.*`、`done.*`、`dialog.*`、`webview2.*`、`shortcut.*`）。占位符写作 `{subject}`、`{done}`、`{total}`、`{items}`、`{local}`、`{remote}`、`{sid}`、`{event_id}`。
 
-构建形态：`src-tauri/build.rs` 读取 `locales/*.tsv`，按 key 字典序合并为宽表 `i18n.tsv`——首行表头 `KEY\t<lang1>\t<lang2>…`（列名取文件名），缺失翻译留空单元格——zstd level 22 压缩后作为资产条目 `i18n.tsv` 加入 `host/assets.rs`。`cargo:rerun-if-changed` 指向 `locales/` 目录与其中每个文件。
+构建形态：根目录 `build.rs` 读取 `locales/*.tsv`，按 key 字典序合并为宽表 `i18n.tsv`——首行表头 `KEY\t<lang1>\t<lang2>…`（列名取文件名），缺失翻译留空单元格——zstd level 22 压缩后作为资产条目 `i18n.tsv` 加入 `host/assets.rs`。`cargo:rerun-if-changed` 指向 `locales/` 目录与其中每个文件。
 
 运行时：Rust 与前端都经 `assets::lookup("i18n.tsv")` 拿同一份字节。Rust 侧 `utils/i18n.rs::Catalog` 解码后按表头找列、按 key 找行，`t(key, params)` 只做 `{name}` 直接替换，缺键返回键名；语言由 `GetUserDefaultLocaleName` 决定一次（无匹配列时用第一列），放入 `UiState.project.lang`。`format_size` 也在此模块，供 native 渲染器使用。文案表的读者只有渲染器（native、silent、`show_error`）与会话层中少数用户可见的文件系统名（卸载快捷方式名 `shortcut.uninstall`）。
 
@@ -206,4 +206,4 @@ bridge 暴露两层：`error_dialog({ code, detail, subject, sid, event_id })` �
 - `UiSession::apply` 集中了原本散在两个前端的推导，是新的复杂点，由逐意图单测覆盖；`run_install` / `run_uninstall` 本体只多了 `base` 参数。
 - 自定义 HTML 若只实现 `ui-state` / `intent` 而不实现插件宿主协议，以插件源打包的安装器会在 `session-plugin` 上等待超时。
 - serde `Content` 机制在二进制中仅剩 `SourceField` 的 untagged 残余（约 2.4 KiB）；新增需要反序列化的公开形状时沿用手写解析或外部标签，不再引入内部标签派生。
-- 静态 CRT 的 cargo 配置在仓库根 `.cargo/config.toml`：仓库根 `pnpm build`（`--manifest-path`）与 `src-tauri` 内构建都能沿目录向上加载。
+- 静态 CRT 的 cargo 配置在仓库根 `.cargo/config.toml`，根目录 `cargo` / `pnpm build` 直接加载。

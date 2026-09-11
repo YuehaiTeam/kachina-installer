@@ -30,7 +30,7 @@ Status: implemented
 
 `package.json` 提供 `test:dfs2` 和 `test:updater-survival`，`test:all` 将两个聚合入口加入完整回归。CI matrix 保留原有十项场景，并增加一个 `dfs2` 聚合 job 和一个 `updater-survival` 聚合 job，不为故障变体逐项增加 job。
 
-CI 另设 `unit-test` job，在 Windows 2022 上执行 `cargo test --manifest-path src-tauri/Cargo.toml`；release job 等待该 job 成功后才发布。
+CI 另设 `unit-test` job，在 Windows 2022 上执行 `cargo test`；release job 等待该 job 成功后才发布。
 
 测试 server 的故障控制只读取测试进程环境变量，不进入 installer 的 release binary。正式 release binary 不包含阶段退出或自动取消的测试逻辑。
 

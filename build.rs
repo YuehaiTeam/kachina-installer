@@ -7,11 +7,11 @@ fn main() {
     let manifest = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
     embed_app_manifest(&manifest);
     embed_app_icon(&manifest);
-    let dist = manifest.join("../dist");
+    let dist = manifest.join("dist");
     let html = dist.join("index.html");
     println!("cargo:rerun-if-changed={}", html.display());
 
-    let locales = manifest.join("../locales");
+    let locales = manifest.join("locales");
     println!("cargo:rerun-if-changed={}", locales.display());
 
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
@@ -117,7 +117,7 @@ fn zstd_file(src: &Path, dst: &Path) {
 }
 
 fn embed_app_manifest(crate_dir: &Path) {
-    let app_manifest = crate_dir.join("app.manifest");
+    let app_manifest = crate_dir.join("resources/app.manifest");
     println!("cargo:rerun-if-changed={}", app_manifest.display());
     println!("cargo:rustc-link-arg=/MANIFEST:EMBED");
     println!(
@@ -127,8 +127,8 @@ fn embed_app_manifest(crate_dir: &Path) {
 }
 
 fn embed_app_icon(crate_dir: &Path) {
-    let icon = crate_dir.join("icons/icon.ico");
-    let rc = crate_dir.join("app.rc");
+    let icon = crate_dir.join("resources/icons/icon.ico");
+    let rc = crate_dir.join("resources/app.rc");
     println!("cargo:rerun-if-changed={}", icon.display());
     println!("cargo:rerun-if-changed={}", rc.display());
     embed_resource::compile_for(

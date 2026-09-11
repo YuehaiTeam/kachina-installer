@@ -7,7 +7,7 @@ const rsbuild = spawn('pnpm', ['exec', 'rsbuild', 'dev'], {
 
 const cargo = spawn(
   'cargo',
-  ['run', '--manifest-path', 'src-tauri/Cargo.toml'],
+  ['run'],
   {
     stdio: 'inherit',
     shell: true,

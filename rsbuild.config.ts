@@ -7,6 +7,9 @@ export default defineConfig({
     port: 1420,
   },
   source: {
+    entry: {
+      index: './web/index.tsx',
+    },
     define: {
       'process.env.NODE_ENV': JSON.stringify(process.env.NODE_ENV),
     },

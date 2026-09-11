@@ -40,7 +40,7 @@ pub const STAGE_KEYS: &[&str] = &[
 ];
 
 /// Stages whose `done` / `total` are byte counts; every other stage counts items.
-/// `src/screens/Running.tsx` keeps the same list for the WebView renderer.
+/// `web/screens/Running.tsx` keeps the same list for the WebView renderer.
 pub const BYTE_STAGES: &[&str] = &["download", "runtime_download", "mirrorc_download"];
 
 pub const PROMPT_KEYS: &[&str] = &[
@@ -415,7 +415,7 @@ mod tests {
     use std::process::Command;
 
     fn scratch_dir() -> PathBuf {
-        let base = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../.cache/ui-session-tests");
+        let base = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(".cache/ui-session-tests");
         std::fs::create_dir_all(&base).unwrap();
         let dir = base.join(format!("t-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();

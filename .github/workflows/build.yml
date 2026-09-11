@@ -17,9 +17,7 @@ jobs:
           fetch-tags: true
       - name: Override rust-toolchain for CI
         run: |
-          foreach ($f in @('rust-toolchain.toml', 'src-tauri/rust-toolchain.toml')) {
-            (Get-Content $f) -replace 'channel = "nightly"', 'channel = "${{ env.RUST_NIGHTLY_VERSION }}"' | Set-Content $f
-          }
+          (Get-Content rust-toolchain.toml) -replace 'channel = "nightly"', 'channel = "${{ env.RUST_NIGHTLY_VERSION }}"' | Set-Content rust-toolchain.toml
       - run: |
           rustup toolchain install ${{ env.RUST_NIGHTLY_VERSION }} --profile minimal
           rustup component add rust-src --toolchain ${{ env.RUST_NIGHTLY_VERSION }}
@@ -27,7 +25,6 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           cache-targets: false
-          workspaces: 'src-tauri'
       - uses: pnpm/action-setup@v4.0.0
       - uses: actions/setup-node@v4
         with:
@@ -46,18 +43,18 @@ jobs:
           $utcNow = [System.DateTime]::UtcNow
           $cstTime = [System.TimeZoneInfo]::ConvertTimeFromUtc($utcNow, $cstTimeZone)
           $BUILDMETA = $cstTime.ToString("yyMMddHHmm")
-          (Get-Content ./src-tauri/Cargo.toml -Raw) -replace '(?m)^(version = "\d+\.\d+\.\d+)', "version = `"$TAG-$PKGVER+$BUILDMETA" | Set-Content ./src-tauri/Cargo.toml -Encoding utf8
+          (Get-Content ./Cargo.toml -Raw) -replace '(?m)^(version = "\d+\.\d+\.\d+)', "version = `"$TAG-$PKGVER+$BUILDMETA" | Set-Content ./Cargo.toml -Encoding utf8
           echo "version=$TAG-$PKGVER+$BUILDMETA" >> $env:GITHUB_OUTPUT
       - name: Build
         run: pnpm build
       - name: Copy Binary
-        run: copy src-tauri\target\x86_64-win7-windows-msvc\release\kachina-builder-bundle.exe kachina-builder.exe
+        run: copy target\x86_64-win7-windows-msvc\release\kachina-builder-bundle.exe kachina-builder.exe
       - name: Artifact
         uses: actions/upload-artifact@v4.6.0
         with:
           path: |
-            src-tauri/target/x86_64-win7-windows-msvc/release/*.exe
-            src-tauri/target/x86_64-win7-windows-msvc/release/*.pdb
+            target/x86_64-win7-windows-msvc/release/*.exe
+            target/x86_64-win7-windows-msvc/release/*.pdb
   unit-test:
     runs-on: windows-2022
     steps:
@@ -66,9 +63,7 @@ jobs:
           fetch-depth: 0
       - name: Override rust-toolchain for CI
         run: |
-          foreach ($f in @('rust-toolchain.toml', 'src-tauri/rust-toolchain.toml')) {
-            (Get-Content $f) -replace 'channel = "nightly"', 'channel = "${{ env.RUST_NIGHTLY_VERSION }}"' | Set-Content $f
-          }
+          (Get-Content rust-toolchain.toml) -replace 'channel = "nightly"', 'channel = "${{ env.RUST_NIGHTLY_VERSION }}"' | Set-Content rust-toolchain.toml
       - run: |
           rustup toolchain install ${{ env.RUST_NIGHTLY_VERSION }} --profile minimal
           rustup component add rust-src --toolchain ${{ env.RUST_NIGHTLY_VERSION }}
@@ -76,9 +71,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           cache-targets: false
-          workspaces: 'src-tauri'
       - name: Rust unit tests
-        run: cargo test --manifest-path src-tauri/Cargo.toml
+        run: cargo test
 
   release:
     needs: [build, test, unit-test]
@@ -147,15 +141,15 @@ jobs:
       - name: Setup test environment
         run: |
           # 复制构建的二进制文件到正确位置
-          New-Item -ItemType Directory -Force -Path "src-tauri/target/release"
-          New-Item -ItemType Directory -Force -Path "src-tauri/target/x86_64-win7-windows-msvc/release"
-          Copy-Item "artifacts/artifact/*.exe" "src-tauri/target/x86_64-win7-windows-msvc/release/" -Force
-          Copy-Item "artifacts/artifact/*.pdb" "src-tauri/target/x86_64-win7-windows-msvc/release/" -Force
-          Copy-Item "artifacts/artifact/*.exe" "src-tauri/target/release/" -Force
-          Copy-Item "artifacts/artifact/*.pdb" "src-tauri/target/release/" -Force
+          New-Item -ItemType Directory -Force -Path "target/release"
+          New-Item -ItemType Directory -Force -Path "target/x86_64-win7-windows-msvc/release"
+          Copy-Item "artifacts/artifact/*.exe" "target/x86_64-win7-windows-msvc/release/" -Force
+          Copy-Item "artifacts/artifact/*.pdb" "target/x86_64-win7-windows-msvc/release/" -Force
+          Copy-Item "artifacts/artifact/*.exe" "target/release/" -Force
+          Copy-Item "artifacts/artifact/*.pdb" "target/release/" -Force
           # 产物名保持 kachina-builder.exe（内容已是 bundle），为测试补 bundle 别名
-          Copy-Item "artifacts/artifact/kachina-builder.exe" "src-tauri/target/x86_64-win7-windows-msvc/release/kachina-builder-bundle.exe" -Force
-          Copy-Item "artifacts/artifact/kachina-builder.exe" "src-tauri/target/release/kachina-builder-bundle.exe" -Force
+          Copy-Item "artifacts/artifact/kachina-builder.exe" "target/x86_64-win7-windows-msvc/release/kachina-builder-bundle.exe" -Force
+          Copy-Item "artifacts/artifact/kachina-builder.exe" "target/release/kachina-builder-bundle.exe" -Force
       - name: Prepare test fixtures
         run: npm run test:prepare
       - name: Run ${{ matrix.test }} test

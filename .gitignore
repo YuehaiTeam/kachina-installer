@@ -33,3 +33,5 @@ rustc-ice*
 .cache/
 
 fixtures/
+
+/target/

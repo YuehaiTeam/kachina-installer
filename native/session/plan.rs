@@ -517,7 +517,7 @@ mod tests {
     #[test]
     fn compare_offline_install_dump_if_present() {
         let dir =
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../tests/plan-dumps/offline-install");
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/plan-dumps/offline-install");
         let settings_path = dir.join("01-settings.json");
         let meta_path = dir.join("02-meta-scan.json");
         let js_plan_path = dir.join("03-plan.json");
