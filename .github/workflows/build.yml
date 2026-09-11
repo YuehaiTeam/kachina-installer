@@ -47,8 +47,16 @@ jobs:
           echo "version=$TAG-$PKGVER+$BUILDMETA" >> $env:GITHUB_OUTPUT
       - name: Build
         run: pnpm build
-      - name: Copy Binary
-        run: copy target\x86_64-win7-windows-msvc\release\kachina-builder-bundle.exe kachina-builder.exe
+      - name: Publish bundle as kachina-builder.exe
+        run: |
+          $rel = "target\x86_64-win7-windows-msvc\release"
+          $bundle = Join-Path $rel "kachina-builder-bundle.exe"
+          $builder = Join-Path $rel "kachina-builder.exe"
+          if ((Get-Item $bundle).Length -le (Get-Item $builder).Length) {
+            throw "bundle $($bundle) is not larger than cargo builder; merge-release-bundle did not run"
+          }
+          Copy-Item $bundle $builder -Force
+          Copy-Item $bundle "kachina-builder.exe" -Force
       - name: Artifact
         uses: actions/upload-artifact@v4.6.0
         with:
@@ -147,9 +155,17 @@ jobs:
           Copy-Item "artifacts/artifact/*.pdb" "target/x86_64-win7-windows-msvc/release/" -Force
           Copy-Item "artifacts/artifact/*.exe" "target/release/" -Force
           Copy-Item "artifacts/artifact/*.pdb" "target/release/" -Force
-          # 产物名保持 kachina-builder.exe（内容已是 bundle），为测试补 bundle 别名
-          Copy-Item "artifacts/artifact/kachina-builder.exe" "target/x86_64-win7-windows-msvc/release/kachina-builder-bundle.exe" -Force
-          Copy-Item "artifacts/artifact/kachina-builder.exe" "target/release/kachina-builder-bundle.exe" -Force
+          # merge 已写出更大的 kachina-builder-bundle.exe 时不要用 cargo builder 覆盖
+          $src = "artifacts/artifact/kachina-builder.exe"
+          foreach ($rel in @(
+            "target/x86_64-win7-windows-msvc/release",
+            "target/release"
+          )) {
+            $bundle = Join-Path $rel "kachina-builder-bundle.exe"
+            if (-not (Test-Path $bundle) -or (Get-Item $src).Length -ge (Get-Item $bundle).Length) {
+              Copy-Item $src $bundle -Force
+            }
+          }
       - name: Prepare test fixtures
         run: npm run test:prepare
       - name: Run ${{ matrix.test }} test
