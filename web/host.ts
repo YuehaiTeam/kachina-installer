@@ -59,30 +59,50 @@ function webview(): {
   return wv;
 }
 
+function coerceHostMsg(data: unknown): HostMsg | null {
+  let msg: unknown = data;
+  if (typeof msg === 'string') {
+    try {
+      msg = JSON.parse(msg);
+    } catch {
+      return null;
+    }
+  }
+  if (!msg || typeof msg !== 'object') {
+    return null;
+  }
+  return msg as HostMsg;
+}
+
+function dispatchHostMsg(msg: HostMsg) {
+  if (msg.kind === 'reply') {
+    const waiter = pending.get(msg.id);
+    if (!waiter) return;
+    pending.delete(msg.id);
+    if (msg.ok) {
+      waiter.resolve(msg.data);
+    } else {
+      waiter.reject(msg.error ?? { code: null, detail: 'invoke failed' });
+    }
+    return;
+  }
+  if (msg.kind === 'event') {
+    const set = listeners.get(msg.event);
+    if (!set) return;
+    for (const cb of set) {
+      cb(msg.payload);
+    }
+  }
+}
+
 let listening = false;
 function ensureListen() {
   if (listening) return;
   listening = true;
   webview().addEventListener('message', (ev) => {
-    const msg = ev.data;
-    if (!msg || typeof msg !== 'object') return;
-    if (msg.kind === 'reply') {
-      const waiter = pending.get(msg.id);
-      if (!waiter) return;
-      pending.delete(msg.id);
-      if (msg.ok) {
-        waiter.resolve(msg.data);
-      } else {
-        waiter.reject(msg.error ?? { code: null, detail: 'invoke failed' });
-      }
-      return;
-    }
-    if (msg.kind === 'event') {
-      const set = listeners.get(msg.event);
-      if (!set) return;
-      for (const cb of set) {
-        cb(msg.payload);
-      }
+    const msg = coerceHostMsg(ev.data);
+    if (msg) {
+      dispatchHostMsg(msg);
     }
   });
 }

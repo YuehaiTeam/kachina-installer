@@ -1,3 +1,5 @@
+use std::cell::RefCell;
+use std::rc::Rc;
 use std::sync::mpsc;
 use std::sync::Arc;
 
@@ -8,8 +10,13 @@ use webview2_com::*;
 use windows::core::{Interface, PCWSTR, PWSTR};
 use windows::Win32::Foundation::{E_POINTER, HWND, RECT};
 use windows::Win32::System::Com::IStream;
+use windows::Win32::UI::Input::KeyboardAndMouse::{GetKeyState, VK_CONTROL, VK_F12, VK_I, VK_SHIFT};
 use windows::Win32::UI::Shell::SHCreateMemStream;
 use windows::Win32::UI::WindowsAndMessaging::DestroyWindow;
+
+fn devtools_enabled() -> bool {
+    cfg!(debug_assertions) || cfg!(feature = "webview-devtools")
+}
 
 use super::assets;
 use super::bridge;
@@ -17,10 +24,20 @@ use super::window;
 use super::{HostCtx, HostHandle, UiAction, UI_HOST};
 use crate::utils::gui::is_dark_mode;
 
+/// Host→page `PostWebMessageAsJson` posted before the first
+/// `NavigationCompleted` is dropped; on Windows 7 (WebView2 ~109) a post
+/// during that first navigation also prevents later posts from reaching the
+/// same document.
+struct PostGate {
+    ready: bool,
+    pending: Vec<Value>,
+}
+
 pub struct WebViewHost {
     controller: ICoreWebView2Controller,
     webview: ICoreWebView2,
     mica: bool,
+    posts: Rc<RefCell<PostGate>>,
 }
 
 impl WebViewHost {
@@ -32,8 +49,9 @@ impl WebViewHost {
     pub fn apply(&self, hwnd: HWND, action: UiAction) -> anyhow::Result<()> {
         match action {
             UiAction::Emit { event, payload } => {
-                post_json(
+                enqueue_or_post(
                     &self.webview,
+                    &self.posts,
                     &serde_json::json!({
                         "kind": "event",
                         "event": event,
@@ -47,7 +65,7 @@ impl WebViewHost {
                 } else {
                     serde_json::json!({ "kind": "reply", "id": id, "ok": false, "error": data })
                 };
-                post_json(&self.webview, &msg)?;
+                enqueue_or_post(&self.webview, &self.posts, &msg)?;
             }
             UiAction::Close => unsafe {
                 let _ = DestroyWindow(hwnd);
@@ -145,10 +163,15 @@ pub fn attach(
     unsafe {
         let settings = webview.Settings()?;
         settings.SetAreDefaultContextMenusEnabled(cfg!(debug_assertions))?;
-        settings.SetAreDevToolsEnabled(cfg!(debug_assertions))?;
+        settings.SetAreDevToolsEnabled(devtools_enabled())?;
         settings.SetIsStatusBarEnabled(false)?;
         settings.SetIsZoomControlEnabled(false)?;
+        settings.SetIsWebMessageEnabled(true)?;
     }
+    if devtools_enabled() {
+        bind_devtools_shortcut(&controller, &webview)?;
+    }
+    inject_error_hook(&webview)?;
 
     let filter = wide(&format!("{UI_HOST}/*"));
     unsafe {
@@ -188,6 +211,39 @@ pub fn attach(
         )?;
     }
 
+    let posts = Rc::new(RefCell::new(PostGate {
+        ready: false,
+        pending: Vec::new(),
+    }));
+    unsafe {
+        let mut token = 0;
+        let posts_nav = posts.clone();
+        let webview_nav = webview.clone();
+        webview.add_NavigationCompleted(
+            &NavigationCompletedEventHandler::create(Box::new(move |_sender, args| {
+                let mut ok = windows::core::BOOL::default();
+                if let Some(args) = args {
+                    let _ = args.IsSuccess(&mut ok);
+                }
+                if !ok.as_bool() {
+                    return Ok(());
+                }
+                let pending = {
+                    let mut gate = posts_nav.borrow_mut();
+                    gate.ready = true;
+                    std::mem::take(&mut gate.pending)
+                };
+                for msg in &pending {
+                    if let Err(err) = post_json(&webview_nav, msg) {
+                        tracing::warn!("flush web message failed: {err}");
+                    }
+                }
+                Ok(())
+            })),
+            &mut token,
+        )?;
+    }
+
     let start_w = wide(start);
     unsafe { webview.Navigate(PCWSTR(start_w.as_ptr())) }?;
 
@@ -195,7 +251,98 @@ pub fn attach(
         controller,
         webview,
         mica: is_win11,
+        posts,
     })
+}
+
+fn bind_devtools_shortcut(
+    controller: &ICoreWebView2Controller,
+    webview: &ICoreWebView2,
+) -> anyhow::Result<()> {
+    let webview = webview.clone();
+    let mut token = 0i64;
+    unsafe {
+        controller.add_AcceleratorKeyPressed(
+            &AcceleratorKeyPressedEventHandler::create(Box::new(move |_sender, args| {
+                if let Some(args) = args {
+                    if is_devtools_hotkey(&args) {
+                        let _ = args.SetHandled(true);
+                        let _ = webview.OpenDevToolsWindow();
+                    }
+                }
+                Ok(())
+            })),
+            &mut token,
+        )?;
+    }
+    Ok(())
+}
+
+fn is_devtools_hotkey(args: &ICoreWebView2AcceleratorKeyPressedEventArgs) -> bool {
+    let mut kind = COREWEBVIEW2_KEY_EVENT_KIND::default();
+    if unsafe { args.KeyEventKind(&mut kind) }.is_err() {
+        return false;
+    }
+    if kind != COREWEBVIEW2_KEY_EVENT_KIND_KEY_DOWN
+        && kind != COREWEBVIEW2_KEY_EVENT_KIND_SYSTEM_KEY_DOWN
+    {
+        return false;
+    }
+    let mut vk = 0u32;
+    if unsafe { args.VirtualKey(&mut vk) }.is_err() {
+        return false;
+    }
+    if vk == VK_F12.0 as u32 {
+        return true;
+    }
+    vk == VK_I.0 as u32 && key_down(VK_CONTROL) && key_down(VK_SHIFT)
+}
+
+fn key_down(vk: windows::Win32::UI::Input::KeyboardAndMouse::VIRTUAL_KEY) -> bool {
+    let state = unsafe { GetKeyState(i32::from(vk.0)) };
+    state < 0
+}
+
+/// ES5：在页面脚本之前挂上，把未捕获错误打到 `%TEMP%\KachinaInstaller.log`。
+const ERROR_HOOK: &str = r#"
+window.addEventListener("error", function (e) {
+  try {
+    chrome.webview.postMessage({
+      id: 0,
+      kind: "invoke",
+      cmd: "error",
+      args: {
+        data: "webview uncaught " + (e.message || "") + " " + (e.filename || "") + ":" + (e.lineno || 0)
+      }
+    });
+  } catch (x) {}
+});
+window.addEventListener("unhandledrejection", function (e) {
+  try {
+    var r = e.reason;
+    chrome.webview.postMessage({
+      id: 0,
+      kind: "invoke",
+      cmd: "error",
+      args: {
+        data: "webview unhandledrejection " + (r && r.stack ? r.stack : String(r))
+      }
+    });
+  } catch (x) {}
+});
+"#;
+
+fn inject_error_hook(webview: &ICoreWebView2) -> anyhow::Result<()> {
+    let script = wide(ERROR_HOOK);
+    unsafe {
+        webview.AddScriptToExecuteOnDocumentCreated(
+            PCWSTR(script.as_ptr()),
+            &AddScriptToExecuteOnDocumentCreatedCompletedHandler::create(Box::new(
+                |_error, _id| Ok(()),
+            )),
+        )?;
+    }
+    Ok(())
 }
 
 fn handle_resource(
@@ -246,6 +393,20 @@ fn make_response(
         )
     }?;
     Ok(response)
+}
+
+fn enqueue_or_post(
+    webview: &ICoreWebView2,
+    posts: &RefCell<PostGate>,
+    value: &Value,
+) -> anyhow::Result<()> {
+    let mut gate = posts.borrow_mut();
+    if gate.ready {
+        drop(gate);
+        return post_json(webview, value);
+    }
+    gate.pending.push(value.clone());
+    Ok(())
 }
 
 fn post_json(webview: &ICoreWebView2, value: &Value) -> anyhow::Result<()> {

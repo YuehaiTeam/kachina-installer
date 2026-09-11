@@ -53,7 +53,7 @@ web/
 
 ### 渲染规则
 
-- 屏幕由 `state.phase` 决定：`Ready` → `Ready.tsx`；`Running` → `Running.tsx`；`Done` → `Done.tsx`（按 `SessionResult` 的 `is_uninstall` / `already_latest` / `is_update` 选文案键 `done.uninstall` / `done.latest` / `done.update` / `done.install`）；`Failed` → `Failed.tsx`。首次 `ui-state` 到达前显示 spinner。
+- 屏幕由 `state.phase` 决定：`Ready` → `Ready.tsx`；`Running` → `Running.tsx`；`Done` → `Done.tsx`（按 `SessionResult` 的 `is_uninstall` / `already_latest` / `is_update` 选文案键 `done.uninstall` / `done.latest` / `done.update` / `done.install`）；`Failed` → `Failed.tsx`。订阅 `ui-state` 之后立刻 `get_ui_state` 拉一次；首次状态到达前显示 spinner。
 - `Running.tsx` 用 `t("progress." + stage, { subject, done, total })` 组当前状态行，`done` / `total` 对字节阶段（与 Rust 侧 `BYTE_STAGES` 同一列表）经 `formatSize` 格式化、其余按计数；步骤列表按当前源是否为 `mirrorc://` 选 `step.default.*` / `step.mirrorc.*`；卸载模式不显示安装四步。
 - `Failed.tsx` 调用 `invoke("error_dialog", errorDialogArgs(coded))`，透传 `code` / `detail` / `subject` / `sid` / `event_id`，对话框关闭后发 `Intent::Dismiss`；`MIRRORC_CDK_*` 码在 `Dismiss` 之后打开 `CdkPanel`。`ui-notice` 事件同样调 `error_dialog`，不改 `phase`。
 - `state.pending` 非空时渲染确认模态：文案键 `prompt.<kind>.title` / `prompt.<kind>.message`，`items` 以列表展示，按钮发 `Intent::Answer`。

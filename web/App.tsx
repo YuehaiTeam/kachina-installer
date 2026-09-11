@@ -1,7 +1,6 @@
 import { useEffect, useState } from 'preact/hooks';
 import { invoke, listen } from './host';
-import { ready as i18nReady } from './i18n';
-import { t } from './i18n';
+import { ready as i18nReady, t } from './i18n';
 import {
   errorDialogArgs,
   intent,
@@ -115,7 +114,9 @@ export function App() {
         // 监听已就绪，向 host 看门狗上报页面可用。
         void invoke('frontend_ready');
       });
-    return () => unsub?.();
+    return () => {
+      unsub?.();
+    };
   }, []);
 
   if (!ui || !copyReady) {

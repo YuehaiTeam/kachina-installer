@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 
 fn main() {
     let manifest = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
+    win7_delayload(&manifest);
     embed_app_manifest(&manifest);
     embed_app_icon(&manifest);
     let dist = manifest.join("dist");
@@ -114,6 +115,29 @@ fn zstd_file(src: &Path, dst: &Path) {
     let data = fs::read(src).expect("read dist/index.html");
     let compressed = zstd::encode_all(data.as_slice(), 22).expect("zstd frontend");
     fs::write(dst, compressed).expect("write index.html.zst");
+}
+
+/// `windows-link` 对 `combase.dll` 使用 `raw-dylib`，DLL 名写进目标文件，自造
+/// `combase.lib` 改不了 IAT。delay-load 的 failure hook 在缺 DLL 时改加载
+/// ole32（microsoft/windows-rs#3808）。
+fn win7_delayload(crate_dir: &Path) {
+    if env::var("CARGO_CFG_WINDOWS").is_err() {
+        return;
+    }
+    if env::var("CARGO_CFG_TARGET_ENV").ok().as_deref() != Some("msvc") {
+        return;
+    }
+
+    let src = crate_dir.join("resources/win7_delayload.c");
+    println!("cargo:rerun-if-changed={}", src.display());
+    cc::Build::new()
+        .file(&src)
+        .flag_if_supported("/wd4201")
+        .compile("win7_delayload");
+
+    println!("cargo:rustc-link-arg=/DELAYLOAD:combase.dll");
+    println!("cargo:rustc-link-lib=delayimp");
+    println!("cargo:rustc-link-arg=/INCLUDE:__pfnDliFailureHook2");
 }
 
 fn embed_app_manifest(crate_dir: &Path) {
