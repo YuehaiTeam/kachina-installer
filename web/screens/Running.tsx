@@ -13,7 +13,7 @@ const ELLIPSIS = new Set([
   'uninstall_delete',
 ]);
 
-// Same list as `BYTE_STAGES` in src-tauri/src/session/state.rs: these stages report
+// Same list as `BYTE_STAGES` in native/session/state.rs: these stages report
 // bytes in done/total, every other stage reports item counts.
 const BYTE_STAGES = new Set(['download', 'runtime_download', 'mirrorc_download']);
 

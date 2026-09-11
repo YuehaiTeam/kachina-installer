@@ -35,7 +35,7 @@ WebView 前端（`src/`，Vue 3 + rsbuild，产物为单个内联脚本与样式
 ### 目录
 
 ```
-src/
+web/
   index.tsx          入口：?pluginHost=1 走插件宿主，否则挂载 <App/>
   host.ts            chrome.webview 收发：invoke / listen
   state.ts           UiState / Phase / Intent / Coded 的 TS 类型（手写，与 Rust serde 形状对应）、signal<UiState>、订阅 ui-state、intent(…) 发送、errorDialogArgs(coded)

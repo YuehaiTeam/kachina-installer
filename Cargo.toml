@@ -68,8 +68,8 @@ fmmap = { version = "0.4", features = ["tokio"] }
 clap = { version = "4.5", features = ["derive"] }
 chrono = "0.4.39"
 uuid = { version = "1.16", features = ["v4"] }
-hpatch-sys = { path = "./libs/hpatch-sys" }
-hdiff-sys = { path = "./libs/hdiff-sys" }
+hpatch-sys = { path = "libs/hpatch-sys" }
+hdiff-sys = { path = "libs/hdiff-sys" }
 ignore = "0.4.23"
 num_cpus = "1.16.0"
 indicatif = { version = "0.17.9", features = ["tokio"] }
@@ -113,11 +113,11 @@ zstd = "0.13"
 
 [[bin]]
 name = "kachina-installer"
-path = "src/main.rs"
+path = "native/main.rs"
 
 [[bin]]
 name = "kachina-builder"
-path = "src/builder/main.rs"
+path = "native/builder/main.rs"
 
 [profile.dev]
 incremental = true # Compile your binary in smaller steps.

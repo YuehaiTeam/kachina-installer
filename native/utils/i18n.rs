@@ -142,7 +142,7 @@ mod tests {
     use crate::utils::code::ALL_CODES;
 
     fn zh_cn_bytes() -> Vec<u8> {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../locales/zh-CN.tsv");
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("locales/zh-CN.tsv");
         std::fs::read(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
     }
 

@@ -200,23 +200,15 @@ async function buildCompletePackages() {
   if (dev) {
     // merge kachina-builder.exe+kachina-installer.exe to kachina-builder-bundle.exe
     console.log(chalk.gray('  Merging kachina-builder for dev...'));
-    const builderExe = path.join(
-      '..',
-      'src-tauri',
-      'target',
-      'debug',
-      'kachina-builder.exe',
-    );
+    const builderExe = path.join('..', 'target', 'debug', 'kachina-builder.exe');
     const installerExe = path.join(
       '..',
-      'src-tauri',
       'target',
       'debug',
       'kachina-installer.exe',
     );
     const mergedExe = path.join(
       '..',
-      'src-tauri',
       'target',
       'debug',
       'kachina-builder-bundle.exe',
@@ -238,12 +230,11 @@ async function buildCompletePackages() {
   }
   const builderPath = path.join(
     '..',
-    'src-tauri',
     'target',
     dev ? 'debug' : 'x86_64-win7-windows-msvc/release',
     'kachina-builder-bundle.exe',
   );
-  const iconPath = path.resolve('../src-tauri/icons/icon.ico');
+  const iconPath = path.resolve('../resources/icons/icon.ico');
   if (!(await fs.pathExists(iconPath))) {
     throw new Error(`icon not found at ${iconPath}`);
   }
