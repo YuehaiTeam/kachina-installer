@@ -31,3 +31,5 @@ tests/plan-dumps
 rustc-ice*
 
 .cache/
+
+fixtures/
