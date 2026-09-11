@@ -170,63 +170,89 @@ pub async fn get_embedded(file: &AsyncMmapFile) -> anyhow::Result<Vec<Embedded>>
     Ok(entries)
 }
 
-async fn search_pattern(file: &AsyncMmapFile) -> Result<Vec<usize>, String> {
-    let pattern: [u8; 4] = [0x4D, 0x5A, 0x90, 0x00]; // exe header
-    let mut reader = file.reader(0).map_err(|e| e.to_string())?;
-    let mut buffer = [0u8; 4096];
-    let mut offset: usize = 0;
-    let mut previous_bytes = Vec::new();
-    let mut founds = Vec::new();
+/// DOS `e_lfanew` is a 32-bit offset to `PE\0\0`. Real linkers keep it in this window;
+/// a random `MZ\x90\x00` in `.rdata` / zstd / ico almost never does.
+const PE_LFANEW_MIN: usize = 0x40;
+const PE_LFANEW_MAX: usize = 0x1000;
 
-    loop {
-        let bytes_read = reader.read(&mut buffer).await.map_err(|e| e.to_string())?;
-        if bytes_read == 0 {
-            break;
+/// Bundle file is `kachina-builder` bytes followed by `kachina-installer` bytes.
+/// Only a real PE image start counts; the last one is the appended installer.
+pub fn pe_image_starts(bytes: &[u8]) -> Vec<usize> {
+    let mut found = Vec::new();
+    let mut i = 0;
+    while i + 2 <= bytes.len() {
+        if bytes[i] == b'M' && bytes[i + 1] == b'Z' && is_pe_at(bytes, i) {
+            found.push(i);
         }
-
-        // Step 1: Check across previous_bytes and buffer
-        if !previous_bytes.is_empty() {
-            let pb_len = previous_bytes.len();
-            let needed = 4 - pb_len;
-            if bytes_read >= needed {
-                let combined: Vec<u8> = previous_bytes
-                    .iter()
-                    .cloned()
-                    .chain(buffer[..needed].iter().cloned())
-                    .collect();
-                if combined == pattern[..] {
-                    founds.push(offset - (pb_len));
-                }
-            }
-        }
-
-        // Step 2: Check within the buffer
-        for i in 0..bytes_read - 3 {
-            if buffer[i..i + 4] == pattern {
-                founds.push(offset + i);
-            }
-        }
-
-        // Step 3: Update previous_bytes
-        if bytes_read > 0 {
-            let start = bytes_read - std::cmp::min(3, bytes_read);
-            previous_bytes = buffer[start..bytes_read].to_vec();
-        }
-
-        offset += bytes_read as usize;
+        i += 1;
     }
+    found
+}
 
-    Ok(founds)
+fn is_pe_at(bytes: &[u8], offset: usize) -> bool {
+    if offset.saturating_add(0x40) > bytes.len() {
+        return false;
+    }
+    if bytes[offset] != b'M' || bytes[offset + 1] != b'Z' {
+        return false;
+    }
+    let e_lfanew =
+        u32::from_le_bytes(bytes[offset + 0x3C..offset + 0x40].try_into().unwrap()) as usize;
+    if e_lfanew < PE_LFANEW_MIN || e_lfanew > PE_LFANEW_MAX {
+        return false;
+    }
+    let pe = offset.saturating_add(e_lfanew);
+    bytes.get(pe..pe + 4) == Some(&b"PE\0\0"[..])
 }
 
 pub async fn get_reader_for_bundle() -> Result<AsyncMmapFileReader<'static>, String> {
     let file = mmap().await;
-    let headers = search_pattern(file).await.map_err(|e| e.to_string())?;
+    let bytes = file.slice(0, file.len());
+    let headers = pe_image_starts(bytes);
     if headers.len() < 2 {
-        println!("Found headers: {:?}", headers);
+        println!("Found PE images: {headers:?}");
         return Err("Failed to find packed exe: ".to_string());
     }
     let exe_offset = headers[headers.len() - 1];
     let reader = file.reader(exe_offset).map_err(|e| e.to_string())?;
     Ok(reader)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{is_pe_at, pe_image_starts};
+
+    fn mini_pe(tag: u8) -> Vec<u8> {
+        let e_lfanew = 0x80usize;
+        let mut bytes = vec![0u8; 0x200];
+        bytes[0] = b'M';
+        bytes[1] = b'Z';
+        bytes[2] = 0x90;
+        bytes[3] = 0x00;
+        bytes[0x3C..0x40].copy_from_slice(&(e_lfanew as u32).to_le_bytes());
+        bytes[e_lfanew..e_lfanew + 4].copy_from_slice(b"PE\0\0");
+        bytes[e_lfanew + 4] = tag;
+        bytes
+    }
+
+    #[test]
+    fn pe_at_requires_pe_signature() {
+        let pe = mini_pe(1);
+        assert!(is_pe_at(&pe, 0));
+        let mut false_mz = vec![0x4D, 0x5A, 0x90, 0x00];
+        false_mz.extend_from_slice(&[0u8; 60]);
+        assert!(!is_pe_at(&false_mz, 0));
+    }
+
+    #[test]
+    fn bundle_uses_last_real_pe_not_last_mz90() {
+        let builder = mini_pe(1);
+        let installer = mini_pe(2);
+        let mut bundle = builder.clone();
+        bundle.extend_from_slice(&installer);
+        // 安装器体内再放一个 DOS 魔数：旧扫描会把它当成映像起点，rcedit 加载失败。
+        let planted = builder.len() + 0x40;
+        bundle[planted..planted + 4].copy_from_slice(&[0x4D, 0x5A, 0x90, 0x00]);
+        assert_eq!(pe_image_starts(&bundle), vec![0, builder.len()]);
+    }
 }
