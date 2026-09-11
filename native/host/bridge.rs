@@ -128,6 +128,13 @@ async fn dispatch(
             crate::FRONTEND_READY.store(true, std::sync::atomic::Ordering::SeqCst);
             ok(())
         }
+        "get_ui_state" => {
+            let gui = ctx.gui.lock().unwrap_or_else(|e| e.into_inner()).clone();
+            match gui {
+                Some(gui) => ok(gui.snapshot()),
+                None => ok(()),
+            }
+        }
         "intent" => {
             let intent = Intent::from_value(&args).map_err(TACommandError::new)?;
             crate::session::commands::handle_intent(intent, ctx, handle).await

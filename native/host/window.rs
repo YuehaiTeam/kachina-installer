@@ -20,10 +20,10 @@ use windows::Win32::UI::WindowsAndMessaging::{
     GetSystemMetrics, GetWindowLongPtrW, LoadCursorW, PostMessageW, PostQuitMessage,
     RegisterClassExW, SendMessageW, SetWindowLongPtrW, SetWindowPos, SetWindowTextW, ShowWindow,
     GWLP_USERDATA, GWL_STYLE, HICON, ICON_BIG, ICON_SMALL, IDC_ARROW, SM_CXSCREEN, SM_CYSCREEN,
-    SWP_FRAMECHANGED, SWP_NOMOVE, SWP_NOZORDER, SW_HIDE, SW_MINIMIZE, SW_SHOW, SW_SHOWNA, WM_APP,
-    WM_CLOSE, WM_DESTROY, WM_SETICON, WM_SETTINGCHANGE, WNDCLASSEXW, WS_CAPTION, WS_EX_NOACTIVATE,
-    WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_MAXIMIZE, WS_MINIMIZE, WS_MINIMIZEBOX,
-    WS_OVERLAPPED, WS_POPUP, WS_SYSMENU, WS_VISIBLE,
+    SWP_FRAMECHANGED, SWP_NOMOVE, SWP_NOZORDER, SW_HIDE, SW_MINIMIZE, SW_SHOW, SW_SHOWNA,
+    WINDOW_EX_STYLE, WM_APP, WM_CLOSE, WM_DESTROY, WM_SETICON, WM_SETTINGCHANGE, WNDCLASSEXW,
+    WS_CAPTION, WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_MAXIMIZE,
+    WS_MINIMIZE, WS_MINIMIZEBOX, WS_OVERLAPPED, WS_POPUP, WS_SYSMENU, WS_VISIBLE,
 };
 
 use crate::installer::uninstall::delete_self_on_exit;
@@ -55,6 +55,17 @@ pub fn is_win11() -> bool {
     let (major, minor, build) = nt_version::get();
     let build = (build & 0xffff) as u16;
     major == 10 && minor == 0 && build >= 22000
+}
+
+/// `WS_EX_NOREDIRECTIONBITMAP` is `WINVER >= 0x0602` (Windows 8). Windows 7
+/// (`6.1`) rejects it in `CreateWindowExW` with `ERROR_INVALID_PARAMETER`.
+fn no_redirection_bitmap() -> WINDOW_EX_STYLE {
+    let (major, minor, _) = nt_version::get();
+    if major > 6 || (major == 6 && minor >= 2) {
+        WS_EX_NOREDIRECTIONBITMAP
+    } else {
+        WINDOW_EX_STYLE::default()
+    }
 }
 
 /// PROCESS_PER_MONITOR_DPI_AWARE / MDT_EFFECTIVE_DPI. Integer constants avoid
@@ -138,7 +149,7 @@ pub fn create(client_w: i32, client_h: i32) -> anyhow::Result<HWND> {
     unsafe { RegisterClassExW(&class) };
 
     let style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
-    let ex_style = WS_EX_NOREDIRECTIONBITMAP;
+    let ex_style = no_redirection_bitmap();
     let mut rect = RECT {
         left: 0,
         top: 0,
@@ -192,7 +203,7 @@ pub fn create_hidden() -> anyhow::Result<HWND> {
 
     let hwnd = unsafe {
         CreateWindowExW(
-            WS_EX_NOREDIRECTIONBITMAP | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+            no_redirection_bitmap() | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
             PLUGIN_CLASS,
             w!(" "),
             WS_POPUP,
@@ -345,7 +356,7 @@ pub fn set_decorations(hwnd: HWND, decorated: bool) {
             right: rect.right - rect.left,
             bottom: rect.bottom - rect.top,
         };
-        let _ = AdjustWindowRectEx(&mut outer, win_style, false, WS_EX_NOREDIRECTIONBITMAP);
+        let _ = AdjustWindowRectEx(&mut outer, win_style, false, no_redirection_bitmap());
         let _ = SetWindowPos(
             hwnd,
             None,

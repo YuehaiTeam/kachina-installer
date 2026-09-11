@@ -7,6 +7,10 @@ authors = ["YuehaiTeam"]
 edition = "2021"
 default-run = "kachina-installer"
 
+[features]
+# release 默认不开 DevTools。需要在安装器里按 F12 / Ctrl+Shift+I 打开时再开。
+webview-devtools = []
+
 [dependencies]
 webview2-com = "0.39"
 serde = { version = "1", features = ["derive"] }
@@ -48,6 +52,7 @@ windows = { version = "0.62", features = [
     "Win32_System_ProcessStatus",
     "Win32_System_Diagnostics_ToolHelp",
     "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_Controls",
     "Win32_Graphics_Gdi",
     "Win32_Graphics_Dwm",
@@ -107,6 +112,7 @@ regex-lite = "0.1.9"
 postcard = { version = "1", default-features = false, features = ["use-std"] }
 
 [build-dependencies]
+cc = "1"
 embed-resource = "3"
 zstd = "0.13"
 

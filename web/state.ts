@@ -120,9 +120,25 @@ export type Intent =
 
 export const state = signal<UiState | null>(null);
 
-void listen<UiState>('ui-state', (payload) => {
+function applyUiState(payload: UiState) {
   state.value = payload;
+}
+
+void listen<UiState>('ui-state', (payload) => {
+  applyUiState(payload);
 });
+
+export function pullUiState(): Promise<void> {
+  return invoke<UiState | null>('get_ui_state')
+    .then((s) => {
+      if (s && s.phase) {
+        applyUiState(s);
+      }
+    })
+    .catch(() => {});
+}
+
+void pullUiState();
 
 export function intent(payload: Intent): Promise<unknown> {
   return invoke('intent', payload);
