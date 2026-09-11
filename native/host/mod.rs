@@ -13,7 +13,6 @@ use tokio::sync::oneshot;
 use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
 use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
 use windows::Win32::System::Threading::GetCurrentThreadId;
-use windows::Win32::UI::HiDpi::{SetProcessDpiAwareness, PROCESS_PER_MONITOR_DPI_AWARE};
 use windows::Win32::UI::WindowsAndMessaging::{
     DispatchMessageW, GetMessageW, IsWindow, PostThreadMessageW, TranslateMessage, MSG, WM_APP,
     WM_QUIT,
@@ -133,10 +132,8 @@ pub fn run(
 ) -> anyhow::Result<()> {
     unsafe {
         CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok()?;
-        if SetProcessDpiAwareness(PROCESS_PER_MONITOR_DPI_AWARE).is_err() {
-            let _ = windows::Win32::UI::WindowsAndMessaging::SetProcessDPIAware();
-        }
     }
+    window::enable_dpi_awareness();
 
     if crate::fs::staging::enter_neutral_cwd().is_err() {
         show_error(ErrorDialog::code(TEMP_DIR_UNAVAILABLE), HWND::default());

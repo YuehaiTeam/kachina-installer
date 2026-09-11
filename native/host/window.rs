@@ -2,18 +2,18 @@ use std::mem::size_of;
 use std::os::windows::ffi::OsStrExt;
 
 use anyhow::Context;
-use windows::core::{w, PCWSTR};
+use windows::core::{s, w, HRESULT, PCSTR, PCWSTR};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Dwm::{
     DwmExtendFrameIntoClientArea, DwmSetWindowAttribute, DWMWA_SYSTEMBACKDROP_TYPE,
     DWMWA_USE_IMMERSIVE_DARK_MODE, DWM_SYSTEMBACKDROP_TYPE,
 };
 use windows::Win32::Graphics::Gdi::{
-    MonitorFromPoint, UpdateWindow, HBRUSH, MONITOR_DEFAULTTOPRIMARY,
+    GetDC, GetDeviceCaps, MonitorFromPoint, ReleaseDC, UpdateWindow, HBRUSH, HMONITOR, LOGPIXELSX,
+    MONITOR_DEFAULTTOPRIMARY,
 };
-use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress, LoadLibraryW};
 use windows::Win32::UI::Controls::MARGINS;
-use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
 use windows::Win32::UI::Shell::ExtractIconExW;
 use windows::Win32::UI::WindowsAndMessaging::{
     AdjustWindowRectEx, CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect,
@@ -57,21 +57,68 @@ pub fn is_win11() -> bool {
     major == 10 && minor == 0 && build >= 22000
 }
 
+/// PROCESS_PER_MONITOR_DPI_AWARE / MDT_EFFECTIVE_DPI. Integer constants avoid
+/// `windows::Win32::UI::HiDpi`, whose `link!` writes the shcore scaling API set
+/// into the IAT. Windows 7 does not ship that API set, so the loader refuses
+/// the image before any installer code runs.
+const PROCESS_PER_MONITOR_DPI_AWARE: i32 = 2;
+const MDT_EFFECTIVE_DPI: i32 = 0;
+
+/// Per-monitor awareness when `shcore.dll` exports it; otherwise Vista system DPI.
+pub fn enable_dpi_awareness() {
+    unsafe {
+        if let Some(set) =
+            shcore_proc::<unsafe extern "system" fn(i32) -> HRESULT>(s!("SetProcessDpiAwareness"))
+        {
+            if set(PROCESS_PER_MONITOR_DPI_AWARE).is_ok() {
+                return;
+            }
+        }
+        let _ = windows::Win32::UI::WindowsAndMessaging::SetProcessDPIAware();
+    }
+}
+
 pub fn primary_dpi() -> u32 {
     unsafe {
         let monitor = MonitorFromPoint(POINT { x: 0, y: 0 }, MONITOR_DEFAULTTOPRIMARY);
-        let mut dpi_x = 96u32;
-        let mut dpi_y = 96u32;
-        if GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &mut dpi_x, &mut dpi_y).is_ok() {
-            dpi_x.max(1)
+        if let Some(get) = shcore_proc::<
+            unsafe extern "system" fn(HMONITOR, i32, *mut u32, *mut u32) -> HRESULT,
+        >(s!("GetDpiForMonitor"))
+        {
+            let mut dpi_x = 96u32;
+            let mut dpi_y = 96u32;
+            if get(monitor, MDT_EFFECTIVE_DPI, &mut dpi_x, &mut dpi_y).is_ok() {
+                return dpi_x.max(1);
+            }
+        }
+        system_dpi()
+    }
+}
+
+pub fn dpi_scale() -> f64 {
+    primary_dpi() as f64 / 96.0
+}
+
+fn system_dpi() -> u32 {
+    unsafe {
+        let hdc = GetDC(None);
+        if hdc.is_invalid() {
+            return 96;
+        }
+        let dpi = GetDeviceCaps(Some(hdc), LOGPIXELSX);
+        let _ = ReleaseDC(None, hdc);
+        if dpi > 0 {
+            dpi as u32
         } else {
             96
         }
     }
 }
 
-pub fn dpi_scale() -> f64 {
-    primary_dpi() as f64 / 96.0
+unsafe fn shcore_proc<T: Copy>(name: PCSTR) -> Option<T> {
+    let module = LoadLibraryW(w!("shcore.dll")).ok()?;
+    let proc = GetProcAddress(module, name)?;
+    Some(std::mem::transmute_copy(&proc))
 }
 
 pub fn create(client_w: i32, client_h: i32) -> anyhow::Result<HWND> {
