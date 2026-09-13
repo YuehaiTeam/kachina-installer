@@ -1,0 +1,154 @@
+cargo-features = ["profile-rustflags", "trim-paths"]
+[package]
+name = "kachina-installer"
+version = "0.1.0"
+description = "Unified installer and upgrader"
+authors = ["YuehaiTeam"]
+edition = "2021"
+default-run = "kachina-installer"
+
+[features]
+# release 默认不开 DevTools。需要在安装器里按 F12 / Ctrl+Shift+I 打开时再开。
+webview-devtools = []
+
+[dependencies]
+webview2-com = "0.39"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1" }
+async-compression = { version = "0.4", features = ["tokio", "zstd", "zstdmt"] }
+tokio = { version = "1", features = [
+    "rt",
+    "rt-multi-thread",
+    "sync",
+    "fs",
+    "io-util",
+    "macros",
+    "net",
+] }
+chksum-md5 = { version = "0.1", features = ["async-runtime-tokio"] }
+sha2 = "0.10"
+reqwest = { version = "0.12", default-features = false, features = [
+    "json",
+    "native-tls",
+    "gzip",
+    "zstd",
+    "stream",
+    "system-proxy"
+] }
+futures = "0.3"
+tokio-util = { version = "0.7", features = ["io-util"] }
+async-walkdir = "2.0"
+windows = { version = "0.62", features = [
+    "Win32_System_Console",
+    "Win32_System_Com",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Threading",
+    "Win32_Security",
+    "Win32_System_Registry",
+    "Win32_Security_Authorization",
+    "Win32_Security_Credentials",
+    "Win32_Security_Cryptography",
+    "Security",
+    "Win32_System_ProcessStatus",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_Controls",
+    "Win32_Graphics_Gdi",
+    "Win32_Graphics_Dwm",
+    "Win32_UI_Shell",
+    "Win32_System_Environment",
+    "Win32_System_DataExchange",
+    "Win32_System_Memory",
+    "Win32_Storage_FileSystem"
+] }
+
+nt_version = "0.1"
+lazy_static = "1.5"
+mslnk = "=0.1"
+twox-hash = "2.1.0"
+pin-project = "1.1.7"
+fmmap = { version = "0.4", features = ["tokio"] }
+clap = { version = "4.5", features = ["derive"] }
+chrono = "0.4.39"
+uuid = { version = "1.16", features = ["v4"] }
+hpatch-sys = { path = "libs/hpatch-sys" }
+hdiff-sys = { path = "libs/hdiff-sys" }
+ignore = "0.4.23"
+num_cpus = "1.16.0"
+indicatif = { version = "0.17.9", features = ["tokio"] }
+console = "0.15.10"
+rcedit = { version = "0.1.0", git = "https://github.com/Devolutions/rcedit-rs.git" }
+windows-registry = "0.5"
+zip = { git = "https://github.com/xytoki/zip2.git", default-features = false, features = [
+    "deflate",
+] }
+anyhow = "1.0"
+reqwest-middleware = { version = "0.4", features = ["json"] }
+# release_max_level_info：LogSubscriber 本就丢弃 INFO 以下事件，编译期直接不生成 callsite。
+# log 只为给传递依赖（schannel/mio/want/zip）设同一 feature，仓库代码不直接使用。
+tracing = { version = "0.1", features = ["release_max_level_info"] }
+log = { version = "0.4", features = ["release_max_level_info"] }
+whoami = "1.6.0"
+win32-version-info = "0.2.0"
+bytes = "1.10.1"
+url = "2.5"
+base64 = "0.22.1"
+h3 = "0.0.8"
+h3-msquic-async = { version = "0.3", default-features = false, features = ["msquic-seera", "msquic-seera-static", "tracing"] }
+hex = "0.4"
+async-trait = "0.1"
+async-stream = "0.3"
+http = "1"
+russh = { git = "https://github.com/xytoki/russh.git", default-features = false, features = ["client-minimal", "crypto-cng"] }
+hyper = { version = "1", features = ["client", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
+
+zstd = { version = "0.13", default-features = false }
+regex-lite = "0.1.9"
+# 提权管道帧编码。位置编码，同一二进制的两个进程间使用；不能承载 serde_json::Value
+# 与带 skip_serializing_if 的类型，这类载荷以 JSON 文本字段过管道。
+postcard = { version = "1", default-features = false, features = ["use-std"] }
+
+[build-dependencies]
+cc = "1"
+embed-resource = "3"
+zstd = "0.13"
+
+[[bin]]
+name = "kachina-installer"
+path = "native/main.rs"
+
+[[bin]]
+name = "kachina-builder"
+path = "native/builder/main.rs"
+
+[profile.dev]
+incremental = true # Compile your binary in smaller steps.
+rustflags = ["-Zthreads=16"] # Better compile performance.
+
+[profile.release]
+debug = true
+split-debuginfo = "packed"
+codegen-units = 1 # Allows LLVM to perform better optimization.
+lto = true # Enables link-time-optimizations.
+# "z"：C 依赖（zstd/hpatch/msquic）经 cc-rs 在 MSVC 下 s/z 同为 /O1，不受影响；
+# Rust 侧热路径只有哈希，见下方 per-package 覆盖。
+opt-level = "z"
+panic = "abort" # Higher performance by disabling panic handlers.
+trim-paths = "all" # Removes potentially privileged information from your binaries.
+rustflags = ["-Zthreads=16"] # Better compile performance.
+
+# 哈希是安装器唯一 CPU 受限的 Rust 路径，保持 O3。
+[profile.release.package.twox-hash]
+opt-level = 3
+[profile.release.package.chksum-hash-md5]
+opt-level = 3
+[profile.release.package.chksum-md5]
+opt-level = 3
+
+[patch.crates-io]
+msquic-async = { git = "https://github.com/xytoki/msquic-async-rs.git", branch = "main" }
+ctor = { git = "https://github.com/xytoki/rust-ctor.git", branch = "master" }
+seera-msquic = { git = "https://github.com/xytoki/seera-msquic.git", branch = "seera-main" }

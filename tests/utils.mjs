@@ -1,10 +1,13 @@
 import crypto from 'crypto';
+import { spawn } from 'child_process';
 import fs from 'fs-extra';
 import path from 'path';
 import os from 'os';
 
 export const dev = !!process.env.DEV;
 export const FLAGS = dev ? '-I' : '-S';
+// NSIS-style switch; keeps the slash-alias path covered end-to-end
+export const FLAGS_SLASH = dev ? '-I' : '/S';
 
 export function getTestDir(name) {
   return path.join(os.tmpdir(), `kachina-test-${name}-${Date.now()}`);
@@ -150,4 +153,110 @@ export async function printLogFileIfExists() {
   } else {
     console.log(chalk.yellow('Log file not found at: ' + logFile));
   }
+}
+
+export function getLogFilePath() {
+  return path.join(os.tmpdir(), 'KachinaInstaller.log');
+}
+
+export async function clearLogFile() {
+  const logFile = getLogFilePath();
+  if (await fs.pathExists(logFile)) {
+    await fs.remove(logFile);
+  }
+}
+
+export async function runInstaller(exe, args, label, timeout = '3m') {
+  const { $, usePwsh } = await import('zx');
+  usePwsh();
+  try {
+    const result = await $`& ${exe} ${args}`.timeout(timeout);
+    return result;
+  } catch (error) {
+    if (error.message && error.message.includes('timed out')) {
+      console.error(chalk.red(`${label} timed out after ${timeout}`));
+      await printLogFileIfExists();
+    }
+    throw error;
+  }
+}
+
+export function assertDfs2BatchCoverage(state, label) {
+  if (state.batchRequests.length === 0) {
+    throw new Error(`${label}: DFS2 batch endpoint was not called`);
+  }
+  if (state.singleRequests.length !== 0) {
+    throw new Error(
+      `${label}: fell back to ${state.singleRequests.length} single DFS2 URL requests`,
+    );
+  }
+  const batchRanges = new Set(
+    state.batchRequests.flatMap((request) => request.ranges),
+  );
+  const missing = state.downloadRequests
+    .map((request) => request.range)
+    .filter((range) => !batchRanges.has(range));
+  if (missing.length > 0) {
+    throw new Error(
+      `${label}: downloads were not covered by batch URLs: ${missing.join(', ')}`,
+    );
+  }
+}
+
+export function spawnInstaller(exe, args) {
+  return spawn(exe, args, {
+    windowsHide: true,
+    stdio: 'ignore',
+  });
+}
+
+export function waitForProcess(child, timeout = 180000) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      child.kill();
+      reject(
+        new Error(`Process ${child.pid ?? '<unknown>'} did not exit in time`),
+      );
+    }, timeout);
+    child.once('error', (error) => {
+      clearTimeout(timer);
+      reject(error);
+    });
+    child.once('exit', (code, signal) => {
+      clearTimeout(timer);
+      resolve({ exitCode: code, signal });
+    });
+  });
+}
+
+export function assertExitOk(result, label) {
+  if (result.exitCode !== 0) {
+    throw new Error(`${label} failed with exit code ${result.exitCode}`);
+  }
+}
+
+export async function assertNoInstallerError() {
+  const logFile = getLogFilePath();
+  if (!(await fs.pathExists(logFile))) {
+    return;
+  }
+  const logs = await fs.readFile(logFile, 'utf-8');
+  console.log(logs);
+  if (logs.includes('ERROR kachina_installer::installer')) {
+    throw new Error('Installer log contains errors');
+  }
+}
+
+export function reportVerification(name, verification, extraFailed = []) {
+  const failed = [...verification.failed, ...extraFailed];
+  if (failed.length === 0) {
+    console.log(chalk.green(`✓ ${name}`));
+    if (verification.passed?.length) {
+      console.log(chalk.gray(`  Verified: ${verification.passed.join(', ')}`));
+    }
+    return;
+  }
+  console.error(chalk.red(`✗ ${name} failed:`));
+  failed.forEach((msg) => console.error(chalk.red(`  - ${msg}`)));
+  process.exit(1);
 }

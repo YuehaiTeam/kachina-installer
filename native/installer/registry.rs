@@ -1,0 +1,139 @@
+use crate::utils::{
+    error::{IntoTAResult, TAResult},
+    uac::check_elevated,
+};
+use anyhow::{Context, Result};
+use serde_json::Value;
+
+#[derive(serde::Deserialize, serde::Serialize, Debug, Clone)]
+pub struct WriteRegistryParams {
+    pub reg_name: String,
+    pub name: String,
+    pub version: String,
+    pub exe: String,
+    pub source: String,
+    pub uninstaller: String,
+    pub metadata: String,
+    pub size: u64,
+    pub publisher: String,
+}
+
+pub async fn write_registry_with_params(params: WriteRegistryParams) -> TAResult<()> {
+    write_registry(
+        params.reg_name,
+        params.name,
+        params.version,
+        params.exe,
+        params.source,
+        params.uninstaller,
+        params.metadata,
+        params.size,
+        params.publisher,
+    )
+    .await
+}
+
+pub async fn write_registry(
+    reg_name: String,
+    name: String,
+    version: String,
+    exe: String,
+    source: String,
+    uninstaller: String,
+    metadata: String,
+    size: u64,
+    publisher: String,
+) -> TAResult<()> {
+    write_registry_raw(
+        reg_name,
+        name,
+        version,
+        exe,
+        source,
+        uninstaller,
+        metadata,
+        size,
+        publisher,
+    )
+    .await
+    .into_ta_result()
+}
+pub async fn write_registry_raw(
+    reg_name: String,
+    name: String,
+    version: String,
+    exe: String,
+    source: String,
+    uninstaller: String,
+    metadata: String,
+    size: u64,
+    publisher: String,
+) -> Result<()> {
+    let elevated = check_elevated().unwrap_or(false);
+    let hive = if elevated {
+        windows_registry::LOCAL_MACHINE
+    } else {
+        windows_registry::CURRENT_USER
+    };
+
+    let key_path = format!("SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\{reg_name}");
+
+    let key = hive.create(&key_path).context("OPEN_REG_ERR")?;
+    {
+        key.set_string("DisplayName", &name)?;
+        key.set_string("DisplayVersion", &version)?;
+        key.set_string("UninstallString", &uninstaller)?;
+        key.set_string("InstallLocation", &source)?;
+        key.set_string("DisplayIcon", &exe)?;
+        key.set_string("Publisher", &publisher)?;
+        key.set_u32("EstimatedSize", (size as u32) / 1024)?;
+        key.set_u32("NoModify", 1u32)?;
+        key.set_u32("NoRepair", 1u32)?;
+        key.set_string("InstallerMeta", &metadata)?;
+        Ok::<(), anyhow::Error>(())
+    }
+    .context("WRITE_REG_ERR")
+}
+
+pub async fn read_uninstall_metadata(reg_name: String) -> TAResult<Value> {
+    read_uninstall_metadata_raw(&reg_name, None)
+        .and_then(|raw| Ok(serde_json::from_str::<Value>(&raw)?))
+        .into_ta_result()
+}
+
+/// 返回注册表里 `InstallerMeta` 的原始 JSON 文本，只校验它是合法 JSON（`IgnoredAny`
+/// 不建树）。不在这里解成 `Value`：调用方各自 `from_str` 成自己要的类型，经 Value
+/// 中转会为每个目标类型多留一整棵反序列化副本。
+pub fn read_uninstall_metadata_raw(reg_name: &str, install_path: Option<&str>) -> Result<String> {
+    let key_path = format!("SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\{reg_name}");
+    let hives = [
+        windows_registry::LOCAL_MACHINE,
+        windows_registry::CURRENT_USER,
+    ];
+    let mut fallback = None;
+    for hive in hives {
+        let Ok(key) = hive.options().read().open(&key_path) else {
+            continue;
+        };
+        let Ok(metadata) = key.get_string("InstallerMeta") else {
+            continue;
+        };
+        if serde_json::from_str::<serde::de::IgnoredAny>(&metadata).is_err() {
+            continue;
+        }
+        if let Some(want) = install_path {
+            let location = key.get_string("InstallLocation").unwrap_or_default();
+            if !location.is_empty()
+                && location
+                    .trim_end_matches(['\\', '/'])
+                    .eq_ignore_ascii_case(want.trim_end_matches(['\\', '/']))
+            {
+                return Ok(metadata);
+            }
+        }
+        if fallback.is_none() {
+            fallback = Some(metadata);
+        }
+    }
+    fallback.context("GET_INSTALLMETA_ERR")
+}

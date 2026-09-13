@@ -76,6 +76,14 @@ async function createAppFiles() {
     crypto.randomBytes(1024 * 10),
   );
 
+  await fs.ensureDir(path.join(V1_DIR, 'User'));
+  await fs.writeFile(
+    path.join(V1_DIR, 'User/settings.json'),
+    '{"from":"v1"}\n',
+  );
+  await fs.ensureDir(path.join(V1_DIR, 'cache'));
+  await fs.writeFile(path.join(V1_DIR, 'cache/keep.dat'), 'CACHE_V1');
+
   // === V2 文件 ===
   // app.exe - 更新的主程序
   const appExeV2 = Buffer.concat([
@@ -118,6 +126,15 @@ async function createAppFiles() {
     crypto.randomBytes(1024 * 5),
   );
 
+  await fs.ensureDir(path.join(V2_DIR, 'User'));
+  await fs.writeFile(
+    path.join(V2_DIR, 'User/settings.json'),
+    '{"from":"v2"}\n',
+  );
+  await fs.ensureDir(path.join(V2_DIR, 'cache'));
+  await fs.writeFile(path.join(V2_DIR, 'cache/keep.dat'), 'CACHE_V2');
+  await fs.writeFile(path.join(V2_DIR, 'cache/new.dat'), 'CACHE_NEW_V2');
+
   console.log(chalk.gray('  App files created'));
 }
 
@@ -135,6 +152,18 @@ async function createConfig() {
         name: 'Local v2',
         uri: 'http://localhost:8080/test-app-v2.exe',
       },
+      {
+        id: 'dfs2-v2',
+        name: 'DFS2 v2',
+        uri: 'dfs2+packed+http://localhost:8080/api/TestApp/v2.exe?challenge=1',
+        hidden: true,
+      },
+      {
+        id: 'stub-v1',
+        name: 'Stub plugin v1',
+        uri: 'plugin-stub+http://localhost:8080/test-app-v1.exe',
+        hidden: true,
+      },
     ],
     appName: 'Test Application',
     publisher: 'Test Publisher',
@@ -147,6 +176,9 @@ async function createConfig() {
     description: 'Integration test application',
     windowTitle: 'Test Application Installer',
     uacStrategy: 'prefer-user',
+    userDataPath: ['${INSTALL_PATH}/User'],
+    ignoreFolderPath: ['${INSTALL_PATH}/cache'],
+    extraUninstallPath: ['${INSTALL_PATH}/log'],
   };
 
   // v1和v2使用相同配置
@@ -168,23 +200,15 @@ async function buildCompletePackages() {
   if (dev) {
     // merge kachina-builder.exe+kachina-installer.exe to kachina-builder-bundle.exe
     console.log(chalk.gray('  Merging kachina-builder for dev...'));
-    const builderExe = path.join(
-      '..',
-      'src-tauri',
-      'target',
-      'debug',
-      'kachina-builder.exe',
-    );
+    const builderExe = path.join('..', 'target', 'debug', 'kachina-builder.exe');
     const installerExe = path.join(
       '..',
-      'src-tauri',
       'target',
       'debug',
       'kachina-installer.exe',
     );
     const mergedExe = path.join(
       '..',
-      'src-tauri',
       'target',
       'debug',
       'kachina-builder-bundle.exe',
@@ -206,11 +230,14 @@ async function buildCompletePackages() {
   }
   const builderPath = path.join(
     '..',
-    'src-tauri',
     'target',
-    dev ? 'debug' : 'release',
-    dev ? 'kachina-builder-bundle.exe' : 'kachina-builder.exe',
+    dev ? 'debug' : 'x86_64-win7-windows-msvc/release',
+    'kachina-builder-bundle.exe',
   );
+  const iconPath = path.resolve('../resources/icons/icon.ico');
+  if (!(await fs.pathExists(iconPath))) {
+    throw new Error(`icon not found at ${iconPath}`);
+  }
 
   // 检查builder是否存在
   if (!(await fs.pathExists(builderPath))) {
@@ -224,7 +251,7 @@ async function buildCompletePackages() {
   // === V1 构建流程 ===
   console.log(chalk.gray('  Building v1 updater...'));
   // 步骤2: 构建v1更新器
-  await $`& ${builderPath} pack -c ${path.join(FIXTURES_DIR, 'kachina.config.json')} -o ${path.join(V1_DIR, 'updater.exe')}`;
+  await $`& ${builderPath} pack -c ${path.join(FIXTURES_DIR, 'kachina.config.json')} --icon ${iconPath} -o ${path.join(V1_DIR, 'updater.exe')}`;
 
   console.log(chalk.gray('  Generating v1 metadata...'));
   // 步骤3: 生成v1 metadata
@@ -232,12 +259,12 @@ async function buildCompletePackages() {
 
   console.log(chalk.gray('  Building v1 offline package...'));
   // 步骤4: 构建v1离线包
-  await $`& ${builderPath} pack -c ${path.join(FIXTURES_DIR, 'kachina.config.json')} -m ${path.join(FIXTURES_DIR, 'v1-metadata.json')} -d ${path.join(FIXTURES_DIR, 'v1-hashed')} -o ${path.join(FIXTURES_DIR, 'test-app-v1.exe')}`;
+  await $`& ${builderPath} pack -c ${path.join(FIXTURES_DIR, 'kachina.config.json')} -m ${path.join(FIXTURES_DIR, 'v1-metadata.json')} -d ${path.join(FIXTURES_DIR, 'v1-hashed')} --icon ${iconPath} -o ${path.join(FIXTURES_DIR, 'test-app-v1.exe')}`;
 
   // === V2 构建流程 ===
   console.log(chalk.gray('  Building v2 updater...'));
   // 步骤2: 构建v2更新器
-  await $`& ${builderPath} pack -c ${path.join(FIXTURES_DIR, 'kachina.config.v2.json')} -o ${path.join(V2_DIR, 'updater.exe')}`;
+  await $`& ${builderPath} pack -c ${path.join(FIXTURES_DIR, 'kachina.config.v2.json')} --icon ${iconPath} -o ${path.join(V2_DIR, 'updater.exe')}`;
 
   console.log(chalk.gray('  Generating v2 metadata...'));
   // 步骤3: 生成v2 metadata
@@ -245,9 +272,12 @@ async function buildCompletePackages() {
 
   console.log(chalk.gray('  Building v2 offline package...'));
   // 步骤4: 构建v2离线包
-  await $`& ${builderPath} pack -c ${path.join(FIXTURES_DIR, 'kachina.config.v2.json')} -m ${path.join(FIXTURES_DIR, 'v2-metadata.json')} -d ${path.join(FIXTURES_DIR, 'v2-hashed')} -o ${path.join(FIXTURES_DIR, 'test-app-v2.exe')}`;
+  await $`& ${builderPath} pack -c ${path.join(FIXTURES_DIR, 'kachina.config.v2.json')} -m ${path.join(FIXTURES_DIR, 'v2-metadata.json')} -d ${path.join(FIXTURES_DIR, 'v2-hashed')} --icon ${iconPath} -o ${path.join(FIXTURES_DIR, 'test-app-v2.exe')}`;
 
   console.log(chalk.gray('  All packages built'));
 }
 
-main().catch(console.error);
+main().catch((error) => {
+  console.error(error);
+  process.exitCode = 1;
+});
