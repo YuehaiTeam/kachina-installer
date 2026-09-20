@@ -19,7 +19,7 @@ import { SourcePanel } from './panels/SourcePanel';
 import { CdkPanel } from './panels/CdkPanel';
 import { registerPluginBridge } from './plugin-host';
 import { Dialog } from './ui/Dialog';
-import { IconClose, IconMinimize } from './ui/icons';
+import { IconClose, IconMinimize, WizardArt } from './ui/icons';
 import { Spinner } from './ui/Spinner';
 
 type Panel = 'source' | 'cdk' | null;
@@ -129,15 +129,10 @@ export function App() {
     );
   }
 
-  const noImage = ui.theme === 'none' || ui.theme === 'css' || ui.theme === 'html';
-  const showImage = ui.theme === 'image';
-
   return (
     <div class="main">
       {ui.theme === 'css' ? <link rel="stylesheet" href="/theme.css" /> : null}
-      <div
-        class={`content ${ui.project.borderless ? 'borderless' : ''} ${noImage ? 'no-image' : ''}`}
-      >
+      <div class={`content ${ui.project.borderless ? 'borderless' : ''}`}>
         {ui.project.borderless ? (
           <div class="controls">
             <button class="cont-minimize" onClick={() => void invoke('window_minimize')}>
@@ -148,11 +143,15 @@ export function App() {
             </button>
           </div>
         ) : null}
-        {showImage ? (
-          <div class="image">
+        <div class="image">
+          {ui.theme === 'image' ? (
             <img src="/theme.webp" alt={ui.project.title} />
-          </div>
-        ) : null}
+          ) : (
+            <div class="image-default">
+              <WizardArt />
+            </div>
+          )}
+        </div>
         <div class="right">
           <div class="title">{ui.project.title}</div>
           <div class="desc">{ui.project.description}</div>

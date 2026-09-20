@@ -30,10 +30,7 @@ export function SourcePanel({
     <Dialog
       title={<div class="title">{t('ready.select_source')}</div>}
       desc={
-        <div class="desc">
-          {ui.project.title}
-          {t('ready.source_multi')}
-        </div>
+        <div class="desc">{t('ready.source_multi', { title: ui.project.title })}</div>
       }
     >
       <div class="card-container">

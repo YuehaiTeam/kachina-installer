@@ -38,6 +38,22 @@ export function CircleSuccess() {
   );
 }
 
+/** Original artwork for the side column when the package ships no image. */
+export function WizardArt() {
+  return (
+    <svg viewBox="0 0 168 226" xmlns="http://www.w3.org/2000/svg" preserveAspectRatio="xMidYMid meet">
+      <circle cx="84" cy="104" r="58" fill="none" stroke="var(--colorBrandStroke1)" stroke-opacity="0.3" stroke-width="2" />
+      <circle cx="84" cy="104" r="42" fill="var(--colorBrandBackground)" fill-opacity="0.25" />
+      <path d="M84 74v36M70 98l14 14 14-14" fill="none" stroke="var(--colorBrandForeground1)" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" />
+      <path d="M58 118v10a6 6 0 0 0 6 6h40a6 6 0 0 0 6-6v-10" fill="none" stroke="var(--colorBrandForeground1)" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" />
+      <circle cx="30" cy="44" r="4" fill="var(--colorBrandForeground1)" fill-opacity="0.35" />
+      <circle cx="136" cy="34" r="3" fill="var(--colorBrandForeground1)" fill-opacity="0.25" />
+      <circle cx="142" cy="176" r="6" fill="var(--colorBrandForeground1)" fill-opacity="0.3" />
+      <circle cx="36" cy="186" r="3" fill="var(--colorBrandForeground1)" fill-opacity="0.25" />
+    </svg>
+  );
+}
+
 export function Cloud() {
   return (
     <svg fill="currentColor" viewBox="0 0 20 20">

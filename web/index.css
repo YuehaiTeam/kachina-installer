@@ -601,6 +601,11 @@ body,
   opacity: 0.5;
   cursor: not-allowed;
   background-color: var(--colorBrandBackground) !important;
+  &.neutral {
+    background-color: var(--colorNeutralBackground1) !important;
+    border-color: var(--colorNeutralStroke1) !important;
+    color: var(--colorNeutralForeground1) !important;
+  }
 }
 .checkbox {
   app-region: no-drag;

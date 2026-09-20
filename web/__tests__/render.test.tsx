@@ -60,25 +60,61 @@ describe('screens', () => {
     expect(screen.getByText('同时删除用户数据')).toBeTruthy();
   });
 
-  it('renders running progress with a cancel button', async () => {
+  it('renders running progress; cancel asks for confirmation first', async () => {
     await mount(running());
     expect(screen.getByText(/下载 app.exe/)).toBeTruthy();
     fireEvent.click(screen.getByText('取消'));
+    expect(screen.getByText('确定要取消吗？')).toBeTruthy();
+    expect(lastIntent()).toBeUndefined();
+    fireEvent.click(screen.getByText('否，继续'));
+    expect(screen.queryByText('确定要取消吗？')).toBeNull();
+    expect(lastIntent()).toBeUndefined();
+    fireEvent.click(screen.getByText('取消'));
+    fireEvent.click(screen.getByText('是，取消'));
     await waitFor(() => expect(lastIntent()).toEqual({ kind: 'cancel' }));
+    expect((screen.getByText('取消') as HTMLButtonElement).disabled).toBe(true);
   });
 
-  it('hides cancel during the swap', async () => {
+  it('keeps the cancel button in place but disabled during the swap', async () => {
     const ui = running();
     if (ui.phase.kind === 'running') ui.phase.stage = 'commit';
     await mount(ui);
-    expect(screen.queryByText('取消')).toBeNull();
+    const btn = screen.getByText('取消') as HTMLButtonElement;
+    expect(btn.disabled).toBe(true);
+    expect(btn.classList.contains('btn-install-2rd')).toBe(false);
   });
 
-  it('hides cancel during runtime install', async () => {
+  it('disables cancel during runtime install', async () => {
     const ui = running();
     if (ui.phase.kind === 'running') ui.phase.stage = 'runtime_install';
     await mount(ui);
+    expect((screen.getByText('取消') as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it('has no cancel button while uninstalling', async () => {
+    const ui = running();
+    ui.mode = 'uninstall';
+    await mount(ui);
     expect(screen.queryByText('取消')).toBeNull();
+  });
+
+  it('always renders the side column; default art when the package has no image', async () => {
+    await mount(ready({ theme: 'none' }));
+    expect(document.querySelector('.image .image-default svg')).not.toBeNull();
+    expect(document.querySelector('.image img')).toBeNull();
+    await mount(ready({ theme: 'image' }));
+    expect(document.querySelector('.image img')).not.toBeNull();
+    expect(document.querySelector('.image-default')).toBeNull();
+  });
+
+  it('renders English copy when project.lang is en-US', async () => {
+    const ui = ready();
+    ui.project = { ...ui.project, lang: 'en-US' };
+    await mount(ui);
+    expect(screen.getByText('Install')).toBeTruthy();
+    expect(screen.getByText('Create a desktop shortcut')).toBeTruthy();
+    fireEvent.click(screen.getByTitle('Select a source'));
+    expect(screen.getByText('Demo App supports multiple online install sources.')).toBeTruthy();
   });
 
   it('renders done variants', async () => {
