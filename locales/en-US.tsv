@@ -1,0 +1,137 @@
+DISK_FULL	Not enough disk space to complete the installation or update
+DOWNLOAD_FAILED	Could not connect to the download server. Try again or switch to another source
+DOWNLOAD_REFUSED	The download server returned an error. Try again or switch to another source
+DOWNLOAD_STALLED	Download speed is abnormally low. Check your network connection or switch to another source
+DOWNLOAD_TIMEOUT	Connection to the download server timed out. Check your network connection or switch to another source
+ELEVATE_FAILED	Failed to obtain administrator privileges
+EXTRACT_FAILED	Extraction failed
+FILE_IN_USE	File is in use
+FILE_IO_FAILED	File read/write failed
+HASH_ALGORITHM_UNSUPPORTED	The update server is misconfigured: unsupported hash algorithm
+HASH_MISMATCH	File verification failed
+INSTALL_PATH_INVALID	Invalid install path
+INTERNAL_ERROR	The installer encountered an internal error
+METADATA_HTTP_ERROR	Failed to fetch update information. Check your network connection
+METADATA_INVALID	Update information is invalid
+METADATA_UNREACHABLE	Failed to fetch update information. Check your network connection
+MIRRORC_CDK_BANNED	This Mirror酱 CDK has been banned. Please use another CDK
+MIRRORC_CDK_EXPIRED	This Mirror酱 CDK has expired
+MIRRORC_CDK_INVALID	Invalid Mirror酱 CDK. Please check the CDK you entered
+MIRRORC_CDK_MISMATCH	This Mirror酱 CDK does not match the requested resource. Please check the CDK you entered
+MIRRORC_CDK_MISSING	A Mirror酱 CDK is required
+MIRRORC_CDK_QUOTA_EXCEEDED	This Mirror酱 CDK has reached its daily download limit. Use another CDK or try again tomorrow
+MIRRORC_CONFIG_INVALID	Invalid Mirror酱 parameters. Please check the packaging configuration
+MIRRORC_FAILED	Failed to fetch the update from Mirror酱. Please contact Mirror酱 support
+MIRRORC_UNREACHABLE	Could not reach Mirror酱. Check your network connection and try again
+NO_DOWNLOAD_NODE	No download node available
+PERMISSION_DENIED	Access denied
+PKG_BROKEN	The installer package is corrupted. Please download it again
+PLUGIN_FAILED	Plugin execution failed
+PLUGIN_HOST_FAILED	Failed to start the plugin host
+PLUGIN_NOT_FOUND	Plugin not found
+PLUGIN_NO_UI	This source requires a graphical interface
+PROCESS_KILL_FAILED	Failed to terminate the process
+REGISTRY_WRITE_FAILED	Failed to write to the registry
+REMOTE_FILE_MISSING	Could not fetch a required file. Check your network connection or switch to another source
+RUNTIME_INSTALL_FAILED	Failed to install {subject}. Please install it manually
+RUNTIME_UNSUPPORTED	Unsupported runtime
+SELF_UPDATE_FAILED	Failed to update the installer
+SERVER_HTTP_ERROR	The download server returned an error
+SHORTCUT_FAILED	Failed to create the shortcut
+SOURCE_INVALID	Invalid install source
+SOURCE_METADATA_INVALID	Update information is invalid
+SOURCE_NEEDS_VERIFICATION	This source requires verification
+STAGING_IN_USE	Another installer is already working on this folder
+TEMP_DIR_UNAVAILABLE	Cannot access the temporary folder
+UNINSTALL_INFO_MISSING	Uninstall information not found. Reinstall before uninstalling
+VERSION_REGEX_INVALID	Invalid version pattern
+WEBVIEW2_FAILED	WebView2 installation failed
+WEBVIEW2_REQUIRED	This source requires WebView2. Use "Advanced install"
+dialog.cancel	Cancel
+dialog.copy	Copy
+dialog.crash	The installer encountered an internal error and has stopped. Please run it again; if the problem persists, report it with this ID: {event_id}
+dialog.error	Something went wrong
+dialog.event_id	Event ID: {event_id}
+dialog.mirrorc_cdk_get	Get a CDK
+dialog.mirrorc_cdk_hint	Mirror酱 is an independent third-party download platform offering paid download acceleration. If you have a Mirror酱 CDK, enter it here.
+dialog.mirrorc_cdk_placeholder	Enter your Mirror酱 CDK
+dialog.mirrorc_cdk_title	Mirror酱 CDK
+dialog.no	No
+dialog.ok	OK
+dialog.prompt	Notice
+dialog.session_id	Download session: {sid}
+dialog.unknown_event	Unknown
+dialog.yes	Yes
+done.close	Close
+done.install	Installation complete
+done.latest	Already up to date
+done.launch	Launch
+done.uninstall	Uninstalled successfully
+done.update	Update complete
+progress.already_latest	Already up to date
+progress.commit	Applying the update…
+progress.delete	Removing leftover files…
+progress.download	Downloading {subject}
+progress.extract	Extracting {subject}
+progress.finalize	Almost done…
+progress.hash_scan	Verifying local files…
+progress.install_done	Installation complete
+progress.metadata	Fetching the latest version
+progress.mirrorc_download	Preparing download from Mirror酱…
+progress.mirrorc_metadata	Fetching the latest version from Mirror酱
+progress.mirrorc_verify	Checking the archive…
+progress.patch	Patching {subject}
+progress.plan	Preparing download…
+progress.prepare	Preparing…
+progress.registry	Writing registry entries…
+progress.runtime_download	Downloading {subject}
+progress.runtime_install	Installing {subject}…
+progress.shortcut	Creating shortcuts…
+progress.uninstall_delete	Uninstalling…
+progress.uninstall_done	Uninstall complete
+progress.uninstall_scan	Preparing to uninstall…
+prompt.occupied_files.message	Some files are in use and the installation may not succeed. Continue anyway? {items}
+prompt.occupied_files.title	Notice
+prompt.process_running.message	{items} is running. Close it and continue the installation?
+prompt.process_running.title	Notice
+prompt.version_mismatch.message	This installer is not the latest version. Install the latest version instead?
+prompt.version_mismatch.title	Notice
+ready.advanced	Advanced install
+ready.advanced_hint	Installs WebView2 and opens the full interface
+ready.agree	I accept the
+ready.change_path	Change install location
+ready.continue	Continue with current options
+ready.create_lnk	Create a desktop shortcut
+ready.delete_user_data	Also delete user data
+ready.dir_not_empty	The selected folder is not empty. Create a new subfolder for the installation? Choosing No may affect existing data.
+ready.eula	License Agreement
+ready.from	From
+ready.install	Install
+ready.install_to	Install to
+ready.installing	Installing
+ready.no_cdk	No CDK
+ready.select_source	Select a source
+ready.source_multi	{title} supports multiple online install sources.
+ready.uninstall	Uninstall
+ready.uninstall_from	Uninstall from
+ready.uninstalling	Uninstalling
+ready.update	Update
+ready.update_to	Update to
+ready.updating	Updating
+running.cancel_message	Downloaded data will be discarded. Files already on disk are left untouched.
+running.cancel_no	No, continue
+running.cancel_title	Are you sure you want to cancel?
+running.cancel_yes	Yes, cancel
+shortcut.uninstall	Uninstall {subject}
+step.default.0	Fetching the latest version
+step.default.1	Verifying update contents
+step.default.2	Downloading and extracting files
+step.default.3	Preparing the runtime environment
+step.mirrorc.0	Fetching the latest version from Mirror酱
+step.mirrorc.1	Downloading the package
+step.mirrorc.2	Extracting files
+step.mirrorc.3	Preparing the runtime environment
+webview2.progress_downloading	Downloading the installer...
+webview2.progress_heading	WebView2 Runtime is missing on this system. Installing...
+webview2.progress_installing	Installing WebView2 Runtime...
+webview2.progress_title	Install WebView2 Runtime

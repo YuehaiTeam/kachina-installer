@@ -48,6 +48,26 @@ impl Catalog {
         self.rows.contains_key(key)
     }
 
+    /// Map a BCP 47 tag to one of the table's columns: exact match, then the
+    /// first column sharing the primary language (`zh-TW` → `zh-CN`), then the
+    /// first column. Returns `None` for an empty table.
+    pub fn resolve_lang(&self, requested: &str) -> Option<&str> {
+        if let Some(l) = self.langs.iter().find(|l| l.eq_ignore_ascii_case(requested)) {
+            return Some(l.as_str());
+        }
+        let primary = requested.split('-').next().unwrap_or("");
+        if !primary.is_empty() {
+            if let Some(l) = self.langs.iter().find(|l| {
+                l.split('-')
+                    .next()
+                    .is_some_and(|p| p.eq_ignore_ascii_case(primary))
+            }) {
+                return Some(l.as_str());
+            }
+        }
+        self.langs.first().map(String::as_str).filter(|s| !s.is_empty())
+    }
+
     /// Look up `key` in `lang`'s column (no match → first language column).
     /// Missing key returns the key. `{name}` placeholders are replaced.
     pub fn t(&self, lang: &str, key: &str, params: &[(&str, &str)]) -> String {
@@ -106,17 +126,14 @@ pub fn lang() -> &'static str {
 fn system_lang() -> String {
     let mut buf = [0u16; 85];
     let n = unsafe { windows::Win32::Globalization::GetUserDefaultLocaleName(&mut buf) };
-    if n > 1 {
-        let s = String::from_utf16_lossy(&buf[..n as usize - 1]).replace('_', "-");
-        if !s.is_empty() {
-            return s;
-        }
-    }
+    let requested = if n > 1 {
+        String::from_utf16_lossy(&buf[..n as usize - 1]).replace('_', "-")
+    } else {
+        String::new()
+    };
     catalog()
-        .langs()
-        .first()
-        .cloned()
-        .filter(|s| !s.is_empty())
+        .resolve_lang(&requested)
+        .map(str::to_string)
         .unwrap_or_else(|| "zh-CN".into())
 }
 
@@ -141,29 +158,81 @@ mod tests {
     use crate::session::state::{PROMPT_KEYS, STAGE_KEYS};
     use crate::utils::code::ALL_CODES;
 
-    fn zh_cn_bytes() -> Vec<u8> {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("locales/zh-CN.tsv");
-        std::fs::read(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
+    /// Every `locales/*.tsv`, parsed, keyed by file stem.
+    fn locale_files() -> Vec<(String, Catalog)> {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("locales");
+        let mut out: Vec<(String, Catalog)> = std::fs::read_dir(&dir)
+            .unwrap_or_else(|e| panic!("read {}: {e}", dir.display()))
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("tsv"))
+            .map(|p| {
+                let bytes =
+                    std::fs::read(&p).unwrap_or_else(|e| panic!("read {}: {e}", p.display()));
+                let stem = p.file_stem().unwrap().to_string_lossy().into_owned();
+                (stem, Catalog::parse(&bytes))
+            })
+            .collect();
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        assert!(
+            out.iter().any(|(l, _)| l == "zh-CN"),
+            "locales/zh-CN.tsv is the reference table"
+        );
+        out
     }
 
     #[test]
     fn locale_covers_codes_stages_prompts() {
-        let cat = Catalog::parse(&zh_cn_bytes());
-        let mut missing = Vec::new();
-        for key in ALL_CODES
-            .iter()
-            .copied()
-            .chain(STAGE_KEYS.iter().copied())
-            .chain(PROMPT_KEYS.iter().copied())
-        {
-            if !cat.has_key(key) {
-                missing.push(key);
+        for (lang, cat) in locale_files() {
+            let mut missing = Vec::new();
+            for key in ALL_CODES
+                .iter()
+                .copied()
+                .chain(STAGE_KEYS.iter().copied())
+                .chain(PROMPT_KEYS.iter().copied())
+            {
+                if !cat.has_key(key) {
+                    missing.push(key);
+                }
             }
+            assert!(
+                missing.is_empty(),
+                "locales/{lang}.tsv missing keys: {missing:?}"
+            );
         }
-        assert!(
-            missing.is_empty(),
-            "locales/zh-CN.tsv missing keys: {missing:?}"
-        );
+    }
+
+    #[test]
+    fn every_locale_has_the_same_keys_as_zh_cn() {
+        let files = locale_files();
+        let reference = &files.iter().find(|(l, _)| l == "zh-CN").unwrap().1;
+        for (lang, cat) in &files {
+            let missing: Vec<&String> = reference
+                .rows
+                .keys()
+                .filter(|k| !cat.has_key(k))
+                .collect();
+            let extra: Vec<&String> = cat
+                .rows
+                .keys()
+                .filter(|k| !reference.has_key(k))
+                .collect();
+            assert!(
+                missing.is_empty() && extra.is_empty(),
+                "locales/{lang}.tsv: missing {missing:?}, extra {extra:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn resolve_lang_exact_then_primary_then_first() {
+        let cat = Catalog::parse("KEY\ten-US\tzh-CN\nk\ta\tb\n".as_bytes());
+        assert_eq!(cat.resolve_lang("zh-CN"), Some("zh-CN"));
+        assert_eq!(cat.resolve_lang("zh-cn"), Some("zh-CN"));
+        assert_eq!(cat.resolve_lang("zh-TW"), Some("zh-CN"));
+        assert_eq!(cat.resolve_lang("en-GB"), Some("en-US"));
+        assert_eq!(cat.resolve_lang("ja-JP"), Some("en-US"));
+        assert_eq!(cat.resolve_lang(""), Some("en-US"));
+        assert_eq!(Catalog::parse(b"").resolve_lang("zh-CN"), None);
     }
 
     #[test]
