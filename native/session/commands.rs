@@ -43,10 +43,16 @@ pub struct GuiRuntime {
 
 impl GuiRuntime {
     pub fn cancel_running(&self) {
-        self.cancel
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .cancel();
+        let mut session = self.session.lock().unwrap_or_else(|e| e.into_inner());
+        if let Phase::Running(progress) = &mut session.state.phase {
+            if progress.cancel == crate::session::state::CancelState::Available {
+                progress.cancel = crate::session::state::CancelState::Requested;
+                self.cancel
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .cancel();
+            }
+        }
     }
 
     fn fresh_cancel(&self) -> tokio_util::sync::CancellationToken {
@@ -457,6 +463,7 @@ pub async fn handle_intent(
         Intent::Cancel => {
             if gui.running.load(Ordering::SeqCst) {
                 gui.cancel_running();
+                gui.emit(handle);
             }
             ok(())
         }
@@ -481,6 +488,7 @@ async fn handle_start(
     if gui.running.swap(true, Ordering::SeqCst) {
         return ok(());
     }
+    let cancel = gui.fresh_cancel();
     {
         let mut sess = gui.session.lock().unwrap_or_else(|e| e.into_inner());
         sess.apply(Intent::Start);
@@ -490,14 +498,11 @@ async fn handle_start(
             gui.emit(handle);
             return ok(());
         }
-        sess.state.phase = Phase::Running(Progress {
-            sub_step: 0,
-            percent: 0.0,
-            stage: "prepare",
-            subject: None,
-            done: None,
-            total: None,
-        });
+        sess.state.phase = Phase::Running(Progress::new(
+            crate::session::state::ProgressStage::Prepare,
+            Some(0),
+            Some(0.0),
+        ));
     }
     gui.emit(handle);
 
@@ -519,7 +524,7 @@ async fn handle_start(
         ctx.session.plugins.clone(),
         settings.auto_answer,
         gui.session.clone(),
-        gui.fresh_cancel(),
+        cancel,
     );
     let result = if uninstall {
         run_uninstall(&settings, &gui.config, &project, &ui, &base, &ctx.elevate).await

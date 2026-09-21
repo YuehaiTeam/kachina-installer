@@ -13,35 +13,25 @@ use crate::installer::{probe_dir, DirState};
 use crate::session::types::{elevate_from_state, SessionResult};
 use crate::utils::code::{Coded, MIRRORC_CDK_MISSING};
 
-/// Progress `stage` values. Locale keys are `progress.<stage>`.
 pub const STAGE_KEYS: &[&str] = &[
     "progress.prepare",
-    "progress.metadata",
-    "progress.hash_scan",
-    "progress.plan",
-    "progress.download",
+    "progress.fetch_metadata",
+    "progress.scan_files",
+    "progress.prepare_download",
+    "progress.create_download_session",
+    "progress.process_files",
+    "progress.download_archive",
+    "progress.verify_archive",
+    "progress.extract_archive",
     "progress.commit",
-    "progress.patch",
-    "progress.extract",
-    "progress.delete",
-    "progress.runtime_download",
-    "progress.runtime_install",
-    "progress.shortcut",
-    "progress.registry",
+    "progress.download_runtime",
+    "progress.install_runtime",
+    "progress.create_shortcuts",
+    "progress.write_registry",
     "progress.finalize",
     "progress.uninstall_scan",
     "progress.uninstall_delete",
-    "progress.mirrorc_metadata",
-    "progress.mirrorc_download",
-    "progress.mirrorc_verify",
-    "progress.install_done",
-    "progress.already_latest",
-    "progress.uninstall_done",
 ];
-
-/// Stages whose `done` / `total` are byte counts; every other stage counts items.
-/// `web/screens/Running.tsx` keeps the same list for the WebView renderer.
-pub const BYTE_STAGES: &[&str] = &["download", "runtime_download", "mirrorc_download"];
 
 pub const PROMPT_KEYS: &[&str] = &[
     "prompt.process_running.title",
@@ -154,12 +144,166 @@ pub enum Theme {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Progress {
-    pub sub_step: u32,
-    pub percent: f64,
-    pub stage: &'static str,
+    pub step: Option<u8>,
+    pub stage: ProgressStage,
     pub subject: Option<String>,
-    pub done: Option<u64>,
+    pub percent: Option<f64>,
+    pub cancel: CancelState,
+    pub summary: Option<ProgressCounter>,
+    pub processing_bps: Option<u64>,
+    pub network_bps: Option<u64>,
+    pub network_pending: bool,
+    pub files: Vec<FileProgress>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProgressStage {
+    Prepare,
+    FetchMetadata,
+    ScanFiles,
+    PrepareDownload,
+    CreateDownloadSession,
+    ProcessFiles,
+    DownloadArchive,
+    VerifyArchive,
+    ExtractArchive,
+    Commit,
+    DownloadRuntime,
+    InstallRuntime,
+    CreateShortcuts,
+    WriteRegistry,
+    Finalize,
+    UninstallScan,
+    UninstallDelete,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CancelState {
+    Available,
+    Requested,
+    Unavailable,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ProgressCounter {
+    pub unit: ProgressUnit,
+    pub done: u64,
     pub total: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProgressUnit {
+    Bytes,
+    Files,
+    Operations,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct FileProgress {
+    pub id: u32,
+    pub name: String,
+    pub action: FileAction,
+    pub bytes: Option<ByteProgress>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FileAction {
+    Download,
+    Extract,
+    Patch,
+    Verify,
+    Flush,
+    Retry,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ByteProgress {
+    pub done: u64,
+    pub total: Option<u64>,
+}
+
+impl ProgressStage {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Prepare => "prepare",
+            Self::FetchMetadata => "fetch_metadata",
+            Self::ScanFiles => "scan_files",
+            Self::PrepareDownload => "prepare_download",
+            Self::CreateDownloadSession => "create_download_session",
+            Self::ProcessFiles => "process_files",
+            Self::DownloadArchive => "download_archive",
+            Self::VerifyArchive => "verify_archive",
+            Self::ExtractArchive => "extract_archive",
+            Self::Commit => "commit",
+            Self::DownloadRuntime => "download_runtime",
+            Self::InstallRuntime => "install_runtime",
+            Self::CreateShortcuts => "create_shortcuts",
+            Self::WriteRegistry => "write_registry",
+            Self::Finalize => "finalize",
+            Self::UninstallScan => "uninstall_scan",
+            Self::UninstallDelete => "uninstall_delete",
+        }
+    }
+    pub fn cancellable(self) -> bool {
+        !matches!(
+            self,
+            Self::Commit
+                | Self::DownloadRuntime
+                | Self::InstallRuntime
+                | Self::CreateShortcuts
+                | Self::WriteRegistry
+                | Self::Finalize
+                | Self::UninstallScan
+                | Self::UninstallDelete
+        )
+    }
+    pub fn unit(self) -> ProgressUnit {
+        match self {
+            Self::ProcessFiles | Self::DownloadArchive | Self::DownloadRuntime => {
+                ProgressUnit::Bytes
+            }
+            Self::Commit => ProgressUnit::Operations,
+            _ => ProgressUnit::Files,
+        }
+    }
+}
+impl FileAction {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Download => "download",
+            Self::Extract => "extract",
+            Self::Patch => "patch",
+            Self::Verify => "verify",
+            Self::Flush => "flush",
+            Self::Retry => "retry",
+        }
+    }
+}
+impl Progress {
+    pub fn new(stage: ProgressStage, step: Option<u8>, percent: Option<f64>) -> Self {
+        Self {
+            stage,
+            step,
+            percent: percent
+                .filter(|v| v.is_finite())
+                .map(|v| v.clamp(0.0, 100.0)),
+            subject: None,
+            cancel: if stage.cancellable() {
+                CancelState::Available
+            } else {
+                CancelState::Unavailable
+            },
+            summary: None,
+            processing_bps: None,
+            network_bps: None,
+            network_pending: false,
+            files: Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -555,14 +699,7 @@ mod tests {
     #[test]
     fn answer_clears_matching_prompt_and_leaves_phase_to_the_session() {
         let mut sess = UiSession::new(UiState::default());
-        let running = Phase::Running(Progress {
-            sub_step: 1,
-            percent: 10.0,
-            stage: "hash_scan",
-            subject: None,
-            done: None,
-            total: None,
-        });
+        let running = Phase::Running(Progress::new(ProgressStage::ScanFiles, Some(1), Some(10.0)));
         sess.state.phase = running.clone();
         sess.state.pending = Some(Prompt {
             id: "p1".into(),

@@ -62,7 +62,8 @@ describe('screens', () => {
 
   it('renders running progress; cancel asks for confirmation first', async () => {
     await mount(running());
-    expect(screen.getByText(/下载 app.exe/)).toBeTruthy();
+    expect(screen.getByText('app.exe')).toBeTruthy();
+    expect(screen.getByText('正在处理文件……')).toBeTruthy();
     fireEvent.click(screen.getByText('取消'));
     expect(screen.getByText('确定要取消吗？')).toBeTruthy();
     expect(lastIntent()).toBeUndefined();
@@ -72,12 +73,38 @@ describe('screens', () => {
     fireEvent.click(screen.getByText('取消'));
     fireEvent.click(screen.getByText('是，取消'));
     await waitFor(() => expect(lastIntent()).toEqual({ kind: 'cancel' }));
+    const cancelling = running();
+    if (cancelling.phase.kind === 'running') cancelling.phase.cancel = 'requested';
+    await mount(cancelling);
+    expect(screen.getByText('正在取消，等待任务结束并清理……')).toBeTruthy();
     expect((screen.getByText('取消') as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it('shows active files, explicit units and zero network speed before offline processing speed', async () => {
+    const ui = running();
+    if (ui.phase.kind !== 'running') throw new Error('fixture');
+    ui.phase.files.push({ id: 2, name: 'assets/app.exe', action: 'verify', bytes: null });
+    await mount(ui);
+    expect(screen.getByTitle('网络接收速度').textContent).toBe('0B/s');
+    expect(screen.getByTitle('assets/app.exe')).toBeTruthy();
+    expect(screen.getByText('校验')).toBeTruthy();
+    ui.phase.network_pending = false;
+    ui.phase.summary = { unit: 'files', done: 0, total: 0 };
+    ui.phase.percent = null;
+    await mount(ui);
+    expect(screen.getByTitle('文件处理速度').textContent).toBe('1KB/s');
+    expect(screen.getByText('0 / 0')).toBeTruthy();
+    expect(screen.getByRole('progressbar').getAttribute('aria-valuenow')).toBeNull();
+    ui.phase.summary = { unit: 'bytes', done: 0, total: null };
+    ui.phase.files = [];
+    await mount(ui);
+    expect(screen.queryByTitle('assets/app.exe')).toBeNull();
+    expect(screen.getByText('0B')).toBeTruthy();
   });
 
   it('keeps the cancel button in place but disabled during the swap', async () => {
     const ui = running();
-    if (ui.phase.kind === 'running') ui.phase.stage = 'commit';
+    if (ui.phase.kind === 'running') { ui.phase.stage = 'commit'; ui.phase.cancel = 'unavailable'; }
     await mount(ui);
     const btn = screen.getByText('取消') as HTMLButtonElement;
     expect(btn.disabled).toBe(true);
@@ -86,7 +113,7 @@ describe('screens', () => {
 
   it('disables cancel during runtime install', async () => {
     const ui = running();
-    if (ui.phase.kind === 'running') ui.phase.stage = 'runtime_install';
+    if (ui.phase.kind === 'running') { ui.phase.stage = 'install_runtime'; ui.phase.cancel = 'unavailable'; }
     await mount(ui);
     expect((screen.getByText('取消') as HTMLButtonElement).disabled).toBe(true);
   });

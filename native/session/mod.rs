@@ -1,4 +1,5 @@
 pub mod commands;
+pub mod download_plan;
 pub mod dump;
 pub mod merge;
 pub mod plan;
@@ -10,3 +11,5 @@ pub mod types;
 pub mod ui;
 
 pub use types::ProjectConfig;
+
+pub mod rate;

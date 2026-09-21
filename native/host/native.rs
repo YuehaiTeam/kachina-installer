@@ -14,8 +14,8 @@ use crate::session::commands::{mirrorc_target, settings_from_input, visible_sour
 use crate::session::run::{run_install, run_uninstall};
 use crate::session::source::needs_js_plugin;
 use crate::session::state::{
-    CdkStatus, Intent, Mode, Options, Phase, Progress, Prompt, Renderer, UiSession, UiState,
-    BYTE_STAGES,
+    CancelState, CdkStatus, Intent, Mode, Options, Phase, Progress, ProgressUnit, Prompt, Renderer,
+    UiSession, UiState,
 };
 use crate::session::types::{settings_from_cli, SessionInput};
 use crate::session::ui::SessionUi;
@@ -490,14 +490,11 @@ async fn native_session(
         Mode::Install => t(&sess.state, "ready.installing"),
     };
     let prepare = t(&sess.state, "progress.prepare");
-    sess.state.phase = Phase::Running(Progress {
-        sub_step: 0,
-        percent: 0.0,
-        stage: "prepare",
-        subject: None,
-        done: None,
-        total: None,
-    });
+    sess.state.phase = Phase::Running(Progress::new(
+        crate::session::state::ProgressStage::Prepare,
+        Some(0),
+        Some(0.0),
+    ));
     let cancel = tokio_util::sync::CancellationToken::new();
     let dialog = ProgressDialog::show_with_cancel(
         &project.window_title,
@@ -634,8 +631,36 @@ impl SessionUi for NativeUi {
         if let Phase::Running(p) = &state.phase {
             if let Some(hwnd) = self.hwnd.get() {
                 set_progress_hwnd(hwnd, p.percent, &progress_current(p));
+                unsafe {
+                    windows::Win32::UI::WindowsAndMessaging::SendMessageW(
+                        hwnd,
+                        windows::Win32::UI::Controls::TDM_ENABLE_BUTTON.0 as u32,
+                        Some(windows::Win32::Foundation::WPARAM(
+                            windows::Win32::UI::WindowsAndMessaging::IDCANCEL.0 as usize,
+                        )),
+                        Some(windows::Win32::Foundation::LPARAM(
+                            (p.cancel == CancelState::Available) as isize,
+                        )),
+                    );
+                }
             }
         }
+    }
+
+    fn begin_commit(&self) -> bool {
+        if let Some(hwnd) = self.hwnd.get() {
+            unsafe {
+                windows::Win32::UI::WindowsAndMessaging::SendMessageW(
+                    hwnd,
+                    windows::Win32::UI::Controls::TDM_ENABLE_BUTTON.0 as u32,
+                    Some(windows::Win32::Foundation::WPARAM(
+                        windows::Win32::UI::WindowsAndMessaging::IDCANCEL.0 as usize,
+                    )),
+                    Some(windows::Win32::Foundation::LPARAM(0)),
+                );
+            }
+        }
+        !self.cancel.is_cancelled()
     }
 
     async fn confirm(&self, prompt: Prompt) -> bool {
@@ -681,23 +706,49 @@ impl SessionUi for NativeUi {
     }
 }
 
-/// Copy line from the table, plus a `done / total` line when the stage reports
-/// one (bytes for `BYTE_STAGES`, item counts otherwise).
 fn progress_current(p: &Progress) -> String {
-    let subject = p.subject.clone().unwrap_or_default();
-    let mut text = i18n::t(
-        &format!("progress.{}", p.stage),
-        &[("subject", subject.as_str())],
-    );
-    if let (Some(done), Some(total)) = (p.done, p.total) {
-        let fmt = |n: u64| {
-            if BYTE_STAGES.contains(&p.stage) {
+    let subject = p.subject.as_deref().unwrap_or_default();
+    let mut text = if p.cancel == CancelState::Requested {
+        i18n::t("running.cancelling", &[])
+    } else {
+        i18n::t(
+            &format!("progress.{}", p.stage.as_str()),
+            &[("subject", subject)],
+        )
+    };
+    if let Some(counter) = &p.summary {
+        let fmt = |n| {
+            if counter.unit == ProgressUnit::Bytes {
                 i18n::format_size(n)
             } else {
                 n.to_string()
             }
         };
-        text.push_str(&format!("\n{} / {}", fmt(done), fmt(total)));
+        text.push_str(&format!("\n{}", fmt(counter.done)));
+        if let Some(total) = counter.total {
+            text.push_str(&format!(" / {}", fmt(total)));
+        }
+    }
+    let speed = if p.network_pending {
+        p.network_bps
+    } else {
+        p.processing_bps
+    };
+    if let Some(speed) = speed {
+        text.push_str(&format!("  {}/s", i18n::format_size(speed)));
+    }
+    for file in &p.files {
+        text.push_str(&format!(
+            "\n{}  {}",
+            file.name,
+            i18n::t(&format!("file_action.{}", file.action.as_str()), &[])
+        ));
+        if let Some(bytes) = &file.bytes {
+            text.push_str(&format!("  {}", i18n::format_size(bytes.done)));
+            if let Some(total) = bytes.total {
+                text.push_str(&format!(" / {}", i18n::format_size(total)));
+            }
+        }
     }
     text
 }
@@ -718,14 +769,26 @@ fn prompt_copy(prompt: &Prompt) -> (String, String) {
     )
 }
 
-fn set_progress_hwnd(hwnd: HWND, percent: f64, text: &str) {
+fn set_progress_hwnd(hwnd: HWND, percent: Option<f64>, text: &str) {
     use windows::Win32::Foundation::{LPARAM, WPARAM};
     use windows::Win32::UI::Controls::{
         TDE_CONTENT, TDM_SET_PROGRESS_BAR_POS, TDM_UPDATE_ELEMENT_TEXT,
     };
     let wide: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
-    let pos = percent.round().clamp(0.0, 100.0) as usize;
+    let pos = percent.unwrap_or(0.0).round().clamp(0.0, 100.0) as usize;
     unsafe {
+        windows::Win32::UI::WindowsAndMessaging::SendMessageW(
+            hwnd,
+            windows::Win32::UI::Controls::TDM_SET_MARQUEE_PROGRESS_BAR.0 as u32,
+            Some(WPARAM(percent.is_none() as usize)),
+            Some(LPARAM(0)),
+        );
+        windows::Win32::UI::WindowsAndMessaging::SendMessageW(
+            hwnd,
+            windows::Win32::UI::Controls::TDM_SET_PROGRESS_BAR_MARQUEE.0 as u32,
+            Some(WPARAM(percent.is_none() as usize)),
+            Some(LPARAM(30)),
+        );
         windows::Win32::UI::WindowsAndMessaging::SendMessageW(
             hwnd,
             TDM_UPDATE_ELEMENT_TEXT.0 as u32,

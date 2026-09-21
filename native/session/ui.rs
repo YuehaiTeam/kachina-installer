@@ -65,6 +65,10 @@ pub trait SessionUi: Send + Sync {
     fn cancel_token(&self) -> CancellationToken {
         CancellationToken::new()
     }
+    /// 与取消受理互斥地关闭提交阶段的取消入口。
+    fn begin_commit(&self) -> bool {
+        !self.cancel_token().is_cancelled()
+    }
 }
 
 pub struct SilentUi;
@@ -107,15 +111,7 @@ impl SessionUi for SilentUi {
     fn state(&self, state: &UiState) {
         match &state.phase {
             Phase::Running(p) => {
-                tracing::debug!(
-                    "progress sub={} percent={:.1} stage={} subject={:?} done={:?} total={:?}",
-                    p.sub_step,
-                    p.percent,
-                    p.stage,
-                    p.subject,
-                    p.done,
-                    p.total
-                );
+                tracing::debug!("progress {p:?}");
             }
             Phase::Failed(c) => {
                 tracing::error!("{}", log_line(&anyhow::Error::from(c.clone())));
@@ -345,9 +341,28 @@ impl SessionUi for GuiUi {
     fn state(&self, state: &UiState) {
         let mut sess = self.session.lock().unwrap_or_else(|e| e.into_inner());
         sess.state.phase = state.phase.clone();
+        if let Phase::Running(p) = &mut sess.state.phase {
+            if p.cancel == crate::session::state::CancelState::Available
+                && self.cancel.is_cancelled()
+            {
+                p.cancel = crate::session::state::CancelState::Requested;
+            }
+        }
         let snap = sess.state.clone();
         drop(sess);
         self.window.emit("ui-state", &snap);
+    }
+
+    fn begin_commit(&self) -> bool {
+        let mut sess = self.session.lock().unwrap_or_else(|e| e.into_inner());
+        if self.cancel.is_cancelled() {
+            return false;
+        }
+        if let Phase::Running(p) = &mut sess.state.phase {
+            p.cancel = crate::session::state::CancelState::Unavailable;
+        }
+        self.window.emit("ui-state", &sess.state);
+        true
     }
 
     async fn confirm(&self, mut prompt: Prompt) -> bool {

@@ -56,12 +56,14 @@ export function running(): UiState {
   return ready({
     phase: {
       kind: 'running',
-      sub_step: 2,
+      step: 2,
       percent: 40,
-      stage: 'download',
-      subject: 'app.exe',
-      done: 1024,
-      total: 2048,
+      stage: 'process_files',
+      subject: null,
+      cancel: 'available',
+      summary: { unit: 'bytes', done: 1024, total: 2048 },
+      processing_bps: 1024, network_bps: 0, network_pending: true,
+      files: [{ id: 1, name: 'app.exe', action: 'download', bytes: { done: 1024, total: 2048 } }],
     },
   });
 }

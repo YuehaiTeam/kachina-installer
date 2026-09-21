@@ -307,3 +307,11 @@
   width: 40px;
   height: 40px;
 }
+
+.progress-summary { display: flex; gap: 16px; padding: 8px 14px; font-size: 12px; white-space: nowrap; }
+.active-files { max-height: 128px; overflow-y: auto; padding: 0 14px; font-size: 12px; app-region: no-drag; }
+.active-file { display: flex; gap: 8px; align-items: baseline; padding: 4px 0; }
+.active-file-name { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.active-file-counter { white-space: nowrap; font-variant-numeric: tabular-nums; }
+.progress-bar.indeterminate { width: 30%; animation: progress-indeterminate 1.5s infinite linear; }
+@keyframes progress-indeterminate { from { left: -30%; } to { left: 100%; } }

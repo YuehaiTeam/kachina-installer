@@ -110,10 +110,11 @@ pub struct SourceCtx {
     pub index: HashMap<String, Embedded>,
     pub installer_end: usize,
     pub resource_version: Option<String>,
+    pub policy: super::download_plan::Policy,
     dfs2: Option<Dfs2Session>,
     plugin_session: bool,
     plugin: Option<Arc<dyn PluginHost>>,
-    insights: Mutex<Vec<InsightItem>>,
+    insights: Arc<Mutex<Vec<InsightItem>>>,
     chunk_urls: Mutex<HashMap<String, String>>,
 }
 
@@ -133,10 +134,11 @@ impl SourceCtx {
             index,
             installer_end: 0,
             resource_version: None,
+            policy: super::download_plan::Policy::default(),
             dfs2: None,
             plugin_session: false,
             plugin: None,
-            insights: Mutex::new(Vec::new()),
+            insights: Arc::new(Mutex::new(Vec::new())),
             chunk_urls: Mutex::new(HashMap::new()),
         }
     }
@@ -147,6 +149,10 @@ impl SourceCtx {
 
     pub fn find(&self, name: &str) -> Option<&Embedded> {
         self.index.get(name)
+    }
+
+    pub fn insight_sink(&self) -> Arc<Mutex<Vec<InsightItem>>> {
+        self.insights.clone()
     }
 
     pub fn add_insight(&self, mut item: InsightItem, mode: Option<&str>) {
@@ -312,9 +318,10 @@ async fn fetch_hashed_metadata(url: &str) -> anyhow::Result<RepoMetadata> {
 }
 
 async fn fetch_dfs2_metadata(api_url: &str, ctx: &mut SourceCtx) -> anyhow::Result<RepoMetadata> {
-    let dfs2 = get_dfs2_metadata(api_url.to_string())
+    let (dfs2, policy) = get_dfs2_metadata(api_url.to_string())
         .await
         .map_err(attach_metadata)?;
+    ctx.policy = policy;
     let data = dfs2.data.ok_or_else(|| {
         anyhow!("dfs2 metadata is null").attach(crate::utils::code::METADATA_INVALID)
     })?;

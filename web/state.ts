@@ -24,14 +24,49 @@ export function errorDialogArgs(coded: Coded) {
   };
 }
 
-export type Progress = {
-  sub_step: number;
-  percent: number;
-  stage: string;
-  subject: string | null;
-  done: number | null;
+export type ProgressStage =
+  | 'prepare' | 'fetch_metadata' | 'scan_files'
+  | 'prepare_download' | 'create_download_session' | 'process_files'
+  | 'download_archive' | 'verify_archive' | 'extract_archive' | 'commit'
+  | 'download_runtime' | 'install_runtime' | 'create_shortcuts'
+  | 'write_registry' | 'finalize' | 'uninstall_scan' | 'uninstall_delete';
+
+export type CancelState = 'available' | 'requested' | 'unavailable';
+export type ProgressUnit = 'bytes' | 'files' | 'operations';
+export type FileAction = 'download' | 'extract' | 'patch' | 'verify' | 'flush' | 'retry';
+
+export type ProgressCounter = {
+  unit: ProgressUnit;
+  done: number;
   total: number | null;
 };
+
+export type ByteProgress = {
+  done: number;
+  total: number | null;
+};
+
+export type FileProgress = {
+  id: number;
+  name: string;
+  action: FileAction;
+  bytes: ByteProgress | null;
+};
+
+export type Progress = {
+  step: number | null;
+  stage: ProgressStage;
+  subject: string | null;
+  percent: number | null;
+  cancel: CancelState;
+  summary: ProgressCounter | null;
+  processing_bps: number | null;
+  network_bps: number | null;
+  network_pending: boolean;
+  files: FileProgress[];
+};
+
+export type RunningPhase = { kind: 'running' } & Progress;
 
 export type SessionResult = {
   already_latest: boolean;

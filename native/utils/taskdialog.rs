@@ -411,6 +411,23 @@ unsafe extern "system" fn progress_callback(
             if let Some(token) = &shared.cancel {
                 if !shared.closing.load(Ordering::SeqCst) {
                     token.cancel();
+                    unsafe {
+                        SendMessageW(
+                            hwnd,
+                            windows::Win32::UI::Controls::TDM_ENABLE_BUTTON.0 as u32,
+                            Some(WPARAM(IDCANCEL.0 as usize)),
+                            Some(LPARAM(0)),
+                        );
+                    }
+                    let text = wide(&crate::utils::i18n::t("running.cancelling", &[]));
+                    unsafe {
+                        SendMessageW(
+                            hwnd,
+                            TDM_UPDATE_ELEMENT_TEXT.0 as u32,
+                            Some(WPARAM(TDE_CONTENT.0 as usize)),
+                            Some(LPARAM(text.as_ptr() as isize)),
+                        );
+                    }
                     // the session decides when the dialog goes away
                     return S_FALSE;
                 }

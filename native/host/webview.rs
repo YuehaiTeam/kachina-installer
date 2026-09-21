@@ -10,7 +10,9 @@ use webview2_com::*;
 use windows::core::{Interface, PCWSTR, PWSTR};
 use windows::Win32::Foundation::{E_POINTER, HWND, RECT};
 use windows::Win32::System::Com::IStream;
-use windows::Win32::UI::Input::KeyboardAndMouse::{GetKeyState, VK_CONTROL, VK_F12, VK_I, VK_SHIFT};
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    GetKeyState, VK_CONTROL, VK_F12, VK_I, VK_SHIFT,
+};
 use windows::Win32::UI::Shell::SHCreateMemStream;
 use windows::Win32::UI::WindowsAndMessaging::DestroyWindow;
 

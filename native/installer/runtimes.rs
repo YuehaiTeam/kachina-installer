@@ -162,7 +162,7 @@ pub async fn install_dotnet(
             .context("RUNTIME_DOWNLOAD_ERR")?;
         (stream, len.try_into().unwrap_or(0))
     };
-    let progress_noti = move |downloaded: usize| {
+    let progress_noti = |downloaded: usize| {
         notify(Progress::BytesOf {
             done: downloaded as u64,
             total: len as u64,
@@ -172,6 +172,9 @@ pub async fn install_dotnet(
     // close streams
     drop(stream);
     drop(target);
+    notify(Progress::Stage(
+        crate::session::state::ProgressStage::InstallRuntime,
+    ));
     let child = process::spawn(&installer_path, &["/passive", "/norestart"], false)
         .context("RUNTIME_INSTALL_START_ERR")?;
     let code = child.wait().await.context("RUNTIME_INSTALL_WAIT_ERR")?;
@@ -245,7 +248,7 @@ pub async fn install_vcredist(
     let mut target = create_staged_file(&installer_path)
         .await
         .context("CREATE_TARGET_FILE_ERR")?;
-    let progress_noti = move |downloaded: usize| {
+    let progress_noti = |downloaded: usize| {
         notify(Progress::BytesOf {
             done: downloaded as u64,
             total: len as u64,
@@ -255,6 +258,9 @@ pub async fn install_vcredist(
     // close streams
     drop(stream);
     drop(target);
+    notify(Progress::Stage(
+        crate::session::state::ProgressStage::InstallRuntime,
+    ));
     let child = process::spawn(
         &installer_path,
         &["/install", "/quiet", "/norestart"],

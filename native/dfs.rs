@@ -100,7 +100,7 @@ pub struct Dfs2BatchChunkResponse {
     pub urls: HashMap<String, Dfs2ChunkUrlResult>,
 }
 
-#[derive(Clone, Deserialize, Serialize, Debug)]
+#[derive(Clone, Deserialize, Serialize, Debug, PartialEq, Eq)]
 pub struct InsightItem {
     pub url: String,
     pub ttfb: u32, // 首字节时间(ms)
@@ -283,7 +283,9 @@ pub async fn get_dfs(
 }
 
 // DFS2 API commands
-pub async fn get_dfs2_metadata(api_url: String) -> anyhow::Result<Dfs2Metadata> {
+pub async fn get_dfs2_metadata(
+    api_url: String,
+) -> anyhow::Result<(Dfs2Metadata, crate::session::download_plan::Policy)> {
     let url_with_metadata = if api_url.contains('?') {
         format!("{}&with_metadata=1", api_url)
     } else {
@@ -300,13 +302,26 @@ pub async fn get_dfs2_metadata(api_url: String) -> anyhow::Result<Dfs2Metadata> 
         return Err(status_error(res).await);
     }
 
+    let hints = res.headers();
+    let number = |name| {
+        hints
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.parse::<u64>().ok())
+    };
+    let policy = crate::session::download_plan::Policy::from_hints(
+        number("dfs-max-part-bytes"),
+        number("dfs-preferred-part-upper-bytes"),
+        number("dfs-preferred-part-lower-bytes"),
+        number("dfs-download-concurrency").and_then(|n| usize::try_from(n).ok()),
+    );
     let body_text = res
         .text()
         .await
         .with_http_context("get_dfs2_metadata", &url_with_metadata)
         .context("read response body")?;
 
-    parse_json(&body_text)
+    Ok((parse_json(&body_text)?, policy))
 }
 
 pub async fn create_dfs2_session(

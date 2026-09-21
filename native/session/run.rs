@@ -2,7 +2,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use anyhow::{anyhow, bail};
+use anyhow::bail;
 use futures::future::join_all;
 use serde_json::{json, Value};
 use tokio::sync::Semaphore;
@@ -36,10 +36,12 @@ use crate::session::plan::{
 };
 use crate::session::source::{
     cleanup_dfs2, ensure_dfs2_session, fetch_metadata, hash_of_item, needs_js_plugin, parse_source,
-    prefetch_chunk_urls, resolve_file_location, resolve_range_url, FileLocation, ParsedSource,
-    SourceCtx,
+    resolve_file_location, resolve_range_url, FileLocation, ParsedSource, SourceCtx,
 };
-use crate::session::state::{Phase, Progress as UiProgress, Prompt, UiState};
+use crate::session::state::{
+    ByteProgress, CancelState, FileAction, FileProgress, Phase, Progress as UiProgress,
+    ProgressCounter, ProgressStage, ProgressUnit, Prompt, UiState,
+};
 use crate::session::types::{version_gt, ProjectConfig, SessionResult, Settings, SourceField};
 use crate::session::ui::{send_ev_insight, SessionUi, SilentPluginUi};
 use crate::thirdparty::mirrorc::get_mirrorc_status;
@@ -64,13 +66,110 @@ pub async fn run_op(
     mgr.run(op, elevate, on_progress).await.into_anyhow()
 }
 
+struct OperationProgress {
+    network_pending: bool,
+    network_bytes: u64,
+    processing_bytes: u64,
+    finished: bool,
+    network_rate: super::rate::Rate,
+    processing_rate: super::rate::Rate,
+}
+impl OperationProgress {
+    fn new(network_pending: bool) -> Self {
+        Self {
+            network_pending,
+            network_bytes: 0,
+            processing_bytes: 0,
+            finished: false,
+            network_rate: super::rate::Rate::new(Instant::now()),
+            processing_rate: super::rate::Rate::new(Instant::now()),
+        }
+    }
+    fn observe(&mut self, p: &Progress) -> bool {
+        if self.finished {
+            return false;
+        }
+        match p {
+            Progress::Network(snapshot) | Progress::NetworkFinal(snapshot) => {
+                self.network_bytes = self.network_bytes.max(snapshot.bytes);
+                if snapshot.bytes > 0 || snapshot.active > 0 {
+                    self.network_pending = snapshot.active > 0;
+                }
+                if matches!(p, Progress::NetworkFinal(_)) {
+                    self.network_pending = false;
+                    self.finished = true;
+                }
+            }
+            Progress::BytesOf { done, .. } => {
+                self.processing_bytes = self.processing_bytes.max(*done)
+            }
+            Progress::Stage(_) => self.network_pending = false,
+            _ => {}
+        }
+        true
+    }
+    fn publish(&mut self, ui: &LiveUi<'_>) {
+        let mut state = ui.live.lock().unwrap();
+        if let Phase::Running(p) = &mut state.phase {
+            p.network_pending = self.network_pending;
+            let network = self.network_rate.sample(Instant::now(), self.network_bytes);
+            p.network_bps = if p.network_pending { network } else { None };
+            let processing = self
+                .processing_rate
+                .sample(Instant::now(), self.processing_bytes);
+            p.processing_bps = if p.stage.unit() == ProgressUnit::Bytes {
+                processing
+            } else {
+                None
+            };
+            if p.cancel == CancelState::Available && ui.cancel.is_cancelled() {
+                p.cancel = CancelState::Requested;
+            }
+        }
+        ui.inner.state(&state);
+    }
+}
+
 async fn run_op_with_ui(
     mgr: &ManagedElevate,
     elevate: bool,
-    op: IpcOperation,
+    mut op: IpcOperation,
     ui: &LiveUi<'_>,
     mut on_ui: impl FnMut(&LiveUi<'_>, &Progress),
 ) -> anyhow::Result<IpcResult> {
+    let mut stats = OperationProgress::new(matches!(
+        &op,
+        IpcOperation::RunMirrorcDownload { .. } | IpcOperation::InstallRuntime { offset: None, .. }
+    ));
+    let session = if let IpcOperation::RunMirrorcDownload { zip_path, .. } = &op {
+        let session = uuid::Uuid::new_v4().to_string();
+        run_op(
+            mgr,
+            elevate,
+            IpcOperation::BeginDownload(crate::ipc::download::Config {
+                id: session.clone(),
+                concurrency: 1,
+                prefetch_bytes: 0,
+                dl_dir: std::path::Path::new(zip_path)
+                    .parent()
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned(),
+            }),
+            progress_noop(),
+        )
+        .await?;
+        op = IpcOperation::Download(
+            crate::ipc::download::Job {
+                session: session.clone(),
+                large: true,
+            },
+            Box::new(op),
+        );
+        Some(session)
+    } else {
+        None
+    };
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Progress>();
     let mut op_fut = Box::pin(run_op(
         mgr,
@@ -80,12 +179,35 @@ async fn run_op_with_ui(
             let _ = tx.send(p);
         }),
     ));
-    loop {
+    let mut cancelled = false;
+    let mut interval = tokio::time::interval(std::time::Duration::from_millis(100));
+    let result = loop {
         tokio::select! {
-            Some(p) = rx.recv() => on_ui(ui, &p),
-            res = &mut op_fut => return res,
+            Some(p) = rx.recv() => { if stats.observe(&p) { on_ui(ui, &p); } },
+            _ = ui.cancel.cancelled(), if session.is_some() && !cancelled => {
+                cancelled = true;
+                run_op(mgr, elevate, IpcOperation::CancelDownload(session.clone().unwrap()), progress_noop()).await?;
+            }
+            _ = interval.tick() => {
+                stats.publish(ui);
+            }
+            result = &mut op_fut => {
+                while let Ok(p) = rx.try_recv() { if stats.observe(&p) { on_ui(ui, &p); } }
+                break result;
+            }
         }
+    };
+    if let Some(session) = session {
+        run_op(
+            mgr,
+            elevate,
+            IpcOperation::EndDownload(session),
+            progress_noop(),
+        )
+        .await?;
+        ui.check_cancel()?;
     }
+    result
 }
 
 fn runtime_name(tag: &str) -> &str {
@@ -104,6 +226,18 @@ async fn run_download_op(
     mode: Option<&str>,
     on_progress: ProgressNotify,
 ) -> anyhow::Result<(IpcResult, Option<InsightItem>)> {
+    let insights = ctx.insight_sink();
+    let mode_owned = mode.map(str::to_owned);
+    let on_progress = progress_notify(move |p| {
+        if let Progress::Insight(mut item) = p {
+            if crate::dfs::is_remote_insight_url(&item.url) {
+                item.mode = mode_owned.clone();
+                insights.lock().unwrap().push(item);
+            }
+        } else {
+            on_progress(p);
+        }
+    });
     match mgr.run(op, elevate, on_progress).await {
         Ok(result) => {
             let insight = result.insight();
@@ -132,7 +266,9 @@ fn mode_from_op(op: &IpcOperation) -> Option<&'static str> {
         IpcOperation::InstallFile(args) => match &args.mode {
             InstallFileMode::HybridPatch { .. } => Some("hybridpatch"),
             InstallFileMode::Patch { .. } => Some("patch"),
-            InstallFileMode::Direct(InstallFileSource::Url { .. }) => Some("direct"),
+            InstallFileMode::Direct(
+                InstallFileSource::Url { .. } | InstallFileSource::Sliced { .. },
+            ) => Some("direct"),
             _ => None,
         },
         _ => None,
@@ -284,7 +420,10 @@ async fn recover_or_discard(
         "recovering interrupted commit ({} units)",
         journal.units.len()
     );
-    progress(ui, 2, 95.0, "commit", None, None, None);
+    if !ui.inner.begin_commit() {
+        return Err(crate::utils::code::Cancelled.into());
+    }
+    progress(ui, 2, 95.0, ProgressStage::Commit, None, None, None);
     let args = CommitArgs {
         staging_root: staged.root(),
         install_dir: settings.install_path.clone(),
@@ -297,7 +436,15 @@ async fn recover_or_discard(
         ui,
         |ui, p| {
             if let Progress::CountOf { done, total } = p {
-                progress(ui, 2, 95.0, "commit", None, Some(*done), Some(*total));
+                progress(
+                    ui,
+                    2,
+                    95.0,
+                    ProgressStage::Commit,
+                    None,
+                    Some(*done),
+                    Some(*total),
+                );
             }
         },
     )
@@ -605,11 +752,14 @@ async fn commit_staged(
     ui: &LiveUi<'_>,
     mgr: &ManagedElevate,
 ) -> anyhow::Result<bool> {
+    if !ui.inner.begin_commit() {
+        return Err(Cancelled.into());
+    }
     progress(
         ui,
         2,
         95.0,
-        "commit",
+        ProgressStage::Commit,
         None,
         Some(0),
         Some(journal.units.len() as u64),
@@ -625,12 +775,12 @@ async fn commit_staged(
         ui,
         |ui, p| {
             if let Progress::CountOf { done, total } = p {
-                let total = (*total).max(1);
+                let total = *total;
                 progress(
                     ui,
                     2,
-                    95.0 + (*done as f64 / total as f64) * 3.0,
-                    "commit",
+                    95.0 + (*done as f64 / total.max(1) as f64) * 3.0,
+                    ProgressStage::Commit,
                     None,
                     Some(*done),
                     Some(total),
@@ -694,20 +844,35 @@ fn progress(
     ui: &LiveUi<'_>,
     sub_step: u32,
     percent: f64,
-    stage: &'static str,
+    stage: ProgressStage,
     subject: Option<&str>,
     done: Option<u64>,
     total: Option<u64>,
 ) {
     let mut state = ui.live.lock().unwrap_or_else(|e| e.into_inner());
-    state.phase = Phase::Running(UiProgress {
-        sub_step,
-        percent,
-        stage,
-        subject: subject.map(str::to_string),
+    let step = if state.mode == crate::session::state::Mode::Uninstall {
+        None
+    } else {
+        Some(sub_step as u8)
+    };
+    let mut value = UiProgress::new(stage, step, Some(percent));
+    if let Phase::Running(previous) = &state.phase {
+        if previous.stage == stage {
+            value.processing_bps = previous.processing_bps;
+            value.network_bps = previous.network_bps;
+            value.network_pending = previous.network_pending;
+        }
+    }
+    value.subject = subject.map(str::to_string);
+    value.summary = done.map(|done| ProgressCounter {
+        unit: stage.unit(),
         done,
         total,
     });
+    if value.cancel == CancelState::Available && ui.cancel.is_cancelled() {
+        value.cancel = CancelState::Requested;
+    }
+    state.phase = Phase::Running(value);
     let snap = state.clone();
     drop(state);
     ui.inner.state(&snap);
@@ -987,7 +1152,7 @@ async fn run_dfs_install(
     mgr: &ManagedElevate,
     txn: &crate::utils::sentry::Transaction,
 ) -> anyhow::Result<SessionResult> {
-    progress(ui, 0, 1.0, "metadata", None, None, None);
+    progress(ui, 0, 1.0, ProgressStage::FetchMetadata, None, None, None);
     session_dump!(
         settings.dump_dir.as_deref(),
         "01-settings.json",
@@ -1163,7 +1328,7 @@ async fn dfs_staged(
             }
         }
     }
-    progress(ui, 1, 5.0, "hash_scan", None, None, None);
+    progress(ui, 1, 5.0, ProgressStage::ScanFiles, None, None, None);
     let (local, scan) = txn
         .timed(
             "hash-scan",
@@ -1287,7 +1452,6 @@ async fn dfs_staged(
             finish_install(settings, config, project, Some(latest), ui, mgr),
         )
         .await?;
-        progress(ui, 3, 100.0, "already_latest", None, None, None);
         return Ok((
             SessionResult::install(true, settings.is_update),
             self_replaced,
@@ -1342,6 +1506,7 @@ async fn dfs_staged(
         config.embedded_files.as_deref().unwrap_or(&[]),
         &latest.patches,
         source_ctx,
+        &local,
     );
     let ranges = dfs2_ranges(
         &tasks,
@@ -1350,6 +1515,15 @@ async fn dfs_staged(
         config.embedded_files.as_deref().unwrap_or(&[]),
         &latest.patches,
         &local,
+    );
+    progress(
+        ui,
+        2,
+        20.0,
+        ProgressStage::CreateDownloadSession,
+        None,
+        None,
+        None,
     );
     if let Err(err) =
         ensure_dfs2_session(source_ctx, ranges.clone(), settings.dfs_extras.as_deref()).await
@@ -1365,9 +1539,16 @@ async fn dfs_staged(
         None => err,
     };
     log_task_plan(&tasks, &ranges);
-    prefetch_chunk_urls(source_ctx, ranges).await;
 
-    progress(ui, 2, 20.0, "plan", None, None, None);
+    progress(
+        ui,
+        2,
+        20.0,
+        ProgressStage::PrepareDownload,
+        None,
+        None,
+        None,
+    );
     let ops = txn
         .timed(
             "download",
@@ -1442,14 +1623,13 @@ async fn dfs_staged(
     )
     .await
     .map_err(tag_sid)?;
-    progress(ui, 3, 98.0, "finalize", None, None, None);
+    progress(ui, 3, 98.0, ProgressStage::Finalize, None, None, None);
     txn.timed(
         "finalize",
         finish_install(settings, config, project, Some(latest), ui, mgr),
     )
     .await
     .map_err(tag_sid)?;
-    progress(ui, 3, 100.0, "install_done", None, None, None);
     Ok((
         SessionResult::install(false, settings.is_update),
         self_replaced,
@@ -1621,13 +1801,13 @@ async fn scan_local(
                 let Progress::CountOf { done: cur, total } = p else {
                     continue;
                 };
-                let total = total.max(1);
-                progress(ui, 1, 5.0 + (cur as f64 / total as f64) * 15.0, "hash_scan", None, Some(cur), Some(total));
+
+                progress(ui, 1, 5.0 + (cur as f64 / total.max(1) as f64) * 15.0, ProgressStage::ScanFiles, None, Some(cur), Some(total));
             }
             res = &mut op_fut => break res?,
         }
     };
-    progress(ui, 1, 20.0, "hash_scan", None, None, None);
+    progress(ui, 1, 20.0, ProgressStage::ScanFiles, None, None, None);
     let IpcResult::CheckLocalFiles(scan) = raw else {
         bail!("IPC_SHAPE_ERR");
     };
@@ -1658,64 +1838,100 @@ struct FileProg {
     size: u64,
     downloaded: u64,
     running: bool,
+    network_pending: bool,
+    action: FileAction,
+    bytes: Option<ByteProgress>,
 }
 
 struct DownloadProg {
     files: Vec<FileProg>,
-    last_bytes: u64,
-    last_at: Instant,
+    processed: u64,
+    network_bytes: u64,
+    processing_rate: super::rate::Rate,
+    network_rate: super::rate::Rate,
 }
 
 impl DownloadProg {
-    fn from_tasks(tasks: &[InstallTask]) -> Self {
+    fn from_tasks(
+        tasks: &[InstallTask],
+        local: &[Embedded],
+        patches: &[crate::utils::metadata::PatchInfo],
+        hash_key: HashKey,
+    ) -> Self {
         let mut files = Vec::new();
         for task in tasks {
-            match task {
-                InstallTask::Single(item) => files.push(FileProg {
+            let network = !is_local_task(task, local, patches, hash_key);
+            let mut push = |item: &FileMeta, size| {
+                files.push(FileProg {
                     name: item.file_name.clone(),
-                    size: item.size.max(1),
+                    size,
                     downloaded: 0,
                     running: false,
-                }),
-                InstallTask::Merged { files: group, .. } => {
-                    for file in group {
-                        files.push(FileProg {
-                            name: file.item.file_name.clone(),
-                            size: file.item.size.max(1),
-                            downloaded: 0,
-                            running: false,
-                        });
+                    network_pending: network,
+                    action: FileAction::Download,
+                    bytes: None,
+                })
+            };
+            match task {
+                InstallTask::Single(item) => push(item, item.size),
+                InstallTask::Merged { files, .. } => {
+                    for file in files {
+                        push(
+                            &file.item,
+                            file.patch.as_ref().map_or(file.item.size, |p| p.size),
+                        );
                     }
                 }
             }
         }
         Self {
             files,
-            last_bytes: 0,
-            last_at: Instant::now(),
+            processed: 0,
+            network_bytes: 0,
+            processing_rate: super::rate::Rate::new(Instant::now()),
+            network_rate: super::rate::Rate::new(Instant::now()),
         }
     }
-
-    fn render(&mut self) -> (f64, Option<String>, u64, u64) {
-        let total: u64 = self.files.iter().map(|f| f.size).sum::<u64>().max(1);
-        let done: u64 = self.files.iter().map(|f| f.downloaded.min(f.size)).sum();
-        let now = Instant::now();
-        let dt = now.duration_since(self.last_at).as_millis() as f64;
-        if dt > 100.0 {
-            self.last_bytes = done;
-            self.last_at = now;
-        }
-        let subject = self
+    fn render(&mut self) -> UiProgress {
+        let total: u64 = self.files.iter().map(|f| f.size).sum();
+        let done: u64 = self.files.iter().map(|f| f.downloaded).sum();
+        let mut progress = UiProgress::new(
+            ProgressStage::ProcessFiles,
+            Some(2),
+            Some(
+                20.0 + if total == 0 {
+                    75.0
+                } else {
+                    done as f64 / total.max(1) as f64 * 75.0
+                },
+            ),
+        );
+        progress.summary = Some(ProgressCounter {
+            unit: ProgressUnit::Bytes,
+            done,
+            total: Some(total),
+        });
+        progress.processing_bps = self.processing_rate.sample(Instant::now(), self.processed);
+        progress.network_pending = self.files.iter().any(|f| f.network_pending);
+        let speed = self.network_rate.sample(Instant::now(), self.network_bytes);
+        progress.network_bps = if progress.network_pending {
+            speed
+        } else {
+            None
+        };
+        progress.files = self
             .files
             .iter()
-            .find(|f| f.running && f.downloaded < f.size)
-            .map(|f| basename(&f.name).to_string());
-        (
-            20.0 + (done as f64 / total as f64) * 75.0,
-            subject,
-            done,
-            total,
-        )
+            .enumerate()
+            .filter(|(_, f)| f.running)
+            .map(|(id, f)| FileProgress {
+                id: id as u32,
+                name: f.name.clone(),
+                action: f.action,
+                bytes: f.bytes.clone(),
+            })
+            .collect();
+        progress
     }
 }
 
@@ -1723,62 +1939,114 @@ impl DownloadProg {
 struct ProgressHandle {
     inner: Arc<Mutex<DownloadProg>>,
     ids: Vec<usize>,
+    job: crate::ipc::download::Job,
 }
 
 impl ProgressHandle {
-    fn start(&self) {
-        if let Ok(mut g) = self.inner.lock() {
-            for id in &self.ids {
-                if let Some(f) = g.files.get_mut(*id) {
-                    f.running = true;
-                }
+    fn prepare(&self, op: &IpcOperation) {
+        if let IpcOperation::InstallFile(args) = op {
+            let (total, source) = match &args.mode {
+                InstallFileMode::Direct(source) => (args.output_size, source),
+                InstallFileMode::Patch { source, diff_size } => (*diff_size as u64, source),
+                InstallFileMode::HybridPatch {
+                    diff,
+                    diff_size,
+                    base_size,
+                    ..
+                } => (*diff_size as u64 + base_size, diff),
+            };
+            let mut g = self.inner.lock().unwrap();
+            if let Some(file) = self.ids.first().and_then(|id| g.files.get_mut(*id)) {
+                file.size = total;
+                file.downloaded = 0;
+                file.network_pending = !matches!(source, InstallFileSource::Local { .. });
+                file.bytes = None;
+                file.action = FileAction::Retry;
             }
         }
     }
-
-    fn set(&self, local_idx: usize, bytes: u64) {
-        let Some(&id) = self.ids.get(local_idx) else {
-            return;
-        };
-        if let Ok(mut g) = self.inner.lock() {
-            if let Some(f) = g.files.get_mut(id) {
-                f.downloaded = bytes;
-            }
+    fn finish(&self, _ok: bool) {
+        let mut g = self.inner.lock().unwrap();
+        for &id in &self.ids {
+            g.files[id].running = false;
+            g.files[id].network_pending = false;
         }
     }
-
-    fn finish(&self, ok: bool) {
-        if let Ok(mut g) = self.inner.lock() {
-            for id in &self.ids {
-                if let Some(f) = g.files.get_mut(*id) {
-                    f.running = false;
-                    if ok {
-                        f.downloaded = f.size;
-                    }
-                }
-            }
-        }
-    }
-
     fn only(&self, local_idx: usize) -> Self {
         Self {
             inner: self.inner.clone(),
+            job: self.job.clone(),
             ids: self.ids.get(local_idx).copied().into_iter().collect(),
         }
     }
-
     fn callback(&self) -> ProgressNotify {
         let handle = self.clone();
-        progress_notify(move |p| apply_ipc_progress(&handle, &p))
+        let mut sequences = vec![0; self.ids.len()];
+        let mut processed = vec![0; self.ids.len()];
+        let state = Mutex::new((
+            0u64,
+            false,
+            std::mem::take(&mut sequences),
+            std::mem::take(&mut processed),
+        ));
+        progress_notify(move |p| {
+            let mut state = state.lock().unwrap();
+            if state.1 {
+                return;
+            }
+            let mut g = handle.inner.lock().unwrap();
+            match p {
+                Progress::File(file) => {
+                    let index = file.index as usize;
+                    let Some(&id) = handle.ids.get(index) else {
+                        return;
+                    };
+                    if file.sequence <= state.2[index] {
+                        return;
+                    }
+                    state.2[index] = file.sequence;
+                    g.processed += file.processed.saturating_sub(state.3[index]);
+                    state.3[index] = file.processed;
+                    let target = &mut g.files[id];
+                    target.running = !file.finished;
+                    target.size = file.work_total;
+                    target.downloaded = file.completed;
+                    target.action = file.action;
+                    target.bytes = file.done.map(|done| ByteProgress {
+                        done,
+                        total: file.total,
+                    });
+                    if file.finished
+                        || matches!(file.action, FileAction::Verify | FileAction::Flush)
+                    {
+                        target.network_pending = false;
+                    }
+                }
+                Progress::Network(snapshot) | Progress::NetworkFinal(snapshot) => {
+                    g.network_bytes += snapshot.bytes.saturating_sub(state.0);
+                    state.0 = state.0.max(snapshot.bytes);
+                    let finished = matches!(p, Progress::NetworkFinal(_));
+                    if finished || snapshot.bytes > 0 || snapshot.active > 0 {
+                        for &id in &handle.ids {
+                            g.files[id].network_pending = !finished && snapshot.active > 0;
+                        }
+                    }
+                    state.1 = finished;
+                }
+                _ => {}
+            }
+        })
     }
 }
 
-fn apply_ipc_progress(handle: &ProgressHandle, p: &Progress) {
-    match p {
-        Progress::Chunk(index, bytes) => handle.set(*index as usize, *bytes),
-        Progress::Bytes(n) => handle.set(0, *n),
-        _ => {}
+fn download_progress(ui: &LiveUi<'_>, prog: &Arc<Mutex<DownloadProg>>) {
+    let mut value = prog.lock().unwrap().render();
+    if ui.cancel.is_cancelled() {
+        value.cancel = CancelState::Requested;
     }
+    let mut state = ui.live.lock().unwrap();
+    state.phase = Phase::Running(value);
+    ui.inner.state(&state);
 }
 
 fn task_bytes(task: &InstallTask) -> u64 {
@@ -1823,10 +2091,6 @@ fn format_size(size: u64) -> String {
     }
 }
 
-fn basename(path: &str) -> &str {
-    path.rsplit(['\\', '/']).next().unwrap_or(path)
-}
-
 fn log_task(
     mode: &str,
     size: u64,
@@ -1863,20 +2127,55 @@ async fn install_files(
 ) -> anyhow::Result<Vec<IpcOperation>> {
     let local_files = Arc::new(config.embedded_files.clone().unwrap_or_default());
     let disk_files = Arc::new(disk_files.to_vec());
-    let prog = Arc::new(Mutex::new(DownloadProg::from_tasks(tasks)));
+    let prog = Arc::new(Mutex::new(DownloadProg::from_tasks(
+        tasks,
+        local_files.as_slice(),
+        &latest.patches,
+        hash_key,
+    )));
     let has_error = Arc::new(AtomicBool::new(false));
     let cancel = ui.cancel.clone();
     let sizes: Vec<u64> = tasks.iter().map(task_bytes).collect();
     let threshold = size_threshold(&sizes);
+    let session = uuid::Uuid::new_v4().to_string();
+    let (large_limit, small_limit) = crate::ipc::download::limits(source_ctx.policy.concurrency);
+    run_op(
+        mgr,
+        settings.elevate,
+        IpcOperation::BeginDownload(crate::ipc::download::Config {
+            id: session.clone(),
+            concurrency: source_ctx.policy.concurrency,
+            prefetch_bytes: crate::fs::staging::free_space(staging.root())
+                .map(|free| free.saturating_sub(tasks.iter().map(task_bytes).sum()))
+                .unwrap_or(256 * 1024 * 1024)
+                .min(256 * 1024 * 1024) as usize,
+            dl_dir: staging.dl_dir().to_string_lossy().into_owned(),
+        }),
+        progress_noop(),
+    )
+    .await?;
     let local_sem = Arc::new(Semaphore::new(16));
-    let large_sem = Arc::new(Semaphore::new(5));
-    let small_sem = Arc::new(Semaphore::new(11));
-    tracing::info!(
-        "TaskManager initialized: threshold={}MB large=5 small=11 local=16 total={}",
-        (threshold as f64 / 1024.0 / 1024.0).round(),
-        tasks.len()
-    );
-
+    let large_sem = Arc::new(Semaphore::new(large_limit));
+    let small_sem = Arc::new(Semaphore::new(small_limit));
+    let requests = async_stream::stream! {
+        while let Some(query) = mgr.next_resolution().await { yield query; }
+    };
+    let mut resolving = Box::pin(futures::StreamExt::for_each_concurrent(
+        requests,
+        16,
+        |(query, remote)| async move {
+            let url = resolve_range_url(
+                source_ctx,
+                settings.dfs_extras.as_deref(),
+                query.offset as usize,
+                query.len as usize,
+            )
+            .await
+            .map_err(|err| format!("{err:#}"));
+            mgr.resolve_reply(crate::ipc::download::Reply { id: query.id, url }, remote)
+                .await;
+        },
+    ));
     let mut file_cursor = 0usize;
     let mut futs = Vec::new();
     for task in tasks {
@@ -1894,6 +2193,10 @@ async fn install_files(
         };
         let handle = ProgressHandle {
             inner: prog.clone(),
+            job: crate::ipc::download::Job {
+                session: session.clone(),
+                large: task_bytes(task) >= threshold,
+            },
             ids,
         };
         let sem = if is_local_task(task, local_files.as_ref(), &latest.patches, hash_key) {
@@ -1912,7 +2215,6 @@ async fn install_files(
             if has_error.load(Ordering::Relaxed) || cancel.is_cancelled() {
                 return None;
             }
-            handle.start();
             let local_ref = local_files.as_slice();
             let disk_ref = disk_files.as_slice();
             let res = match task {
@@ -2041,32 +2343,29 @@ async fn install_files(
     }
 
     let mut download = Box::pin(join_all(futs));
+    let mut cancel_sent = false;
     let results = loop {
         tokio::select! {
+            _ = &mut resolving => {},
             _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {
-                if let Ok(mut g) = prog.lock() {
-                    let (pct, subject, done, total) = g.render();
-                    progress(ui, 2, pct, "download", subject.as_deref(), Some(done), Some(total));
-                }
+                download_progress(ui, &prog);
             }
-            // dropping `download` aborts every in-flight stream; the staged
-            // files are thrown away with the staging directory
-            _ = cancel.cancelled() => return Err(anyhow::Error::new(Cancelled)),
+            _ = cancel.cancelled(), if !cancel_sent => {
+                cancel_sent = true;
+                run_op(mgr, settings.elevate, IpcOperation::CancelDownload(session.clone()), progress_noop()).await?;
+            }
             results = &mut download => break results,
         }
     };
-    if let Ok(mut g) = prog.lock() {
-        let (pct, subject, done, total) = g.render();
-        progress(
-            ui,
-            2,
-            pct,
-            "download",
-            subject.as_deref(),
-            Some(done),
-            Some(total),
-        );
-    }
+    run_op(
+        mgr,
+        settings.elevate,
+        IpcOperation::EndDownload(session),
+        progress_noop(),
+    )
+    .await?;
+    ui.check_cancel()?;
+    download_progress(ui, &prog);
 
     let mut ops = Vec::new();
     let mut first_err = None;
@@ -2074,7 +2373,7 @@ async fn install_files(
         match res {
             Ok(op) => ops.push(op),
             Err(err) => {
-                if first_err.is_none() {
+                if first_err.as_ref().is_none_or(is_cancelled) {
                     first_err = Some(err);
                 }
             }
@@ -2103,7 +2402,7 @@ async fn fallback_merged_files(
     let mut last = None;
     for &i in failed {
         if has_error.load(Ordering::Relaxed) {
-            return Err(anyhow!("merged fallback cancelled"));
+            return Err(Cancelled.into());
         }
         let Some(file) = files.get(i) else {
             continue;
@@ -2119,13 +2418,13 @@ async fn fallback_merged_files(
                 source_ctx,
                 staging,
                 mgr,
-                false,
+                true,
                 Some(handle.only(i)),
             )
             .await?,
         );
     }
-    last.ok_or_else(|| anyhow!("merged fallback cancelled"))
+    last.ok_or_else(|| Cancelled.into())
 }
 
 async fn install_one(
@@ -2145,7 +2444,7 @@ async fn install_one(
     let mut last_err = None;
     let mut first_op = None;
     let mut last_insight = None;
-    for attempt in 1..=3 {
+    for attempt in 1..=if skip_patch_first { 2 } else { 3 } {
         let skip_patch = skip_patch_first || attempt > 1;
         let ipc = build_install_op(
             settings,
@@ -2162,12 +2461,15 @@ async fn install_one(
         if first_op.is_none() {
             first_op = Some(ipc.clone());
         }
+        if let Some(handle) = &handle {
+            handle.prepare(&ipc);
+        }
         let mode = mode_from_op(&ipc);
         let result = if let Some(handle) = handle.clone() {
             run_download_op(
                 mgr,
                 settings.elevate,
-                ipc,
+                IpcOperation::Download(handle.job.clone(), Box::new(ipc)),
                 source_ctx,
                 mode,
                 handle.callback(),
@@ -2196,6 +2498,12 @@ async fn install_one(
                     None,
                 );
                 return Ok(first_op.unwrap());
+            }
+            Err(err)
+                if is_cancelled(&err)
+                    || matches!(extract(&err), Extracted::Coded(c) if matches!(c.code, DISK_FULL | FILE_IO_FAILED | crate::utils::code::PERMISSION_DENIED)) =>
+            {
+                return Err(err)
             }
             Err(err) => last_err = Some(err),
         }
@@ -2241,15 +2549,29 @@ async fn install_merged(
     let chunks: Vec<InstallFileArgs> = files
         .iter()
         .map(|file| InstallFileArgs {
-            mode: InstallFileMode::Direct(InstallFileSource::Url {
-                url: url.clone(),
-                offset: file.offset.saturating_sub(start),
-                size: file.size,
-                skip_decompress: false,
-                request_range: Some(range.to_string()),
-            }),
+            mode: {
+                let source = InstallFileSource::Url {
+                    url: url.clone(),
+                    offset: file.offset - start,
+                    size: file.size,
+                    skip_decompress: false,
+                    request_range: Some(range.to_string()),
+                };
+                if let Some(patch) = &file.patch {
+                    InstallFileMode::Patch {
+                        source,
+                        diff_size: patch.size as usize,
+                    }
+                } else {
+                    InstallFileMode::Direct(source)
+                }
+            },
+            output_size: file.item.size,
             target: staged_target(staging, &file.item.file_name),
-            old: None,
+            old: file
+                .patch
+                .as_ref()
+                .map(|_| join_install(&settings.install_path, &file.item.file_name)),
             md5: file.item.md5.clone(),
             xxh: file.item.xxh.clone(),
             clear_installer_index_mark: None,
@@ -2265,7 +2587,7 @@ async fn install_merged(
         run_download_op(
             mgr,
             settings.elevate,
-            ipc.clone(),
+            IpcOperation::Download(handle.job.clone(), Box::new(ipc.clone())),
             source_ctx,
             Some(mode),
             handle.callback(),
@@ -2348,6 +2670,7 @@ async fn build_install_op(
                     skip_decompress: false,
                 }),
                 target,
+                output_size: item.size,
                 old: None,
                 md5: item.md5.clone(),
                 xxh: item.xxh.clone(),
@@ -2363,14 +2686,22 @@ async fn build_install_op(
         if let Some(patch) = lpatch {
             if let Some(from) = side_hash(&patch.from, hash_key) {
                 if let Some(local) = local_files.iter().find(|l| l.name == from) {
-                    let loc = resolve_file_location(
+                    let loc = resolve_install_source(
                         source_ctx,
                         &format!("{from}_{hash}"),
                         settings.dfs_extras.as_deref(),
                         false,
+                        true,
                     )
                     .await?;
-                    return Ok(hybrid_op(local, loc, &target, item));
+                    return Ok(hybrid_op(
+                        local,
+                        loc,
+                        &target,
+                        item,
+                        patch.size as usize,
+                        patch.from.size,
+                    ));
                 }
             }
         }
@@ -2382,11 +2713,12 @@ async fn build_install_op(
         });
         if let Some(patch) = patch {
             if let Some(from) = side_hash(&patch.from, hash_key) {
-                if let Ok(loc) = resolve_file_location(
+                if let Ok(loc) = resolve_install_source(
                     source_ctx,
                     &format!("{from}_{hash}"),
                     settings.dfs_extras.as_deref(),
                     false,
+                    true,
                 )
                 .await
                 {
@@ -2403,9 +2735,42 @@ async fn build_install_op(
         }
     }
 
-    let loc =
-        resolve_file_location(source_ctx, &hash, settings.dfs_extras.as_deref(), installer).await?;
+    let loc = resolve_install_source(
+        source_ctx,
+        &hash,
+        settings.dfs_extras.as_deref(),
+        installer,
+        !skip_patch,
+    )
+    .await?;
     Ok(url_op(loc, &target, None, item, None, installer))
+}
+
+async fn resolve_install_source(
+    ctx: &SourceCtx,
+    hash: &str,
+    extras: Option<&str>,
+    installer: bool,
+    slice: bool,
+) -> anyhow::Result<InstallFileSource> {
+    if let Some(entry) = ctx.find(hash).filter(|entry| entry.size > 0) {
+        let range = super::download_plan::Range {
+            start: entry.offset as u64,
+            len: entry.size as u64,
+        };
+        let parts = if slice {
+            ctx.policy.split(range)
+        } else {
+            vec![range]
+        };
+        return Ok(InstallFileSource::Sliced {
+            parts: parts.into_iter().map(|p| (p.start, p.len)).collect(),
+            skip_decompress: false,
+        });
+    }
+    Ok(file_source(
+        resolve_file_location(ctx, hash, extras, installer).await?,
+    ))
 }
 
 fn side_hash(side: &crate::utils::metadata::PatchSide, key: HashKey) -> Option<&str> {
@@ -2446,14 +2811,13 @@ fn file_source(loc: FileLocation) -> InstallFileSource {
 }
 
 fn url_op(
-    loc: FileLocation,
+    source: InstallFileSource,
     target: &str,
     old: Option<String>,
     item: &FileMeta,
     diff_size: Option<usize>,
     installer: bool,
 ) -> IpcOperation {
-    let source = file_source(loc);
     let mode = if let Some(diff_size) = diff_size {
         InstallFileMode::Patch { source, diff_size }
     } else {
@@ -2462,6 +2826,7 @@ fn url_op(
     IpcOperation::InstallFile(InstallFileArgs {
         mode,
         target: target.to_string(),
+        output_size: item.size,
         old,
         md5: item.md5.clone(),
         xxh: item.xxh.clone(),
@@ -2469,10 +2834,19 @@ fn url_op(
     })
 }
 
-fn hybrid_op(local: &Embedded, loc: FileLocation, target: &str, item: &FileMeta) -> IpcOperation {
+fn hybrid_op(
+    local: &Embedded,
+    source: InstallFileSource,
+    target: &str,
+    item: &FileMeta,
+    diff_size: usize,
+    base_size: u64,
+) -> IpcOperation {
     IpcOperation::InstallFile(InstallFileArgs {
         mode: InstallFileMode::HybridPatch {
-            diff: file_source(loc),
+            diff_size,
+            base_size,
+            diff: source,
             source: InstallFileSource::Local {
                 offset: local.offset,
                 size: local.size,
@@ -2480,6 +2854,7 @@ fn hybrid_op(local: &Embedded, loc: FileLocation, target: &str, item: &FileMeta)
             },
         },
         target: target.to_string(),
+        output_size: item.size,
         old: None,
         md5: item.md5.clone(),
         xxh: item.xxh.clone(),
@@ -2507,11 +2882,27 @@ async fn install_runtimes(
             .as_ref()
             .and_then(|files| files.iter().find(|e| e.name == *tag));
         let name = runtime_name(tag);
-        progress(ui, 3, 96.0, "runtime_install", Some(name), None, None);
+        progress(
+            ui,
+            3,
+            96.0,
+            ProgressStage::InstallRuntime,
+            Some(name),
+            None,
+            None,
+        );
         let mut last_err = None;
         for _ in 0..3 {
-            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Progress>();
-            let mut op_fut = Box::pin(run_op(
+            progress(
+                ui,
+                3,
+                96.0,
+                ProgressStage::DownloadRuntime,
+                Some(name),
+                None,
+                None,
+            );
+            let res = run_op_with_ui(
                 mgr,
                 settings.elevate,
                 IpcOperation::InstallRuntime {
@@ -2520,33 +2911,30 @@ async fn install_runtimes(
                     size: embed.map(|e| e.size),
                     dl_dir: dl_dir.clone(),
                 },
-                progress_notify(move |p| {
-                    let _ = tx.send(p);
-                }),
-            ));
-            let res = loop {
-                tokio::select! {
-                    Some(p) = rx.recv() => {
-                        let Progress::BytesOf { done: cur, total } = p else {
-                            continue;
-                        };
-                        if total > 0 && cur + 1 < total {
-                            progress(
-                                ui,
-                                3,
-                                96.0,
-                                "runtime_download",
-                                Some(name),
-                                Some(cur),
-                                Some(total),
-                            );
-                        } else {
-                            progress(ui, 3, 96.0, "runtime_install", Some(name), None, None);
-                        }
-                    }
-                    res = &mut op_fut => break res,
-                }
-            };
+                ui,
+                |ui, p| match p {
+                    Progress::BytesOf { done, total } => progress(
+                        ui,
+                        3,
+                        96.0,
+                        ProgressStage::DownloadRuntime,
+                        Some(name),
+                        Some(*done),
+                        (*total > 0).then_some(*total),
+                    ),
+                    Progress::Stage(ProgressStage::InstallRuntime) => progress(
+                        ui,
+                        3,
+                        96.0,
+                        ProgressStage::InstallRuntime,
+                        Some(name),
+                        None,
+                        None,
+                    ),
+                    _ => {}
+                },
+            )
+            .await;
             match res {
                 Ok(_) => {
                     last_err = None;
@@ -2586,7 +2974,15 @@ async fn finish_install(
         &[("subject", project.app_name.as_str())],
     );
     let uninstall_lnk = format!("{}\\{}\\{}.lnk", program, project.app_name, uninstall_name);
-    progress(ui, 3, 98.0, "shortcut", None, None, None);
+    progress(
+        ui,
+        3,
+        98.0,
+        ProgressStage::CreateShortcuts,
+        None,
+        None,
+        None,
+    );
     if settings.create_lnk && !settings.is_update {
         create_lnk_or_notify(
             mgr,
@@ -2629,7 +3025,7 @@ async fn finish_install(
         .await;
     }
     if let Some(latest) = latest {
-        progress(ui, 3, 99.0, "registry", None, None, None);
+        progress(ui, 3, 99.0, ProgressStage::WriteRegistry, None, None, None);
         let size: u64 = latest.hashed.iter().map(|e| e.size).sum();
         if let Err(err) = run_op(
             mgr,
@@ -2682,7 +3078,7 @@ async fn run_mirrorc(
             settings.source_uri.clone(),
         )));
     };
-    progress(ui, 0, 2.0, "mirrorc_metadata", None, None, None);
+    progress(ui, 0, 2.0, ProgressStage::FetchMetadata, None, None, None);
     let current_version = win32_version_info::VersionInfo::from_file(join_install(
         &settings.install_path,
         &project.exe_name,
@@ -2799,9 +3195,8 @@ async fn mirrorc_staged(
         .join(format!("{sha256}.zip"))
         .to_string_lossy()
         .to_string();
-    progress(ui, 1, 5.0, "mirrorc_download", None, None, None);
-    let cancel = ui.cancel.clone();
-    let download = run_op_with_ui(
+    progress(ui, 1, 5.0, ProgressStage::PrepareDownload, None, None, None);
+    run_op_with_ui(
         mgr,
         settings.elevate,
         IpcOperation::RunMirrorcDownload {
@@ -2815,25 +3210,26 @@ async fn mirrorc_staged(
                 total,
             } = p
             {
-                let total = (*total).max(1);
+                let total = *total;
                 progress(
                     ui,
                     1,
-                    5.0 + (*downloaded as f64 / total as f64) * 65.0,
-                    "mirrorc_download",
+                    5.0 + if total == 0 {
+                        0.0
+                    } else {
+                        *downloaded as f64 / total.max(1) as f64 * 65.0
+                    },
+                    ProgressStage::DownloadArchive,
                     None,
                     Some(*downloaded),
-                    Some(total),
+                    (total > 0).then_some(total),
                 );
             }
         },
-    );
-    tokio::select! {
-        res = download => res?,
-        _ = cancel.cancelled() => return Err(anyhow::Error::new(Cancelled)),
-    };
+    )
+    .await?;
     ui.check_cancel()?;
-    progress(ui, 2, 70.0, "mirrorc_verify", None, None, None);
+    progress(ui, 2, 70.0, ProgressStage::VerifyArchive, None, None, None);
     let new_dir = staged.staging.new_dir().to_string_lossy().to_string();
     let installed = run_op_with_ui(
         mgr,
@@ -2851,12 +3247,12 @@ async fn mirrorc_staged(
                 total,
             } = p
             {
-                let total = (*total).max(1);
+                let total = *total;
                 progress(
                     ui,
                     2,
-                    70.0 + (*count as f64 / total as f64) * 25.0,
-                    "extract",
+                    70.0 + (*count as f64 / total.max(1) as f64) * 25.0,
+                    ProgressStage::ExtractArchive,
                     Some(file),
                     Some(*count),
                     Some(total),
@@ -2931,7 +3327,6 @@ async fn mirrorc_staged(
     .await?;
     install_runtimes(settings, config, project, &staged.staging, ui, mgr).await?;
     finish_install(settings, config, project, meta.as_ref(), ui, mgr).await?;
-    progress(ui, 3, 100.0, "install_done", None, None, None);
     Ok((
         SessionResult::install(false, settings.is_update),
         self_replaced,
@@ -2983,7 +3378,7 @@ async fn run_uninstall_inner(
     mgr: &ManagedElevate,
 ) -> anyhow::Result<SessionResult> {
     log_session_start("uninstall", settings, config, project);
-    progress(ui, 0, 10.0, "uninstall_scan", None, None, None);
+    progress(ui, 0, 10.0, ProgressStage::UninstallScan, None, None, None);
     let meta = read_uninstall_metadata_raw(&project.reg_name, Some(settings.install_path.as_str()))
         .map_err(|e| e.attach(UNINSTALL_INFO_MISSING))?;
     tracing::info!("UNINSTALL_METADATA: {meta}");
@@ -3014,7 +3409,15 @@ async fn run_uninstall_inner(
     if settings.elevate {
         let _ = run_op(mgr, true, IpcOperation::Ping, progress_noop()).await;
     }
-    progress(ui, 1, 40.0, "uninstall_delete", None, None, None);
+    progress(
+        ui,
+        1,
+        40.0,
+        ProgressStage::UninstallDelete,
+        None,
+        None,
+        None,
+    );
     let raw = run_op(
         mgr,
         settings.elevate,
@@ -3038,7 +3441,6 @@ async fn run_uninstall_inner(
     if let Some(root) = outcome.self_moved_to.as_deref() {
         schedule_delete_on_exit(root);
     }
-    progress(ui, 2, 100.0, "uninstall_done", None, None, None);
     let _ = config;
     Ok(SessionResult::uninstall())
 }
@@ -3380,5 +3782,60 @@ mod tests {
             rels(&units),
             vec!["file:app.exe".to_string(), "copy:link/f.dll".to_string()]
         );
+    }
+    #[test]
+    fn file_progress_keeps_attempt_work_and_ignores_late_snapshots() {
+        let tasks = vec![InstallTask::Single(meta("app.exe", "h"))];
+        let prog = Arc::new(Mutex::new(DownloadProg::from_tasks(
+            &tasks,
+            &[],
+            &[],
+            HashKey::Md5,
+        )));
+        let handle = ProgressHandle {
+            inner: prog.clone(),
+            ids: vec![0],
+            job: crate::ipc::download::Job {
+                session: "test".into(),
+                large: true,
+            },
+        };
+        let first = handle.callback();
+        let reporter = crate::ipc::file_progress::Reporter::new(20, first.clone());
+        reporter.action(FileAction::Patch, Some(20));
+        reporter.bytes(10);
+        first(Progress::Network(crate::ipc::network::Snapshot {
+            bytes: u32::MAX as u64 + 5,
+            active: 1,
+        }));
+        first(Progress::NetworkFinal(crate::ipc::network::Snapshot {
+            bytes: u32::MAX as u64 + 8,
+            active: 0,
+        }));
+        reporter.bytes(19);
+        first(Progress::Network(crate::ipc::network::Snapshot {
+            bytes: 3,
+            active: 1,
+        }));
+        let second = handle.callback();
+        let reporter = crate::ipc::file_progress::Reporter::new(100, second.clone());
+        reporter.action(FileAction::Extract, Some(80));
+        reporter.bytes(80);
+        reporter.action(FileAction::Patch, Some(20));
+        reporter.bytes(20);
+        reporter.action(FileAction::Verify, None);
+        {
+            let mut prog = prog.lock().unwrap();
+            assert_eq!(prog.processed, 110);
+            assert_eq!(prog.network_bytes, u32::MAX as u64 + 8);
+            let view = prog.render();
+            assert_eq!(view.files[0].action, FileAction::Verify);
+            assert!(view.files[0].bytes.is_none());
+            assert_eq!(view.summary.unwrap().done, 100);
+        }
+        reporter.action(FileAction::Flush, None);
+        reporter.finish();
+        assert!(prog.lock().unwrap().render().files.is_empty());
+        assert_eq!(prog.lock().unwrap().processed, 110);
     }
 }

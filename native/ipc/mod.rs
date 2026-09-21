@@ -1,5 +1,8 @@
+pub mod download;
+pub mod file_progress;
 pub mod install_file;
 pub mod manager;
+pub mod network;
 pub mod operation;
 
 use std::sync::Arc;
@@ -62,6 +65,11 @@ pub async fn read_frame<R: AsyncRead + Unpin>(reader: &mut R) -> std::io::Result
 // 的同型字段保留具名，写反不会被编译器发现。
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub enum Progress {
+    Insight(crate::dfs::InsightItem),
+    Network(network::Snapshot),
+    NetworkFinal(network::Snapshot),
+    File(file_progress::Snapshot),
+    Stage(crate::session::state::ProgressStage),
     Bytes(u64),
     Chunk(u32, u64),
     BytesOf { done: u64, total: u64 },
@@ -184,11 +192,12 @@ impl IpcResult {
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub enum PipeMsg {
     Progress(String, Progress),
-    Ok(String, IpcResult),
-    Err(String, IpcError),
+    Ok(String, IpcResult, network::Stats),
+    Err(String, IpcError, network::Stats),
     Envelope(String),
     Breadcrumb(String),
     Disconnect(String),
+    Resolve(download::Resolve),
 }
 
 #[cfg(test)]
@@ -236,8 +245,9 @@ mod tests {
                 ],
                 insight: insight(None),
             }),
+            network::Stats::default(),
         ));
-        let PipeMsg::Ok(id, IpcResult::InstallMultichunkStream(r)) = multi else {
+        let PipeMsg::Ok(id, IpcResult::InstallMultichunkStream(r), _) = multi else {
             panic!("variant lost");
         };
         assert_eq!(id, "id");
@@ -268,10 +278,11 @@ mod tests {
                 files: vec![("a/b.dll".into(), "h".into())],
                 deletes: vec!["gone".into()],
             }),
+            network::Stats::default(),
         ));
         assert!(matches!(
             meta,
-            PipeMsg::Ok(_, IpcResult::RunMirrorcInstall(m))
+            PipeMsg::Ok(_, IpcResult::RunMirrorcInstall(m), _)
                 if m.metadata.as_deref().is_some_and(|s| s.contains("tag_name"))
                     && m.files.len() == 1 && m.deletes == vec!["gone".to_string()]
         ));
@@ -288,8 +299,12 @@ mod tests {
                 .with_sid("sid-1")
                 .wrap(anyhow::anyhow!("timed out (https://cdn.example/a)")),
         );
-        let back = roundtrip(&PipeMsg::Err("e".into(), IpcError::from_ta(&err)));
-        let PipeMsg::Err(_, ipc) = back else {
+        let back = roundtrip(&PipeMsg::Err(
+            "e".into(),
+            IpcError::from_ta(&err),
+            network::Stats::default(),
+        ));
+        let PipeMsg::Err(_, ipc, _) = back else {
             panic!("variant lost");
         };
         let ta = ipc.into_ta();
@@ -317,6 +332,8 @@ mod tests {
     fn operation_with_default_fields_roundtrip() {
         let op = IpcOperation::InstallFile(InstallFileArgs {
             mode: InstallFileMode::HybridPatch {
+                diff_size: 12,
+                base_size: 40,
                 diff: InstallFileSource::Url {
                     url: "https://x.example/d".into(),
                     offset: 1,
@@ -330,6 +347,7 @@ mod tests {
                     skip_decompress: true,
                 },
             },
+            output_size: 123,
             target: "C:\\staged\\new\\a.dll".into(),
             old: Some("C:\\app\\a.dll".into()),
             md5: None,
@@ -343,7 +361,7 @@ mod tests {
         assert_eq!(args.target, "C:\\staged\\new\\a.dll");
         assert_eq!(args.old.as_deref(), Some("C:\\app\\a.dll"));
         assert_eq!(args.xxh.as_deref(), Some("ff"));
-        let InstallFileMode::HybridPatch { diff, source } = args.mode else {
+        let InstallFileMode::HybridPatch { diff, source, .. } = args.mode else {
             panic!("mode lost");
         };
         assert!(matches!(

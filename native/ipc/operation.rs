@@ -12,6 +12,11 @@ use crate::utils::error::TAResult;
 #[derive(serde::Deserialize, serde::Serialize, Clone, Debug)]
 pub enum IpcOperation {
     Ping,
+    BeginDownload(super::download::Config),
+    CancelDownload(String),
+    EndDownload(String),
+    ResolveDownload(super::download::Reply),
+    Download(super::download::Job, Box<IpcOperation>),
     InstallFile(super::install_file::InstallFileArgs),
     InstallMultichunkStream(super::install_file::InstallMultiStreamArgs),
     CreateLnk(crate::installer::lnk::CreateLnkArgs),
@@ -56,6 +61,11 @@ pub enum IpcOperation {
 
 pub async fn run_opr(op: IpcOperation, notify: ProgressNotify) -> TAResult<IpcResult> {
     let op_name = match &op {
+        IpcOperation::BeginDownload(_) => "BeginDownload",
+        IpcOperation::CancelDownload(_) => "CancelDownload",
+        IpcOperation::EndDownload(_) => "EndDownload",
+        IpcOperation::ResolveDownload(_) => "ResolveDownload",
+        IpcOperation::Download(..) => "Download",
         IpcOperation::Ping => "Ping",
         IpcOperation::InstallFile(_) => "InstallFile",
         IpcOperation::InstallMultichunkStream(_) => "InstallMultichunkStream",
@@ -77,6 +87,48 @@ pub async fn run_opr(op: IpcOperation, notify: ProgressNotify) -> TAResult<IpcRe
     };
     tracing::info!("IPC operation: {}", op_name);
     match op {
+        IpcOperation::BeginDownload(config) => {
+            super::download::begin(config);
+            Ok(IpcResult::Ping)
+        }
+        IpcOperation::CancelDownload(id) => {
+            super::download::cancel(&id);
+            Ok(IpcResult::Ping)
+        }
+        IpcOperation::EndDownload(id) => {
+            super::download::end(&id);
+            Ok(IpcResult::Ping)
+        }
+        IpcOperation::ResolveDownload(reply) => {
+            super::download::reply(reply);
+            Ok(IpcResult::Ping)
+        }
+        IpcOperation::Download(job, operation) => {
+            let network = !matches!(
+                &*operation,
+                IpcOperation::InstallFile(super::install_file::InstallFileArgs {
+                    mode: super::install_file::InstallFileMode::Direct(
+                        super::install_file::InstallFileSource::Local { .. }
+                    ),
+                    ..
+                })
+            );
+            let ctx = super::download::context(&job, network)?;
+            let result = super::download::CURRENT
+                .scope(ctx.clone(), Box::pin(run_opr(*operation, notify.clone())))
+                .await;
+            let finished = super::download::finish(&ctx, result.is_ok()).await;
+            for insight in ctx.insights.lock().unwrap().iter() {
+                notify(super::Progress::Insight(insight.lock().unwrap().clone()));
+            }
+            if ctx.session.cancel.is_cancelled() {
+                return Err(anyhow::Error::new(crate::utils::code::Cancelled).into());
+            }
+            if result.is_ok() {
+                finished?;
+            }
+            result
+        }
         IpcOperation::Ping => Ok(IpcResult::Ping),
         IpcOperation::InstallFile(args) => Ok(IpcResult::InstallFile(
             super::install_file::ipc_install_file(args, notify).await?,

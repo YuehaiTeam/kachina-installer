@@ -5,36 +5,10 @@ import { Dialog } from '../ui/Dialog';
 import { CircleSuccess } from '../ui/icons';
 import { Spinner } from '../ui/Spinner';
 
-const ELLIPSIS = new Set([
-  'download',
-  'extract',
-  'patch',
-  'delete',
-  'mirrorc_download',
-  'uninstall_delete',
-]);
-
-// Same list as `BYTE_STAGES` in native/session/state.rs: these stages report
-// bytes in done/total, every other stage reports item counts.
-const BYTE_STAGES = new Set(['download', 'runtime_download', 'mirrorc_download']);
-
-function counter(progress: Progress): string | null {
-  if (progress.done == null || progress.total == null) return null;
-  const fmt = BYTE_STAGES.has(progress.stage) ? formatSize : String;
-  return `${fmt(progress.done)} / ${fmt(progress.total)}`;
+function counter(value: { done: number; total: number | null }, bytes: boolean): string {
+  const fmt = bytes ? formatSize : String;
+  return value.total === null ? fmt(value.done) : `${fmt(value.done)} / ${fmt(value.total)}`;
 }
-
-// Phase two does not observe the cancel token.
-const NO_CANCEL = new Set([
-  'commit',
-  'finalize',
-  'shortcut',
-  'registry',
-  'install_done',
-  'already_latest',
-  'runtime_download',
-  'runtime_install',
-]);
 
 function CancelConfirm({ onYes, onNo }: { onYes: () => void; onNo: () => void }) {
   return (
@@ -56,15 +30,18 @@ function CancelConfirm({ onYes, onNo }: { onYes: () => void; onNo: () => void })
 }
 
 export function Running({ ui, progress }: { ui: UiState; progress: Progress }) {
-  const [cancelling, setCancelling] = useState(false);
+  const [sending, setSending] = useState(false);
   const [confirming, setConfirming] = useState(false);
   const mirrorc = ui.options.source_uri.startsWith('mirrorc://');
   const prefix = mirrorc ? 'step.mirrorc.' : 'step.default.';
   // The step titles describe the install pipeline; uninstall only has a status line.
-  const steps = ui.mode === 'uninstall' ? [] : [0, 1, 2, 3].map((i) => t(prefix + i));
-  const status = t('progress.' + progress.stage, { subject: progress.subject ?? '' });
-  const stat = counter(progress);
-  const canCancel = !NO_CANCEL.has(progress.stage) && !cancelling;
+  const steps = progress.step === null ? [] : [0, 1, 2, 3].map((i) => t(prefix + i));
+  const status = progress.cancel === 'requested' ? t('running.cancelling')
+    : t('progress.' + progress.stage, { subject: progress.subject ?? '' });
+  const stat = progress.summary && counter(progress.summary, progress.summary.unit === 'bytes');
+  const speed = progress.network_pending ? progress.network_bps : progress.processing_bps;
+  const speedLabel = progress.network_pending ? t('running.network_speed') : t('running.processing_speed');
+  const canCancel = progress.cancel === 'available' && !sending;
 
   // The swap may start while the confirmation is open; there is nothing left to cancel.
   useEffect(() => {
@@ -84,9 +61,9 @@ export function Running({ ui, progress }: { ui: UiState; progress: Progress }) {
       ) : null}
       <div class="step-desc">
         {steps.map((label, i) =>
-          i <= progress.sub_step ? (
-            <div class={`substep ${i < progress.sub_step ? 'done' : ''}`} key={label}>
-              {i === progress.sub_step ? (
+          i <= (progress.step ?? -1) ? (
+            <div class={`substep ${i < (progress.step ?? -1) ? 'done' : ''}`} key={label}>
+              {i === (progress.step ?? -1) ? (
                 <Spinner size={16} />
               ) : (
                 <span class="substep-done">
@@ -98,17 +75,29 @@ export function Running({ ui, progress }: { ui: UiState; progress: Progress }) {
           ) : null,
         )}
       </div>
-      <div class={`current-status ${ELLIPSIS.has(progress.stage) ? 'ellipsis' : ''}`}>
-        {status}
-        {stat ? <span class="current-stat">{stat}</span> : null}
+      <div class="current-status">{status}</div>
+      <div class="progress-summary">
+        {stat !== null ? <span>{stat}</span> : null}
+        {speed !== null ? <span title={speedLabel}>{formatSize(speed)}/s</span> : null}
       </div>
-      <div class="progress-bar" style={{ width: `${progress.percent}%` }} />
+      <div class="active-files">
+        {progress.files.map((file) => (
+          <div class="active-file" key={file.id}>
+            <span class="active-file-name" title={file.name}>{file.name}</span>
+            <span>{t('file_action.' + file.action)}</span>
+            {file.bytes !== null ? <span class="active-file-counter">{counter(file.bytes, true)}</span> : null}
+          </div>
+        ))}
+      </div>
+      <div class={`progress-bar ${progress.percent === null ? 'indeterminate' : ''}`}
+        role="progressbar" aria-valuenow={progress.percent ?? undefined}
+        style={progress.percent === null ? undefined : { width: `${progress.percent}%` }} />
       {confirming ? (
         <CancelConfirm
           onYes={() => {
             setConfirming(false);
-            setCancelling(true);
-            void intent({ kind: 'cancel' });
+            setSending(true);
+            void intent({ kind: 'cancel' }).finally(() => setSending(false));
           }}
           onNo={() => setConfirming(false)}
         />

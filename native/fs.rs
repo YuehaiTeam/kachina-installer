@@ -810,20 +810,23 @@ pub async fn create_http_stream(
     u64,
     Arc<Mutex<InsightItem>>,
 )> {
+    let reading = crate::ipc::network::Reading::begin();
+    let permit = crate::ipc::download::request().await?;
     let request_start_time = Instant::now();
     let has_range = size > 0;
     let insight_range = insight_range_vec(request_range, offset, size);
 
     // 构建HTTP请求
-    let mut builder = DOWNLOAD_CLIENT.get(url);
+    let mut builder = DOWNLOAD_CLIENT
+        .get(url)
+        .header("Accept-Encoding", "identity");
     if has_range {
         builder = builder.header("Range", format!("bytes={}-{}", offset, offset + size - 1));
     }
 
     // 发送请求
-    let res = builder
-        .send()
-        .await
+    let res = crate::ipc::download::cancellable(builder.send())
+        .await?
         .with_http_context("create_http_stream", url);
     let response_received_time = Instant::now();
 
@@ -863,6 +866,10 @@ pub async fn create_http_stream(
     }
 
     let content_length = res.content_length().unwrap_or(0);
+    if has_range {
+        validate_range_response(&res, offset as u64, size as u64)?;
+    }
+    let exact_length = res.content_length();
     let stream = res.bytes_stream();
     let reader = tokio_util::io::StreamReader::new(stream.map_err(std::io::Error::other));
 
@@ -877,6 +884,8 @@ pub async fn create_http_stream(
     );
 
     let insight_handle = insight_stream.get_insight_handle();
+    let insight_stream =
+        crate::ipc::network::Reader::new(insight_stream, reading, permit, exact_length);
 
     if skip_decompress {
         Ok((Box::new(insight_stream), content_length, insight_handle))
@@ -887,6 +896,35 @@ pub async fn create_http_stream(
         // ✅ 关键：即使被解压缩包装，insight_handle仍然可用！
         Ok((Box::new(decompressed), content_length, insight_handle))
     }
+}
+
+/// 包内范围必须保持原始字节位置；拒绝服务器返回其他范围或额外内容编码。
+fn validate_range_response(
+    response: &reqwest::Response,
+    start: u64,
+    len: u64,
+) -> anyhow::Result<()> {
+    let range = response
+        .headers()
+        .get("content-range")
+        .and_then(|v| v.to_str().ok());
+    let expected = format!("bytes {}-{}/", start, start + len - 1);
+    anyhow::ensure!(
+        range.is_some_and(|v| v.starts_with(&expected)),
+        "unexpected Content-Range: {range:?}"
+    );
+    anyhow::ensure!(
+        response.content_length().is_none_or(|n| n == len),
+        "unexpected range length"
+    );
+    anyhow::ensure!(
+        response
+            .headers()
+            .get("content-encoding")
+            .is_none_or(|v| v == "identity"),
+        "encoded range response"
+    );
+    Ok(())
 }
 
 fn parse_range_string(range: &str) -> Vec<(u32, u32)> {
@@ -915,96 +953,6 @@ fn insight_range_vec(request_range: Option<&str>, offset: usize, size: usize) ->
         }
     }
     vec![(offset as u32, (offset + size - 1) as u32)]
-}
-
-pub async fn create_multi_http_stream(
-    url: &str,
-    range: &str,
-) -> TAResult<(
-    Box<dyn Stream<Item = reqwest::Result<Bytes>> + Send + Unpin>,
-    u64,
-    String,
-    Arc<Mutex<InsightItem>>,
-)> {
-    let request_start_time = Instant::now();
-    let range_info = parse_range_string(range);
-
-    let res = DOWNLOAD_CLIENT
-        .get(url)
-        .header("Range", format!("bytes={range}"))
-        .send()
-        .await
-        .with_http_context("create_multi_http_stream", url);
-    let response_received_time = Instant::now();
-
-    let res = match res {
-        Ok(r) => r,
-        Err(e) => {
-            let insight = Arc::new(Mutex::new(InsightItem {
-                url: crate::utils::url::sanitize_url_for_logging(url),
-                ttfb: request_start_time.elapsed().as_millis() as u32,
-                time: 0,
-                size: 0,
-                error: Some(crate::utils::code::insight_code(&e).to_string()),
-                range: range_info.clone(),
-                mode: None,
-            }));
-            return Err(crate::utils::error::TACommandError::with_insight_handle(
-                e, insight,
-            ));
-        }
-    };
-
-    // HTTP状态码检查
-    let code = res.status();
-    if code != 206 {
-        let insight = Arc::new(Mutex::new(InsightItem {
-            url: crate::utils::url::sanitize_url_for_logging(url),
-            ttfb: request_start_time.elapsed().as_millis() as u32,
-            time: 0,
-            size: 0,
-            error: Some(crate::utils::code::SERVER_HTTP_ERROR.to_string()),
-            range: range_info,
-            mode: None,
-        }));
-        let error = anyhow::Error::new(crate::dfs::HttpStatus::new(code.as_u16(), "")).context(
-            crate::utils::url::create_reqwest_context(
-                "create_multi_http_stream",
-                url,
-                "HTTP_STATUS_ERR",
-            ),
-        );
-        return Err(crate::utils::error::TACommandError::with_insight_handle(
-            error, insight,
-        ));
-    }
-
-    let content_length = res.content_length().unwrap_or(0);
-    let content_type = res
-        .headers()
-        .get("Content-Type")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("application/octet-stream")
-        .to_string();
-
-    // 创建NetworkInsightStream包装HTTP响应流
-    let insight_stream = NetworkInsightStream::new_with_detection(
-        res.bytes_stream(),
-        crate::utils::url::sanitize_url_for_logging(url),
-        range_info,
-        request_start_time,
-        response_received_time,
-        Some(content_length),
-    );
-
-    let insight_handle = insight_stream.get_insight_handle();
-
-    Ok((
-        Box::new(Box::pin(insight_stream)),
-        content_length,
-        content_type,
-        insight_handle,
-    ))
 }
 
 pub async fn create_local_stream(

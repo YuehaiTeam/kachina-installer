@@ -3,9 +3,7 @@ use crate::session::plan::{find_local, HashKey, LocalFile};
 use crate::session::source::{hash_of_item, SourceCtx};
 use crate::utils::metadata::{FileMeta, PatchInfo, PatchSide};
 
-const SMALL_FILE: u64 = 500 * 1024;
-const MAX_GROUP: usize = 10 * 1024 * 1024;
-const MAX_WASTE: f64 = 0.2;
+use super::download_plan::{self, Input, Range};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FileMode {
@@ -20,6 +18,7 @@ pub struct FilePos {
     pub item: FileMeta,
     pub offset: usize,
     pub size: usize,
+    pub patch: Option<PatchInfo>,
 }
 
 #[derive(Debug, Clone)]
@@ -79,125 +78,88 @@ pub fn plan_tasks(
     local: &[Embedded],
     patches: &[PatchInfo],
     ctx: &SourceCtx,
+    disk: &[LocalFile],
 ) -> Vec<InstallTask> {
-    let mut mergeable = Vec::new();
-    let mut non_mergeable = Vec::new();
-    for item in items {
-        match file_mode(item, hash_key, local, patches, false) {
-            FileMode::Direct | FileMode::Patch => mergeable.push(item.clone()),
-            _ => non_mergeable.push(item.clone()),
-        }
-    }
-
-    let mut positioned = Vec::new();
-    let mut unindexed = Vec::new();
-    let mut large = Vec::new();
-    for item in mergeable {
-        if item.size > SMALL_FILE {
-            large.push(item);
+    let mut inputs = Vec::new();
+    let mut tasks = Vec::new();
+    let mut matching = std::collections::HashMap::new();
+    for (id, item) in items.iter().enumerate() {
+        if matches!(
+            file_mode(item, hash_key, local, patches, false),
+            FileMode::Local | FileMode::Hybrid
+        ) {
+            tasks.push(InstallTask::Single(item.clone()));
             continue;
         }
-        if let Some(file) = hash_of_item(&item, hash_key).and_then(|h| ctx.find(&h).cloned()) {
-            positioned.push(FilePos {
-                item,
-                offset: file.offset,
-                size: file.size,
+        let Some(full) = hash_of_item(item, hash_key).and_then(|hash| ctx.find(&hash)) else {
+            tasks.push(InstallTask::Single(item.clone()));
+            continue;
+        };
+        if full.size == 0 {
+            tasks.push(InstallTask::Single(item.clone()));
+            continue;
+        }
+        let disk_hash = find_local(disk, &item.file_name).map(|f| f.hash.as_str());
+        let patch = patches.iter().find(|p| {
+            side_hash(&p.to, hash_key) == Some(full.name.as_str())
+                && disk_hash.is_some()
+                && side_hash(&p.from, hash_key) == disk_hash
+        });
+        let patch_range = patch.and_then(|p| {
+            let name = format!("{}_{}", side_hash(&p.from, hash_key)?, full.name);
+            let entry = ctx.find(&name)?;
+            if entry.size == 0 {
+                return None;
+            }
+            matching.insert(id, p.clone());
+            Some(Range {
+                start: entry.offset as u64,
+                len: entry.size as u64,
+            })
+        });
+        inputs.push(Input {
+            id,
+            raw_size: item.size,
+            full: Range {
+                start: full.offset as u64,
+                len: full.size as u64,
+            },
+            patch: patch_range,
+        });
+    }
+    for transfer in download_plan::plan(&inputs, ctx.policy) {
+        if transfer.files.len() == 1 {
+            tasks.push(InstallTask::Single(items[transfer.files[0].id].clone()));
+        } else {
+            let range = transfer.parts[0];
+            tasks.push(InstallTask::Merged {
+                files: transfer
+                    .files
+                    .into_iter()
+                    .map(|file| FilePos {
+                        item: items[file.id].clone(),
+                        offset: file.range.start as usize,
+                        size: file.range.len as usize,
+                        patch: if file.patch {
+                            matching.get(&file.id).cloned()
+                        } else {
+                            None
+                        },
+                    })
+                    .collect(),
+                range: range.key(),
+                start: range.start as usize,
+                download_size: range.len as usize,
             });
-        } else {
-            unindexed.push(item);
         }
     }
-    positioned.sort_by_key(|p| p.offset);
-
-    let mut singles = Vec::new();
-    let mut merged = Vec::new();
-    let mut current: Vec<FilePos> = Vec::new();
-    for file in positioned {
-        if can_merge(&current, &file) {
-            current.push(file);
-        } else {
-            push_group(current, &mut singles, &mut merged);
-            current = vec![file];
-        }
-    }
-    push_group(current, &mut singles, &mut merged);
-
-    singles.extend(large);
-    singles.extend(unindexed);
-
-    non_mergeable.sort_by(|a, b| b.size.cmp(&a.size));
-    singles.sort_by(|a, b| b.size.cmp(&a.size));
-    merged.sort_by(|a, b| match (a, b) {
-        (
-            InstallTask::Merged {
-                download_size: da, ..
-            },
-            InstallTask::Merged {
-                download_size: db, ..
-            },
-        ) => db.cmp(da),
-        _ => std::cmp::Ordering::Equal,
+    tasks.sort_by_key(|task| {
+        std::cmp::Reverse(match task {
+            InstallTask::Single(item) => item.size,
+            InstallTask::Merged { files, .. } => files.iter().map(|f| f.item.size).sum(),
+        })
     });
-
-    let mut out = Vec::new();
-    let mut i = 0;
-    let mut j = 0;
-    let mut k = 0;
-    while i < non_mergeable.len() || j < singles.len() || k < merged.len() {
-        if i < non_mergeable.len() {
-            out.push(InstallTask::Single(non_mergeable[i].clone()));
-            i += 1;
-        }
-        if j < singles.len() {
-            out.push(InstallTask::Single(singles[j].clone()));
-            j += 1;
-        }
-        if k < merged.len() {
-            out.push(merged[k].clone());
-            k += 1;
-        }
-    }
-    out
-}
-
-fn can_merge(group: &[FilePos], new: &FilePos) -> bool {
-    if group.is_empty() {
-        return true;
-    }
-    let last = group.last().unwrap();
-    let group_end = last.offset + last.size;
-    if new.offset < group_end {
-        return false;
-    }
-    let start = group[0].offset;
-    let end = new.offset + new.size;
-    let total = end - start;
-    if total > MAX_GROUP {
-        return false;
-    }
-    let effective = group.iter().map(|f| f.size).sum::<usize>() + new.size;
-    let waste = (total - effective) as f64 / total as f64;
-    waste <= MAX_WASTE
-}
-
-fn push_group(group: Vec<FilePos>, singles: &mut Vec<FileMeta>, merged: &mut Vec<InstallTask>) {
-    if group.is_empty() {
-        return;
-    }
-    if group.len() == 1 {
-        singles.push(group.into_iter().next().unwrap().item);
-        return;
-    }
-    let start = group[0].offset;
-    let last = group.last().unwrap();
-    let end = last.offset + last.size;
-    let download_size = end - start;
-    merged.push(InstallTask::Merged {
-        range: format!("{}-{}", start, end.saturating_sub(1)),
-        start,
-        download_size,
-        files: group,
-    });
+    tasks
 }
 
 pub fn dfs2_ranges(
@@ -284,6 +246,15 @@ fn add_index_range(ranges: &mut Vec<String>, ctx: &SourceCtx, hash: &str) {
     if let Some(file) = ctx.find(hash) {
         let end = file.offset + file.size.saturating_sub(1);
         ranges.push(format!("{}-{}", file.offset, end));
+        ranges.extend(
+            ctx.policy
+                .split(Range {
+                    start: file.offset as u64,
+                    len: file.size as u64,
+                })
+                .into_iter()
+                .map(Range::key),
+        );
     }
 }
 

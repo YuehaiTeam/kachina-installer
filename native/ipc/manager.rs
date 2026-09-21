@@ -34,7 +34,8 @@ pub struct IpcInner {
 /// One waiter per in-flight request, keyed by request id. Results are
 /// delivered here; progress goes over a broadcast that may lag without
 /// consequence.
-pub type Pending = Arc<Mutex<HashMap<String, oneshot::Sender<Result<IpcResult, IpcError>>>>>;
+pub type Pending =
+    Arc<Mutex<HashMap<String, (oneshot::Sender<Result<IpcResult, IpcError>>, ProgressNotify)>>>;
 
 pub fn disconnect_error() -> IpcError {
     IpcError {
@@ -47,7 +48,6 @@ pub fn disconnect_error() -> IpcError {
     }
 }
 
-#[derive(Debug)]
 pub struct ManagedElevate {
     process: tokio::sync::RwLock<Option<SendableHandle>>,
     started: AtomicBool,
@@ -57,6 +57,9 @@ pub struct ManagedElevate {
     pending: Pending,
     pipe_id: String,
     already_elevated: bool,
+    resolve_tx: tokio::sync::mpsc::UnboundedSender<(super::download::Resolve, bool)>,
+    resolve_rx:
+        tokio::sync::Mutex<tokio::sync::mpsc::UnboundedReceiver<(super::download::Resolve, bool)>>,
 }
 
 impl Default for ManagedElevate {
@@ -69,8 +72,11 @@ impl ManagedElevate {
     pub fn new() -> Self {
         let (progress_tx, _progress_rx) = tokio::sync::broadcast::channel(256);
         let (mpsc_tx, mpsc_rx) = tokio::sync::mpsc::channel(100);
+        let (resolve_tx, resolve_rx) = tokio::sync::mpsc::unbounded_channel();
         let pipe_id = format!("{}", uuid::Uuid::new_v4());
         Self {
+            resolve_tx,
+            resolve_rx: tokio::sync::Mutex::new(resolve_rx),
             process: tokio::sync::RwLock::new(None),
             started: AtomicBool::new(false),
             progress_tx,
@@ -131,7 +137,14 @@ impl ManagedElevate {
             if !wait_conn(&mut server).await {
                 return Err(anyhow::anyhow!("Failed to wait for connection").context("ELEVATE_ERR"));
             }
-            handle_pipe(server, self.progress_tx.clone(), self.pending.clone(), rx).await;
+            handle_pipe(
+                server,
+                self.progress_tx.clone(),
+                self.pending.clone(),
+                rx,
+                self.resolve_tx.clone(),
+            )
+            .await;
             self.started.store(true, Ordering::SeqCst);
         }
         Ok(())
@@ -144,7 +157,14 @@ impl ManagedElevate {
         on_progress: ProgressNotify,
     ) -> TAResult<IpcResult> {
         if !elevate || self.already_elevated {
-            return run_opr(ipc, on_progress).await;
+            let (result, snapshot) = super::download::RESOLVER
+                .scope(
+                    self.resolve_tx.clone(),
+                    super::network::measure(on_progress.clone(), |notify| run_opr(ipc, notify)),
+                )
+                .await;
+            snapshot.publish(&on_progress);
+            return result;
         }
         if !self.started.load(Ordering::SeqCst) {
             tracing::info!("Elevate process not started, starting...");
@@ -156,7 +176,7 @@ impl ManagedElevate {
         self.pending
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .insert(id.clone(), tx);
+            .insert(id.clone(), (tx, on_progress.clone()));
         let mut progress_rx = self.progress_tx.subscribe();
         // 管道任务已退出时接收端不存在，此处不返回就会永远等不到回包
         if self
@@ -210,6 +230,24 @@ impl ManagedElevate {
         }
     }
 
+    pub async fn next_resolution(&self) -> Option<(super::download::Resolve, bool)> {
+        self.resolve_rx.lock().await.recv().await
+    }
+
+    pub async fn resolve_reply(&self, reply: super::download::Reply, remote: bool) {
+        if remote {
+            let _ = self
+                .mpsc_tx
+                .send(IpcInner {
+                    op: IpcOperation::ResolveDownload(reply),
+                    id: String::new(),
+                })
+                .await;
+        } else {
+            super::download::reply(reply);
+        }
+    }
+
     /// Block until every in-flight elevate request has a result. Pending
     /// entries stay until the elevate side replies, even if the local `run`
     /// future was dropped (phase-one cancel).
@@ -234,7 +272,7 @@ fn fail_all_pending(pending: &Pending) {
         .unwrap_or_else(|e| e.into_inner())
         .drain()
         .collect();
-    for (_, tx) in waiters {
+    for (_, (tx, _)) in waiters {
         let _ = tx.send(Err(disconnect_error()));
     }
 }
@@ -255,6 +293,7 @@ pub async fn handle_pipe(
     progress_tx: tokio::sync::broadcast::Sender<(String, Progress)>,
     pending: Pending,
     mut rx: tokio::sync::mpsc::Receiver<IpcInner>,
+    resolve_tx: tokio::sync::mpsc::UnboundedSender<(super::download::Resolve, bool)>,
 ) {
     let (serverrx, mut servertx) = tokio::io::split(server);
     let mut writer = tokio::spawn(async move {
@@ -292,23 +331,28 @@ pub async fn handle_pipe(
                 Ok(PipeMsg::Progress(id, p)) => {
                     let _ = progress_tx.send((id, p));
                 }
-                Ok(PipeMsg::Ok(id, data)) => {
-                    if let Some(tx) = reader_pending
+                Ok(PipeMsg::Ok(id, data, snapshot)) => {
+                    if let Some((tx, notify)) = reader_pending
                         .lock()
                         .unwrap_or_else(|e| e.into_inner())
                         .remove(&id)
                     {
+                        snapshot.publish(&notify);
                         let _ = tx.send(Ok(data));
                     }
                 }
-                Ok(PipeMsg::Err(id, err)) => {
-                    if let Some(tx) = reader_pending
+                Ok(PipeMsg::Err(id, err, snapshot)) => {
+                    if let Some((tx, notify)) = reader_pending
                         .lock()
                         .unwrap_or_else(|e| e.into_inner())
                         .remove(&id)
                     {
+                        snapshot.publish(&notify);
                         let _ = tx.send(Err(err));
                     }
+                }
+                Ok(PipeMsg::Resolve(query)) => {
+                    let _ = resolve_tx.send((query, true));
                 }
                 Ok(PipeMsg::Disconnect(_)) => {}
                 Err(err) => {
@@ -405,29 +449,35 @@ pub async fn uac_ipc_main(args: crate::cli::arg::UacArgs) {
                         break;
                     }
                 };
+                if let IpcOperation::ResolveDownload(reply) = res.op {
+                    super::download::reply(reply);
+                    continue;
+                }
                 let tx = tx.clone();
                 let id = res.id.clone();
                 tokio::spawn(async move {
-                    let tx2 = tx.clone();
-                    let res = run_opr(
-                        res.op,
-                        progress_notify(move |opr| {
-                            let id = res.id.clone();
-                            let tx_clone = tx.clone();
-                            tokio::spawn(async move {
-                                let _ = tx_clone.send(PipeMsg::Progress(id, opr)).await;
-                            });
-                        }),
-                    )
-                    .await;
-                    if let Err(err) = res.as_ref() {
-                        tracing::error!("Client: Operation failed: {:?}", err);
-                    }
-                    let msg = match res {
-                        Ok(data) => PipeMsg::Ok(id, data),
-                        Err(err) => PipeMsg::Err(id, IpcError::from_ta(&err)),
+                    let (resolve_tx, mut resolve_rx) = tokio::sync::mpsc::unbounded_channel();
+                    let progress_tx = tx.clone();
+                    let progress_id = id.clone();
+                    let notify = progress_notify(move |p| {
+                        // 进度允许丢失；结果与解析请求通过可靠发送路径传递。
+                        let _ = progress_tx.try_send(PipeMsg::Progress(progress_id.clone(), p));
+                    });
+                    let mut operation = Box::pin(super::download::RESOLVER.scope(
+                        resolve_tx,
+                        super::network::measure(notify.clone(), |notify| run_opr(res.op, notify)),
+                    ));
+                    let (result, snapshot) = loop {
+                        tokio::select! {
+                            result = &mut operation => break result,
+                            Some((query, _)) = resolve_rx.recv() => { let _ = tx.send(PipeMsg::Resolve(query)).await; }
+                        }
                     };
-                    let _ = tx2.send(msg).await;
+                    let msg = match result {
+                        Ok(data) => PipeMsg::Ok(id, data, snapshot),
+                        Err(err) => PipeMsg::Err(id, IpcError::from_ta(&err), snapshot),
+                    };
+                    let _ = tx.send(msg).await;
                 });
             }
         })
@@ -492,7 +542,10 @@ mod tests {
 
     fn register(pending: &Pending, id: &str) -> oneshot::Receiver<Result<IpcResult, IpcError>> {
         let (tx, rx) = oneshot::channel();
-        pending.lock().unwrap().insert(id.to_string(), tx);
+        pending
+            .lock()
+            .unwrap()
+            .insert(id.to_string(), (tx, super::super::progress_noop()));
         rx
     }
 
@@ -509,7 +562,14 @@ mod tests {
         let (progress_tx, _progress_rx) = tokio::sync::broadcast::channel(16);
         let pending: Pending = Arc::new(Mutex::new(HashMap::new()));
         let (mpsc_tx, mpsc_rx) = tokio::sync::mpsc::channel(16);
-        handle_pipe(server, progress_tx, pending.clone(), mpsc_rx).await;
+        handle_pipe(
+            server,
+            progress_tx,
+            pending.clone(),
+            mpsc_rx,
+            tokio::sync::mpsc::unbounded_channel().0,
+        )
+        .await;
 
         async fn wait(
             rx: oneshot::Receiver<Result<IpcResult, IpcError>>,
@@ -565,7 +625,7 @@ mod tests {
                 let _ = progress_tx.send((req.id.clone(), Progress::Bytes(i)));
             }
             let tx = pending.lock().unwrap().remove(&req.id).unwrap();
-            tx.send(Ok(IpcResult::Ping)).unwrap();
+            tx.0.send(Ok(IpcResult::Ping)).unwrap();
         });
         let seen = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let seen2 = seen.clone();
@@ -599,7 +659,7 @@ mod tests {
             .await
             .is_err());
         let tx = pending.lock().unwrap().remove("pending").unwrap();
-        let _ = tx.send(Ok(IpcResult::Ping));
+        let _ = tx.0.send(Ok(IpcResult::Ping));
         time::timeout(Duration::from_secs(1), wait)
             .await
             .unwrap()

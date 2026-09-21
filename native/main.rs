@@ -58,7 +58,12 @@ lazy_static::lazy_static! {
     pub static ref DOWNLOAD_CLIENT: reqwest_middleware::ClientWithMiddleware = {
         let h3_ok = capabilities::is_h3_available();
 
-        let mut builder = reqwest_middleware::ClientBuilder::new(RAW_CLIENT.clone())
+        let raw = reqwest::Client::builder()
+            .user_agent(capabilities::ua_string())
+            .no_gzip().no_zstd()
+            .read_timeout(Duration::from_secs(30)).connect_timeout(Duration::from_secs(5))
+            .build().unwrap();
+        let mut builder = reqwest_middleware::ClientBuilder::new(raw)
             .with(capabilities::DynamicUaMiddleware::new());
 
         if h3_ok {

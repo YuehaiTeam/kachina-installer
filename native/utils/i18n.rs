@@ -52,7 +52,11 @@ impl Catalog {
     /// first column sharing the primary language (`zh-TW` → `zh-CN`), then the
     /// first column. Returns `None` for an empty table.
     pub fn resolve_lang(&self, requested: &str) -> Option<&str> {
-        if let Some(l) = self.langs.iter().find(|l| l.eq_ignore_ascii_case(requested)) {
+        if let Some(l) = self
+            .langs
+            .iter()
+            .find(|l| l.eq_ignore_ascii_case(requested))
+        {
             return Some(l.as_str());
         }
         let primary = requested.split('-').next().unwrap_or("");
@@ -65,7 +69,10 @@ impl Catalog {
                 return Some(l.as_str());
             }
         }
-        self.langs.first().map(String::as_str).filter(|s| !s.is_empty())
+        self.langs
+            .first()
+            .map(String::as_str)
+            .filter(|s| !s.is_empty())
     }
 
     /// Look up `key` in `lang`'s column (no match → first language column).
@@ -206,16 +213,8 @@ mod tests {
         let files = locale_files();
         let reference = &files.iter().find(|(l, _)| l == "zh-CN").unwrap().1;
         for (lang, cat) in &files {
-            let missing: Vec<&String> = reference
-                .rows
-                .keys()
-                .filter(|k| !cat.has_key(k))
-                .collect();
-            let extra: Vec<&String> = cat
-                .rows
-                .keys()
-                .filter(|k| !reference.has_key(k))
-                .collect();
+            let missing: Vec<&String> = reference.rows.keys().filter(|k| !cat.has_key(k)).collect();
+            let extra: Vec<&String> = cat.rows.keys().filter(|k| !reference.has_key(k)).collect();
             assert!(
                 missing.is_empty() && extra.is_empty(),
                 "locales/{lang}.tsv: missing {missing:?}, extra {extra:?}"
