@@ -23,43 +23,8 @@ fn default_as_false() -> bool {
     false
 }
 
-// Helper function to check if decompression should be performed based on InstallFileArgs
 fn should_decompress_chunk(args: &InstallFileArgs) -> bool {
-    match &args.mode {
-        InstallFileMode::Direct(source) => match source {
-            InstallFileSource::Url {
-                skip_decompress, ..
-            } => !skip_decompress,
-            InstallFileSource::Local {
-                skip_decompress, ..
-            }
-            | InstallFileSource::Sliced {
-                skip_decompress, ..
-            } => !skip_decompress,
-        },
-        InstallFileMode::Patch { source, .. } => match source {
-            InstallFileSource::Url {
-                skip_decompress, ..
-            } => !skip_decompress,
-            InstallFileSource::Local {
-                skip_decompress, ..
-            }
-            | InstallFileSource::Sliced {
-                skip_decompress, ..
-            } => !skip_decompress,
-        },
-        InstallFileMode::HybridPatch { diff, .. } => match diff {
-            InstallFileSource::Url {
-                skip_decompress, ..
-            } => !skip_decompress,
-            InstallFileSource::Local {
-                skip_decompress, ..
-            }
-            | InstallFileSource::Sliced {
-                skip_decompress, ..
-            } => !skip_decompress,
-        },
-    }
+    !args.mode.primary().skips_decompress()
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -97,6 +62,34 @@ pub enum InstallFileSource {
     },
 }
 
+impl InstallFileSource {
+    pub(crate) fn is_local(&self) -> bool {
+        matches!(self, Self::Local { .. })
+    }
+
+    fn skips_decompress(&self) -> bool {
+        match self {
+            Self::Sliced {
+                skip_decompress, ..
+            }
+            | Self::Url {
+                skip_decompress, ..
+            }
+            | Self::Local {
+                skip_decompress, ..
+            } => *skip_decompress,
+        }
+    }
+
+    /// Byte range inside a merged request. Sliced sources are not merged.
+    fn positioned(&self) -> (usize, usize) {
+        match self {
+            Self::Url { offset, size, .. } | Self::Local { offset, size, .. } => (*offset, *size),
+            Self::Sliced { .. } => unreachable!("sliced source in merged request"),
+        }
+    }
+}
+
 #[derive(serde::Deserialize, serde::Serialize, Clone, Debug)]
 pub enum InstallFileMode {
     Direct(InstallFileSource),
@@ -110,6 +103,37 @@ pub enum InstallFileMode {
         diff_size: usize,
         base_size: u64,
     },
+}
+
+impl InstallFileMode {
+    /// The stream read first: the file itself, the patch, or the hybrid diff.
+    pub(crate) fn primary(&self) -> &InstallFileSource {
+        match self {
+            Self::Direct(source) | Self::Patch { source, .. } => source,
+            Self::HybridPatch { diff, .. } => diff,
+        }
+    }
+
+    /// True when this install reads any bytes over HTTP. A local patch, or a
+    /// hybrid whose base and diff are both local, does not take a request slot.
+    pub(crate) fn uses_network(&self) -> bool {
+        match self {
+            Self::Direct(source) | Self::Patch { source, .. } => !source.is_local(),
+            Self::HybridPatch { diff, source, .. } => !diff.is_local() || !source.is_local(),
+        }
+    }
+
+    pub(crate) fn transfer_total(&self, output_size: u64) -> u64 {
+        match self {
+            Self::Direct(_) => output_size,
+            Self::Patch { diff_size, .. } => *diff_size as u64,
+            Self::HybridPatch {
+                diff_size,
+                base_size,
+                ..
+            } => *diff_size as u64 + *base_size,
+        }
+    }
 }
 
 #[derive(serde::Deserialize, serde::Serialize, Clone, Debug)]
@@ -153,7 +177,12 @@ async fn finalize_staged(args: &InstallFileArgs, target: &Path, reporter: &Repor
     res
 }
 
-struct TemporaryFile(PathBuf);
+pub(crate) struct TemporaryFile(pub(crate) PathBuf);
+impl TemporaryFile {
+    pub(crate) fn path(&self) -> &Path {
+        &self.0
+    }
+}
 impl Drop for TemporaryFile {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.0);
@@ -276,15 +305,7 @@ async fn create_stream_by_source(
     }
 }
 fn work_total(args: &InstallFileArgs) -> u64 {
-    match &args.mode {
-        InstallFileMode::Direct(_) => args.output_size,
-        InstallFileMode::Patch { diff_size, .. } => *diff_size as u64,
-        InstallFileMode::HybridPatch {
-            diff_size,
-            base_size,
-            ..
-        } => *diff_size as u64 + base_size,
-    }
+    args.mode.transfer_total(args.output_size)
 }
 fn source_action(source: &InstallFileSource) -> FileAction {
     if matches!(source, InstallFileSource::Local { .. }) {
@@ -364,7 +385,6 @@ pub async fn ipc_install_file(
                 progressed_copy(source_stream.as_mut(), &mut base_fs, &progress_noti).await;
             drop(base_fs);
             if let Err(e) = copied {
-                let _ = tokio::fs::remove_file(&base).await;
                 return Err(e.into());
             }
 
@@ -378,7 +398,6 @@ pub async fn ipc_install_file(
                 Box::new(progress_noti),
             )
             .await;
-            let _ = tokio::fs::remove_file(&base).await;
             let diff_bytes = match patched {
                 Ok(v) => v,
                 Err(e) => return Err(fail_with_insight(e, &insight_handle)),
@@ -444,46 +463,8 @@ pub struct InstallMultiStreamArgs {
     pub range: String,
     pub chunks: Vec<InstallFileArgs>,
 }
-// Helper function to extract chunk size from InstallFileArgs
-fn get_chunk_size(args: &InstallFileArgs) -> usize {
-    match &args.mode {
-        InstallFileMode::Direct(source) => match source {
-            InstallFileSource::Url { size, .. } | InstallFileSource::Local { size, .. } => *size,
-            InstallFileSource::Sliced { .. } => unreachable!("sliced source in merged request"),
-        },
-        InstallFileMode::Patch { source, .. } => match source {
-            InstallFileSource::Url { size, .. } | InstallFileSource::Local { size, .. } => *size,
-            InstallFileSource::Sliced { .. } => unreachable!("sliced source in merged request"),
-        },
-        InstallFileMode::HybridPatch { diff, .. } => match diff {
-            InstallFileSource::Url { size, .. } | InstallFileSource::Local { size, .. } => *size,
-            InstallFileSource::Sliced { .. } => unreachable!("sliced source in merged request"),
-        },
-    }
-}
-
-// Helper function to extract chunk position from InstallFileArgs
-fn get_chunk_position(args: &InstallFileArgs) -> usize {
-    match &args.mode {
-        InstallFileMode::Direct(source) => match source {
-            InstallFileSource::Url { offset, .. } | InstallFileSource::Local { offset, .. } => {
-                *offset
-            }
-            InstallFileSource::Sliced { .. } => unreachable!("sliced source in merged request"),
-        },
-        InstallFileMode::Patch { source, .. } => match source {
-            InstallFileSource::Url { offset, .. } | InstallFileSource::Local { offset, .. } => {
-                *offset
-            }
-            InstallFileSource::Sliced { .. } => unreachable!("sliced source in merged request"),
-        },
-        InstallFileMode::HybridPatch { diff, .. } => match diff {
-            InstallFileSource::Url { offset, .. } | InstallFileSource::Local { offset, .. } => {
-                *offset
-            }
-            InstallFileSource::Sliced { .. } => unreachable!("sliced source in merged request"),
-        },
-    }
+fn chunk_span(args: &InstallFileArgs) -> (usize, usize) {
+    args.mode.primary().positioned()
 }
 
 #[derive(Debug, Clone)]
@@ -500,7 +481,7 @@ pub async fn ipc_install_multichunk_stream(
         .chunks
         .into_iter()
         .map(|args| ChunkWithPosition {
-            position: get_chunk_position(&args),
+            position: chunk_span(&args).0,
             args,
         })
         .collect();
@@ -523,7 +504,7 @@ pub async fn ipc_install_multichunk_stream(
                     tokio::io::copy(&mut (&mut reader).take(skip), &mut tokio::io::sink()).await?;
                 anyhow::ensure!(read == skip, "incomplete merged gap");
             }
-            let mut buffer = vec![0; get_chunk_size(&chunk.args)];
+            let mut buffer = vec![0; chunk_span(&chunk.args).1];
             reader.read_exact(&mut buffer).await?;
             Ok(buffer)
         }
@@ -566,4 +547,64 @@ pub async fn ipc_install_multichunk_stream(
     }
     let insight = insight_handle.lock().unwrap().clone();
     Ok(MultichunkResult { results, insight })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn local() -> InstallFileSource {
+        InstallFileSource::Local {
+            offset: 0,
+            size: 1,
+            skip_decompress: false,
+        }
+    }
+
+    fn url() -> InstallFileSource {
+        InstallFileSource::Url {
+            url: "http://example".into(),
+            offset: 0,
+            size: 1,
+            skip_decompress: false,
+            request_range: None,
+        }
+    }
+
+    #[test]
+    fn local_reads_do_not_take_a_request_slot() {
+        assert!(!InstallFileMode::Direct(local()).uses_network());
+        assert!(!InstallFileMode::Patch {
+            source: local(),
+            diff_size: 1
+        }
+        .uses_network());
+        assert!(!InstallFileMode::HybridPatch {
+            diff: local(),
+            source: local(),
+            diff_size: 1,
+            base_size: 1,
+        }
+        .uses_network());
+        assert!(InstallFileMode::Direct(url()).uses_network());
+        assert!(InstallFileMode::Patch {
+            source: url(),
+            diff_size: 1
+        }
+        .uses_network());
+        assert!(InstallFileMode::HybridPatch {
+            diff: local(),
+            source: url(),
+            diff_size: 1,
+            base_size: 1,
+        }
+        .uses_network());
+        assert!(InstallFileMode::HybridPatch {
+            diff: url(),
+            source: local(),
+            diff_size: 1,
+            base_size: 1,
+        }
+        .uses_network());
+    }
 }

@@ -104,15 +104,10 @@ pub async fn run_opr(op: IpcOperation, notify: ProgressNotify) -> TAResult<IpcRe
             Ok(IpcResult::Ping)
         }
         IpcOperation::Download(job, operation) => {
-            let network = !matches!(
-                &*operation,
-                IpcOperation::InstallFile(super::install_file::InstallFileArgs {
-                    mode: super::install_file::InstallFileMode::Direct(
-                        super::install_file::InstallFileSource::Local { .. }
-                    ),
-                    ..
-                })
-            );
+            let network = match &*operation {
+                IpcOperation::InstallFile(args) => args.mode.uses_network(),
+                _ => true,
+            };
             let ctx = super::download::context(&job, network)?;
             let result = super::download::CURRENT
                 .scope(ctx.clone(), Box::pin(run_opr(*operation, notify.clone())))

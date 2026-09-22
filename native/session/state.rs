@@ -13,25 +13,51 @@ use crate::installer::{probe_dir, DirState};
 use crate::session::types::{elevate_from_state, SessionResult};
 use crate::utils::code::{Coded, MIRRORC_CDK_MISSING};
 
-pub const STAGE_KEYS: &[&str] = &[
-    "progress.prepare",
-    "progress.fetch_metadata",
-    "progress.scan_files",
-    "progress.prepare_download",
-    "progress.create_download_session",
-    "progress.process_files",
-    "progress.download_archive",
-    "progress.verify_archive",
-    "progress.extract_archive",
-    "progress.commit",
-    "progress.download_runtime",
-    "progress.install_runtime",
-    "progress.create_shortcuts",
-    "progress.write_registry",
-    "progress.finalize",
-    "progress.uninstall_scan",
-    "progress.uninstall_delete",
-];
+macro_rules! progress_stages {
+    ($($variant:ident => $snake:literal),+ $(,)?) => {
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+        #[serde(rename_all = "snake_case")]
+        pub enum ProgressStage {
+            $($variant,)+
+        }
+
+        impl ProgressStage {
+            pub const ALL: &'static [Self] = &[$(Self::$variant,)+];
+
+            pub fn as_str(self) -> &'static str {
+                match self {
+                    $(Self::$variant => $snake,)+
+                }
+            }
+
+            pub fn i18n_key(self) -> &'static str {
+                match self {
+                    $(Self::$variant => concat!("progress.", $snake),)+
+                }
+            }
+        }
+    };
+}
+
+progress_stages! {
+    Prepare => "prepare",
+    FetchMetadata => "fetch_metadata",
+    ScanFiles => "scan_files",
+    PrepareDownload => "prepare_download",
+    CreateDownloadSession => "create_download_session",
+    ProcessFiles => "process_files",
+    DownloadArchive => "download_archive",
+    VerifyArchive => "verify_archive",
+    ExtractArchive => "extract_archive",
+    Commit => "commit",
+    DownloadRuntime => "download_runtime",
+    InstallRuntime => "install_runtime",
+    CreateShortcuts => "create_shortcuts",
+    WriteRegistry => "write_registry",
+    Finalize => "finalize",
+    UninstallScan => "uninstall_scan",
+    UninstallDelete => "uninstall_delete",
+}
 
 pub const PROMPT_KEYS: &[&str] = &[
     "prompt.process_running.title",
@@ -160,28 +186,6 @@ pub struct Progress {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum ProgressStage {
-    Prepare,
-    FetchMetadata,
-    ScanFiles,
-    PrepareDownload,
-    CreateDownloadSession,
-    ProcessFiles,
-    DownloadArchive,
-    VerifyArchive,
-    ExtractArchive,
-    Commit,
-    DownloadRuntime,
-    InstallRuntime,
-    CreateShortcuts,
-    WriteRegistry,
-    Finalize,
-    UninstallScan,
-    UninstallDelete,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
 pub enum CancelState {
     Available,
     Requested,
@@ -229,27 +233,6 @@ pub struct ByteProgress {
 }
 
 impl ProgressStage {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Prepare => "prepare",
-            Self::FetchMetadata => "fetch_metadata",
-            Self::ScanFiles => "scan_files",
-            Self::PrepareDownload => "prepare_download",
-            Self::CreateDownloadSession => "create_download_session",
-            Self::ProcessFiles => "process_files",
-            Self::DownloadArchive => "download_archive",
-            Self::VerifyArchive => "verify_archive",
-            Self::ExtractArchive => "extract_archive",
-            Self::Commit => "commit",
-            Self::DownloadRuntime => "download_runtime",
-            Self::InstallRuntime => "install_runtime",
-            Self::CreateShortcuts => "create_shortcuts",
-            Self::WriteRegistry => "write_registry",
-            Self::Finalize => "finalize",
-            Self::UninstallScan => "uninstall_scan",
-            Self::UninstallDelete => "uninstall_delete",
-        }
-    }
     pub fn cancellable(self) -> bool {
         !matches!(
             self,
@@ -304,6 +287,14 @@ impl Progress {
             network_bps: None,
             network_pending: false,
             files: Vec::new(),
+        }
+    }
+
+    /// A fresh stage starts as `Available`. Once the user has cancelled, later
+    /// snapshots stay `Requested` until commit marks cancel unavailable.
+    pub fn apply_user_cancel(&mut self, cancelled: bool) {
+        if cancelled && self.cancel == CancelState::Available {
+            self.cancel = CancelState::Requested;
         }
     }
 }
@@ -567,6 +558,26 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
     use std::process::Command;
+
+    #[test]
+    fn stage_names_follow_one_list() {
+        for stage in ProgressStage::ALL {
+            assert_eq!(serde_json::to_value(stage).unwrap(), stage.as_str());
+            assert_eq!(stage.i18n_key(), format!("progress.{}", stage.as_str()));
+        }
+    }
+
+    #[test]
+    fn later_progress_keeps_a_requested_cancel() {
+        let mut progress = Progress::new(ProgressStage::ProcessFiles, Some(2), Some(1.0));
+        progress.apply_user_cancel(false);
+        assert_eq!(progress.cancel, CancelState::Available);
+        progress.apply_user_cancel(true);
+        assert_eq!(progress.cancel, CancelState::Requested);
+        progress.cancel = CancelState::Unavailable;
+        progress.apply_user_cancel(true);
+        assert_eq!(progress.cancel, CancelState::Unavailable);
+    }
 
     fn scratch_dir() -> PathBuf {
         let base = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(".cache/ui-session-tests");

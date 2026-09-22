@@ -756,10 +756,7 @@ fn progress_current(p: &Progress) -> String {
     let mut text = if p.cancel == CancelState::Requested {
         i18n::t("running.cancelling", &[])
     } else {
-        i18n::t(
-            &format!("progress.{}", p.stage.as_str()),
-            &[("subject", subject)],
-        )
+        i18n::t(p.stage.i18n_key(), &[("subject", subject)])
     };
     if let Some(counter) = &p.summary {
         let fmt = |n| {

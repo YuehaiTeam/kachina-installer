@@ -622,7 +622,13 @@ mod tests {
         let responder = tokio::spawn(async move {
             let req = requests.recv().await.unwrap();
             for i in 0..1000u64 {
-                let _ = progress_tx.send((req.id.clone(), Progress::Bytes(i)));
+                let _ = progress_tx.send((
+                    req.id.clone(),
+                    Progress::BytesOf {
+                        done: i,
+                        total: 1000,
+                    },
+                ));
             }
             let tx = pending.lock().unwrap().remove(&req.id).unwrap();
             tx.0.send(Ok(IpcResult::Ping)).unwrap();

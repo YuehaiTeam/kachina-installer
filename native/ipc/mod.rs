@@ -70,8 +70,6 @@ pub enum Progress {
     NetworkFinal(network::Snapshot),
     File(file_progress::Snapshot),
     Stage(crate::session::state::ProgressStage),
-    Bytes(u64),
-    Chunk(u32, u64),
     BytesOf { done: u64, total: u64 },
     CountOf { done: u64, total: u64 },
     Extract { file: String, done: u64, total: u64 },
@@ -265,10 +263,22 @@ mod tests {
         );
         assert_eq!(r.insight.range, vec![(0, 99), (200, 299)]);
 
-        let progress = roundtrip(&PipeMsg::Progress("p".into(), Progress::Chunk(3, 4096)));
+        let progress = roundtrip(&PipeMsg::Progress(
+            "p".into(),
+            Progress::BytesOf {
+                done: 3,
+                total: 4096,
+            },
+        ));
         assert!(matches!(
             progress,
-            PipeMsg::Progress(_, Progress::Chunk(3, 4096))
+            PipeMsg::Progress(
+                _,
+                Progress::BytesOf {
+                    done: 3,
+                    total: 4096
+                }
+            )
         ));
 
         let meta = roundtrip(&PipeMsg::Ok(

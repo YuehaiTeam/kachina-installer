@@ -342,11 +342,7 @@ impl SessionUi for GuiUi {
         let mut sess = self.session.lock().unwrap_or_else(|e| e.into_inner());
         sess.state.phase = state.phase.clone();
         if let Phase::Running(p) = &mut sess.state.phase {
-            if p.cancel == crate::session::state::CancelState::Available
-                && self.cancel.is_cancelled()
-            {
-                p.cancel = crate::session::state::CancelState::Requested;
-            }
+            p.apply_user_cancel(self.cancel.is_cancelled());
         }
         let snap = sess.state.clone();
         drop(sess);

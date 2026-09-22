@@ -230,7 +230,7 @@ pub async fn finish(ctx: &Context, success: bool) -> anyhow::Result<()> {
 }
 
 struct PartFile {
-    path: std::path::PathBuf,
+    file: super::install_file::TemporaryFile,
     _space: OwnedSemaphorePermit,
 }
 
@@ -246,12 +246,6 @@ impl std::error::Error for SharedError {
         Some(self.0.as_ref().as_ref())
     }
 }
-impl Drop for PartFile {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.path);
-    }
-}
-
 async fn open_part(
     offset: u64,
     len: u64,
@@ -286,11 +280,7 @@ async fn open_part(
 
 fn local_error(error: std::io::Error) -> anyhow::Error {
     use crate::utils::code::Attach;
-    let code = match error.kind() {
-        std::io::ErrorKind::StorageFull => crate::utils::code::DISK_FULL,
-        std::io::ErrorKind::PermissionDenied => crate::utils::code::PERMISSION_DENIED,
-        _ => crate::utils::code::FILE_IO_FAILED,
-    };
+    let code = crate::utils::code::code_for_local_io(&error);
     anyhow::Error::new(error).attach(code)
 }
 
@@ -298,11 +288,13 @@ async fn prefetch(offset: u64, len: u64, space: OwnedSemaphorePermit) -> anyhow:
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let dir = CURRENT.with(|c| c.session.dl_dir.clone());
     let part = PartFile {
-        path: std::path::Path::new(&dir).join(format!("{}.part", uuid::Uuid::new_v4())),
+        file: super::install_file::TemporaryFile(
+            std::path::Path::new(&dir).join(format!("{}.part", uuid::Uuid::new_v4())),
+        ),
         _space: space,
     };
     for attempt in 0..2 {
-        let mut file = tokio::fs::File::create(&part.path)
+        let mut file = tokio::fs::File::create(part.file.path())
             .await
             .map_err(local_error)?;
         let input = open_part(offset, len).await;
@@ -364,7 +356,7 @@ pub fn sliced(parts: Vec<(u64, u64)>) -> Box<dyn tokio::io::AsyncRead + Unpin + 
                 let network_pending = queued[index].take();
                 let mut retried = false;
                 let mut reader: Box<dyn tokio::io::AsyncRead + Unpin + Send> = if let Some(part) = &part {
-                    Box::new(tokio::fs::File::open(&part.path).await?)
+                    Box::new(tokio::fs::File::open(part.file.path()).await?)
                 } else {
                     match open_part(offset, len).await {
                         Ok(reader) => reader,

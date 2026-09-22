@@ -110,24 +110,37 @@ impl OperationProgress {
         true
     }
     fn publish(&mut self, ui: &LiveUi<'_>) {
-        let mut state = ui.live.lock().unwrap();
-        if let Phase::Running(p) = &mut state.phase {
-            p.network_pending = self.network_pending;
-            let network = self.network_rate.sample(Instant::now(), self.network_bytes);
-            p.network_bps = if p.network_pending { network } else { None };
-            let processing = self
-                .processing_rate
-                .sample(Instant::now(), self.processing_bytes);
-            p.processing_bps = if p.stage.unit() == ProgressUnit::Bytes {
-                processing
-            } else {
-                None
-            };
-            if p.cancel == CancelState::Available && ui.cancel.is_cancelled() {
-                p.cancel = CancelState::Requested;
+        let show = {
+            let state = ui.live.lock().unwrap();
+            match &state.phase {
+                Phase::Running(p) => {
+                    let rates = self.network_pending || p.stage.unit() == ProgressUnit::Bytes;
+                    let cancel = p.cancel == CancelState::Available && ui.cancel.is_cancelled();
+                    rates || cancel
+                }
+                _ => false,
+            }
+        };
+        if !show {
+            return;
+        }
+        {
+            let mut state = ui.live.lock().unwrap();
+            if let Phase::Running(p) = &mut state.phase {
+                p.network_pending = self.network_pending;
+                let network = self.network_rate.sample(Instant::now(), self.network_bytes);
+                p.network_bps = if p.network_pending { network } else { None };
+                let processing = self
+                    .processing_rate
+                    .sample(Instant::now(), self.processing_bytes);
+                p.processing_bps = if p.stage.unit() == ProgressUnit::Bytes {
+                    processing
+                } else {
+                    None
+                };
             }
         }
-        ui.inner.state(&state);
+        ui.emit_live();
     }
 }
 
@@ -187,7 +200,8 @@ async fn run_op_with_ui(
             Some(p) = rx.recv() => { if stats.observe(&p) { on_ui(ui, &p); } },
             _ = ui.cancel.cancelled(), if session.is_some() && !cancelled => {
                 cancelled = true;
-                run_op(mgr, elevate, IpcOperation::CancelDownload(session.clone().unwrap()), progress_noop()).await?;
+                // 返回这个错误会跳过 EndDownload，会话留在 SESSIONS。
+                cancel_download(mgr, elevate, &session.clone().unwrap()).await;
             }
             _ = interval.tick() => {
                 stats.publish(ui);
@@ -209,6 +223,19 @@ async fn run_op_with_ui(
         ui.check_cancel()?;
     }
     result
+}
+
+async fn cancel_download(mgr: &ManagedElevate, elevate: bool, session: &str) {
+    if let Err(err) = run_op(
+        mgr,
+        elevate,
+        IpcOperation::CancelDownload(session.to_string()),
+        progress_noop(),
+    )
+    .await
+    {
+        tracing::warn!("cancel download session {session} failed: {err:#}");
+    }
 }
 
 fn runtime_name(tag: &str) -> &str {
@@ -313,6 +340,18 @@ impl<'a> LiveUi<'a> {
             live: Mutex::new(base.clone()),
             cancel: inner.cancel_token(),
         }
+    }
+
+    /// Emit `live` after releasing its lock.
+    fn emit_live(&self) {
+        let snap = {
+            let mut state = self.live.lock().unwrap_or_else(|e| e.into_inner());
+            if let Phase::Running(p) = &mut state.phase {
+                p.apply_user_cancel(self.cancel.is_cancelled());
+            }
+            state.clone()
+        };
+        self.inner.state(&snap);
     }
 
     /// Phase-one checkpoint: `Err(Cancelled)` once the user asked to stop.
@@ -870,13 +909,9 @@ fn progress(
         done,
         total,
     });
-    if value.cancel == CancelState::Available && ui.cancel.is_cancelled() {
-        value.cancel = CancelState::Requested;
-    }
     state.phase = Phase::Running(value);
-    let snap = state.clone();
     drop(state);
-    ui.inner.state(&snap);
+    ui.emit_live();
 }
 
 fn log_session_start(
@@ -1961,6 +1996,13 @@ impl DownloadProg {
     }
 }
 
+struct DownloadFeed {
+    network_bytes: u64,
+    network_finished: bool,
+    sequence: Vec<u64>,
+    processed: Vec<u64>,
+}
+
 #[derive(Clone)]
 struct ProgressHandle {
     inner: Arc<Mutex<DownloadProg>>,
@@ -1971,27 +2013,19 @@ struct ProgressHandle {
 impl ProgressHandle {
     fn prepare(&self, op: &IpcOperation) {
         if let IpcOperation::InstallFile(args) = op {
-            let (total, source) = match &args.mode {
-                InstallFileMode::Direct(source) => (args.output_size, source),
-                InstallFileMode::Patch { source, diff_size } => (*diff_size as u64, source),
-                InstallFileMode::HybridPatch {
-                    diff,
-                    diff_size,
-                    base_size,
-                    ..
-                } => (*diff_size as u64 + base_size, diff),
-            };
+            let total = args.mode.transfer_total(args.output_size);
+            let source = args.mode.primary();
             let mut g = self.inner.lock().unwrap();
             if let Some(file) = self.ids.first().and_then(|id| g.files.get_mut(*id)) {
                 file.size = total;
                 file.downloaded = 0;
-                file.network_pending = !matches!(source, InstallFileSource::Local { .. });
+                file.network_pending = !source.is_local();
                 file.bytes = None;
                 file.action = FileAction::Retry;
             }
         }
     }
-    fn finish(&self, _ok: bool) {
+    fn finish(&self) {
         let mut g = self.inner.lock().unwrap();
         for &id in &self.ids {
             g.files[id].running = false;
@@ -2007,17 +2041,15 @@ impl ProgressHandle {
     }
     fn callback(&self) -> ProgressNotify {
         let handle = self.clone();
-        let mut sequences = vec![0; self.ids.len()];
-        let mut processed = vec![0; self.ids.len()];
-        let state = Mutex::new((
-            0u64,
-            false,
-            std::mem::take(&mut sequences),
-            std::mem::take(&mut processed),
-        ));
+        let state = Mutex::new(DownloadFeed {
+            network_bytes: 0,
+            network_finished: false,
+            sequence: vec![0; self.ids.len()],
+            processed: vec![0; self.ids.len()],
+        });
         progress_notify(move |p| {
             let mut state = state.lock().unwrap();
-            if state.1 {
+            if state.network_finished {
                 return;
             }
             let mut g = handle.inner.lock().unwrap();
@@ -2027,12 +2059,12 @@ impl ProgressHandle {
                     let Some(&id) = handle.ids.get(index) else {
                         return;
                     };
-                    if file.sequence <= state.2[index] {
+                    if file.sequence <= state.sequence[index] {
                         return;
                     }
-                    state.2[index] = file.sequence;
-                    g.processed += file.processed.saturating_sub(state.3[index]);
-                    state.3[index] = file.processed;
+                    state.sequence[index] = file.sequence;
+                    g.processed += file.processed.saturating_sub(state.processed[index]);
+                    state.processed[index] = file.processed;
                     let target = &mut g.files[id];
                     target.running = !file.finished;
                     target.size = file.work_total;
@@ -2049,15 +2081,15 @@ impl ProgressHandle {
                     }
                 }
                 Progress::Network(snapshot) | Progress::NetworkFinal(snapshot) => {
-                    g.network_bytes += snapshot.bytes.saturating_sub(state.0);
-                    state.0 = state.0.max(snapshot.bytes);
+                    g.network_bytes += snapshot.bytes.saturating_sub(state.network_bytes);
+                    state.network_bytes = state.network_bytes.max(snapshot.bytes);
                     let finished = matches!(p, Progress::NetworkFinal(_));
                     if finished || snapshot.bytes > 0 || snapshot.active > 0 {
                         for &id in &handle.ids {
                             g.files[id].network_pending = !finished && snapshot.active > 0;
                         }
                     }
-                    state.1 = finished;
+                    state.network_finished = finished;
                 }
                 _ => {}
             }
@@ -2066,13 +2098,12 @@ impl ProgressHandle {
 }
 
 fn download_progress(ui: &LiveUi<'_>, prog: &Arc<Mutex<DownloadProg>>) {
-    let mut value = prog.lock().unwrap().render();
-    if ui.cancel.is_cancelled() {
-        value.cancel = CancelState::Requested;
+    let value = prog.lock().unwrap().render();
+    {
+        let mut state = ui.live.lock().unwrap();
+        state.phase = Phase::Running(value);
     }
-    let mut state = ui.live.lock().unwrap();
-    state.phase = Phase::Running(value);
-    ui.inner.state(&state);
+    ui.emit_live();
 }
 
 fn task_bytes(task: &InstallTask) -> u64 {
@@ -2180,6 +2211,9 @@ async fn install_files(
         progress_noop(),
     )
     .await?;
+    // 这里限制同时进行的安装任务。download::Session 用同一组大/小名额限制在途
+    // HTTP 请求，并让每个任务先拿到一个请求，同文件的后续切片才能预取。
+    // 并成一个信号量会让切片数乘上任务数。
     let local_sem = Arc::new(Semaphore::new(16));
     let large_sem = Arc::new(Semaphore::new(large_limit));
     let small_sem = Arc::new(Semaphore::new(small_limit));
@@ -2356,11 +2390,11 @@ async fn install_files(
             };
             match res {
                 Ok(op) => {
-                    handle.finish(true);
+                    handle.finish();
                     Some(Ok(op))
                 }
                 Err(err) => {
-                    handle.finish(false);
+                    handle.finish();
                     has_error.store(true, Ordering::Relaxed);
                     Some(Err(err))
                 }
@@ -2378,7 +2412,7 @@ async fn install_files(
             }
             _ = cancel.cancelled(), if !cancel_sent => {
                 cancel_sent = true;
-                run_op(mgr, settings.elevate, IpcOperation::CancelDownload(session.clone()), progress_noop()).await?;
+                cancel_download(mgr, settings.elevate, &session).await;
             }
             results = &mut download => break results,
         }

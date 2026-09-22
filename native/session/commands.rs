@@ -50,11 +50,11 @@ impl GuiRuntime {
         let mut session = self.session.lock().unwrap_or_else(|e| e.into_inner());
         if let Phase::Running(progress) = &mut session.state.phase {
             if progress.cancel == crate::session::state::CancelState::Available {
-                progress.cancel = crate::session::state::CancelState::Requested;
                 self.cancel
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
                     .cancel();
+                progress.apply_user_cancel(true);
             }
         }
     }

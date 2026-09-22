@@ -162,7 +162,7 @@ pub fn format_size(size: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::session::state::{PROMPT_KEYS, STAGE_KEYS};
+    use crate::session::state::{ProgressStage, PROMPT_KEYS};
     use crate::utils::code::ALL_CODES;
 
     /// Every `locales/*.tsv`, parsed, keyed by file stem.
@@ -194,7 +194,7 @@ mod tests {
             for key in ALL_CODES
                 .iter()
                 .copied()
-                .chain(STAGE_KEYS.iter().copied())
+                .chain(ProgressStage::ALL.iter().map(|stage| stage.i18n_key()))
                 .chain(PROMPT_KEYS.iter().copied())
             {
                 if !cat.has_key(key) {
