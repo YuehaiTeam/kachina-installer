@@ -8,15 +8,18 @@ import { Spinner } from '../ui/Spinner';
 
 export function CdkPanel({
   ui,
+  verifyUri,
   onCancel,
   onConfirmed,
 }: {
   ui: UiState;
+  verifyUri?: string | null;
   onCancel: () => void;
   onConfirmed: () => void;
 }) {
   const [value, setValue] = useState(ui.options.mirrorc_cdk ?? '');
   const checking = ui.cdk.kind === 'checking';
+  const uri = verifyUri || ui.options.source_uri;
 
   useEffect(() => {
     if (isCdkInvalid(ui.cdk)) {
@@ -33,7 +36,10 @@ export function CdkPanel({
   }, [ui.cdk, onConfirmed]);
 
   function submit() {
-    void intent({ kind: 'set_cdk', cdk: value });
+    void intent({ kind: 'set_cdk', cdk: value, uri });
+    if (!value) {
+      onConfirmed();
+    }
   }
 
   return (

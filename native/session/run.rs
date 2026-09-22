@@ -30,7 +30,7 @@ use crate::session::commands::SessionState;
 use crate::session::dump::session_dump;
 use crate::session::merge::{dfs2_ranges, file_mode, plan_tasks, FileMode, FilePos, InstallTask};
 use crate::session::plan::{
-    build_plan, collect_skip_hash, files_to_probe_writable, find_local, join_install,
+    build_plan, collect_skip_hash, files_to_probe_writable, find_local, is_under, join_install,
     mark_unwritable, normalize_rel, strip_install_prefix, HashKey, InstallPlan, LocalFile,
     PlanAction, PlanInput, SkipReason,
 };
@@ -51,7 +51,8 @@ use crate::utils::code::{
     DISK_FULL, FILE_IO_FAILED, HASH_ALGORITHM_UNSUPPORTED, METADATA_UNREACHABLE,
     MIRRORC_CDK_MISSING, MIRRORC_CONFIG_INVALID, MIRRORC_FAILED, MIRRORC_UNREACHABLE,
     NO_DOWNLOAD_NODE, PKG_BROKEN, PROCESS_KILL_FAILED, REGISTRY_WRITE_FAILED,
-    RUNTIME_INSTALL_FAILED, SHORTCUT_FAILED, UNINSTALL_INFO_MISSING, WEBVIEW2_REQUIRED,
+    RUNTIME_INSTALL_FAILED, SHORTCUT_FAILED, UNINSTALL_INCOMPLETE, UNINSTALL_INFO_MISSING,
+    WEBVIEW2_REQUIRED,
 };
 use crate::utils::error::IntoAnyhow;
 use crate::utils::metadata::{FileMeta, RepoMetadata};
@@ -1289,6 +1290,10 @@ async fn run_dfs_install(
     result.map(|(r, _)| r)
 }
 
+fn has_runtimes(runtimes: Option<&[String]>) -> bool {
+    runtimes.is_some_and(|r| !r.is_empty())
+}
+
 /// Everything between "target known" and "files swapped in", with the staging
 /// directory available. Returns the outcome and whether the swap replaced the
 /// running executable.
@@ -1413,7 +1418,10 @@ async fn dfs_staged(
         .cloned()
         .collect();
 
-    if to_install.is_empty() {
+    if to_install.is_empty()
+        && plan.deletes.is_empty()
+        && !has_runtimes(project.runtimes.as_deref())
+    {
         session_dump!(
             settings.dump_dir.as_deref(),
             "04-install-ops.json",
@@ -1458,123 +1466,141 @@ async fn dfs_staged(
         ));
     }
 
-    let occupied: Vec<String> = to_install
-        .iter()
-        .filter(|f| f.unwritable && f.file_name != project.updater_name)
-        .map(|f| f.file_name.clone())
-        .collect();
-    if !occupied.is_empty() {
-        tracing::info!("occupied files: {}", occupied.join(", "));
-        if !ui
-            .confirm(Prompt {
-                id: String::new(),
-                kind: "occupied_files",
-                items: occupied.clone(),
-                params: std::collections::BTreeMap::new(),
-            })
-            .await
-        {
-            tracing::info!("install cancelled at occupied-files prompt");
-            return Ok((SessionResult::cancelled(settings.is_update), false));
+    let mut sid = None;
+    if to_install.is_empty() {
+        session_dump!(
+            settings.dump_dir.as_deref(),
+            "04-install-ops.json",
+            Vec::<IpcOperation>::new()
+        );
+        tracing::info!(
+            "no files to download, applying deletes/runtimes, tag={}",
+            latest.tag_name
+        );
+    } else {
+        let occupied: Vec<String> = to_install
+            .iter()
+            .filter(|f| f.unwritable && f.file_name != project.updater_name)
+            .map(|f| f.file_name.clone())
+            .collect();
+        if !occupied.is_empty() {
+            tracing::info!("occupied files: {}", occupied.join(", "));
+            if !ui
+                .confirm(Prompt {
+                    id: String::new(),
+                    kind: "occupied_files",
+                    items: occupied.clone(),
+                    params: std::collections::BTreeMap::new(),
+                })
+                .await
+            {
+                tracing::info!("install cancelled at occupied-files prompt");
+                return Ok((SessionResult::cancelled(settings.is_update), false));
+            }
         }
+        ui.check_cancel()?;
+
+        let install_items: Vec<InstallItem> = to_install
+            .iter()
+            .filter_map(|file| {
+                let item = latest
+                    .hashed
+                    .iter()
+                    .find(|h| h.file_name == file.file_name)?
+                    .clone();
+                Some(InstallItem { item })
+            })
+            .collect();
+        txn.set_measurement("download_files", install_items.len() as f64, "none");
+        let download_bytes: u64 = install_items.iter().map(|i| i.item.size).sum();
+        txn.set_measurement("download_bytes", download_bytes as f64, "byte");
+        // phase one holds every produced file next to the existing install
+        ensure_space(staged, download_bytes)?;
+
+        let tasks = plan_tasks(
+            &install_items
+                .iter()
+                .map(|i| i.item.clone())
+                .collect::<Vec<_>>(),
+            hash_key,
+            config.embedded_files.as_deref().unwrap_or(&[]),
+            &latest.patches,
+            source_ctx,
+            &local,
+        );
+        let ranges = dfs2_ranges(
+            &tasks,
+            source_ctx,
+            hash_key,
+            config.embedded_files.as_deref().unwrap_or(&[]),
+            &latest.patches,
+            &local,
+        );
+        progress(
+            ui,
+            2,
+            20.0,
+            ProgressStage::CreateDownloadSession,
+            None,
+            None,
+            None,
+        );
+        if let Err(err) =
+            ensure_dfs2_session(source_ctx, ranges.clone(), settings.dfs_extras.as_deref()).await
+        {
+            cleanup_dfs2(source_ctx).await;
+            return Err(attach_download_or(err, NO_DOWNLOAD_NODE, None, None));
+        }
+        // Every failure from here on happened inside this DFS session; the id lets
+        // the DFS side find the matching server log.
+        sid = source_ctx.dfs2_session_id();
+        let tag_sid = |err: anyhow::Error| match &sid {
+            Some(sid) => tag_session(err, sid.clone()),
+            None => err,
+        };
+        log_task_plan(&tasks, &ranges);
+
+        progress(
+            ui,
+            2,
+            20.0,
+            ProgressStage::PrepareDownload,
+            None,
+            None,
+            None,
+        );
+        let ops = txn
+            .timed(
+                "download",
+                install_files(
+                    settings,
+                    config,
+                    latest,
+                    hash_key,
+                    &tasks,
+                    &local,
+                    source_ctx,
+                    &staged.staging,
+                    ui,
+                    mgr,
+                ),
+            )
+            .await;
+        cleanup_dfs2(source_ctx).await;
+        #[cfg_attr(not(debug_assertions), allow(unused_variables))]
+        let ops = ops.map_err(tag_sid)?;
+        tracing::info!(
+            "All tasks completed successfully: files={} ops={}",
+            to_install.len(),
+            ops.len()
+        );
+        session_dump!(settings.dump_dir.as_deref(), "04-install-ops.json", ops);
     }
     ui.check_cancel()?;
-
-    let install_items: Vec<InstallItem> = to_install
-        .iter()
-        .filter_map(|file| {
-            let item = latest
-                .hashed
-                .iter()
-                .find(|h| h.file_name == file.file_name)?
-                .clone();
-            Some(InstallItem { item })
-        })
-        .collect();
-    txn.set_measurement("download_files", install_items.len() as f64, "none");
-    let download_bytes: u64 = install_items.iter().map(|i| i.item.size).sum();
-    txn.set_measurement("download_bytes", download_bytes as f64, "byte");
-    // phase one holds every produced file next to the existing install
-    ensure_space(staged, download_bytes)?;
-
-    let tasks = plan_tasks(
-        &install_items
-            .iter()
-            .map(|i| i.item.clone())
-            .collect::<Vec<_>>(),
-        hash_key,
-        config.embedded_files.as_deref().unwrap_or(&[]),
-        &latest.patches,
-        source_ctx,
-        &local,
-    );
-    let ranges = dfs2_ranges(
-        &tasks,
-        source_ctx,
-        hash_key,
-        config.embedded_files.as_deref().unwrap_or(&[]),
-        &latest.patches,
-        &local,
-    );
-    progress(
-        ui,
-        2,
-        20.0,
-        ProgressStage::CreateDownloadSession,
-        None,
-        None,
-        None,
-    );
-    if let Err(err) =
-        ensure_dfs2_session(source_ctx, ranges.clone(), settings.dfs_extras.as_deref()).await
-    {
-        cleanup_dfs2(source_ctx).await;
-        return Err(attach_download_or(err, NO_DOWNLOAD_NODE, None, None));
-    }
-    // Every failure from here on happened inside this DFS session; the id lets
-    // the DFS side find the matching server log.
-    let sid = source_ctx.dfs2_session_id();
     let tag_sid = |err: anyhow::Error| match &sid {
         Some(sid) => tag_session(err, sid.clone()),
         None => err,
     };
-    log_task_plan(&tasks, &ranges);
-
-    progress(
-        ui,
-        2,
-        20.0,
-        ProgressStage::PrepareDownload,
-        None,
-        None,
-        None,
-    );
-    let ops = txn
-        .timed(
-            "download",
-            install_files(
-                settings,
-                config,
-                latest,
-                hash_key,
-                &tasks,
-                &local,
-                source_ctx,
-                &staged.staging,
-                ui,
-                mgr,
-            ),
-        )
-        .await;
-    cleanup_dfs2(source_ctx).await;
-    #[cfg_attr(not(debug_assertions), allow(unused_variables))]
-    let ops = ops.map_err(tag_sid)?;
-    tracing::info!(
-        "All tasks completed successfully: files={} ops={}",
-        to_install.len(),
-        ops.len()
-    );
-    session_dump!(settings.dump_dir.as_deref(), "04-install-ops.json", ops);
 
     // the installer's own files join the same journal
     let updater_rel = normalize_rel(&project.updater_name);
@@ -3359,6 +3385,29 @@ pub async fn run_uninstall(
     result
 }
 
+/// Hashed files, leftover deletes, and the updater. Paths under `keep_under`
+/// (expanded user-data directories) stay unless the user asked to delete them.
+fn uninstall_files(
+    hashed: impl IntoIterator<Item = String>,
+    deletes: impl IntoIterator<Item = String>,
+    updater: &str,
+    install_path: &str,
+    keep_under: &[String],
+) -> Vec<String> {
+    let mut files: Vec<String> = hashed.into_iter().collect();
+    files.extend(deletes);
+    files.push(updater.to_string());
+    files.retain(|f| {
+        keep_under.is_empty() || {
+            let full = join_install(install_path, f);
+            !keep_under.iter().any(|dir| is_under(&full, dir))
+        }
+    });
+    files.sort();
+    files.dedup();
+    files
+}
+
 /// 卸载只需要注册表元数据里的这两个字段，用窄投影而非直接解 `RepoMetadata`：后者的
 /// `tag_name`/`hashed` 是必填的，缺字段即整体报错，而卸载是最不该硬失败的路径——
 /// 旧版或被手工改过的注册表项也应当至少能删掉 updater。
@@ -3383,18 +3432,26 @@ async fn run_uninstall_inner(
         .map_err(|e| e.attach(UNINSTALL_INFO_MISSING))?;
     tracing::info!("UNINSTALL_METADATA: {meta}");
     let meta: UninstallMeta = serde_json::from_str(&meta).unwrap_or_default();
-    let mut files: Vec<String> = meta.hashed.into_iter().map(|e| e.file_name).collect();
-    files.extend(meta.deletes);
-    files.push(project.updater_name.clone());
-    files.sort();
-    files.dedup();
+    let user_data_dirs: Vec<String> = project
+        .user_data_path
+        .iter()
+        .map(|p| settings.expand(p, &project.app_name))
+        .collect();
+    let keep_user_data = if settings.delete_user_data {
+        Vec::new()
+    } else {
+        user_data_dirs.clone()
+    };
+    let files = uninstall_files(
+        meta.hashed.into_iter().map(|e| e.file_name),
+        meta.deletes,
+        &project.updater_name,
+        &settings.install_path,
+        &keep_user_data,
+    );
     tracing::info!("uninstall files: {}", files.join(", "));
     let user_data = if settings.delete_user_data {
-        project
-            .user_data_path
-            .iter()
-            .map(|p| settings.expand(p, &project.app_name))
-            .collect()
+        user_data_dirs
     } else {
         Vec::new()
     };
@@ -3437,6 +3494,9 @@ async fn run_uninstall_inner(
     };
     for err in &outcome.errors {
         tracing::warn!("uninstall: {err}");
+    }
+    if !outcome.errors.is_empty() {
+        return Err(anyhow::anyhow!(outcome.errors.join("\n")).attach(UNINSTALL_INCOMPLETE));
     }
     if let Some(root) = outcome.self_moved_to.as_deref() {
         schedule_delete_on_exit(root);
@@ -3556,6 +3616,55 @@ mod tests {
         let units = build_units(&plan, &hashed, HashKey::Md5, &[], &LocalScan::default());
         // the whole install is one root unit; a delete under it is moot
         assert_eq!(rels(&units), vec!["dir:[2]".to_string()]);
+    }
+
+    #[test]
+    fn units_deletes_when_nothing_to_install() {
+        let hashed = vec![meta("app.exe", "a")];
+        let plan = InstallPlan {
+            files: vec![plan_file("app.exe", PlanAction::Skip, Some("a"))],
+            deletes: vec!["old.txt".into()],
+        };
+        let units = build_units(&plan, &hashed, HashKey::Md5, &[], &LocalScan::default());
+        assert_eq!(rels(&units), vec!["del:old.txt".to_string()]);
+    }
+
+    #[test]
+    fn has_runtimes_is_true_only_for_nonempty_list() {
+        let none: Option<&[String]> = None;
+        assert!(!has_runtimes(none));
+        let empty: &[String] = &[];
+        assert!(!has_runtimes(Some(empty)));
+        let one = [String::from("vcruntime")];
+        assert!(has_runtimes(Some(one.as_slice())));
+    }
+
+    #[test]
+    fn uninstall_files_keeps_paths_under_user_data() {
+        let files = uninstall_files(
+            [
+                "app.exe".into(),
+                "User/save.dat".into(),
+                "User/deep/x.bin".into(),
+            ],
+            ["User/old.dat".into(), "gone.dll".into()],
+            "updater.exe",
+            r"C:\Games\App",
+            &[r"C:\Games\App\User".into()],
+        );
+        assert_eq!(files, ["app.exe", "gone.dll", "updater.exe"]);
+    }
+
+    #[test]
+    fn uninstall_files_includes_user_data_when_not_kept() {
+        let files = uninstall_files(
+            ["app.exe".into(), "User/save.dat".into()],
+            Vec::<String>::new(),
+            "updater.exe",
+            r"C:\Games\App",
+            &[],
+        );
+        assert_eq!(files, ["User/save.dat", "app.exe", "updater.exe"]);
     }
 
     #[test]

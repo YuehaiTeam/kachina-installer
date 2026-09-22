@@ -2,7 +2,7 @@ use tokio::io::AsyncSeekExt;
 
 use crate::{
     cli::AppendArgs,
-    local::is_embedded_name,
+    local::check_tlv_name,
     pack::{write_file, PackFile},
 };
 
@@ -10,6 +10,21 @@ pub async fn append_cli(args: AppendArgs) {
     // files len should equals to names len, or names len should be 0
     if args.file.len() != args.name.len() && !args.name.is_empty() {
         panic!("Files length must equal to names length, or names length must be 0");
+    }
+    let mut names = Vec::with_capacity(args.file.len());
+    for (i, file) in args.file.iter().enumerate() {
+        let name = if !args.name.is_empty() {
+            args.name[i].clone()
+        } else {
+            file.file_name()
+                .and_then(|s| s.to_str())
+                .unwrap()
+                .to_string()
+        };
+        if let Err(err) = check_tlv_name(&name) {
+            panic!("{err}");
+        }
+        names.push(name);
     }
     // open file as append mode
     let mut output = tokio::fs::OpenOptions::new()
@@ -22,20 +37,7 @@ pub async fn append_cli(args: AppendArgs) {
         .seek(std::io::SeekFrom::End(0))
         .await
         .expect("Failed to seek to the end of the file");
-    // loop through input files, get corresponding name or dafault to the file name
-    for (i, file) in args.file.iter().enumerate() {
-        let name = if !args.name.is_empty() {
-            &args.name[i]
-        } else {
-            file.file_name().and_then(|s| s.to_str()).unwrap()
-        };
-        // 与读取器同一规则；不合规的名称会被 get_embedded 静默过滤，
-        // 数据还在包里但 --list / --name 都看不到，必须在写入时拒绝。
-        if !is_embedded_name(name) {
-            panic!(
-                "Invalid embedded name {name:?}: only ASCII letters, digits, '.', '_' and '-' are allowed; pass --name to override the file name"
-            );
-        }
+    for (file, name) in args.file.iter().zip(names) {
         let input_stream = tokio::fs::File::open(file)
             .await
             .expect("Failed to open input file");
@@ -44,17 +46,16 @@ pub async fn append_cli(args: AppendArgs) {
             .await
             .expect("Failed to get input file metadata")
             .len();
-        // write file to output
+        println!("Appended file: {name} ({input_length} bytes)");
         write_file(
             &mut output,
             &mut PackFile {
-                name: name.to_string(),
+                name,
                 data: Box::new(input_stream),
                 size: input_length.try_into().expect("File size too large"),
             },
         )
         .await
         .expect("Failed to write file");
-        println!("Appended file: {name} ({input_length} bytes)");
     }
 }

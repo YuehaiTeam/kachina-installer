@@ -19,6 +19,7 @@ pub const PERMISSION_DENIED: &str = "PERMISSION_DENIED";
 pub const DISK_FULL: &str = "DISK_FULL";
 pub const FILE_IN_USE: &str = "FILE_IN_USE";
 pub const FILE_IO_FAILED: &str = "FILE_IO_FAILED";
+pub const UNINSTALL_INCOMPLETE: &str = "UNINSTALL_INCOMPLETE";
 pub const TEMP_DIR_UNAVAILABLE: &str = "TEMP_DIR_UNAVAILABLE";
 pub const PROCESS_KILL_FAILED: &str = "PROCESS_KILL_FAILED";
 pub const REGISTRY_WRITE_FAILED: &str = "REGISTRY_WRITE_FAILED";
@@ -81,6 +82,7 @@ pub const ALL_CODES: &[&str] = &[
     DISK_FULL,
     FILE_IN_USE,
     FILE_IO_FAILED,
+    UNINSTALL_INCOMPLETE,
     TEMP_DIR_UNAVAILABLE,
     PROCESS_KILL_FAILED,
     REGISTRY_WRITE_FAILED,
@@ -382,6 +384,7 @@ pub fn class_of(code: &str) -> Option<Class> {
         | DISK_FULL
         | FILE_IN_USE
         | FILE_IO_FAILED
+        | UNINSTALL_INCOMPLETE
         | TEMP_DIR_UNAVAILABLE
         | PROCESS_KILL_FAILED
         | REGISTRY_WRITE_FAILED

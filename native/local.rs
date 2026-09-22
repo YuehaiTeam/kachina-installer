@@ -8,6 +8,10 @@ use tokio::sync::OnceCell;
 
 use crate::utils::error::return_anyhow_result;
 use crate::utils::metadata::RepoMetadata;
+
+#[path = "embedded_name.rs"]
+mod embedded_name;
+use embedded_name::is_embedded_name;
 static MMAP_SELF: OnceCell<AsyncMmapFile> = OnceCell::const_new();
 static EMBEDDED_FILES: OnceCell<Vec<Embedded>> = OnceCell::const_new();
 static PARSED_PACK: OnceCell<ParsedPack> = OnceCell::const_new();
@@ -116,7 +120,7 @@ async fn scan_embedded(file: &'static AsyncMmapFile) -> anyhow::Result<Vec<Embed
         }
         let name_length =
             u16::from_be_bytes(file.slice(mem_pos_name_length, 2).try_into().unwrap()) as usize;
-        if name_length == 0 || name_length > 512 {
+        if name_length == 0 {
             continue;
         }
         let mem_pos_name = mem_pos_name_length + 2;
@@ -146,16 +150,6 @@ async fn scan_embedded(file: &'static AsyncMmapFile) -> anyhow::Result<Vec<Embed
         last_offset = mem_pos_content + content_length;
     }
     Ok(entries)
-}
-
-fn is_embedded_name(name: &str) -> bool {
-    matches!(
-        name,
-        "\0CONFIG" | "\0META" | "\0INDEX" | "\0IMAGE" | "\0THEME"
-    ) || name.chars().all(|c| c.is_ascii_hexdigit())
-        || name
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-')
 }
 
 pub async fn get_config_from_embedded(

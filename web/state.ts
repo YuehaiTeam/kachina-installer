@@ -103,6 +103,7 @@ export type SourceItem = {
   uri: string;
   icon: string | null;
   requires_webview: boolean;
+  hidden?: boolean;
 };
 
 export type PathState = {
@@ -144,7 +145,8 @@ export type Intent =
   | { kind: 'set_source'; uri: string }
   | { kind: 'set_create_lnk'; value: boolean }
   | { kind: 'set_delete_user_data'; value: boolean }
-  | { kind: 'set_cdk'; cdk: string }
+  | { kind: 'set_cdk'; cdk: string; uri?: string }
+  | { kind: 'cancel_cdk' }
   | { kind: 'start' }
   | { kind: 'cancel' }
   | { kind: 'answer'; id: string; ok: boolean }

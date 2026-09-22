@@ -1,9 +1,10 @@
 use anyhow::Context;
+use std::io;
 use std::path::{Path, PathBuf};
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 
 use crate::fs::staging::{staging_root, Staging};
-use crate::utils::code::{Coded, FILE_IO_FAILED};
+use crate::utils::code::{Attach, Coded, FILE_IO_FAILED, UNINSTALL_INCOMPLETE};
 use crate::utils::error::TAResult;
 use crate::utils::process;
 
@@ -66,23 +67,20 @@ pub fn delete_dir_if_empty(path: &Path) -> Result<(), std::io::Error> {
 pub async fn rm_list(key: Vec<PathBuf>) -> Vec<String> {
     let mut set = tokio::task::JoinSet::new();
     for path in key {
-        set.spawn(tokio::task::spawn_blocking(move || {
-            let path = Path::new(&path);
-            if path.exists() {
-                let res = std::fs::remove_file(path);
-                if res.is_err() {
-                    return Err(format!("Failed to remove file: {:?}", res.err()));
-                }
-            }
-            Ok(())
-        }));
+        set.spawn_blocking(move || match std::fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(format!("Failed to remove file {}: {e}", path.display())),
+        });
     }
-    let res = set.join_all().await;
-    let errs: Vec<String> = res
-        .into_iter()
-        .filter_map(|r| r.err())
-        .map(|e| e.to_string())
-        .collect();
+    let mut errs = Vec::new();
+    while let Some(res) = set.join_next().await {
+        match res {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => errs.push(e),
+            Err(e) => errs.push(e.to_string()),
+        }
+    }
     errs
 }
 
@@ -167,6 +165,11 @@ pub async fn run_uninstall(
         delete_list.push(Path::new(source.as_str()).join(uninstall_name));
     }
     let res = rm_list(delete_list).await;
+    if !res.is_empty() {
+        return Err(anyhow::anyhow!(res.join("\n"))
+            .attach(UNINSTALL_INCOMPLETE)
+            .into());
+    }
 
     // delete user data
     // merge user_data_path and extra_uninstall_path
@@ -202,7 +205,7 @@ pub async fn run_uninstall(
     let _ = windows_registry::CURRENT_USER.remove_tree(&reg_path);
 
     Ok(UninstallOutcome {
-        errors: res,
+        errors: Vec::new(),
         self_moved_to,
     })
 }
@@ -244,6 +247,78 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         let _ = std::fs::remove_dir_all(&base);
     }
+
+    #[tokio::test]
+    async fn rm_list_missing_is_ok_locked_is_err() {
+        let dir = crate::fs::staging::scratch_file(&format!("kachina-rm-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let missing = dir.join("gone.txt");
+        assert!(rm_list(vec![missing]).await.is_empty());
+
+        let ok = dir.join("ok.txt");
+        std::fs::write(&ok, b"x").unwrap();
+        assert!(rm_list(vec![ok.clone()]).await.is_empty());
+        assert!(!ok.exists());
+
+        let locked = dir.join("locked.txt");
+        std::fs::write(&locked, b"x").unwrap();
+        let _hold = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0x1)
+            .open(&locked)
+            .unwrap();
+        let errs = rm_list(vec![locked.clone()]).await;
+        assert!(!errs.is_empty(), "{errs:?}");
+        assert!(locked.exists());
+        drop(_hold);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn staging_cleanup_deletes_ampersand_path_and_spares_sibling() {
+        let root =
+            crate::fs::staging::scratch_file(&format!("kachina-clean-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let staged = root.join("应用 & Games.kachina-staged");
+        std::fs::create_dir_all(staged.join("old")).unwrap();
+        std::fs::write(staged.join("old").join("a.txt"), b"x").unwrap();
+        let sentinel = root.join("keep.txt");
+        std::fs::write(&sentinel, b"y").unwrap();
+
+        let child = spawn_staging_cleanup(&staged.to_string_lossy()).unwrap();
+        child.wait_blocking().unwrap();
+
+        assert!(
+            !staged.exists(),
+            "staged dir should be gone: {}",
+            staged.display()
+        );
+        assert!(sentinel.exists(), "sibling sentinel must stay");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn staging_cleanup_retries_until_lock_released() {
+        let root =
+            crate::fs::staging::scratch_file(&format!("kachina-clean-{}", uuid::Uuid::new_v4()));
+        let staged = root.join("Apps&Games.kachina-staged");
+        std::fs::create_dir_all(&staged).unwrap();
+        let locked = staged.join("held.txt");
+        std::fs::write(&locked, b"x").unwrap();
+        let hold = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0x1)
+            .open(&locked)
+            .unwrap();
+
+        let child = spawn_staging_cleanup(&staged.to_string_lossy()).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(400));
+        assert!(staged.exists(), "rmdir must wait while the file is held");
+        drop(hold);
+        child.wait_blocking().unwrap();
+        assert!(!staged.exists(), "dir goes away after the lock is dropped");
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }
 
 pub fn delete_self_on_exit() {
@@ -256,23 +331,15 @@ pub fn delete_self_on_exit() {
     else {
         return;
     };
-    // 子进程独立于本进程存活；ping 拖延约 1 秒等本进程退出后再删整个暂存目录。
-    let _ = process::spawn(
-        "cmd",
-        &[
-            "/C",
-            "ping",
-            "127.0.0.1",
-            "-n",
-            "2",
-            "&",
-            "rmdir",
-            "/s",
-            "/q",
-            path.as_str(),
-        ],
-        true,
-    );
+    let _ = spawn_staging_cleanup(&path);
+}
+
+/// `ping -n 2` ≈ 1s; 20 tries cap the wait at about 20s. The path is only in
+/// `%KACHINA_CLEANUP%`, so `&` in the directory name is not cmd syntax.
+const CLEANUP_CMD: &str = r#"for /L %i in (1,1,20) do @if exist "%KACHINA_CLEANUP%" (rmdir /s /q "%KACHINA_CLEANUP%" & ping 127.0.0.1 -n 2 >nul)"#;
+
+fn spawn_staging_cleanup(path: &str) -> io::Result<process::Child> {
+    process::spawn_system_cmd(CLEANUP_CMD, &[("KACHINA_CLEANUP", path)], true)
 }
 
 /// Stage the installer image (uninstaller / updater) under `new\` as phase-one

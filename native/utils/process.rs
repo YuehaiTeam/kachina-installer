@@ -3,19 +3,22 @@
 //! 安装器只有两种用法：拉起后等退出码（运行时安装器、WebView2 引导器）与拉起即走
 //! （崩溃对话框、退出后自删的 `cmd`）。std 的 `Command` 为通用性携带 stdio 管道、
 //! 环境块合并、PATH 解析等代码，本模块只保留命令行拼接与一个 `hide_window` 开关。
+//! 退出清理的 `cmd /S /C` 不把用户路径拼进命令行，见 [`spawn_system_cmd`]。
 //!
 //! 子进程不继承句柄、不进 Job，父进程退出后继续存活；拉起即走的调用方直接丢弃
 //! 返回的 [`Child`] 即可。
 
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::io;
 use std::os::windows::ffi::OsStrExt;
+use std::path::PathBuf;
 
 use windows::core::{HSTRING, PCWSTR, PWSTR};
 use windows::Win32::Foundation::{CloseHandle, HANDLE, WAIT_FAILED};
 use windows::Win32::System::Threading::{
     CreateProcessW, GetExitCodeProcess, GetProcessId, WaitForSingleObject, CREATE_NO_WINDOW,
-    INFINITE, PROCESS_CREATION_FLAGS, PROCESS_INFORMATION, STARTUPINFOW,
+    CREATE_UNICODE_ENVIRONMENT, INFINITE, PROCESS_CREATION_FLAGS, PROCESS_INFORMATION,
+    STARTUPINFOW,
 };
 use windows::Win32::UI::Shell::{
     ShellExecuteExW, SEE_MASK_FLAG_NO_UI, SEE_MASK_NOASYNC, SHELLEXECUTEINFOW,
@@ -70,12 +73,70 @@ pub fn spawn<P: AsRef<OsStr>, A: AsRef<OsStr>>(
 ) -> io::Result<Child> {
     let mut cmdline = make_command_line(program.as_ref(), args.iter().map(AsRef::as_ref));
     cmdline.push(0);
+    create_process(None, &mut cmdline, None, hide_window)
+}
 
-    let flags = if hide_window {
+/// `%SystemRoot%\System32\cmd.exe /S /C "<command>"`。
+///
+/// `/S` 只剥掉 `/C` 之后的首尾引号，`command` 里的引号原样保留，所以
+/// `"%VAR%"` 仍是 cmd 引号而不是 C 运行时的 `\"`。`command` 不得包含用户路径；
+/// 用户路径放进 `extra_env`，由子进程自己的环境块继承。
+pub fn spawn_system_cmd(
+    command: &str,
+    extra_env: &[(&str, &str)],
+    hide_window: bool,
+) -> io::Result<Child> {
+    let exe = system_cmd_exe();
+    let mut cmdline = make_cmd_s_c_line(exe.as_os_str(), command);
+    cmdline.push(0);
+    let mut env = (!extra_env.is_empty()).then(|| unicode_env_block(extra_env));
+    create_process(
+        Some(exe.as_os_str()),
+        &mut cmdline,
+        env.as_deref_mut(),
+        hide_window,
+    )
+}
+
+fn system_cmd_exe() -> PathBuf {
+    let root = std::env::var_os("SystemRoot").unwrap_or_else(|| OsString::from(r"C:\Windows"));
+    PathBuf::from(root).join("System32").join("cmd.exe")
+}
+
+/// `"cmd.exe" /S /C "<command>"`：内层引号不按 C 规则加反斜杠。
+fn make_cmd_s_c_line(cmd_exe: &OsStr, command: &str) -> Vec<u16> {
+    let mut line = Vec::new();
+    append_arg(&mut line, cmd_exe, true);
+    line.extend(" /S /C ".encode_utf16());
+    line.push(b'"' as u16);
+    line.extend(command.encode_utf16());
+    line.push(b'"' as u16);
+    line
+}
+
+fn create_process(
+    application: Option<&OsStr>,
+    cmdline: &mut [u16],
+    env: Option<&mut [u16]>,
+    hide_window: bool,
+) -> io::Result<Child> {
+    let mut app = application.map(|a| {
+        let mut w: Vec<u16> = a.encode_wide().collect();
+        w.push(0);
+        w
+    });
+    let app_ptr = match app.as_mut() {
+        Some(w) => PCWSTR(w.as_ptr()),
+        None => PCWSTR::null(),
+    };
+    let mut flags = if hide_window {
         CREATE_NO_WINDOW
     } else {
         PROCESS_CREATION_FLAGS(0)
     };
+    if env.is_some() {
+        flags |= CREATE_UNICODE_ENVIRONMENT;
+    }
     let si = STARTUPINFOW {
         cb: std::mem::size_of::<STARTUPINFOW>() as u32,
         ..Default::default()
@@ -83,13 +144,13 @@ pub fn spawn<P: AsRef<OsStr>, A: AsRef<OsStr>>(
     let mut pi = PROCESS_INFORMATION::default();
     unsafe {
         CreateProcessW(
-            PCWSTR::null(),
+            app_ptr,
             Some(PWSTR(cmdline.as_mut_ptr())),
             None,
             None,
             false,
             flags,
-            None,
+            env.map(|e| e.as_mut_ptr() as *const core::ffi::c_void),
             PCWSTR::null(),
             &si,
             &mut pi,
@@ -97,6 +158,30 @@ pub fn spawn<P: AsRef<OsStr>, A: AsRef<OsStr>>(
         let _ = CloseHandle(pi.hThread);
     }
     Ok(Child(pi.hProcess))
+}
+
+fn unicode_env_block(extra: &[(&str, &str)]) -> Vec<u16> {
+    let mut block = Vec::new();
+    'parent: for (k, v) in std::env::vars_os() {
+        for (ek, _) in extra {
+            if k.eq_ignore_ascii_case(OsStr::new(*ek)) {
+                continue 'parent;
+            }
+        }
+        push_env_pair(&mut block, &k, &v);
+    }
+    for (k, v) in extra {
+        push_env_pair(&mut block, OsStr::new(*k), OsStr::new(*v));
+    }
+    block.push(0);
+    block
+}
+
+fn push_env_pair(block: &mut Vec<u16>, k: &OsStr, v: &OsStr) {
+    block.extend(k.encode_wide());
+    block.push(b'=' as u16);
+    block.extend(v.encode_wide());
+    block.push(0);
 }
 
 /// 以 shell 默认动词打开 `target`：可执行文件直接运行，URL 交给默认浏览器，
@@ -185,9 +270,41 @@ mod tests {
     }
 
     #[test]
-    fn spawn_hidden_cmd_and_read_exit_code() {
-        let child = spawn("cmd", &["/C", "exit", "7"], true).unwrap();
+    fn cmd_s_c_keeps_inner_quotes() {
+        let line = make_cmd_s_c_line(
+            OsStr::new(r"C:\Windows\System32\cmd.exe"),
+            r#"if exist "%KACHINA_CLEANUP%" rmdir /s /q "%KACHINA_CLEANUP%""#,
+        );
+        assert_eq!(
+            String::from_utf16(&line).unwrap(),
+            r#""C:\Windows\System32\cmd.exe" /S /C "if exist "%KACHINA_CLEANUP%" rmdir /s /q "%KACHINA_CLEANUP%"""#
+        );
+    }
+
+    #[test]
+    fn spawn_system_cmd_reads_exit_code() {
+        let child = spawn_system_cmd("exit 7", &[], true).unwrap();
         assert_eq!(child.wait_blocking().unwrap(), 7);
+    }
+
+    #[test]
+    fn env_block_overrides_and_keeps_ampersand() {
+        let block = unicode_env_block(&[("KACHINA_CLEANUP", r"D:\Apps&Games.kachina-staged")]);
+        let pairs: Vec<(String, String)> = block
+            .split(|c| *c == 0)
+            .filter(|s| !s.is_empty())
+            .map(|s| {
+                let text = String::from_utf16(s).unwrap();
+                let (k, v) = text.split_once('=').unwrap();
+                (k.to_string(), v.to_string())
+            })
+            .collect();
+        assert!(pairs.iter().any(|(k, v)| {
+            k.eq_ignore_ascii_case("KACHINA_CLEANUP") && v == r"D:\Apps&Games.kachina-staged"
+        }));
+        assert!(pairs
+            .iter()
+            .any(|(k, _)| k.eq_ignore_ascii_case("SystemRoot")));
     }
 
     #[test]

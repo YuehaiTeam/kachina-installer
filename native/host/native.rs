@@ -10,7 +10,9 @@ use crate::cli::arg::InstallArgs;
 use crate::host::HwndParent;
 use crate::installer::config::{resolve_installer_config, InstallerConfig};
 use crate::ipc::manager::ManagedElevate;
-use crate::session::commands::{mirrorc_target, settings_from_input, visible_sources};
+use crate::session::commands::{
+    mirrorc_target, settings_from_input, verify_mirrorc_cdk, visible_sources,
+};
 use crate::session::run::{run_install, run_uninstall};
 use crate::session::source::needs_js_plugin;
 use crate::session::state::{
@@ -89,7 +91,7 @@ pub async fn run(args: InstallArgs) -> anyhow::Result<NativeOutcome> {
             sess.apply(Intent::Start);
             if cdk_missing(&sess) {
                 sess.apply(Intent::Dismiss);
-                if !ensure_mirrorc_cdk(&project, &mut sess, false).await {
+                if !ensure_mirrorc_cdk(&project, &mut sess, false, None).await {
                     continue;
                 }
                 sess.apply(Intent::Start);
@@ -108,7 +110,7 @@ pub async fn run(args: InstallArgs) -> anyhow::Result<NativeOutcome> {
         match finish_action(action, input, args.clone(), &config, &project, &mut sess).await? {
             NativeOutcome::Again { reopen_source } => {
                 if reopen_source {
-                    let _ = ensure_mirrorc_cdk(&project, &mut sess, true).await;
+                    let _ = ensure_mirrorc_cdk(&project, &mut sess, true, None).await;
                 }
                 continue;
             }
@@ -124,7 +126,7 @@ async fn ui_session_from(
 ) -> anyhow::Result<UiSession> {
     let settings = settings_from_cli(args, config, project).await?;
     let mut cdk = settings.mirrorc_cdk;
-    if cdk.is_none() && settings.source_uri.starts_with("mirrorc://") {
+    if cdk.is_none() {
         cdk = crate::utils::wincred::wincred_read(&mirrorc_target(&project.app_name)).ok();
     }
     let is_uninstall = config.is_uninstall || args.uninstall;
@@ -210,6 +212,20 @@ fn cdk_missing(sess: &UiSession) -> bool {
     matches!(&sess.state.phase, Phase::Failed(c) if c.code == MIRRORC_CDK_MISSING)
 }
 
+fn apply_cdk(sess: &mut UiSession, cdk: String) {
+    sess.apply(Intent::SetCdk { cdk, uri: None });
+}
+
+fn has_cdk(sess: &UiSession) -> bool {
+    !sess
+        .state
+        .options
+        .mirrorc_cdk
+        .as_deref()
+        .unwrap_or("")
+        .is_empty()
+}
+
 fn apply_preset_to_args(args: &mut InstallArgs, project: &ProjectConfig, input: &SessionInput) {
     args.target = Some(PathBuf::from(&input.install_path));
     args.mirrorc_cdk = input.mirrorc_cdk.clone();
@@ -234,13 +250,24 @@ async fn show_ready_page(
                 .any(|s| s.uri == sess.state.options.source_uri)
         {
             sess.apply(Intent::SetSource {
-                uri: sources[0].uri.clone(),
+                uri: sources
+                    .iter()
+                    .find(|s| !s.hidden)
+                    .or(sources.first())
+                    .unwrap()
+                    .uri
+                    .clone(),
             });
         }
+        let listed: Vec<_> = sources
+            .iter()
+            .filter(|s| !s.hidden || s.uri == sess.state.options.source_uri)
+            .cloned()
+            .collect();
         // 离线整包不提供源选择：切到需要联网/CDK 的源没有意义。
-        let show_radios = sources.len() > 1 && !sess.state.offline;
+        let show_radios = listed.len() > 1 && !sess.state.offline;
         let default_radio = if show_radios {
-            sources
+            listed
                 .iter()
                 .position(|s| s.uri == sess.state.options.source_uri)
                 .map(|i| ID_RADIO_BASE + i as i32)
@@ -249,7 +276,7 @@ async fn show_ready_page(
             0
         };
         let radios = if show_radios {
-            sources
+            listed
                 .iter()
                 .enumerate()
                 .map(|(i, s)| CommandLink {
@@ -330,18 +357,32 @@ async fn show_ready_page(
             .await
             .context("ready dialog")??;
 
+        // TaskDialog 单选在按按钮时才返回。Mirror 源只在安装/更新确认且 CDK
+        // 校验通过后提交；改路径、高级模式不带上这个候选。卸载不下载，单选直接提交。
+        // CDK 取消时本次勾选也不写入。
         if show_radios {
-            if let Some(src) = sources
+            if let Some(src) = listed
                 .iter()
                 .enumerate()
                 .find(|(i, _)| ID_RADIO_BASE + *i as i32 == result.radio)
                 .map(|(_, s)| s)
             {
-                sess.apply(Intent::SetSource {
-                    uri: src.uri.clone(),
-                });
+                let mirrorc_switch =
+                    src.uri.starts_with("mirrorc://") && src.uri != sess.state.options.source_uri;
+                let confirm_install =
+                    result.button == ID_INSTALL && !matches!(sess.state.mode, Mode::Uninstall);
+                if mirrorc_switch && confirm_install {
+                    if !ensure_mirrorc_cdk(project, sess, false, Some(src.uri.as_str())).await {
+                        continue;
+                    }
+                } else if !mirrorc_switch || result.button == ID_INSTALL {
+                    sess.apply(Intent::SetSource {
+                        uri: src.uri.clone(),
+                    });
+                }
             }
         }
+
         match sess.state.mode {
             Mode::Uninstall => sess.apply(Intent::SetDeleteUserData {
                 value: result.verified,
@@ -376,73 +417,77 @@ async fn pick_path(current: &str, exe_name: &str, app_name: &str) -> Option<Stri
     crate::installer::pick_install_path(current, exe_name, app_name, parent).await
 }
 
-async fn ensure_mirrorc_cdk(project: &ProjectConfig, sess: &mut UiSession, force: bool) -> bool {
-    if !force {
-        if sess
-            .state
-            .options
-            .mirrorc_cdk
-            .as_deref()
-            .unwrap_or("")
-            .is_empty()
-        {
+async fn ensure_mirrorc_cdk(
+    project: &ProjectConfig,
+    sess: &mut UiSession,
+    force: bool,
+    candidate_uri: Option<&str>,
+) -> bool {
+    let uri = candidate_uri
+        .unwrap_or(sess.state.options.source_uri.as_str())
+        .to_string();
+    if !uri.starts_with("mirrorc://") {
+        return true;
+    }
+    let already_this = uri == sess.state.options.source_uri;
+
+    if !force && already_this {
+        if !has_cdk(sess) {
             if let Ok(cdk) = crate::utils::wincred::wincred_read(&mirrorc_target(&project.app_name))
             {
-                sess.apply(Intent::SetCdk { cdk });
+                apply_cdk(sess, cdk);
             }
         }
-        if !sess
-            .state
-            .options
-            .mirrorc_cdk
-            .as_deref()
-            .unwrap_or("")
-            .is_empty()
-        {
+        if has_cdk(sess) {
             sess.state.cdk = CdkStatus::Ok;
             return true;
         }
     }
 
-    let initial = sess.state.options.mirrorc_cdk.clone().unwrap_or_default();
-    let title = t(&sess.state, "dialog.mirrorc_cdk_title");
-    let prompt = t(&sess.state, "dialog.mirrorc_cdk_placeholder");
-    let key = tokio::task::spawn_blocking(move || prompt_text(&title, &prompt, &initial))
-        .await
-        .ok()
-        .flatten();
+    let mut initial = sess.state.options.mirrorc_cdk.clone().unwrap_or_default();
+    if initial.is_empty() {
+        if let Ok(cdk) = crate::utils::wincred::wincred_read(&mirrorc_target(&project.app_name)) {
+            initial = cdk;
+        }
+    }
 
-    match key {
-        Some(key) if key.is_empty() => {
-            let _ = crate::utils::wincred::wincred_delete(&mirrorc_target(&project.app_name));
-            sess.apply(Intent::SetCdk { cdk: String::new() });
-            sess.state.cdk = CdkStatus::Idle;
-            false
-        }
-        Some(key) => {
-            let _ = crate::utils::wincred::wincred_write(
-                &mirrorc_target(&project.app_name),
-                &key,
-                "MirrorChyan CDK",
-            );
-            sess.apply(Intent::SetCdk { cdk: key });
-            sess.state.cdk = CdkStatus::Ok;
-            true
-        }
-        None => {
-            if sess
-                .state
-                .options
-                .mirrorc_cdk
-                .as_deref()
-                .unwrap_or("")
-                .is_empty()
-            {
-                false
-            } else {
-                sess.state.cdk = CdkStatus::Ok;
-                true
+    loop {
+        let title = t(&sess.state, "dialog.mirrorc_cdk_title");
+        let prompt = t(&sess.state, "dialog.mirrorc_cdk_placeholder");
+        let typed = initial.clone();
+        let key = tokio::task::spawn_blocking(move || prompt_text(&title, &prompt, &typed))
+            .await
+            .ok()
+            .flatten();
+        match key {
+            Some(key) if key.is_empty() => {
+                // 空输入只清当前已提交的 Mirror 源。候选切换不删凭据，也不改源。
+                if already_this {
+                    let _ =
+                        crate::utils::wincred::wincred_delete(&mirrorc_target(&project.app_name));
+                    apply_cdk(sess, String::new());
+                    sess.state.cdk = CdkStatus::Idle;
+                }
+                return false;
             }
+            Some(key) => match verify_mirrorc_cdk(&uri, &key).await {
+                Ok(()) => {
+                    sess.apply(Intent::SetSource { uri: uri.clone() });
+                    apply_cdk(sess, key.clone());
+                    sess.state.cdk = CdkStatus::Ok;
+                    let _ = crate::utils::wincred::wincred_write(
+                        &mirrorc_target(&project.app_name),
+                        &key,
+                        "MirrorChyan CDK",
+                    );
+                    return true;
+                }
+                Err(coded) => {
+                    show_error_coded(&coded, desktop_hwnd());
+                    initial = key;
+                }
+            },
+            None => return false,
         }
     }
 }

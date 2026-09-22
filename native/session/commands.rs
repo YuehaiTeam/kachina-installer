@@ -1,5 +1,5 @@
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use base64::Engine;
@@ -39,6 +39,10 @@ pub struct GuiRuntime {
     pub fatal: bool,
     /// Token of the running session; replaced on every `Start`.
     pub cancel: Mutex<tokio_util::sync::CancellationToken>,
+    /// Bumped when the user cancels a CDK check or switches source so an
+    /// in-flight verify cannot commit.
+    cdk_epoch: AtomicU64,
+    cdk_restore: Mutex<Option<CdkStatus>>,
 }
 
 impl GuiRuntime {
@@ -148,7 +152,13 @@ async fn ready_runtime(
     };
     let all_sources = visible_sources(&project, &source_uri);
     if !all_sources.is_empty() && !all_sources.iter().any(|s| s.uri == source_uri) {
-        source_uri = all_sources[0].uri.clone();
+        source_uri = all_sources
+            .iter()
+            .find(|s| !s.hidden)
+            .or(all_sources.first())
+            .unwrap()
+            .uri
+            .clone();
     }
     let is_uninstall = config.is_uninstall || args.uninstall;
     let install_path = if let Some(p) = preset.as_ref() {
@@ -164,7 +174,7 @@ async fn ready_runtime(
         .as_ref()
         .and_then(|p| p.mirrorc_cdk.clone())
         .or(args.mirrorc_cdk.clone());
-    if cdk.is_none() && source_uri.starts_with("mirrorc://") {
+    if cdk.is_none() {
         cdk = crate::utils::wincred::wincred_read(&mirrorc_target(&project.app_name)).ok();
     }
     let cdk_status = if cdk.as_deref().unwrap_or("").is_empty() {
@@ -230,6 +240,8 @@ async fn ready_runtime(
         running: AtomicBool::new(false),
         fatal,
         cancel: Mutex::new(tokio_util::sync::CancellationToken::new()),
+        cdk_epoch: AtomicU64::new(0),
+        cdk_restore: Mutex::new(None),
     })
 }
 
@@ -262,6 +274,8 @@ fn failed_runtime(args: InstallArgs, coded: Coded) -> Arc<GuiRuntime> {
         running: AtomicBool::new(false),
         fatal: true,
         cancel: Mutex::new(tokio_util::sync::CancellationToken::new()),
+        cdk_epoch: AtomicU64::new(0),
+        cdk_restore: Mutex::new(None),
     })
 }
 
@@ -279,10 +293,12 @@ fn failed_runtime_with_config(config: InstallerConfig, coded: Coded) -> Arc<GuiR
         running: AtomicBool::new(false),
         fatal: true,
         cancel: Mutex::new(tokio_util::sync::CancellationToken::new()),
+        cdk_epoch: AtomicU64::new(0),
+        cdk_restore: Mutex::new(None),
     })
 }
 
-pub(crate) fn visible_sources(project: &ProjectConfig, current_uri: &str) -> Vec<SourceItem> {
+pub(crate) fn visible_sources(project: &ProjectConfig, _current_uri: &str) -> Vec<SourceItem> {
     match &project.source {
         SourceField::Single(uri) => vec![SourceItem {
             id: "default".into(),
@@ -290,16 +306,17 @@ pub(crate) fn visible_sources(project: &ProjectConfig, current_uri: &str) -> Vec
             uri: uri.clone(),
             icon: None,
             requires_webview: needs_js_plugin(uri),
+            hidden: false,
         }],
         SourceField::List(list) => list
             .iter()
-            .filter(|s| !s.hidden || s.uri == current_uri)
             .map(|s| SourceItem {
                 id: s.id.clone(),
                 name: s.name.clone(),
                 uri: s.uri.clone(),
                 icon: s.icon.clone(),
                 requires_webview: needs_js_plugin(&s.uri),
+                hidden: s.hidden,
             })
             .collect(),
     }
@@ -433,8 +450,18 @@ pub async fn handle_intent(
         .ok_or_else(|| TACommandError::new(anyhow::anyhow!("gui session not ready")))?;
     match intent {
         Intent::Start => handle_start(gui, ctx, handle).await,
-        Intent::SetCdk { cdk } => {
-            handle_set_cdk(gui, cdk, handle).await;
+        Intent::SetCdk { cdk, uri } => {
+            handle_set_cdk(gui, cdk, uri, handle).await;
+            ok(())
+        }
+        Intent::CancelCdk => {
+            handle_cancel_cdk(&gui, handle);
+            ok(())
+        }
+        Intent::SetSource { uri } => {
+            restore_abandoned_cdk(&gui);
+            apply_locked(&gui, Intent::SetSource { uri });
+            gui.emit(handle);
             ok(())
         }
         Intent::Answer { id, ok: accepted } => {
@@ -555,31 +582,9 @@ async fn handle_start(
     ok(())
 }
 
-async fn handle_set_cdk(gui: Arc<GuiRuntime>, cdk: String, handle: &HostHandle) {
-    apply_locked(&gui, Intent::SetCdk { cdk: cdk.clone() });
-    let uri = gui.snapshot().options.source_uri;
-    if cdk.is_empty() {
-        if let Some(project) = gui.project.as_ref() {
-            let _ = crate::utils::wincred::wincred_delete(&mirrorc_target(&project.app_name));
-        }
-        {
-            let mut sess = gui.session.lock().unwrap_or_else(|e| e.into_inner());
-            sess.state.cdk = CdkStatus::Idle;
-        }
-        gui.emit(handle);
-        return;
-    }
-    if !uri.starts_with("mirrorc://") {
-        gui.emit(handle);
-        return;
-    }
-    {
-        let mut sess = gui.session.lock().unwrap_or_else(|e| e.into_inner());
-        sess.state.cdk = CdkStatus::Checking;
-    }
-    gui.emit(handle);
-    // parse_source hangs MIRRORC_CONFIG_INVALID itself; a non-mirrorc parse is the same class.
-    let status: anyhow::Result<Value> = match parse_source(&uri) {
+/// Check a CDK against a Mirror酱 URI without committing options.
+pub(crate) async fn verify_mirrorc_cdk(uri: &str, cdk: &str) -> Result<(), Coded> {
+    let status: anyhow::Result<Value> = match parse_source(uri) {
         Ok(ParsedSource::Mirrorc {
             resource_id,
             channel,
@@ -588,7 +593,7 @@ async fn handle_set_cdk(gui: Arc<GuiRuntime>, cdk: String, handle: &HostHandle) 
         }) => crate::thirdparty::mirrorc::get_mirrorc_status(
             &resource_id,
             "",
-            &cdk,
+            cdk,
             &channel,
             arch.as_deref(),
             os.as_deref(),
@@ -598,37 +603,299 @@ async fn handle_set_cdk(gui: Arc<GuiRuntime>, cdk: String, handle: &HostHandle) 
         .map_err(|e| e.attach(MIRRORC_UNREACHABLE)),
         Ok(_) => Err(anyhow::Error::from(Coded::bare_with(
             MIRRORC_CONFIG_INVALID,
-            uri.clone(),
+            uri,
         ))),
         Err(err) => Err(err),
     };
-    {
-        let mut sess = gui.session.lock().unwrap_or_else(|e| e.into_inner());
-        match status {
-            Ok(value) => {
-                if let Some(coded) = coded_for_mirrorc_response(&value) {
-                    sess.state.cdk = CdkStatus::Invalid(coded);
-                } else {
-                    sess.state.cdk = CdkStatus::Ok;
-                    if let Some(project) = gui.project.as_ref() {
-                        let _ = crate::utils::wincred::wincred_write(
-                            &mirrorc_target(&project.app_name),
-                            &cdk,
-                            "MirrorChyan CDK",
-                        );
-                    }
-                }
-            }
-            Err(err) => {
-                if let Some(coded) = coded_from_error(&err) {
-                    sess.state.cdk = CdkStatus::Invalid(coded);
-                }
+    match status {
+        Ok(value) => {
+            if let Some(coded) = coded_for_mirrorc_response(&value) {
+                Err(coded)
+            } else {
+                Ok(())
             }
         }
+        Err(err) => Err(coded_from_error(&err).unwrap_or_else(|| Coded::bare(MIRRORC_UNREACHABLE))),
     }
+}
+
+async fn handle_set_cdk(
+    gui: Arc<GuiRuntime>,
+    cdk: String,
+    uri: Option<String>,
+    handle: &HostHandle,
+) {
+    let committed = gui.snapshot().options.source_uri;
+    let verify_uri = uri.filter(|u| !u.is_empty()).unwrap_or_else(|| committed);
+    if cdk.is_empty() {
+        commit_empty_cdk(&gui, &verify_uri);
+        gui.emit(handle);
+        return;
+    }
+    if !verify_uri.starts_with("mirrorc://") {
+        gui.emit(handle);
+        return;
+    }
+    let epoch = gui.cdk_epoch.load(Ordering::SeqCst);
+    let current = gui.snapshot().cdk;
+    remember_cdk_snapshot(&gui, &current);
+    {
+        let mut sess = gui.session.lock().unwrap_or_else(|e| e.into_inner());
+        sess.state.cdk = CdkStatus::Checking;
+    }
+    gui.emit(handle);
+    let status = verify_mirrorc_cdk(&verify_uri, &cdk).await;
+    commit_verified_cdk(&gui, epoch, &verify_uri, &cdk, status);
+    gui.emit(handle);
+}
+
+/// 空 CDK 仍提交 Mirror 源，并清掉凭据。世代号先增加，再按与取消相同的锁顺序写入。
+fn commit_empty_cdk(gui: &GuiRuntime, verify_uri: &str) {
+    gui.cdk_epoch.fetch_add(1, Ordering::SeqCst);
+    let mut restore = gui.cdk_restore.lock().unwrap_or_else(|e| e.into_inner());
+    *restore = None;
+    let mut sess = gui.session.lock().unwrap_or_else(|e| e.into_inner());
+    if verify_uri.starts_with("mirrorc://") {
+        sess.apply(Intent::SetSource {
+            uri: verify_uri.to_string(),
+        });
+    }
+    sess.apply(Intent::SetCdk {
+        cdk: String::new(),
+        uri: None,
+    });
+    sess.state.cdk = CdkStatus::Idle;
+    if let Some(project) = gui.project.as_ref() {
+        let _ = crate::utils::wincred::wincred_delete(&mirrorc_target(&project.app_name));
+    }
+}
+
+/// 持有 `cdk_restore` 再持有 `session` 时才读世代号。对不上则不改源、不写凭据。
+/// 成功时在释放这两把锁之前清掉快照，之后的取消不能撤掉这次提交。
+fn commit_verified_cdk(
+    gui: &GuiRuntime,
+    epoch: u64,
+    verify_uri: &str,
+    cdk: &str,
+    status: Result<(), Coded>,
+) -> bool {
+    let mut restore = gui.cdk_restore.lock().unwrap_or_else(|e| e.into_inner());
+    let mut sess = gui.session.lock().unwrap_or_else(|e| e.into_inner());
+    if gui.cdk_epoch.load(Ordering::SeqCst) != epoch {
+        return false;
+    }
+    match status {
+        Ok(()) => {
+            sess.apply(Intent::SetSource {
+                uri: verify_uri.to_string(),
+            });
+            sess.apply(Intent::SetCdk {
+                cdk: cdk.to_string(),
+                uri: None,
+            });
+            sess.state.cdk = CdkStatus::Ok;
+            *restore = None;
+            if let Some(project) = gui.project.as_ref() {
+                let _ = crate::utils::wincred::wincred_write(
+                    &mirrorc_target(&project.app_name),
+                    cdk,
+                    "MirrorChyan CDK",
+                );
+            }
+            true
+        }
+        Err(coded) => {
+            sess.state.cdk = CdkStatus::Invalid(coded);
+            false
+        }
+    }
+}
+
+/// Keep the last committed CDK status for this edit so cancel can put it back.
+/// `Checking` is not committed; a later retry must not replace `Ok` with `Invalid`.
+fn remember_cdk_snapshot(gui: &GuiRuntime, current: &CdkStatus) {
+    if matches!(current, CdkStatus::Checking) {
+        return;
+    }
+    let mut restore = gui.cdk_restore.lock().unwrap_or_else(|e| e.into_inner());
+    if restore.is_none() {
+        *restore = Some(current.clone());
+    }
+}
+
+/// Invalidate an in-flight CDK verify and restore the committed status, if any.
+fn restore_abandoned_cdk(gui: &GuiRuntime) {
+    gui.cdk_epoch.fetch_add(1, Ordering::SeqCst);
+    let restore = gui
+        .cdk_restore
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .take();
+    if let Some(prev) = restore {
+        let mut sess = gui.session.lock().unwrap_or_else(|e| e.into_inner());
+        sess.state.cdk = prev;
+    }
+}
+
+fn handle_cancel_cdk(gui: &GuiRuntime, handle: &HostHandle) {
+    restore_abandoned_cdk(gui);
     gui.emit(handle);
 }
 
 fn ok<T: serde::Serialize>(value: T) -> TAResult<Value> {
     serde_json::to_value(value).map_err(|e| TACommandError::new(anyhow::anyhow!(e)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn dummy_config() -> InstallerConfig {
+        InstallerConfig {
+            install_path: String::new(),
+            install_path_exists: false,
+            install_path_source: "",
+            is_uninstall: false,
+            embedded_files: None,
+            embedded_index: None,
+            embedded_config: None,
+            enbedded_metadata: None,
+            embedded_image: None,
+            exe_path: String::new(),
+            args: InstallArgs::default(),
+            elevated: false,
+            preset: None,
+        }
+    }
+
+    fn gui_with(cdk: CdkStatus, committed: Option<&str>, uri: &str) -> Arc<GuiRuntime> {
+        let mut state = UiState::default();
+        state.cdk = cdk;
+        state.options.mirrorc_cdk = committed.map(str::to_string);
+        state.options.source_uri = uri.into();
+        Arc::new(GuiRuntime {
+            session: Arc::new(Mutex::new(UiSession::with_renderer(
+                state,
+                Renderer::WebView,
+            ))),
+            config: Arc::new(dummy_config()),
+            project: None,
+            running: AtomicBool::new(false),
+            fatal: false,
+            cancel: Mutex::new(tokio_util::sync::CancellationToken::new()),
+            cdk_epoch: AtomicU64::new(0),
+            cdk_restore: Mutex::new(None),
+        })
+    }
+
+    #[test]
+    fn cancel_after_failed_verify_restores_committed_cdk() {
+        let gui = gui_with(CdkStatus::Ok, Some("old"), "mirrorc://rid");
+        remember_cdk_snapshot(&gui, &CdkStatus::Ok);
+        {
+            let mut sess = gui.session.lock().unwrap();
+            sess.state.cdk = CdkStatus::Invalid(Coded::bare("MIRRORC_CDK_INVALID"));
+        }
+        restore_abandoned_cdk(&gui);
+        let snap = gui.snapshot();
+        assert_eq!(snap.cdk, CdkStatus::Ok);
+        assert_eq!(snap.options.mirrorc_cdk.as_deref(), Some("old"));
+    }
+
+    #[test]
+    fn source_change_drops_in_flight_verify() {
+        let gui = gui_with(CdkStatus::Ok, Some("old"), "mirrorc://rid");
+        let epoch = gui.cdk_epoch.load(Ordering::SeqCst);
+        remember_cdk_snapshot(&gui, &CdkStatus::Ok);
+        {
+            let mut sess = gui.session.lock().unwrap();
+            sess.state.cdk = CdkStatus::Checking;
+        }
+        restore_abandoned_cdk(&gui);
+        assert_ne!(gui.cdk_epoch.load(Ordering::SeqCst), epoch);
+        assert_eq!(gui.snapshot().cdk, CdkStatus::Ok);
+        assert_eq!(gui.snapshot().options.mirrorc_cdk.as_deref(), Some("old"));
+    }
+
+    #[test]
+    fn retry_keeps_the_original_committed_snapshot() {
+        let gui = gui_with(CdkStatus::Ok, Some("old"), "mirrorc://rid");
+        remember_cdk_snapshot(&gui, &CdkStatus::Ok);
+        remember_cdk_snapshot(
+            &gui,
+            &CdkStatus::Invalid(Coded::bare("MIRRORC_CDK_INVALID")),
+        );
+        restore_abandoned_cdk(&gui);
+        assert_eq!(gui.snapshot().cdk, CdkStatus::Ok);
+    }
+
+    #[test]
+    fn stale_verify_does_not_commit_source() {
+        let gui = gui_with(CdkStatus::Ok, Some("old"), "https://example.com/app.json");
+        let epoch = gui.cdk_epoch.load(Ordering::SeqCst);
+        remember_cdk_snapshot(&gui, &CdkStatus::Ok);
+        restore_abandoned_cdk(&gui);
+        let committed = commit_verified_cdk(&gui, epoch, "mirrorc://rid", "new", Ok(()));
+        assert!(!committed);
+        let snap = gui.snapshot();
+        assert_eq!(snap.options.source_uri, "https://example.com/app.json");
+        assert_eq!(snap.options.mirrorc_cdk.as_deref(), Some("old"));
+        assert_eq!(snap.cdk, CdkStatus::Ok);
+    }
+
+    #[test]
+    fn fresh_verify_commits_source_and_ignores_a_later_cancel() {
+        let gui = gui_with(CdkStatus::Ok, Some("old"), "https://example.com/app.json");
+        remember_cdk_snapshot(&gui, &CdkStatus::Ok);
+        let epoch = gui.cdk_epoch.load(Ordering::SeqCst);
+        assert!(commit_verified_cdk(
+            &gui,
+            epoch,
+            "mirrorc://rid",
+            "new",
+            Ok(())
+        ));
+        restore_abandoned_cdk(&gui);
+        let snap = gui.snapshot();
+        assert_eq!(snap.options.source_uri, "mirrorc://rid");
+        assert_eq!(snap.options.mirrorc_cdk.as_deref(), Some("new"));
+        assert_eq!(snap.cdk, CdkStatus::Ok);
+    }
+
+    #[test]
+    fn checking_is_not_stored_as_the_committed_snapshot() {
+        let gui = gui_with(CdkStatus::Checking, Some("old"), "mirrorc://rid");
+        remember_cdk_snapshot(&gui, &CdkStatus::Checking);
+        assert!(gui.cdk_restore.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn visible_sources_keeps_hidden_entries() {
+        let project = ProjectConfig::from_value(&serde_json::json!({
+            "source": [
+                {"id": "http", "name": "HTTP", "uri": "https://example.com/a.json"},
+                {
+                    "id": "stub",
+                    "name": "Stub",
+                    "uri": "plugin-stub+http://x",
+                    "hidden": true
+                }
+            ],
+            "appName": "A",
+            "publisher": "P",
+            "regName": "A",
+            "exeName": "a.exe",
+            "uninstallName": "uninst.exe",
+            "updaterName": "update.exe",
+            "programFilesPath": "A",
+            "title": "T",
+            "description": "D",
+            "windowTitle": "W"
+        }))
+        .unwrap();
+        let sources = visible_sources(&project, "");
+        assert_eq!(sources.len(), 2);
+        assert!(sources[1].hidden);
+        assert!(!sources[0].hidden);
+    }
 }

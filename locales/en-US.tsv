@@ -43,6 +43,7 @@ SOURCE_METADATA_INVALID	Update information is invalid
 SOURCE_NEEDS_VERIFICATION	This source requires verification
 STAGING_IN_USE	Another installer is already working on this folder
 TEMP_DIR_UNAVAILABLE	Cannot access the temporary folder
+UNINSTALL_INCOMPLETE	Uninstall did not finish. Install information was kept so you can retry
 UNINSTALL_INFO_MISSING	Uninstall information not found. Reinstall before uninstalling
 VERSION_REGEX_INVALID	Invalid version pattern
 WEBVIEW2_FAILED	WebView2 installation failed

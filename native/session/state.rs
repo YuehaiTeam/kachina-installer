@@ -107,6 +107,8 @@ pub struct SourceItem {
     pub uri: String,
     pub icon: Option<String>,
     pub requires_webview: bool,
+    #[serde(default)]
+    pub hidden: bool,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -321,7 +323,8 @@ pub enum Intent {
     SetSource { uri: String },
     SetCreateLnk { value: bool },
     SetDeleteUserData { value: bool },
-    SetCdk { cdk: String },
+    SetCdk { cdk: String, uri: Option<String> },
+    CancelCdk,
     Start,
     Cancel,
     Answer { id: String, ok: bool },
@@ -363,7 +366,15 @@ impl Intent {
             "set_delete_user_data" => Intent::SetDeleteUserData {
                 value: flag("value")?,
             },
-            "set_cdk" => Intent::SetCdk { cdk: text("cdk")? },
+            "set_cdk" => Intent::SetCdk {
+                cdk: text("cdk")?,
+                uri: v
+                    .get("uri")
+                    .and_then(Value::as_str)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_owned),
+            },
+            "cancel_cdk" => Intent::CancelCdk,
             "start" => Intent::Start,
             "cancel" => Intent::Cancel,
             "answer" => Intent::Answer {
@@ -462,8 +473,7 @@ impl UiSession {
                 self.recompute_path();
             }
             Intent::SetSource { uri } => {
-                // 仅在换到（不同的）mirrorc 源时作废旧校验；同 URI 重选/恢复
-                // 原选择不改变已验证状态，否则取消 CDK 面板也会丢掉 Ok。
+                // 换到另一条 mirrorc URI 才作废旧校验；同 URI 重选必须保住 Ok。
                 let changed = self.state.options.source_uri != uri;
                 self.state.options.source_uri = uri;
                 if changed && self.state.options.source_uri.starts_with("mirrorc://") {
@@ -477,10 +487,10 @@ impl UiSession {
             Intent::SetDeleteUserData { value } => {
                 self.state.options.delete_user_data = value;
             }
-            Intent::SetCdk { cdk } => {
-                // Network check is not in this step; store the value only.
+            Intent::SetCdk { cdk, .. } => {
                 self.state.options.mirrorc_cdk = if cdk.is_empty() { None } else { Some(cdk) };
             }
+            Intent::CancelCdk => {}
             Intent::Start => {
                 // 卸载不下载任何文件（静默卸载直接走 run_uninstall），CDK 校验
                 // 只属于确实需要下载的安装/更新路径，否则 GUI 卸载会被卡在
@@ -667,6 +677,7 @@ mod tests {
                 uri: "https://example.com/app.json".into(),
                 icon: None,
                 requires_webview: false,
+                hidden: false,
             },
             SourceItem {
                 id: "mirrorc".into(),
@@ -674,6 +685,7 @@ mod tests {
                 uri: "mirrorc://rid/1".into(),
                 icon: None,
                 requires_webview: false,
+                hidden: false,
             },
         ]);
         sess.state.cdk = CdkStatus::Ok;
@@ -694,6 +706,40 @@ mod tests {
             Phase::Failed(c) => assert_eq!(c.code, MIRRORC_CDK_MISSING),
             other => panic!("expected Failed(MIRRORC_CDK_MISSING), got {other:?}"),
         }
+    }
+
+    #[test]
+    fn set_cdk_uri_does_not_change_source() {
+        let mut sess = session_with_sources(vec![
+            SourceItem {
+                id: "http".into(),
+                name: "HTTP".into(),
+                uri: "https://example.com/app.json".into(),
+                icon: None,
+                requires_webview: false,
+                hidden: false,
+            },
+            SourceItem {
+                id: "mirrorc".into(),
+                name: "Mirrorc".into(),
+                uri: "mirrorc://rid/1".into(),
+                icon: None,
+                requires_webview: false,
+                hidden: false,
+            },
+        ]);
+        sess.apply(Intent::SetSource {
+            uri: "https://example.com/app.json".into(),
+        });
+        sess.apply(Intent::SetCdk {
+            cdk: "abc".into(),
+            uri: Some("mirrorc://rid/1".into()),
+        });
+        assert_eq!(
+            sess.state.options.source_uri,
+            "https://example.com/app.json"
+        );
+        assert_eq!(sess.state.options.mirrorc_cdk.as_deref(), Some("abc"));
     }
 
     #[test]
@@ -764,7 +810,15 @@ mod tests {
         ));
         assert!(matches!(
             parse(json!({"kind": "set_cdk", "cdk": "abc"})),
-            Intent::SetCdk { cdk } if cdk == "abc"
+            Intent::SetCdk { cdk, uri: None } if cdk == "abc"
+        ));
+        assert!(matches!(
+            parse(json!({"kind": "set_cdk", "cdk": "abc", "uri": "mirrorc://rid"})),
+            Intent::SetCdk { cdk, uri: Some(uri) } if cdk == "abc" && uri == "mirrorc://rid"
+        ));
+        assert!(matches!(
+            parse(json!({"kind": "cancel_cdk"})),
+            Intent::CancelCdk
         ));
         assert!(matches!(parse(json!({"kind": "start"})), Intent::Start));
         assert!(matches!(parse(json!({"kind": "cancel"})), Intent::Cancel));

@@ -104,17 +104,11 @@ pub fn preferred_file_hash<'a>(
     md5.as_ref().or(xxh.as_ref())
 }
 
-/// 读取器（`get_embedded`）只接受内置 `\0` 名称与 ASCII 字母/数字/`.`/`_`/`-`
-/// 组成的名称；append 写入端必须使用同一规则，否则数据进了包却永远读不到。
-pub fn is_embedded_name(name: &str) -> bool {
-    matches!(
-        name,
-        "\0CONFIG" | "\0META" | "\0INDEX" | "\0IMAGE" | "\0THEME"
-    ) || name.chars().all(|c| c.is_ascii_hexdigit())
-        || name
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-')
-}
+#[path = "../embedded_name.rs"]
+mod embedded_name;
+pub use embedded_name::{
+    check_index_name, check_tlv_name, is_embedded_name, EmbeddedNameError, INDEX_NAME_MAX,
+};
 
 pub async fn get_embedded(file: &AsyncMmapFile) -> anyhow::Result<Vec<Embedded>> {
     let offsets = search_pattern_for_extract(file).await?;
@@ -138,7 +132,7 @@ pub async fn get_embedded(file: &AsyncMmapFile) -> anyhow::Result<Vec<Embedded>>
         }
         let name_length =
             u16::from_be_bytes(file.slice(mem_pos_name_length, 2).try_into().unwrap()) as usize;
-        if name_length == 0 || name_length > 512 {
+        if name_length == 0 {
             continue;
         }
         let mem_pos_name = mem_pos_name_length + 2;

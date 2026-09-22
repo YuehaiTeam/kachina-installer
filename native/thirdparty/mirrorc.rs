@@ -87,19 +87,8 @@ pub fn run_mirrorc_install_sync(
     let mut archive = zip::ZipArchive::new(file).into_ta_result()?;
     let total_len = archive.len();
 
-    let file_lists = archive
-        .file_names()
-        .map(|s| s.to_string())
-        .filter(|s| s != "changes.json" && s != ".metadata.json")
-        .collect::<Vec<String>>();
-    let prefix = longest_common_prefix(file_lists);
-    // split last '/', get the prefix
-    let mut prefix = prefix.split('/').collect::<Vec<&str>>();
-    prefix.pop();
-    let mut prefix = prefix.join("/");
-    if !prefix.is_empty() && !prefix.ends_with('/') {
-        prefix.push('/');
-    }
+    let names: Vec<String> = archive.file_names().map(|s| s.to_string()).collect();
+    let prefix = archive_wrapper_prefix(&names);
 
     // changes.json
     let changeset: Option<MirrorcChangeset> = match archive.by_name("changes.json") {
@@ -285,6 +274,28 @@ pub async fn run_mirrorc_download(
     Ok(())
 }
 
+/// Zip-root `.metadata.json` means the archive is already at package root
+/// (files may still share a directory like `Assets/`). Otherwise strip the
+/// shared parent of remaining entries (`root/` in the changeset layout).
+fn archive_wrapper_prefix(names: &[String]) -> String {
+    if names.iter().any(|n| n == ".metadata.json") {
+        return String::new();
+    }
+    let file_lists: Vec<String> = names
+        .iter()
+        .filter(|s| s.as_str() != "changes.json" && s.as_str() != ".metadata.json")
+        .cloned()
+        .collect();
+    let prefix = longest_common_prefix(file_lists);
+    let mut prefix = prefix.split('/').collect::<Vec<&str>>();
+    prefix.pop();
+    let mut prefix = prefix.join("/");
+    if !prefix.is_empty() && !prefix.ends_with('/') {
+        prefix.push('/');
+    }
+    prefix
+}
+
 pub fn longest_common_prefix(strs: Vec<String>) -> String {
     if strs.is_empty() {
         return String::new();
@@ -422,6 +433,63 @@ mod tests {
             progress_notify(|_| {}),
         )
         .is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn root_metadata_does_not_strip_shared_content_dir() {
+        assert_eq!(
+            archive_wrapper_prefix(&[
+                ".metadata.json".into(),
+                "Assets/a.txt".into(),
+                "Assets/b.txt".into(),
+            ]),
+            ""
+        );
+        assert_eq!(
+            archive_wrapper_prefix(&["changes.json".into(), "root/app.exe".into()]),
+            "root/"
+        );
+        assert_eq!(
+            archive_wrapper_prefix(&[
+                "pkg/.metadata.json".into(),
+                "pkg/Assets/a.txt".into(),
+                "pkg/b.txt".into(),
+            ]),
+            "pkg/"
+        );
+
+        let dir = tmp();
+        let zip_path = dir.join("pkg.zip");
+        make_zip(
+            &zip_path,
+            &[
+                (
+                    ".metadata.json",
+                    br#"{"tag_name":"v2","hashed":[],"deletes":[]}"#,
+                ),
+                ("Assets/a.txt", b"a"),
+                ("Assets/b.txt", b"b"),
+            ],
+        );
+        let sha = sha256_file(&zip_path).unwrap();
+        let new_dir = dir.join("new");
+        let out = run_mirrorc_install_sync(
+            &zip_path.to_string_lossy(),
+            &new_dir.to_string_lossy(),
+            &sha,
+            progress_notify(|_| {}),
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read(new_dir.join("Assets").join("a.txt")).unwrap(),
+            b"a"
+        );
+        assert_eq!(
+            std::fs::read(new_dir.join("Assets").join("b.txt")).unwrap(),
+            b"b"
+        );
+        assert!(out.files.iter().any(|(r, _)| r == "Assets/a.txt"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

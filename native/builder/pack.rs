@@ -3,7 +3,10 @@ use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 
 use crate::{
     cli::PackArgs,
-    local::{get_reader_for_bundle, preferred_file_hash},
+    local::{
+        check_index_name, check_tlv_name, get_reader_for_bundle, preferred_file_hash,
+        EmbeddedNameError,
+    },
     utils::metadata::RepoMetadata,
 };
 
@@ -175,6 +178,10 @@ pub async fn pack_cli(args: PackArgs) {
         files,
         icon_path: args.icon,
     };
+    if let Err(err) = validate_pack_names(&config) {
+        eprintln!("{err}");
+        return;
+    }
     let output = tokio::fs::File::create(args.output).await.unwrap();
     println!(
         "Packing: metadata: {:?}, image: {:?}, files: {}",
@@ -190,6 +197,10 @@ pub async fn pack(
     mut output: impl AsyncWrite + std::marker::Unpin,
     mut config: PackConfig,
 ) {
+    if let Err(err) = validate_pack_names(&config) {
+        eprintln!("{err}");
+        return;
+    }
     println!("Generating exe with version info...");
     let tmppath = std::env::temp_dir().join(format!(
         "kachina_installer_tmp_{}_{}.exe",
@@ -309,7 +320,13 @@ pub async fn pack(
         index.push((name, size as u32, offset as u32));
         current_offset = offset + size;
     }
-    let index_len = index_to_bin(&index).len() + get_header_size("\0INDEX");
+    let index_len = match index_to_bin(&index) {
+        Ok(bytes) => bytes.len() + get_header_size("\0INDEX"),
+        Err(err) => {
+            eprintln!("{err}");
+            return;
+        }
+    };
     // add index_len to offset
     for (name, _size, offset) in index.iter_mut() {
         // index is after config and image
@@ -376,7 +393,13 @@ pub async fn pack(
     if !files.is_empty() {
         // write index
         println!("Writing index...");
-        let index_bytes = index_to_bin(&index);
+        let index_bytes = match index_to_bin(&index) {
+            Ok(bytes) => bytes,
+            Err(err) => {
+                eprintln!("{err}");
+                return;
+            }
+        };
         write_header(&mut output, "\0INDEX", index_bytes.len() as u32)
             .await
             .unwrap();
@@ -415,18 +438,42 @@ pub async fn pack(
     println!("Done");
 }
 
+fn validate_pack_names(config: &PackConfig) -> Result<(), EmbeddedNameError> {
+    if let Some(image) = &config.image {
+        check_tlv_name(&image.name)?;
+        check_index_name(&image.name)?;
+    }
+    for file in &config.files {
+        check_tlv_name(&file.name)?;
+        check_index_name(&file.name)?;
+    }
+    Ok(())
+}
+
 pub async fn write_header(
     output: &mut (impl AsyncWrite + std::marker::Unpin),
     name: &str,
     size: u32,
 ) -> Result<(), tokio::io::Error> {
+    check_tlv_name(name).map_err(|err| {
+        tokio::io::Error::new(tokio::io::ErrorKind::InvalidInput, err.to_string())
+    })?;
     let header = "!in\0".to_ascii_uppercase();
     let header = header.as_bytes();
     let name = name.as_bytes();
+    let namelen = u16::try_from(name.len()).map_err(|_| {
+        tokio::io::Error::new(
+            tokio::io::ErrorKind::InvalidInput,
+            format!(
+                "embedded name is {} bytes, limit is {}",
+                name.len(),
+                u16::MAX
+            ),
+        )
+    })?;
     let size = size.to_be_bytes();
     output.write_all(header).await?;
-    let namelen = (name.len() as u16).to_be_bytes();
-    output.write_all(&namelen).await?;
+    output.write_all(&namelen.to_be_bytes()).await?;
     output.write_all(name).await?;
     output.write_all(&size).await?;
     Ok(())
@@ -436,18 +483,18 @@ pub fn get_header_size(name: &str) -> usize {
     "!in\0".len() + 2 + name.len() + 4
 }
 
-pub fn index_to_bin(index: &[(String, u32, u32)]) -> Vec<u8> {
+pub fn index_to_bin(index: &[(String, u32, u32)]) -> Result<Vec<u8>, EmbeddedNameError> {
     let mut data = vec![];
     // u8: name_len var: name u32: size u32: offset
     for (name, size, offset) in index.iter() {
+        check_index_name(name)?;
         let name = name.as_bytes();
-        let name_len = name.len() as u8;
-        data.push(name_len);
+        data.push(name.len() as u8);
         data.extend_from_slice(name);
         data.extend_from_slice(&size.to_be_bytes());
         data.extend_from_slice(&offset.to_be_bytes());
     }
-    data
+    Ok(data)
 }
 
 pub fn gen_index_header(
@@ -502,9 +549,18 @@ fn get_file_pack_priority(
 
 #[cfg(test)]
 mod tests {
-    use super::embed_metadata_bytes;
+    use super::{embed_metadata_bytes, index_to_bin};
+    use crate::local::INDEX_NAME_MAX;
     use crate::utils::metadata::{FileMeta, InstallerInfo, PatchInfo, PatchSide, RepoMetadata};
     use serde::Serialize;
+
+    #[test]
+    fn index_rejects_names_over_255_bytes() {
+        let ok = vec![("n".repeat(INDEX_NAME_MAX), 1u32, 0u32)];
+        assert!(index_to_bin(&ok).is_ok());
+        let over = vec![("n".repeat(INDEX_NAME_MAX + 1), 1u32, 0u32)];
+        assert!(index_to_bin(&over).is_err());
+    }
 
     /// 合并前写出镜像的 serde 属性（`Option` 字段、`assets`），对照嵌入 JSON 字节。
     #[derive(Serialize)]

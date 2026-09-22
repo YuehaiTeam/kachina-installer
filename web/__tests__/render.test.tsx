@@ -37,6 +37,18 @@ function lastIntent() {
   return msgs[msgs.length - 1]?.args;
 }
 
+function listedSourceNames() {
+  return [...document.querySelectorAll('.card-container .card')].map(
+    (el) => el.querySelector('span:last-child')?.textContent,
+  );
+}
+
+function cardNamed(name: string) {
+  return [...document.querySelectorAll('.card-container .card')].find(
+    (el) => el.querySelector('span:last-child')?.textContent === name,
+  ) as HTMLElement;
+}
+
 describe('screens', () => {
   beforeEach(() => {
     resetHost();
@@ -248,10 +260,112 @@ describe('intents', () => {
   it('SetCdk from cdk panel', async () => {
     await mount(ready());
     fireEvent.click(screen.getByTitle('选择安装源'));
-    fireEvent.click(document.querySelectorAll('.card')[1] as HTMLElement);
+    fireEvent.click(cardNamed('Mirror'));
     const input = document.querySelector('input[type="text"]') as HTMLInputElement;
     fireEvent.input(input, { target: { value: 'cdk-1' } });
     fireEvent.click(screen.getByText('确定'));
-    await waitFor(() => expect(lastIntent()).toEqual({ kind: 'set_cdk', cdk: 'cdk-1' }));
+    await waitFor(() =>
+      expect(lastIntent()).toEqual({
+        kind: 'set_cdk',
+        cdk: 'cdk-1',
+        uri: 'mirrorc://rid',
+      }),
+    );
+  });
+
+  it('Mirror card does not commit the source until CDK is confirmed', async () => {
+    await mount(ready());
+    fireEvent.click(screen.getByTitle('选择安装源'));
+    fireEvent.click(cardNamed('Mirror'));
+    expect(screen.getByText('确定')).toBeTruthy();
+    const kinds = posted
+      .filter(
+        (m): m is { cmd: string; args: { kind: string } } =>
+          typeof m === 'object' && m !== null && (m as { cmd?: string }).cmd === 'intent',
+      )
+      .map((m) => m.args.kind);
+    expect(kinds).not.toContain('set_source');
+  });
+
+  it('cancel cdk leaves the current source unchanged', async () => {
+    await mount(ready());
+    fireEvent.click(screen.getByTitle('选择安装源'));
+    fireEvent.click(cardNamed('Mirror'));
+    fireEvent.click(screen.getByText('取消'));
+    const kinds = posted
+      .filter(
+        (m): m is { cmd: string; args: { kind: string } } =>
+          typeof m === 'object' && m !== null && (m as { cmd?: string }).cmd === 'intent',
+      )
+      .map((m) => m.args.kind);
+    expect(kinds).toContain('cancel_cdk');
+    expect(kinds).not.toContain('set_source');
+  });
+
+  it('keeps hidden sources out of the panel until five commas', async () => {
+    const ui = ready({
+      sources: [
+        ...ready().sources,
+        {
+          id: 'stub',
+          name: 'Stub hidden',
+          uri: 'plugin-stub+http://localhost/v1',
+          icon: null,
+          requires_webview: true,
+          hidden: true,
+        },
+      ],
+    });
+    await mount(ui);
+    fireEvent.click(screen.getByTitle('选择安装源'));
+    expect(listedSourceNames()).toEqual(['HTTP', 'Mirror']);
+    for (let i = 0; i < 5; i++) {
+      fireEvent.keyDown(window, { key: ',', code: 'Comma' });
+    }
+    expect(listedSourceNames()).toEqual(['HTTP', 'Mirror', 'Stub hidden']);
+    fireEvent.click(cardNamed('HTTP'));
+    fireEvent.click(screen.getByTitle('选择安装源'));
+    expect(listedSourceNames()).toEqual(['HTTP', 'Mirror']);
+  });
+
+  it('does not reveal hidden sources after four commas', async () => {
+    const ui = ready({
+      sources: [
+        ...ready().sources,
+        {
+          id: 'stub',
+          name: 'Stub hidden',
+          uri: 'plugin-stub+http://localhost/v1',
+          icon: null,
+          requires_webview: true,
+          hidden: true,
+        },
+      ],
+    });
+    await mount(ui);
+    fireEvent.click(screen.getByTitle('选择安装源'));
+    for (let i = 0; i < 4; i++) {
+      fireEvent.keyDown(window, { key: ',', code: 'Comma' });
+    }
+    expect(listedSourceNames()).toEqual(['HTTP', 'Mirror']);
+  });
+
+  it('still lists a hidden source that is already selected', async () => {
+    const hidden = {
+      id: 'stub',
+      name: 'Stub hidden',
+      uri: 'plugin-stub+http://localhost/v1',
+      icon: null as string | null,
+      requires_webview: true,
+      hidden: true,
+    };
+    await mount(
+      ready({
+        options: { ...ready().options, source_uri: hidden.uri },
+        sources: [...ready().sources, hidden],
+      }),
+    );
+    fireEvent.click(screen.getByTitle('选择安装源'));
+    expect(listedSourceNames()).toEqual(['HTTP', 'Mirror', 'Stub hidden']);
   });
 });

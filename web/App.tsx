@@ -92,9 +92,8 @@ function Screen({
 export function App() {
   const ui = state.value;
   const [panel, setPanel] = useState<Panel>(null);
-  // Mirror酱走"确认后才生效"：记录打开 CDK 面板前的来源，取消时恢复，
-  // 保证取消不会改变原本的选择。
-  const [cdkFrom, setCdkFrom] = useState<string | null>(null);
+  // 点 Mirror 卡片时记下候选 URI；确定成功才提交，取消只关面板。
+  const [cdkUri, setCdkUri] = useState<string | null>(null);
   const [copyReady, setCopyReady] = useState(false);
 
   useEffect(() => {
@@ -166,8 +165,8 @@ export function App() {
         <SourcePanel
           ui={ui}
           onClose={() => setPanel(null)}
-          onMirrorc={(from) => {
-            setCdkFrom(from);
+          onMirrorc={(uri) => {
+            setCdkUri(uri);
             setPanel('cdk');
           }}
         />
@@ -175,16 +174,14 @@ export function App() {
       {panel === 'cdk' ? (
         <CdkPanel
           ui={ui}
+          verifyUri={cdkUri}
           onCancel={() => {
-            const from = cdkFrom;
-            setCdkFrom(null);
+            setCdkUri(null);
             setPanel(null);
-            if (from) {
-              void intent({ kind: 'set_source', uri: from });
-            }
+            void intent({ kind: 'cancel_cdk' });
           }}
           onConfirmed={() => {
-            setCdkFrom(null);
+            setCdkUri(null);
             setPanel(null);
           }}
         />
