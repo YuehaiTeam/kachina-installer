@@ -13,8 +13,9 @@ use windows::Win32::UI::Controls::{
     TDF_ALLOW_DIALOG_CANCELLATION, TDF_EXPAND_FOOTER_AREA, TDF_NO_DEFAULT_RADIO_BUTTON,
     TDF_SHOW_MARQUEE_PROGRESS_BAR, TDF_SHOW_PROGRESS_BAR, TDF_SIZE_TO_CONTENT,
     TDF_USE_COMMAND_LINKS, TDF_USE_HICON_MAIN, TDF_VERIFICATION_FLAG_CHECKED, TDM_CLICK_BUTTON,
-    TDM_SET_PROGRESS_BAR_MARQUEE, TDM_SET_PROGRESS_BAR_POS, TDM_UPDATE_ELEMENT_TEXT,
-    TDN_BUTTON_CLICKED, TDN_CREATED, TDN_DESTROYED,
+    TDM_SET_BUTTON_ELEVATION_REQUIRED_STATE, TDM_SET_PROGRESS_BAR_MARQUEE,
+    TDM_SET_PROGRESS_BAR_POS, TDM_UPDATE_ELEMENT_TEXT, TDN_BUTTON_CLICKED, TDN_CREATED,
+    TDN_DESTROYED,
 };
 use windows::Win32::UI::Shell::ExtractIconExW;
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -98,6 +99,7 @@ pub struct ReadySpec {
     pub default_radio: i32,
     pub verification: Option<String>,
     pub verification_checked: bool,
+    pub needs_elevate: bool,
 }
 
 pub struct ReadyResult {
@@ -169,7 +171,7 @@ pub fn show_ready(spec: ReadySpec) -> anyhow::Result<ReadyResult> {
             .as_ref()
             .map(|v| PCWSTR(v.as_ptr()))
             .unwrap_or_else(PCWSTR::null),
-        pfCallback: None,
+        pfCallback: spec.needs_elevate.then_some(ready_elevate_callback),
         Anonymous1: TASKDIALOGCONFIG_0 { hMainIcon: icon },
         ..TASKDIALOGCONFIG::default()
     };
@@ -191,6 +193,26 @@ pub fn show_ready(spec: ReadySpec) -> anyhow::Result<ReadyResult> {
         radio,
         verified: verified.as_bool(),
     })
+}
+
+unsafe extern "system" fn ready_elevate_callback(
+    hwnd: HWND,
+    msg: TASKDIALOG_NOTIFICATIONS,
+    _w_param: WPARAM,
+    _l_param: LPARAM,
+    _lp_ref_data: isize,
+) -> HRESULT {
+    if msg == TDN_CREATED {
+        unsafe {
+            SendMessageW(
+                hwnd,
+                TDM_SET_BUTTON_ELEVATION_REQUIRED_STATE.0 as u32,
+                Some(WPARAM(ID_INSTALL as usize)),
+                Some(LPARAM(1)),
+            );
+        }
+    }
+    S_OK
 }
 
 struct ProgressShared {
@@ -410,6 +432,7 @@ unsafe extern "system" fn progress_callback(
         TDN_BUTTON_CLICKED if w_param.0 as i32 == IDCANCEL.0 => {
             if let Some(token) = &shared.cancel {
                 if !shared.closing.load(Ordering::SeqCst) {
+                    tracing::info!("cancel accepted from progress dialog");
                     token.cancel();
                     unsafe {
                         SendMessageW(

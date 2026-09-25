@@ -14,8 +14,19 @@ pub struct LogSubscriber {
     next_span_id: AtomicU64,
 }
 
+static LOG_PATH: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+
+/// `init` 使用的日志文件；未初始化时为启动账号的 `%TEMP%\KachinaInstaller.log`。
+pub fn path() -> std::path::PathBuf {
+    LOG_PATH
+        .get()
+        .cloned()
+        .unwrap_or_else(|| std::env::temp_dir().join("KachinaInstaller.log"))
+}
+
 /// 安装为全局 Subscriber。日志文件打不开时静默降级为仅控制台。
 pub fn init(log_file: &std::path::Path) {
+    let _ = LOG_PATH.set(log_file.to_path_buf());
     let file = std::fs::OpenOptions::new()
         .create(true)
         .append(true)

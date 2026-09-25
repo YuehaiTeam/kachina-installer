@@ -549,10 +549,11 @@ fn get_file_pack_priority(
 
 #[cfg(test)]
 mod tests {
-    use super::{embed_metadata_bytes, index_to_bin};
-    use crate::local::INDEX_NAME_MAX;
+    use super::{embed_metadata_bytes, index_to_bin, write_header};
+    use crate::local::{get_embedded, INDEX_NAME_MAX};
     use crate::utils::metadata::{FileMeta, InstallerInfo, PatchInfo, PatchSide, RepoMetadata};
     use serde::Serialize;
+    use tokio::io::AsyncWriteExt;
 
     #[test]
     fn index_rejects_names_over_255_bytes() {
@@ -560,6 +561,26 @@ mod tests {
         assert!(index_to_bin(&ok).is_ok());
         let over = vec![("n".repeat(INDEX_NAME_MAX + 1), 1u32, 0u32)];
         assert!(index_to_bin(&over).is_err());
+    }
+
+    #[tokio::test]
+    async fn tlv_name_over_512_bytes_round_trips() {
+        let name = "n".repeat(600);
+        let mut bytes = b"stub".to_vec();
+        write_header(&mut bytes, &name, 3).await.unwrap();
+        bytes.write_all(b"abc").await.unwrap();
+
+        let path = std::env::temp_dir().join(format!("kachina-tlv-{}.bin", uuid::Uuid::new_v4()));
+        tokio::fs::write(&path, &bytes).await.unwrap();
+        let file = fmmap::tokio::AsyncMmapFile::open(&path).await.unwrap();
+        let entries = get_embedded(&file).await.unwrap();
+        drop(file);
+        let _ = tokio::fs::remove_file(&path).await;
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].name, name);
+        assert_eq!(entries[0].size, 3);
+        assert_eq!(&bytes[entries[0].offset..], b"abc");
     }
 
     /// 合并前写出镜像的 serde 属性（`Option` 字段、`assets`），对照嵌入 JSON 字节。

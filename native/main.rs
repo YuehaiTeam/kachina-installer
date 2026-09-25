@@ -116,8 +116,13 @@ fn main() {
     };
     utils::sentry::install_panic_hook(show_crash_dialog);
 
-    // 日志：控制台 + %TEMP%\KachinaInstaller.log + Sentry 面包屑，INFO 级全局过滤
-    utils::log::init(&std::env::temp_dir().join("KachinaInstaller.log"));
+    // 日志：控制台 + %TEMP%\KachinaInstaller.log + Sentry 面包屑，INFO 级全局过滤；
+    // 提权子进程写启动进程传来的文件。
+    let log_path = match &command {
+        Command::HeadlessUac(uac) => uac.log_path.clone(),
+        _ => None,
+    };
+    utils::log::init(&log_path.unwrap_or_else(utils::log::path));
 
     // Initialize H3/QUIC probe early — before any client is created
     capabilities::init();

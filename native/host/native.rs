@@ -11,7 +11,7 @@ use crate::host::HwndParent;
 use crate::installer::config::{resolve_installer_config, InstallerConfig};
 use crate::ipc::manager::ManagedElevate;
 use crate::session::commands::{
-    mirrorc_target, settings_from_input, verify_mirrorc_cdk, visible_sources,
+    mirrorc_target, settings_from_ui, verify_mirrorc_cdk, visible_sources,
 };
 use crate::session::run::{run_install, run_uninstall};
 use crate::session::source::needs_js_plugin;
@@ -182,6 +182,8 @@ async fn ui_session_from(
         project.exe_name.clone(),
         project.app_name.clone(),
         project.uac_strategy.clone(),
+        config.install_path.clone(),
+        project.reg_name.clone(),
     );
     sess.apply(Intent::SetPath { path: install_path });
     if is_uninstall {
@@ -352,6 +354,7 @@ async fn show_ready_page(
             default_radio,
             verification,
             verification_checked,
+            needs_elevate: sess.state.needs_elevate,
         };
         let result = tokio::task::spawn_blocking(move || show_ready(spec))
             .await
@@ -516,19 +519,26 @@ async fn finish_action(
 
     match action {
         Intent::Advanced => unreachable!(),
-        Intent::Start => native_session(input, args, config, project, sess).await,
+        Intent::Start => native_session(args, config, project, sess).await,
         _ => Ok(NativeOutcome::Exit),
     }
 }
 
 async fn native_session(
-    input: SessionInput,
     args: InstallArgs,
     config: &InstallerConfig,
     project: &ProjectConfig,
     sess: &mut UiSession,
 ) -> anyhow::Result<NativeOutcome> {
-    let (settings, _) = settings_from_input(&input, &args, config).await?;
+    if let Err(coded) = sess.registry.clone() {
+        show_error_coded(&coded, desktop_hwnd());
+        sess.state.phase = Phase::Failed(coded);
+        sess.apply(Intent::Dismiss);
+        return Ok(NativeOutcome::Again {
+            reopen_source: false,
+        });
+    }
+    let settings = settings_from_ui(sess, &args);
     let heading = match sess.state.mode {
         Mode::Uninstall => t(&sess.state, "ready.uninstalling"),
         Mode::Update => t(&sess.state, "ready.updating"),
@@ -558,6 +568,7 @@ async fn native_session(
     } else {
         run_install(&settings, config, project, &ui, &sess.state, &mgr).await
     };
+    mgr.close().await;
     dialog.close().await;
 
     match result {
@@ -630,6 +641,7 @@ async fn show_finish(state: &UiState, exe_name: &str) {
         default_radio: 0,
         verification: None,
         verification_checked: false,
+        needs_elevate: false,
     };
     let result = tokio::task::spawn_blocking(move || show_ready(spec))
         .await

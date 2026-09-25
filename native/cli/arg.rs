@@ -20,6 +20,9 @@ pub struct InstallArgs {
 #[derive(Debug, Clone)]
 pub struct UacArgs {
     pub pipe_id: String,
+    /// The launching process's log file. The helper may run as another
+    /// account, whose `%TEMP%` the launching user cannot read.
+    pub log_path: Option<PathBuf>,
 }
 
 #[allow(dead_code)]

@@ -346,7 +346,7 @@ pub fn install_panic_hook(show_dialog: bool) {
         {
             use std::io::Write;
             let _ = writeln!(std::io::stderr(), "{diagnostic}");
-            let log_path = std::env::temp_dir().join("KachinaInstaller.log");
+            let log_path = super::log::path();
             if let Ok(mut file) = std::fs::OpenOptions::new()
                 .create(true)
                 .append(true)

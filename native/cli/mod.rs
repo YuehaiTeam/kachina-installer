@@ -130,6 +130,7 @@ fn parse_uac(argv: &[OsString]) -> UacArgs {
     };
     UacArgs {
         pipe_id: pipe_id.to_string(),
+        log_path: argv.get(1).map(PathBuf::from),
     }
 }
 
@@ -468,7 +469,19 @@ mod tests {
             Command::NativeUi(a) if a.silent
         ));
         match parse_from(&os(&["headless-uac", "pipe-123"]), None) {
-            Command::HeadlessUac(u) => assert_eq!(u.pipe_id, "pipe-123"),
+            Command::HeadlessUac(u) => {
+                assert_eq!(u.pipe_id, "pipe-123");
+                assert_eq!(u.log_path, None);
+            }
+            other => panic!("expected HeadlessUac, got {other:?}"),
+        }
+        match parse_from(
+            &os(&["headless-uac", "pipe-123", r"C:\Users\A B\Temp\k.log"]),
+            None,
+        ) {
+            Command::HeadlessUac(u) => {
+                assert_eq!(u.log_path, Some(PathBuf::from(r"C:\Users\A B\Temp\k.log")))
+            }
             other => panic!("expected HeadlessUac, got {other:?}"),
         }
         match parse_from(&os(&["crash-dialog", "abc123"]), None) {

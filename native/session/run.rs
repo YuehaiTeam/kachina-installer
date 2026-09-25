@@ -16,9 +16,8 @@ use crate::fs::LocalScan;
 use crate::installer::config::InstallerConfig;
 use crate::installer::lnk::get_dirs;
 use crate::installer::lnk::CreateLnkArgs;
-use crate::installer::registry::read_uninstall_metadata_raw;
 use crate::installer::registry::WriteRegistryParams;
-use crate::installer::uninstall::{schedule_delete_on_exit, RunUninstallArgs};
+use crate::installer::uninstall::{remove_paths, RunUninstallArgs};
 use crate::ipc::install_file::{
     InstallFileArgs, InstallFileMode, InstallFileSource, InstallMultiStreamArgs,
 };
@@ -48,9 +47,9 @@ use crate::thirdparty::mirrorc::get_mirrorc_status;
 use crate::utils::code::{
     attach_download, attach_download_or, attach_metadata, coded_for_mirrorc_response,
     coded_from_error, extract, fail_kind, tag_session, Attach, Cancelled, Coded, Extracted,
-    DISK_FULL, FILE_IO_FAILED, HASH_ALGORITHM_UNSUPPORTED, METADATA_UNREACHABLE,
-    MIRRORC_CDK_MISSING, MIRRORC_CONFIG_INVALID, MIRRORC_FAILED, MIRRORC_UNREACHABLE,
-    NO_DOWNLOAD_NODE, PKG_BROKEN, PROCESS_KILL_FAILED, REGISTRY_WRITE_FAILED,
+    DISK_FULL, ELEVATED_DRIVE_UNAVAILABLE, FILE_IO_FAILED, HASH_ALGORITHM_UNSUPPORTED,
+    METADATA_UNREACHABLE, MIRRORC_CDK_MISSING, MIRRORC_CONFIG_INVALID, MIRRORC_FAILED,
+    MIRRORC_UNREACHABLE, NO_DOWNLOAD_NODE, PKG_BROKEN, PROCESS_KILL_FAILED, REGISTRY_WRITE_FAILED,
     RUNTIME_INSTALL_FAILED, SHORTCUT_FAILED, UNINSTALL_INCOMPLETE, UNINSTALL_INFO_MISSING,
     WEBVIEW2_REQUIRED,
 };
@@ -362,6 +361,15 @@ impl<'a> LiveUi<'a> {
             Ok(())
         }
     }
+}
+
+fn ensure_helper_sees_path(settings: &Settings, mgr: &ManagedElevate) -> anyhow::Result<()> {
+    if mgr.uses_helper(settings.elevate)
+        && crate::utils::dir::on_session_drive(&settings.install_path)
+    {
+        return Err(Coded::bare_with(ELEVATED_DRIVE_UNAVAILABLE, &settings.install_path).into());
+    }
+    Ok(())
 }
 
 fn is_cancelled(err: &anyhow::Error) -> bool {
@@ -839,9 +847,26 @@ async fn commit_staged(
 /// when it parks the running executable.
 async fn finish_staging(staged: &SessionStaging, self_replaced: bool, mgr: &ManagedElevate) {
     if self_replaced {
-        schedule_delete_on_exit(&staged.root());
+        schedule_cleanup(mgr, staged.elevate, staged.root()).await;
     } else {
         staged.discard(mgr).await;
+    }
+}
+
+/// The side that created the staging root deletes it at its own exit. A
+/// helper holding the cleanup is retired and kept connected until this
+/// process exits (see `ManagedElevate::close`), so its cleanup never runs
+/// under a later session that reopens the same root.
+async fn schedule_cleanup(mgr: &ManagedElevate, elevate: bool, root: String) {
+    if let Err(err) = run_op(
+        mgr,
+        elevate,
+        IpcOperation::ScheduleCleanup(root),
+        progress_noop(),
+    )
+    .await
+    {
+        tracing::warn!("schedule staging cleanup failed: {err:#}");
     }
 }
 
@@ -1143,6 +1168,7 @@ pub async fn run_install(
     mgr: &ManagedElevate,
 ) -> anyhow::Result<SessionResult> {
     log_session_start("install", settings, config, project);
+    ensure_helper_sees_path(settings, mgr)?;
     let ui = LiveUi::new(ui, base);
     let txn = crate::utils::sentry::Transaction::start(
         if settings.is_update {
@@ -1492,9 +1518,9 @@ async fn dfs_staged(
         };
         txn.timed(
             "finalize",
-            finish_install(settings, config, project, Some(latest), ui, mgr),
+            finish_install(settings, config, project, Some(latest), None, ui, mgr),
         )
-        .await?;
+        .await;
         return Ok((
             SessionResult::install(true, settings.is_update),
             self_replaced,
@@ -1682,15 +1708,13 @@ async fn dfs_staged(
         "runtimes",
         install_runtimes(settings, config, project, &staged.staging, ui, mgr),
     )
-    .await
-    .map_err(tag_sid)?;
+    .await;
     progress(ui, 3, 98.0, ProgressStage::Finalize, None, None, None);
     txn.timed(
         "finalize",
-        finish_install(settings, config, project, Some(latest), ui, mgr),
+        finish_install(settings, config, project, Some(latest), None, ui, mgr),
     )
-    .await
-    .map_err(tag_sid)?;
+    .await;
     Ok((
         SessionResult::install(false, settings.is_update),
         self_replaced,
@@ -2426,10 +2450,14 @@ async fn install_files(
     .await?;
     ui.check_cancel()?;
     download_progress(ui, &prog);
+    collect_ops(results.into_iter().flatten())
+}
 
+/// 任一项失败时返回第一个非取消错误；只有取消时才返回取消。
+fn collect_ops<T>(results: impl IntoIterator<Item = anyhow::Result<T>>) -> anyhow::Result<Vec<T>> {
     let mut ops = Vec::new();
     let mut first_err = None;
-    for res in results.into_iter().flatten() {
+    for res in results {
         match res {
             Ok(op) => ops.push(op),
             Err(err) => {
@@ -2439,10 +2467,10 @@ async fn install_files(
             }
         }
     }
-    if let Some(err) = first_err {
-        return Err(err);
+    match first_err {
+        Some(err) => Err(err),
+        None => Ok(ops),
     }
-    Ok(ops)
 }
 
 async fn fallback_merged_files(
@@ -2929,9 +2957,9 @@ async fn install_runtimes(
     staging: &Staging,
     ui: &LiveUi<'_>,
     mgr: &ManagedElevate,
-) -> anyhow::Result<()> {
+) {
     let Some(runtimes) = project.runtimes.as_ref() else {
-        return Ok(());
+        return;
     };
     let dl_dir = staging.dl_dir().to_string_lossy().to_string();
     tracing::info!("latest_meta.runtimes {runtimes:?}");
@@ -3011,7 +3039,71 @@ async fn install_runtimes(
             notify_error(ui, err.attach_with(RUNTIME_INSTALL_FAILED, name));
         }
     }
-    Ok(())
+}
+
+async fn write_registration(
+    settings: &Settings,
+    project: &ProjectConfig,
+    latest: Option<&RepoMetadata>,
+    partial_version: Option<&str>,
+    exe_path: &str,
+    uninstaller_path: &str,
+    ui: &LiveUi<'_>,
+    mgr: &ManagedElevate,
+) {
+    use crate::installer::registry::{remove_record, write_at_hive, Manifest, RegHive};
+
+    if settings.reg_hives.is_empty() {
+        return;
+    }
+    let version = latest
+        .map(|m| m.tag_name.as_str())
+        .or(partial_version)
+        .unwrap_or("");
+    if latest.is_none() {
+        tracing::info!("registry manifest not refreshed; keeping existing InstallerMeta");
+    }
+    progress(ui, 3, 99.0, ProgressStage::WriteRegistry, None, None, None);
+    let manifest = latest.map(|m| Manifest {
+        metadata: serde_json::to_string(m).unwrap_or_default(),
+        size: m.hashed.iter().map(|e| e.size).sum(),
+    });
+    let params = WriteRegistryParams {
+        reg_name: project.reg_name.clone(),
+        name: project.app_name.clone(),
+        version: version.to_string(),
+        exe: exe_path.to_string(),
+        source: settings.install_path.clone(),
+        uninstaller: uninstaller_path.to_string(),
+        publisher: project.publisher.clone(),
+        manifest,
+    };
+    let mut hklm_written = false;
+    for &hive in &settings.reg_hives {
+        let result = match hive {
+            RegHive::Hkcu => write_at_hive(hive, &params),
+            RegHive::Hklm => run_op(
+                mgr,
+                true,
+                IpcOperation::WriteRegistry(params.clone()),
+                progress_noop(),
+            )
+            .await
+            .map(|_| ()),
+        };
+        match result {
+            Ok(()) => hklm_written |= hive == RegHive::Hklm,
+            Err(err) => {
+                tracing::warn!("write registry failed: {err:#}");
+                notify_error(ui, err.attach(REGISTRY_WRITE_FAILED));
+            }
+        }
+    }
+    if settings.reg_drop_hkcu && hklm_written {
+        if let Err(err) = remove_record(RegHive::Hkcu, &project.reg_name) {
+            tracing::warn!("remove migrated HKCU record failed: {err:#}");
+        }
+    }
 }
 
 async fn finish_install(
@@ -3019,11 +3111,65 @@ async fn finish_install(
     config: &InstallerConfig,
     project: &ProjectConfig,
     latest: Option<&RepoMetadata>,
+    partial_version: Option<&str>,
     ui: &LiveUi<'_>,
     mgr: &ManagedElevate,
-) -> anyhow::Result<()> {
-    let (program, desktop) = get_dirs(settings.elevate).await.into_anyhow()?;
+) {
     let exe_path = join_install(&settings.install_path, &project.exe_name);
+    // the uninstaller itself was swapped in with the commit (see
+    // `self_image_units`); only its shortcut is made here when this session
+    // writes an uninstall record.
+    let uninstaller_path = join_install(&settings.install_path, &project.uninstall_name);
+    progress(
+        ui,
+        3,
+        98.0,
+        ProgressStage::CreateShortcuts,
+        None,
+        None,
+        None,
+    );
+    match get_dirs(settings.elevate).await.into_anyhow() {
+        Ok(dirs) => {
+            create_shortcuts(
+                settings,
+                project,
+                dirs,
+                &exe_path,
+                &uninstaller_path,
+                ui,
+                mgr,
+            )
+            .await
+        }
+        Err(err) => {
+            tracing::warn!("shortcut folders unavailable: {err:#}");
+            notify_error(ui, err.attach(SHORTCUT_FAILED));
+        }
+    }
+    write_registration(
+        settings,
+        project,
+        latest,
+        partial_version,
+        &exe_path,
+        &uninstaller_path,
+        ui,
+        mgr,
+    )
+    .await;
+    emit_insight(project, settings, config, "finish", None, false);
+}
+
+async fn create_shortcuts(
+    settings: &Settings,
+    project: &ProjectConfig,
+    (program, desktop): (String, String),
+    exe_path: &str,
+    uninstaller_path: &str,
+    ui: &LiveUi<'_>,
+    mgr: &ManagedElevate,
+) {
     let program_lnk = format!(
         "{}\\{}\\{}.lnk",
         program, project.app_name, project.app_name
@@ -3034,21 +3180,12 @@ async fn finish_install(
         &[("subject", project.app_name.as_str())],
     );
     let uninstall_lnk = format!("{}\\{}\\{}.lnk", program, project.app_name, uninstall_name);
-    progress(
-        ui,
-        3,
-        98.0,
-        ProgressStage::CreateShortcuts,
-        None,
-        None,
-        None,
-    );
     if settings.create_lnk && !settings.is_update {
         create_lnk_or_notify(
             mgr,
             settings.elevate,
             CreateLnkArgs {
-                target: exe_path.clone(),
+                target: exe_path.to_string(),
                 lnk: desktop_lnk,
             },
             ui,
@@ -3060,57 +3197,25 @@ async fn finish_install(
             mgr,
             settings.elevate,
             CreateLnkArgs {
-                target: exe_path.clone(),
+                target: exe_path.to_string(),
                 lnk: program_lnk,
             },
             ui,
         )
         .await;
     }
-    // the uninstaller itself was swapped in with the commit (see
-    // `self_image_units`); only its shortcut is made here, and only if it exists
-    let uninstaller_path = join_install(&settings.install_path, &project.uninstall_name);
-    if (!settings.is_update || config.install_path_source.starts_with("REG"))
-        && std::path::Path::new(&uninstaller_path).is_file()
-    {
+    if !settings.reg_hives.is_empty() && std::path::Path::new(uninstaller_path).is_file() {
         create_lnk_or_notify(
             mgr,
             settings.elevate,
             CreateLnkArgs {
-                target: uninstaller_path,
+                target: uninstaller_path.to_string(),
                 lnk: uninstall_lnk,
             },
             ui,
         )
         .await;
     }
-    if let Some(latest) = latest {
-        progress(ui, 3, 99.0, ProgressStage::WriteRegistry, None, None, None);
-        let size: u64 = latest.hashed.iter().map(|e| e.size).sum();
-        if let Err(err) = run_op(
-            mgr,
-            settings.elevate,
-            IpcOperation::WriteRegistry(WriteRegistryParams {
-                reg_name: project.reg_name.clone(),
-                name: project.app_name.clone(),
-                version: latest.tag_name.clone(),
-                exe: exe_path,
-                source: settings.install_path.clone(),
-                uninstaller: join_install(&settings.install_path, &project.uninstall_name),
-                metadata: serde_json::to_string(latest).unwrap_or_default(),
-                size,
-                publisher: project.publisher.clone(),
-            }),
-            progress_noop(),
-        )
-        .await
-        {
-            tracing::warn!("write registry failed: {err:#}");
-            notify_error(ui, err.attach(REGISTRY_WRITE_FAILED));
-        }
-    }
-    emit_insight(project, settings, config, "finish", None, false);
-    Ok(())
 }
 
 async fn run_mirrorc(
@@ -3201,7 +3306,16 @@ async fn run_mirrorc(
     if version_name == current_version {
         tracing::info!("already latest, tag={version_name}");
         finish_staging(&staged, recovered_self, mgr).await;
-        finish_install(settings, config, project, None, ui, mgr).await?;
+        finish_install(
+            settings,
+            config,
+            project,
+            None,
+            Some(&version_name),
+            ui,
+            mgr,
+        )
+        .await;
         return Ok(SessionResult::install(true, settings.is_update));
     }
     emit_insight(
@@ -3232,7 +3346,18 @@ async fn run_mirrorc(
     };
     tracing::info!("Mirrorc URL {url}");
 
-    let result = mirrorc_staged(settings, config, project, ui, mgr, &staged, &url, &sha256).await;
+    let result = mirrorc_staged(
+        settings,
+        config,
+        project,
+        ui,
+        mgr,
+        &staged,
+        &url,
+        &sha256,
+        &version_name,
+    )
+    .await;
     let self_replaced = recovered_self || matches!(result, Ok((_, true)));
     finish_staging(&staged, self_replaced, mgr).await;
     result.map(|(r, _)| r)
@@ -3248,6 +3373,7 @@ async fn mirrorc_staged(
     staged: &SessionStaging,
     url: &str,
     sha256: &str,
+    version_name: &str,
 ) -> anyhow::Result<(SessionResult, bool)> {
     let zip_path = staged
         .staging
@@ -3385,8 +3511,17 @@ async fn mirrorc_staged(
         mgr,
     )
     .await?;
-    install_runtimes(settings, config, project, &staged.staging, ui, mgr).await?;
-    finish_install(settings, config, project, meta.as_ref(), ui, mgr).await?;
+    install_runtimes(settings, config, project, &staged.staging, ui, mgr).await;
+    finish_install(
+        settings,
+        config,
+        project,
+        meta.as_ref(),
+        Some(version_name),
+        ui,
+        mgr,
+    )
+    .await;
     Ok((
         SessionResult::install(false, settings.is_update),
         self_replaced,
@@ -3461,9 +3596,16 @@ async fn run_uninstall_inner(
     mgr: &ManagedElevate,
 ) -> anyhow::Result<SessionResult> {
     log_session_start("uninstall", settings, config, project);
+    ensure_helper_sees_path(settings, mgr)?;
     progress(ui, 0, 10.0, ProgressStage::UninstallScan, None, None, None);
-    let meta = read_uninstall_metadata_raw(&project.reg_name, Some(settings.install_path.as_str()))
-        .map_err(|e| e.attach(UNINSTALL_INFO_MISSING))?;
+    let matched =
+        settings
+            .identity
+            .matched(&settings.install_path, &project.exe_name, &project.reg_name);
+    let meta = settings
+        .identity
+        .matched_meta(&settings.install_path, &project.exe_name, &project.reg_name)
+        .ok_or_else(|| anyhow::Error::from(Coded::bare(UNINSTALL_INFO_MISSING)))?;
     tracing::info!("UNINSTALL_METADATA: {meta}");
     let meta: UninstallMeta = serde_json::from_str(&meta).unwrap_or_default();
     let user_data_dirs: Vec<String> = project
@@ -3489,14 +3631,26 @@ async fn run_uninstall_inner(
     } else {
         Vec::new()
     };
-    let (program, desktop) = get_dirs(settings.elevate).await.into_anyhow()?;
+    let shortcuts = |(program, desktop): (String, String)| {
+        [
+            format!("{}\\{}", program, project.app_name),
+            format!("{}\\{}.lnk", desktop, project.app_name),
+        ]
+    };
+    // A record migrated from per-user to machine scope leaves the per-user
+    // shortcuts behind; the launching user removes those, the helper the
+    // machine-wide ones.
+    let user_shortcuts = shortcuts(get_dirs(false).await.into_anyhow()?);
     let mut extra: Vec<String> = project
         .extra_uninstall_path
         .iter()
         .map(|p| settings.expand(p, &project.app_name))
         .collect();
-    extra.push(format!("{}\\{}", program, project.app_name));
-    extra.push(format!("{}\\{}.lnk", desktop, project.app_name));
+    if settings.elevate {
+        extra.extend(shortcuts(get_dirs(true).await.into_anyhow()?));
+    } else {
+        extra.extend(user_shortcuts.iter().cloned());
+    }
     if settings.elevate {
         let _ = run_op(mgr, true, IpcOperation::Ping, progress_noop()).await;
     }
@@ -3517,7 +3671,6 @@ async fn run_uninstall_inner(
             files,
             user_data_path: user_data,
             extra_uninstall_path: extra,
-            reg_name: project.reg_name.clone(),
             uninstall_name: project.uninstall_name.clone(),
         }),
         progress_noop(),
@@ -3526,14 +3679,40 @@ async fn run_uninstall_inner(
     let IpcResult::RunUninstall(outcome) = raw else {
         bail!("IPC_SHAPE_ERR");
     };
-    for err in &outcome.errors {
-        tracing::warn!("uninstall: {err}");
+    if let Some(root) = outcome.self_moved_to {
+        schedule_cleanup(mgr, settings.elevate, root).await;
     }
-    if !outcome.errors.is_empty() {
-        return Err(anyhow::anyhow!(outcome.errors.join("\n")).attach(UNINSTALL_INCOMPLETE));
+    // Once removal has started, failures are collected and the uninstall
+    // runs to completion: the record goes too, leftovers are removed by hand.
+    let mut errors = outcome.errors;
+    if settings.elevate {
+        errors.extend(remove_paths(&user_shortcuts).await);
     }
-    if let Some(root) = outcome.self_moved_to.as_deref() {
-        schedule_delete_on_exit(root);
+    use crate::installer::registry::{remove_record, RegHive};
+    for hive in matched {
+        let result = match hive {
+            RegHive::Hkcu => remove_record(hive, &project.reg_name),
+            RegHive::Hklm => run_op(
+                mgr,
+                true,
+                IpcOperation::RemoveRegistry(project.reg_name.clone()),
+                progress_noop(),
+            )
+            .await
+            .map(|_| ()),
+        };
+        if let Err(err) = result {
+            errors.push(format!("remove registry failed: {err:#}"));
+        }
+    }
+    if !errors.is_empty() {
+        for err in &errors {
+            tracing::warn!("uninstall: {err}");
+        }
+        notify_error(
+            ui,
+            anyhow::anyhow!(errors.join("\n")).attach(UNINSTALL_INCOMPLETE),
+        );
     }
     let _ = config;
     Ok(SessionResult::uninstall())
@@ -3566,12 +3745,16 @@ pub async fn silent_main(args: crate::cli::arg::InstallArgs) -> anyhow::Result<(
         if let Some(dir) = inspected {
             settings.elevate =
                 crate::session::types::elevate_from_state(&dir.state, &project.uac_strategy);
+            settings.is_update = dir.upgrade;
         }
+        crate::session::types::apply_registry(&mut settings, &config.install_path, &project)?;
         let mgr = ManagedElevate::new();
-        return run_uninstall(&settings, &config, &project, &ui, &UiState::default(), &mgr)
-            .await
-            .map(|_| ());
+        let result =
+            run_uninstall(&settings, &config, &project, &ui, &UiState::default(), &mgr).await;
+        mgr.close().await;
+        return result.map(|_| ());
     }
+    crate::session::types::apply_registry(&mut settings, &config.install_path, &project)?;
     if needs_js_plugin(&settings.source_uri) {
         if crate::host::webview_version().is_err() {
             return Err(anyhow::Error::from(Coded::bare(WEBVIEW2_REQUIRED)));
@@ -3593,9 +3776,9 @@ async fn silent_install(
     ui: &dyn SessionUi,
 ) -> anyhow::Result<()> {
     let mgr = ManagedElevate::new();
-    run_install(settings, config, project, ui, &UiState::default(), &mgr)
-        .await
-        .map(|_| ())
+    let result = run_install(settings, config, project, ui, &UiState::default(), &mgr).await;
+    mgr.close().await;
+    result.map(|_| ())
 }
 
 #[cfg(test)]
@@ -3664,13 +3847,18 @@ mod tests {
     }
 
     #[test]
-    fn has_runtimes_is_true_only_for_nonempty_list() {
-        let none: Option<&[String]> = None;
-        assert!(!has_runtimes(none));
-        let empty: &[String] = &[];
-        assert!(!has_runtimes(Some(empty)));
-        let one = [String::from("vcruntime")];
-        assert!(has_runtimes(Some(one.as_slice())));
+    fn collect_ops_prefers_the_real_error_over_cancellation() {
+        let results: Vec<anyhow::Result<u8>> = vec![
+            Err(Cancelled.into()),
+            Err(Coded::bare(FILE_IO_FAILED).into()),
+            Err(Cancelled.into()),
+            Ok(1),
+        ];
+        let err = collect_ops(results).unwrap_err();
+        assert!(matches!(extract(&err), Extracted::Coded(c) if c.code == FILE_IO_FAILED));
+
+        let only_cancel: Vec<anyhow::Result<u8>> = vec![Ok(1), Err(Cancelled.into())];
+        assert!(is_cancelled(&collect_ops(only_cancel).unwrap_err()));
     }
 
     #[test]
@@ -3760,6 +3948,9 @@ mod tests {
             elevate: false,
             is_update,
             auto_answer: true,
+            reg_hives: Vec::new(),
+            reg_drop_hkcu: false,
+            identity: crate::installer::registry::Identity::default(),
         }
     }
 

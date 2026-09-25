@@ -3,6 +3,7 @@ DOWNLOAD_FAILED	连接下载服务器失败，请重试或更换下载源
 DOWNLOAD_REFUSED	下载服务器出现问题，请重试或更换下载源
 DOWNLOAD_STALLED	检测到下载速度异常，请检查你的网络连接或更换下载源
 DOWNLOAD_TIMEOUT	连接下载服务器超时，请检查你的网络连接或更换下载源
+ELEVATED_DRIVE_UNAVAILABLE	安装目录位于网络映射盘或 subst 盘，以管理员权限运行时无法访问，请改用本地路径或 UNC 路径
 ELEVATE_FAILED	提权失败
 EXTRACT_FAILED	解压失败
 FILE_IN_USE	文件正在使用
@@ -31,6 +32,7 @@ PLUGIN_HOST_FAILED	插件宿主启动失败
 PLUGIN_NOT_FOUND	未找到插件
 PLUGIN_NO_UI	该安装源需要图形界面
 PROCESS_KILL_FAILED	结束进程失败
+REGISTRY_READ_FAILED	无法读取安装记录，不能继续
 REGISTRY_WRITE_FAILED	写入注册表失败
 REMOTE_FILE_MISSING	无法获取所需文件，请检查网络连接或更换下载源
 RUNTIME_INSTALL_FAILED	安装{subject}失败，请手动安装
@@ -43,7 +45,7 @@ SOURCE_METADATA_INVALID	更新信息无效
 SOURCE_NEEDS_VERIFICATION	安装源需要验证
 STAGING_IN_USE	另一个安装程序正在处理此目录
 TEMP_DIR_UNAVAILABLE	无法访问临时文件夹
-UNINSTALL_INCOMPLETE	未能完全卸载，请重试。安装信息已保留
+UNINSTALL_INCOMPLETE	卸载完成，但部分内容未能删除，可手动删除
 UNINSTALL_INFO_MISSING	未找到卸载配置文件，请重新安装后再卸载
 VERSION_REGEX_INVALID	版本号规则无效
 WEBVIEW2_FAILED	WebView2 安装失败

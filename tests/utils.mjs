@@ -13,6 +13,41 @@ export function getTestDir(name) {
   return path.join(os.tmpdir(), `kachina-test-${name}-${Date.now()}`);
 }
 
+/** Both places a staging directory for `installDir` can live: beside it
+ * (elevated writer or another volume) and under `%TEMP%`. */
+export function stagingCandidates(installDir) {
+  const normalized = installDir
+    .replaceAll('/', '\\')
+    .replace(/[\\]+$/, '')
+    .toLowerCase();
+  const hash = crypto
+    .createHash('sha256')
+    .update(normalized)
+    .digest('hex')
+    .slice(0, 16);
+  return [
+    path.join(
+      path.dirname(installDir),
+      `${path.basename(installDir)}.kachina-staged`,
+    ),
+    path.join(os.tmpdir(), 'kachina-staged', hash),
+  ];
+}
+
+export async function assertStagingRemoved(installDir) {
+  const leftovers = [];
+  for (const candidate of stagingCandidates(installDir)) {
+    if (await fs.pathExists(candidate)) {
+      leftovers.push(candidate);
+    }
+  }
+  if (leftovers.length > 0) {
+    throw new Error(
+      `Installation left staging directories: ${leftovers.join(', ')}`,
+    );
+  }
+}
+
 export async function getFileHash(filePath) {
   const hash = crypto.createHash('sha256');
   const stream = fs.createReadStream(filePath);

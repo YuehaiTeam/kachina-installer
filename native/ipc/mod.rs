@@ -158,6 +158,7 @@ pub enum IpcResult {
     InstallMultichunkStream(MultichunkResult),
     CreateLnk,
     WriteRegistry,
+    RemoveRegistry,
     StageSelfImage(Vec<StagedImage>),
     RunUninstall(UninstallOutcome),
     FindProcessByName(Vec<(u32, String)>),

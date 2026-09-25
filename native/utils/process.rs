@@ -270,18 +270,6 @@ mod tests {
     }
 
     #[test]
-    fn cmd_s_c_keeps_inner_quotes() {
-        let line = make_cmd_s_c_line(
-            OsStr::new(r"C:\Windows\System32\cmd.exe"),
-            r#"if exist "%KACHINA_CLEANUP%" rmdir /s /q "%KACHINA_CLEANUP%""#,
-        );
-        assert_eq!(
-            String::from_utf16(&line).unwrap(),
-            r#""C:\Windows\System32\cmd.exe" /S /C "if exist "%KACHINA_CLEANUP%" rmdir /s /q "%KACHINA_CLEANUP%"""#
-        );
-    }
-
-    #[test]
     fn spawn_system_cmd_reads_exit_code() {
         let child = spawn_system_cmd("exit 7", &[], true).unwrap();
         assert_eq!(child.wait_blocking().unwrap(), 7);

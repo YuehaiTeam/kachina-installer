@@ -1,6 +1,7 @@
 use crate::fs::commit::CommitArgs;
+use crate::installer::registry::RegHive;
 use crate::ipc::{IpcResult, ProgressNotify, StagingOpened};
-use crate::utils::error::TAResult;
+use crate::utils::error::{IntoTAResult, TAResult};
 
 // 外部标签（serde 默认）：内部标签/untagged 会拉进 serde 的 Content 缓冲机制，
 // 单态化体积大；此协议仅在同一二进制的两个进程间使用，形状可自由选择
@@ -20,7 +21,11 @@ pub enum IpcOperation {
     InstallFile(super::install_file::InstallFileArgs),
     InstallMultichunkStream(super::install_file::InstallMultiStreamArgs),
     CreateLnk(crate::installer::lnk::CreateLnkArgs),
+    /// HKLM only: HKCU records belong to the launching user and are written by
+    /// the session process itself.
     WriteRegistry(crate::installer::registry::WriteRegistryParams),
+    /// Remove the HKLM record of this product key.
+    RemoveRegistry(String),
     StageSelfImage(crate::installer::uninstall::StageSelfImageArgs),
     RunUninstall(crate::installer::uninstall::RunUninstallArgs),
     FindProcessByName(String),
@@ -51,12 +56,19 @@ pub enum IpcOperation {
         /// Expected archive digest from the Mirror酱 API.
         sha256: String,
     },
-    /// Find or create the staging directory for `install_dir`.
+    /// Find or create the staging directory for `install_dir`. An elevated
+    /// process always stages next to the install directory (see `staging_root`).
     OpenStaging(String),
     Commit(CommitArgs),
     Recover(CommitArgs),
     /// Delete a staging directory by root path.
     DiscardStaging(String),
+    /// Remove this staging root once the process that runs the operation
+    /// exits. It holds the swapped-out running image, shared by both sides.
+    ScheduleCleanup(String),
+    /// The session is over: the elevated helper refuses every later
+    /// operation and only waits for the launcher to disconnect.
+    Retire,
 }
 
 pub async fn run_opr(op: IpcOperation, notify: ProgressNotify) -> TAResult<IpcResult> {
@@ -71,6 +83,7 @@ pub async fn run_opr(op: IpcOperation, notify: ProgressNotify) -> TAResult<IpcRe
         IpcOperation::InstallMultichunkStream(_) => "InstallMultichunkStream",
         IpcOperation::CreateLnk(_) => "CreateLnk",
         IpcOperation::WriteRegistry(_) => "WriteRegistry",
+        IpcOperation::RemoveRegistry(_) => "RemoveRegistry",
         IpcOperation::StageSelfImage(_) => "StageSelfImage",
         IpcOperation::RunUninstall(_) => "RunUninstall",
         IpcOperation::FindProcessByName(..) => "FindProcessByName",
@@ -84,6 +97,8 @@ pub async fn run_opr(op: IpcOperation, notify: ProgressNotify) -> TAResult<IpcRe
         IpcOperation::Commit(..) => "Commit",
         IpcOperation::Recover(..) => "Recover",
         IpcOperation::DiscardStaging(..) => "DiscardStaging",
+        IpcOperation::ScheduleCleanup(..) => "ScheduleCleanup",
+        IpcOperation::Retire => "Retire",
     };
     tracing::info!("IPC operation: {}", op_name);
     match op {
@@ -132,8 +147,12 @@ pub async fn run_opr(op: IpcOperation, notify: ProgressNotify) -> TAResult<IpcRe
             super::install_file::ipc_install_multichunk_stream(args, notify).await?,
         )),
         IpcOperation::WriteRegistry(params) => {
-            crate::installer::registry::write_registry_with_params(params).await?;
+            crate::installer::registry::write_at_hive(RegHive::Hklm, &params).into_ta_result()?;
             Ok(IpcResult::WriteRegistry)
+        }
+        IpcOperation::RemoveRegistry(name) => {
+            crate::installer::registry::remove_record(RegHive::Hklm, &name).into_ta_result()?;
+            Ok(IpcResult::RemoveRegistry)
         }
         IpcOperation::StageSelfImage(args) => Ok(IpcResult::StageSelfImage(
             crate::installer::uninstall::stage_self_image(args).await?,
@@ -185,8 +204,9 @@ pub async fn run_opr(op: IpcOperation, notify: ProgressNotify) -> TAResult<IpcRe
                 .await?,
         )),
         IpcOperation::OpenStaging(install_dir) => {
+            let beside = crate::utils::uac::check_elevated().unwrap_or(false);
             let opened = tokio::task::spawn_blocking(move || {
-                crate::fs::staging::Staging::open(&install_dir)
+                crate::fs::staging::Staging::open(&install_dir, beside)
             })
             .await
             .map_err(anyhow::Error::from)??;
@@ -207,5 +227,10 @@ pub async fn run_opr(op: IpcOperation, notify: ProgressNotify) -> TAResult<IpcRe
                 .map_err(anyhow::Error::from)?;
             Ok(IpcResult::DiscardStaging)
         }
+        IpcOperation::ScheduleCleanup(root) => {
+            crate::installer::uninstall::schedule_delete_on_exit(&root);
+            Ok(IpcResult::Ping)
+        }
+        IpcOperation::Retire => Ok(IpcResult::Ping),
     }
 }

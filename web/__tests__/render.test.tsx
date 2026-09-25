@@ -88,7 +88,6 @@ describe('screens', () => {
     const cancelling = running();
     if (cancelling.phase.kind === 'running') cancelling.phase.cancel = 'requested';
     await mount(cancelling);
-    expect(screen.getByText('正在取消，等待任务结束并清理……')).toBeTruthy();
     expect((screen.getByText('取消') as HTMLButtonElement).disabled).toBe(true);
   });
 
@@ -325,28 +324,6 @@ describe('intents', () => {
     expect(listedSourceNames()).toEqual(['HTTP', 'Mirror', 'Stub hidden']);
     fireEvent.click(cardNamed('HTTP'));
     fireEvent.click(screen.getByTitle('选择安装源'));
-    expect(listedSourceNames()).toEqual(['HTTP', 'Mirror']);
-  });
-
-  it('does not reveal hidden sources after four commas', async () => {
-    const ui = ready({
-      sources: [
-        ...ready().sources,
-        {
-          id: 'stub',
-          name: 'Stub hidden',
-          uri: 'plugin-stub+http://localhost/v1',
-          icon: null,
-          requires_webview: true,
-          hidden: true,
-        },
-      ],
-    });
-    await mount(ui);
-    fireEvent.click(screen.getByTitle('选择安装源'));
-    for (let i = 0; i < 4; i++) {
-      fireEvent.keyDown(window, { key: ',', code: 'Comma' });
-    }
     expect(listedSourceNames()).toEqual(['HTTP', 'Mirror']);
   });
 

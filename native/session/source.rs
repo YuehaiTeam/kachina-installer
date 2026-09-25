@@ -835,10 +835,18 @@ pub async fn cleanup_dfs2(ctx: &mut SourceCtx) {
             "{}/session/{}/{}",
             session.base_url, session.session_id, session.res_id
         );
+        let started = std::time::Instant::now();
         if let Err(err) = end_dfs2_session(session_api, payload).await {
-            tracing::warn!("end dfs2 session failed: {err}");
+            tracing::warn!(
+                "end dfs2 session failed after {:?}: {err}",
+                started.elapsed()
+            );
         } else {
-            tracing::info!("DFS2 session ended successfully: {}", session.session_id);
+            tracing::info!(
+                "DFS2 session ended successfully after {:?}: {}",
+                started.elapsed(),
+                session.session_id
+            );
         }
         let _ = session.api_url;
     }

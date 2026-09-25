@@ -18,7 +18,7 @@ function SourceIcon({ source }: { source: SourceItem }) {
   return <FallbackIcon uri={source.uri} />;
 }
 
-export function sourceVisible(
+function sourceVisible(
   s: SourceItem,
   currentUri: string,
   showHidden: boolean,

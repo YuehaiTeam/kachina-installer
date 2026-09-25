@@ -2,7 +2,9 @@ use crate::utils::code::Attach;
 use serde::{Deserialize, Serialize};
 
 use crate::cli::arg::InstallArgs;
-use crate::installer::{config::InstallerConfig, DirState};
+use crate::installer::config::InstallerConfig;
+use crate::installer::registry::{plan_registry, Identity, RegHive};
+use crate::installer::DirState;
 use crate::session::plan::{expand_template, HashKey};
 use crate::utils::metadata::{FileMeta, RepoMetadata};
 
@@ -122,6 +124,11 @@ pub struct Settings {
     pub elevate: bool,
     pub is_update: bool,
     pub auto_answer: bool,
+    /// 本次要写入安装记录的 hive，空表示不登记。
+    pub reg_hives: Vec<RegHive>,
+    /// HKLM 写入成功后删除启动用户的 HKCU 记录。
+    pub reg_drop_hkcu: bool,
+    pub identity: Identity,
 }
 
 impl Settings {
@@ -172,7 +179,31 @@ pub async fn settings_from_cli(
         elevate: elevate_from_state(&inspected.state, &project.uac_strategy),
         is_update: inspected.upgrade,
         auto_answer: args.silent || args.non_interactive,
+        reg_hives: Vec::new(),
+        reg_drop_hkcu: false,
+        identity: Identity::default(),
     })
+}
+
+/// 无界面会话按参数确定最终目录后调用。`settings.elevate` 先按目录策略填好。
+pub fn apply_registry(
+    settings: &mut Settings,
+    discovered: &str,
+    project: &ProjectConfig,
+) -> anyhow::Result<()> {
+    let plan = plan_registry(
+        &project.reg_name,
+        &project.exe_name,
+        discovered,
+        &settings.install_path,
+        settings.is_update,
+        settings.elevate,
+    )?;
+    settings.elevate = plan.elevate;
+    settings.reg_hives = plan.hives;
+    settings.reg_drop_hkcu = plan.drop_hkcu;
+    settings.identity = plan.identity;
+    Ok(())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

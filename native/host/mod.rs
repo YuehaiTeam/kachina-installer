@@ -20,7 +20,6 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 use crate::cli::arg::InstallArgs;
 use crate::installer::uninstall::delete_self_on_exit;
-use crate::ipc::manager::ManagedElevate;
 use crate::session::commands::{GuiRuntime, SessionState};
 use crate::session::types::SessionInput;
 use crate::utils::code::{
@@ -78,11 +77,21 @@ impl HostHandle {
             let _ = PostThreadMessageW(self.thread_id, WM_APP, WPARAM(0), LPARAM(0));
         }
     }
+
+    /// 不连接窗口；发出的动作被丢弃。
+    #[cfg(test)]
+    pub fn detached() -> Self {
+        let (tx, _) = mpsc::channel();
+        Self {
+            tx,
+            thread_id: 0,
+            hwnd: 0,
+        }
+    }
 }
 
 pub struct HostCtx {
     pub args: InstallArgs,
-    pub elevate: ManagedElevate,
     pub session: SessionState,
     pub ui: HostHandle,
     pub plugin_runtime: bool,
@@ -159,7 +168,6 @@ pub fn run(
     let non_interactive = args.non_interactive;
     let ctx = Arc::new(HostCtx {
         args,
-        elevate: ManagedElevate::new(),
         session: SessionState::default(),
         ui: handle.clone(),
         plugin_runtime: false,
@@ -335,7 +343,6 @@ fn plugin_runtime_setup(
     };
     let ctx = Arc::new(HostCtx {
         args,
-        elevate: ManagedElevate::new(),
         session,
         ui: handle.clone(),
         plugin_runtime: true,

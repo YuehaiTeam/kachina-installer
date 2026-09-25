@@ -9,6 +9,9 @@ use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+#[cfg(test)]
+use crate::installer::registry::{plan_from_identity, HiveRead, Identity, RegHive};
+use crate::installer::registry::{plan_registry, RegistryPlan};
 use crate::installer::{probe_dir, DirState};
 use crate::session::types::{elevate_from_state, SessionResult};
 use crate::utils::code::{Coded, MIRRORC_CDK_MISSING};
@@ -392,6 +395,9 @@ pub struct UiSession {
     #[allow(dead_code)] // native ReadyState (step 4); GUI pick_path uses ProjectConfig.app_name
     app_name: String,
     uac_strategy: String,
+    discovered_path: String,
+    reg_name: String,
+    pub registry: Result<RegistryPlan, Coded>,
 }
 
 impl Default for UiState {
@@ -434,7 +440,15 @@ impl UiSession {
     }
 
     pub fn with_renderer(state: UiState, renderer: Renderer) -> Self {
-        Self::with_project(state, renderer, String::new(), String::new(), String::new())
+        Self::with_project(
+            state,
+            renderer,
+            String::new(),
+            String::new(),
+            String::new(),
+            String::new(),
+            String::new(),
+        )
     }
 
     pub fn with_project(
@@ -443,6 +457,8 @@ impl UiSession {
         exe_name: String,
         app_name: String,
         uac_strategy: String,
+        discovered_path: String,
+        reg_name: String,
     ) -> Self {
         let all_sources = state.sources.clone();
         let mut sess = Self {
@@ -452,6 +468,9 @@ impl UiSession {
             exe_name,
             app_name,
             uac_strategy,
+            discovered_path,
+            reg_name,
+            registry: Ok(RegistryPlan::default()),
         };
         sess.refresh_sources();
         sess
@@ -534,12 +553,48 @@ impl UiSession {
         } else {
             self.state.mode = Mode::Install;
         }
-        self.state.needs_elevate = elevate_from_state(&state, &self.uac_strategy);
+        self.apply_registry(upgrade, &state);
         self.state.path = PathState {
             writable: PathWritable::from(state),
             exists: probe.is_some_and(|p| p.exists),
             upgrade,
         };
+    }
+
+    fn apply_registry(&mut self, is_update: bool, dir_state: &DirState) {
+        let dir_elevate = elevate_from_state(dir_state, &self.uac_strategy);
+        let plan = plan_registry(
+            &self.reg_name,
+            &self.exe_name,
+            &self.discovered_path,
+            &self.state.options.install_path,
+            is_update,
+            dir_elevate,
+        );
+        self.set_registry_plan(plan, dir_elevate);
+    }
+
+    fn set_registry_plan(&mut self, plan: Result<RegistryPlan, Coded>, dir_elevate: bool) {
+        self.state.needs_elevate = plan.as_ref().map_or(dir_elevate, |p| p.elevate);
+        self.registry = plan;
+    }
+
+    #[cfg(test)]
+    fn force_identity(&mut self, identity: Identity) {
+        let probe = probe_dir(Path::new(&self.state.options.install_path), &self.exe_name);
+        let state = probe.map(|p| p.state()).unwrap_or(DirState::Unwritable);
+        let upgrade = probe.is_some_and(|p| p.upgrade);
+        let dir_elevate = elevate_from_state(&state, &self.uac_strategy);
+        let plan = plan_from_identity(
+            identity,
+            &self.reg_name,
+            &self.exe_name,
+            &self.discovered_path,
+            &self.state.options.install_path,
+            upgrade,
+            dir_elevate,
+        );
+        self.set_registry_plan(plan, dir_elevate);
     }
 }
 
@@ -630,6 +685,8 @@ mod tests {
             "app.exe".into(),
             "App".into(),
             "prefer-user".into(),
+            String::new(),
+            String::new(),
         );
 
         sess.apply(Intent::SetPath {
@@ -677,6 +734,41 @@ mod tests {
             Mode::Update,
             "mode still follows upgrade after readonly"
         );
+    }
+
+    fn present(location: &str) -> HiveRead {
+        HiveRead::Present {
+            location: location.into(),
+            meta: Some("{}".into()),
+        }
+    }
+
+    #[test]
+    fn writable_dir_with_hklm_record_needs_elevate() {
+        let dir = scratch_dir();
+        let path = dir.to_string_lossy().into_owned();
+        let mut sess = UiSession::with_project(
+            UiState::default(),
+            Renderer::Native,
+            "app.exe".into(),
+            "App".into(),
+            "prefer-user".into(),
+            path.clone(),
+            "App".into(),
+        );
+        sess.apply(Intent::SetPath { path: path.clone() });
+        assert!(!sess.state.needs_elevate);
+        sess.force_identity(Identity {
+            hkcu: HiveRead::Absent,
+            hklm: present(&path),
+        });
+        let elevate = sess.state.needs_elevate;
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            elevate,
+            "updating an HKLM record needs elevate even on a writable dir"
+        );
+        assert_eq!(sess.registry.unwrap().hives, [RegHive::Hklm]);
     }
 
     #[test]

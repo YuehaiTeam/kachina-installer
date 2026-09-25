@@ -21,7 +21,8 @@ use tokio::net::windows::named_pipe::NamedPipeServer;
 use tokio::net::windows::named_pipe::ServerOptions;
 use tokio::sync::oneshot;
 use tokio::time;
-use windows::Win32::Foundation::ERROR_PIPE_BUSY;
+use windows::Win32::Foundation::{ERROR_PIPE_BUSY, HANDLE};
+use windows::Win32::System::Pipes::GetNamedPipeServerProcessId;
 
 const PIPE_BUFFER_SIZE: usize = 64 * 1024;
 
@@ -37,6 +38,17 @@ pub struct IpcInner {
 pub type Pending =
     Arc<Mutex<HashMap<String, (oneshot::Sender<Result<IpcResult, IpcError>>, ProgressNotify)>>>;
 
+fn retired_error() -> IpcError {
+    IpcError {
+        message: "Elevate process retired: IPC_ERR".into(),
+        code: None,
+        subject: None,
+        sid: None,
+        cancelled: false,
+        insight: None,
+    }
+}
+
 pub fn disconnect_error() -> IpcError {
     IpcError {
         message: "Elevate process disconnected: PIPE_DISCONNECT_ERR".into(),
@@ -48,9 +60,14 @@ pub fn disconnect_error() -> IpcError {
     }
 }
 
+/// The elevated side of one session. Each session starts its own helper, so
+/// every elevated session asks for consent; [`ManagedElevate::close`] ends it.
 pub struct ManagedElevate {
     process: tokio::sync::RwLock<Option<SendableHandle>>,
     started: AtomicBool,
+    /// The helper holds an exit-time staging cleanup and must outlive this
+    /// process.
+    holds_cleanup: AtomicBool,
     mpsc_tx: tokio::sync::mpsc::Sender<IpcInner>,
     mpsc_rx: tokio::sync::RwLock<Option<tokio::sync::mpsc::Receiver<IpcInner>>>,
     progress_tx: tokio::sync::broadcast::Sender<(String, Progress)>,
@@ -68,7 +85,39 @@ impl Default for ManagedElevate {
     }
 }
 
+lazy_static::lazy_static! {
+    /// Retired helpers whose pipe stays open until this process exits.
+    static ref RETIRED: Mutex<Vec<ManagedElevate>> = Mutex::new(Vec::new());
+}
+
 impl ManagedElevate {
+    /// End the session's helper. A helper without a pending cleanup exits as
+    /// the pipe closes. One holding a cleanup refuses further operations and
+    /// keeps the pipe until this process exits, because the staging root it
+    /// deletes holds this process's image.
+    pub async fn close(self) {
+        if !self.started.load(Ordering::SeqCst) {
+            return;
+        }
+        self.wait_idle().await;
+        if !self.holds_cleanup.load(Ordering::SeqCst) {
+            return;
+        }
+        if let Err(err) = self
+            .run(IpcOperation::Retire, true, super::progress_noop())
+            .await
+        {
+            tracing::warn!("retire elevate process failed: {err:#}");
+        }
+        RETIRED.lock().unwrap_or_else(|e| e.into_inner()).push(self);
+    }
+
+    /// Whether operations sent with `elevate` run in a separate helper
+    /// process, under a token that may not see this session's drive mappings.
+    pub fn uses_helper(&self, elevate: bool) -> bool {
+        elevate && !self.already_elevated
+    }
+
     pub fn new() -> Self {
         let (progress_tx, _progress_rx) = tokio::sync::broadcast::channel(256);
         let (mpsc_tx, mpsc_rx) = tokio::sync::mpsc::channel(100);
@@ -79,6 +128,7 @@ impl ManagedElevate {
             resolve_rx: tokio::sync::Mutex::new(resolve_rx),
             process: tokio::sync::RwLock::new(None),
             started: AtomicBool::new(false),
+            holds_cleanup: AtomicBool::new(false),
             progress_tx,
             mpsc_tx,
             mpsc_rx: tokio::sync::RwLock::new(Some(mpsc_rx)),
@@ -127,7 +177,11 @@ impl ManagedElevate {
             // pipe服务器创建成功后再启动UAC进程
             let command = run_elevated(
                 std::env::current_exe().unwrap(),
-                format!("headless-uac {}", self.pipe_id),
+                format!(
+                    "headless-uac {} \"{}\"",
+                    self.pipe_id,
+                    crate::utils::log::path().display()
+                ),
             )
             .context("ELEVATE_ERR")?;
             process.replace(command);
@@ -156,7 +210,7 @@ impl ManagedElevate {
         elevate: bool,
         on_progress: ProgressNotify,
     ) -> TAResult<IpcResult> {
-        if !elevate || self.already_elevated {
+        if !self.uses_helper(elevate) {
             let (result, snapshot) = super::download::RESOLVER
                 .scope(
                     self.resolve_tx.clone(),
@@ -170,6 +224,9 @@ impl ManagedElevate {
             tracing::info!("Elevate process not started, starting...");
             self.start().await?;
             tracing::info!("Elevate process started");
+        }
+        if matches!(ipc, IpcOperation::ScheduleCleanup(_)) {
+            self.holds_cleanup.store(true, Ordering::SeqCst);
         }
         let id = uuid::Uuid::new_v4().to_string();
         let (tx, mut result_rx) = oneshot::channel();
@@ -252,14 +309,19 @@ impl ManagedElevate {
     /// entries stay until the elevate side replies, even if the local `run`
     /// future was dropped (phase-one cancel).
     pub async fn wait_idle(&self) {
+        let started = std::time::Instant::now();
+        let mut waited = false;
         loop {
-            let empty = self
-                .pending
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .is_empty();
-            if empty {
+            let pending = self.pending.lock().unwrap_or_else(|e| e.into_inner()).len();
+            if pending == 0 {
+                if waited {
+                    tracing::info!("elevated requests drained after {:?}", started.elapsed());
+                }
                 return;
+            }
+            if !waited {
+                tracing::info!("waiting for {pending} in-flight elevated requests");
+                waited = true;
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
@@ -405,6 +467,12 @@ pub async fn uac_ipc_main(args: crate::cli::arg::UacArgs) {
         return;
     }
     let client = client.unwrap();
+    let mut launcher = 0u32;
+    let handle = HANDLE(std::os::windows::io::AsRawHandle::as_raw_handle(&client));
+    match unsafe { GetNamedPipeServerProcessId(handle, &mut launcher) } {
+        Ok(()) => crate::fs::staging::set_lock_owner(launcher),
+        Err(err) => tracing::warn!("launcher pid unavailable: {err}"),
+    }
     let (clientrx, mut clienttx) = tokio::io::split(client);
     let mut clientrx = tokio::io::BufReader::with_capacity(PIPE_BUFFER_SIZE, clientrx);
 
@@ -420,6 +488,7 @@ pub async fn uac_ipc_main(args: crate::cli::arg::UacArgs) {
         let cancel_tx = cancel_tx.clone();
         let mut cancel_rx = cancel_rx.resubscribe();
         tokio::spawn(async move {
+            let mut retired = false;
             loop {
                 let frame = tokio::select! {
                     _ = cancel_rx.recv() => {
@@ -449,9 +518,26 @@ pub async fn uac_ipc_main(args: crate::cli::arg::UacArgs) {
                         break;
                     }
                 };
-                if let IpcOperation::ResolveDownload(reply) = res.op {
-                    super::download::reply(reply);
+                if retired {
+                    let _ = tx
+                        .send(PipeMsg::Err(res.id, retired_error(), Default::default()))
+                        .await;
                     continue;
+                }
+                match res.op {
+                    IpcOperation::ResolveDownload(reply) => {
+                        super::download::reply(reply);
+                        continue;
+                    }
+                    IpcOperation::Retire => {
+                        tracing::info!("IPC operation: Retire");
+                        retired = true;
+                        let _ = tx
+                            .send(PipeMsg::Ok(res.id, IpcResult::Ping, Default::default()))
+                            .await;
+                        continue;
+                    }
+                    _ => {}
                 }
                 let tx = tx.clone();
                 let id = res.id.clone();
@@ -556,7 +642,10 @@ mod tests {
         let pipe_id = uuid::Uuid::new_v4().to_string();
         let server =
             ManagedElevate::create_pipe(&format!(r"\\.\pipe\Kachina-Elevate-{pipe_id}")).unwrap();
-        let client = tokio::spawn(uac_ipc_main(UacArgs { pipe_id }));
+        let client = tokio::spawn(uac_ipc_main(UacArgs {
+            pipe_id,
+            log_path: None,
+        }));
         server.connect().await.unwrap();
 
         let (progress_tx, _progress_rx) = tokio::sync::broadcast::channel(16);
@@ -601,6 +690,23 @@ mod tests {
             panic!("expected Err");
         };
         assert!(err.message.contains("OPEN_PROCESS_ERR"), "{}", err.message);
+
+        for (id, op) in [
+            ("retire", IpcOperation::Retire),
+            ("late", IpcOperation::Ping),
+        ] {
+            let reply = register(&pending, id);
+            mpsc_tx.send(IpcInner { op, id: id.into() }).await.unwrap();
+            let got = wait(reply).await;
+            if id == "retire" {
+                assert!(matches!(got, Ok(Ok(IpcResult::Ping))));
+            } else {
+                let Ok(Err(err)) = got else {
+                    panic!("a retired helper must refuse later operations");
+                };
+                assert!(err.message.contains("retired"), "{}", err.message);
+            }
+        }
 
         let orphan = register(&pending, "orphan");
         drop(mpsc_tx);

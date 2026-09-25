@@ -1,10 +1,8 @@
-import crypto from 'crypto';
-import fs from 'fs-extra';
-import os from 'os';
 import path from 'path';
 import { startServer } from './server.mjs';
 import {
   assertExitOk,
+  assertStagingRemoved,
   cleanupTestDir,
   getFileHash,
   getTestDir,
@@ -18,19 +16,6 @@ import 'zx/globals';
 import { usePwsh } from 'zx';
 
 usePwsh();
-
-function stagingRootFor(installDir) {
-  const normalized = installDir
-    .replaceAll('/', '\\')
-    .replace(/[\\]+$/, '')
-    .toLowerCase();
-  const hash = crypto
-    .createHash('sha256')
-    .update(normalized)
-    .digest('hex')
-    .slice(0, 16);
-  return path.join(os.tmpdir(), 'kachina-staged', hash);
-}
 
 async function installV1(testDir) {
   return runInstaller(
@@ -105,9 +90,7 @@ async function main() {
       );
     }
     await verifyV1(testDir, v1UpdaterHash);
-    if (await fs.pathExists(stagingRootFor(testDir))) {
-      throw new Error('The failed update left a staging directory');
-    }
+    await assertStagingRemoved(testDir);
 
     delete process.env.KACHINA_E2E_ABORT_VERSION;
     delete process.env.KACHINA_E2E_ABORT_AFTER;

@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 
 use crate::fs::staging::{staging_root, Staging};
-use crate::utils::code::{Attach, Coded, FILE_IO_FAILED, UNINSTALL_INCOMPLETE};
+use crate::utils::code::{Coded, FILE_IO_FAILED};
 use crate::utils::error::TAResult;
 use crate::utils::process;
 
@@ -101,12 +101,12 @@ pub struct RunUninstallArgs {
     pub files: Vec<String>,
     pub user_data_path: Vec<String>,
     pub extra_uninstall_path: Vec<String>,
-    pub reg_name: String,
     pub uninstall_name: String,
 }
 
 #[derive(serde::Deserialize, serde::Serialize, Clone, Debug, Default)]
 pub struct UninstallOutcome {
+    /// Paths that could not be removed. Removal continues past each failure.
     pub errors: Vec<String>,
     /// Staging root the running uninstaller was parked in (`old\<name>`); the
     /// session schedules it for deletion at exit.
@@ -119,7 +119,6 @@ pub async fn run_uninstall_with_args(args: RunUninstallArgs) -> TAResult<Uninsta
         args.files,
         args.user_data_path,
         args.extra_uninstall_path,
-        args.reg_name,
         args.uninstall_name,
     )
     .await
@@ -129,7 +128,7 @@ pub async fn run_uninstall_with_args(args: RunUninstallArgs) -> TAResult<Uninsta
 /// install directory can be emptied. Same volume is guaranteed by
 /// `staging_root`; a drive-root install has nowhere to go and is refused.
 async fn park_self(exe_path: &Path, source: &str, uninstall_name: &str) -> anyhow::Result<String> {
-    let root = staging_root(source)?;
+    let root = staging_root(source, false)?;
     let staging = Staging::at(&root);
     staging.ensure_layout()?;
     let parked = staging.old_path(uninstall_name);
@@ -140,12 +139,32 @@ async fn park_self(exe_path: &Path, source: &str, uninstall_name: &str) -> anyho
     Ok(root.to_string_lossy().to_string())
 }
 
+/// Remove each existing file or directory tree; missing paths are skipped and
+/// a failure does not stop the rest. Returns one message per failed path.
+pub async fn remove_paths(paths: &[String]) -> Vec<String> {
+    let mut errs = Vec::new();
+    for pathstr in paths {
+        let path = Path::new(pathstr);
+        if !path.exists() {
+            continue;
+        }
+        let removed = if path.is_file() {
+            tokio::fs::remove_file(path).await
+        } else {
+            tokio::fs::remove_dir_all(path).await
+        };
+        if let Err(e) = removed {
+            errs.push(format!("Failed to remove {pathstr}: {e}"));
+        }
+    }
+    errs
+}
+
 pub async fn run_uninstall(
     source: String,
     files: Vec<String>,
     user_data_path: Vec<String>,
     extra_uninstall_path: Vec<String>,
-    reg_name: String,
     uninstall_name: String,
 ) -> TAResult<UninstallOutcome> {
     let exe_path = std::env::current_exe().context("GET_EXE_PATH_ERR")?;
@@ -164,48 +183,14 @@ pub async fn run_uninstall(
         // external uninstaller
         delete_list.push(Path::new(source.as_str()).join(uninstall_name));
     }
-    let res = rm_list(delete_list).await;
-    if !res.is_empty() {
-        return Err(anyhow::anyhow!(res.join("\n"))
-            .attach(UNINSTALL_INCOMPLETE)
-            .into());
+    let mut errors = rm_list(delete_list).await;
+    errors.extend(remove_paths(&[&user_data_path[..], &extra_uninstall_path[..]].concat()).await);
+    if let Err(e) = clear_empty_dirs(source).await {
+        errors.push(format!("{e:#}"));
     }
-
-    // delete user data
-    // merge user_data_path and extra_uninstall_path
-    let to_be_delete = [&user_data_path[..], &extra_uninstall_path[..]].concat();
-    for pathstr in to_be_delete.iter() {
-        let path = Path::new(pathstr);
-        if path.exists() {
-            // check if is file or dir
-            if path.is_file() {
-                tokio::fs::remove_file(path)
-                    .await
-                    .map_err(|e| {
-                        anyhow::anyhow!("Failed to remove user data file {}: {:?}", pathstr, e)
-                    })
-                    .context("RM_USERDATA_ERR")?;
-            } else {
-                tokio::fs::remove_dir_all(path)
-                    .await
-                    .map_err(|e| {
-                        anyhow::anyhow!("Failed to remove user data folder {}: {:?}", pathstr, e)
-                    })
-                    .context("RM_USERDATA_ERR")?;
-            }
-        }
-    }
-
-    // recursively delete empty folders
-    clear_empty_dirs(source).await?;
-
-    // delete registry - try both HKLM and HKCU since installation could have used either
-    let reg_path = format!("SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\{reg_name}");
-    let _ = windows_registry::LOCAL_MACHINE.remove_tree(&reg_path);
-    let _ = windows_registry::CURRENT_USER.remove_tree(&reg_path);
 
     Ok(UninstallOutcome {
-        errors: Vec::new(),
+        errors,
         self_moved_to,
     })
 }
@@ -272,6 +257,51 @@ mod tests {
         assert!(locked.exists());
         drop(_hold);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn uninstall_continues_past_a_locked_file() {
+        let base =
+            crate::fs::staging::scratch_file(&format!("kachina-uninst-{}", uuid::Uuid::new_v4()));
+        let install = base.join("app");
+        let extra = base.join("extra");
+        std::fs::create_dir_all(install.join("sub")).unwrap();
+        std::fs::create_dir_all(&extra).unwrap();
+        for name in ["locked.txt", "sub/a.txt", "b.txt"] {
+            std::fs::write(install.join(name), b"x").unwrap();
+        }
+        std::fs::write(extra.join("c.txt"), b"x").unwrap();
+        let _hold = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0x1)
+            .open(install.join("locked.txt"))
+            .unwrap();
+
+        let outcome = run_uninstall(
+            install.to_string_lossy().into_owned(),
+            vec!["locked.txt".into(), "sub/a.txt".into(), "b.txt".into()],
+            Vec::new(),
+            vec![extra.to_string_lossy().into_owned()],
+            "uninst.exe".into(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(outcome.errors.len(), 1, "{:?}", outcome.errors);
+        assert!(
+            outcome.errors[0].contains("locked.txt"),
+            "{:?}",
+            outcome.errors
+        );
+        assert!(install.join("locked.txt").exists());
+        assert!(!install.join("b.txt").exists());
+        assert!(
+            !install.join("sub").exists(),
+            "emptied folders are still cleared"
+        );
+        assert!(!extra.exists(), "later paths are still removed");
+        drop(_hold);
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]

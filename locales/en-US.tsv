@@ -3,6 +3,7 @@ DOWNLOAD_FAILED	Could not connect to the download server. Try again or switch to
 DOWNLOAD_REFUSED	The download server returned an error. Try again or switch to another source
 DOWNLOAD_STALLED	Download speed is abnormally low. Check your network connection or switch to another source
 DOWNLOAD_TIMEOUT	Connection to the download server timed out. Check your network connection or switch to another source
+ELEVATED_DRIVE_UNAVAILABLE	The install folder is on a mapped network drive or subst drive that is not visible with administrator privileges. Use a local path or a UNC path
 ELEVATE_FAILED	Failed to obtain administrator privileges
 EXTRACT_FAILED	Extraction failed
 FILE_IN_USE	File is in use
@@ -31,6 +32,7 @@ PLUGIN_HOST_FAILED	Failed to start the plugin host
 PLUGIN_NOT_FOUND	Plugin not found
 PLUGIN_NO_UI	This source requires a graphical interface
 PROCESS_KILL_FAILED	Failed to terminate the process
+REGISTRY_READ_FAILED	Could not read the install record. Cannot continue
 REGISTRY_WRITE_FAILED	Failed to write to the registry
 REMOTE_FILE_MISSING	Could not fetch a required file. Check your network connection or switch to another source
 RUNTIME_INSTALL_FAILED	Failed to install {subject}. Please install it manually
@@ -43,7 +45,7 @@ SOURCE_METADATA_INVALID	Update information is invalid
 SOURCE_NEEDS_VERIFICATION	This source requires verification
 STAGING_IN_USE	Another installer is already working on this folder
 TEMP_DIR_UNAVAILABLE	Cannot access the temporary folder
-UNINSTALL_INCOMPLETE	Uninstall did not finish. Install information was kept so you can retry
+UNINSTALL_INCOMPLETE	Uninstall complete, but some items could not be removed. You can delete them manually
 UNINSTALL_INFO_MISSING	Uninstall information not found. Reinstall before uninstalling
 VERSION_REGEX_INVALID	Invalid version pattern
 WEBVIEW2_FAILED	WebView2 installation failed

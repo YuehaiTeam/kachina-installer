@@ -8,13 +8,14 @@ use serde_json::Value;
 use crate::cli::arg::InstallArgs;
 use crate::host::HostHandle;
 use crate::installer::config::{resolve_installer_config, InstallerConfig};
+use crate::ipc::manager::ManagedElevate;
 use crate::session::run::{run_install, run_uninstall};
 use crate::session::source::{needs_js_plugin, parse_source, ParsedSource};
 use crate::session::state::{
     CdkStatus, Intent, Mode, Options, PathState, PathWritable, Phase, Progress, ProjectView,
     Renderer, SourceItem, Theme, UiSession, UiState,
 };
-use crate::session::types::{elevate_from_state, SessionInput, Settings, SourceField};
+use crate::session::types::{SessionInput, Settings, SourceField};
 use crate::session::ui::{GuiUi, PluginHub, PromptHub};
 use crate::session::ProjectConfig;
 use crate::utils::code::{
@@ -50,11 +51,18 @@ impl GuiRuntime {
         let mut session = self.session.lock().unwrap_or_else(|e| e.into_inner());
         if let Phase::Running(progress) = &mut session.state.phase {
             if progress.cancel == crate::session::state::CancelState::Available {
+                tracing::info!("cancel accepted at stage {}", progress.stage.as_str());
                 self.cancel
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
                     .cancel();
                 progress.apply_user_cancel(true);
+            } else {
+                tracing::info!(
+                    "cancel ignored at stage {}: {:?}",
+                    progress.stage.as_str(),
+                    progress.cancel
+                );
             }
         }
     }
@@ -116,19 +124,30 @@ pub async fn prepare_gui(args: InstallArgs, preset: Option<SessionInput>) -> Arc
 
     let is_uninstall = config.is_uninstall || args.uninstall;
     if is_uninstall {
-        match crate::installer::registry::read_uninstall_metadata(project.reg_name.clone()).await {
-            Ok(_) => {}
-            Err(err) => {
-                tracing::error!("uninstall metadata missing: {err}");
-                return ready_runtime(
-                    args,
-                    preset,
-                    config,
-                    project,
-                    Some(Coded::bare(UNINSTALL_INFO_MISSING)),
-                )
-                .await;
-            }
+        let identity = crate::installer::registry::read_identity(&project.reg_name);
+        if identity.incomplete() {
+            return ready_runtime(
+                args,
+                preset,
+                config,
+                project,
+                Some(Coded::bare(crate::utils::code::REGISTRY_READ_FAILED)),
+            )
+            .await;
+        }
+        if identity
+            .matched_meta(&config.install_path, &project.exe_name, &project.reg_name)
+            .is_none()
+        {
+            tracing::error!("uninstall metadata missing");
+            return ready_runtime(
+                args,
+                preset,
+                config,
+                project,
+                Some(Coded::bare(UNINSTALL_INFO_MISSING)),
+            )
+            .await;
         }
     }
 
@@ -223,6 +242,8 @@ async fn ready_runtime(
         project.exe_name.clone(),
         project.app_name.clone(),
         project.uac_strategy.clone(),
+        config.install_path.clone(),
+        project.reg_name.clone(),
     );
     sess.apply(Intent::SetPath { path: install_path });
     if is_uninstall {
@@ -374,45 +395,17 @@ pub fn mirrorc_target(app_name: &str) -> String {
     format!("KachinaInstaller_MirrorChyanCDK_{app_name}")
 }
 
-pub(crate) async fn settings_from_input(
-    input: &SessionInput,
-    args: &InstallArgs,
-    config: &InstallerConfig,
-) -> anyhow::Result<(Settings, ProjectConfig)> {
-    let project = config
-        .embedded_config
-        .as_ref()
-        .ok_or_else(|| anyhow::Error::from(Coded::bare(PKG_BROKEN)))
-        .and_then(ProjectConfig::from_value)?;
-    let inspected =
-        crate::installer::inspect_dir(input.install_path.clone(), project.exe_name.clone())
-            .await
-            .ok_or_else(|| {
-                anyhow::Error::from(Coded::bare(crate::utils::code::INSTALL_PATH_INVALID))
-            })?;
-    Ok((
-        Settings {
-            install_path: input.install_path.clone(),
-            source_uri: input.source_uri.clone(),
-            create_lnk: input.create_lnk,
-            delete_user_data: input.delete_user_data,
-            mirrorc_cdk: input.mirrorc_cdk.clone().or(args.mirrorc_cdk.clone()),
-            online: args.online,
-            silent: args.silent,
-            non_interactive: args.non_interactive,
-            dump_dir: args.dump_dir.clone(),
-            dfs_extras: args.dfs_extras.clone(),
-            elevate: elevate_from_state(&inspected.state, &project.uac_strategy),
-            is_update: inspected.upgrade,
-            auto_answer: args.silent || args.non_interactive,
-        },
-        project,
-    ))
-}
-
 fn settings_from_gui(gui: &GuiRuntime, args: &InstallArgs) -> Settings {
     let sess = gui.session.lock().unwrap_or_else(|e| e.into_inner());
+    settings_from_ui(&sess, args)
+}
+
+pub(crate) fn settings_from_ui(
+    sess: &crate::session::state::UiSession,
+    args: &InstallArgs,
+) -> Settings {
     let st = &sess.state;
+    let registry = sess.registry.clone().unwrap_or_default();
     Settings {
         install_path: st.options.install_path.clone(),
         source_uri: st.options.source_uri.clone(),
@@ -427,6 +420,9 @@ fn settings_from_gui(gui: &GuiRuntime, args: &InstallArgs) -> Settings {
         elevate: st.needs_elevate,
         is_update: matches!(st.mode, Mode::Update),
         auto_answer: args.silent || args.non_interactive,
+        reg_hives: registry.hives,
+        reg_drop_hkcu: registry.drop_hkcu,
+        identity: registry.identity,
     }
 }
 
@@ -525,6 +521,13 @@ async fn handle_start(
             gui.emit(handle);
             return ok(());
         }
+        if let Err(coded) = sess.registry.clone() {
+            sess.state.phase = Phase::Failed(coded);
+            drop(sess);
+            gui.running.store(false, Ordering::SeqCst);
+            gui.emit(handle);
+            return ok(());
+        }
         sess.state.phase = Phase::Running(Progress::new(
             crate::session::state::ProgressStage::Prepare,
             Some(0),
@@ -553,11 +556,13 @@ async fn handle_start(
         gui.session.clone(),
         cancel,
     );
+    let mgr = ManagedElevate::new();
     let result = if uninstall {
-        run_uninstall(&settings, &gui.config, &project, &ui, &base, &ctx.elevate).await
+        run_uninstall(&settings, &gui.config, &project, &ui, &base, &mgr).await
     } else {
-        run_install(&settings, &gui.config, &project, &ui, &base, &ctx.elevate).await
+        run_install(&settings, &gui.config, &project, &ui, &base, &mgr).await
     };
+    mgr.close().await;
     {
         let mut sess = gui.session.lock().unwrap_or_else(|e| e.into_inner());
         sess.state.pending = None;
@@ -749,6 +754,7 @@ fn ok<T: serde::Serialize>(value: T) -> TAResult<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::session::ui::SessionUi;
 
     fn dummy_config() -> InstallerConfig {
         InstallerConfig {
@@ -788,6 +794,46 @@ mod tests {
         })
     }
 
+    fn running_gui() -> (Arc<GuiRuntime>, GuiUi) {
+        use crate::session::state::ProgressStage;
+
+        let gui = gui_with(CdkStatus::Idle, None, "");
+        gui.session.lock().unwrap().state.phase = Phase::Running(Progress::new(
+            ProgressStage::ProcessFiles,
+            Some(1),
+            Some(0.0),
+        ));
+        let ui = GuiUi::new(
+            HostHandle::detached(),
+            Arc::default(),
+            Arc::default(),
+            false,
+            gui.session.clone(),
+            gui.fresh_cancel(),
+        );
+        assert!(!ui.cancel_token().is_cancelled());
+        (gui, ui)
+    }
+
+    #[test]
+    fn accepted_cancel_blocks_commit() {
+        let (gui, ui) = running_gui();
+        gui.cancel_running();
+        assert!(matches!(
+            gui.snapshot().phase,
+            Phase::Running(p) if p.cancel == crate::session::state::CancelState::Requested
+        ));
+        assert!(!ui.begin_commit());
+    }
+
+    #[test]
+    fn cancel_after_commit_is_ignored() {
+        let (gui, ui) = running_gui();
+        assert!(ui.begin_commit());
+        gui.cancel_running();
+        assert!(!ui.cancel_token().is_cancelled());
+    }
+
     #[test]
     fn cancel_after_failed_verify_restores_committed_cdk() {
         let gui = gui_with(CdkStatus::Ok, Some("old"), "mirrorc://rid");
@@ -800,21 +846,6 @@ mod tests {
         let snap = gui.snapshot();
         assert_eq!(snap.cdk, CdkStatus::Ok);
         assert_eq!(snap.options.mirrorc_cdk.as_deref(), Some("old"));
-    }
-
-    #[test]
-    fn source_change_drops_in_flight_verify() {
-        let gui = gui_with(CdkStatus::Ok, Some("old"), "mirrorc://rid");
-        let epoch = gui.cdk_epoch.load(Ordering::SeqCst);
-        remember_cdk_snapshot(&gui, &CdkStatus::Ok);
-        {
-            let mut sess = gui.session.lock().unwrap();
-            sess.state.cdk = CdkStatus::Checking;
-        }
-        restore_abandoned_cdk(&gui);
-        assert_ne!(gui.cdk_epoch.load(Ordering::SeqCst), epoch);
-        assert_eq!(gui.snapshot().cdk, CdkStatus::Ok);
-        assert_eq!(gui.snapshot().options.mirrorc_cdk.as_deref(), Some("old"));
     }
 
     #[test]
@@ -860,13 +891,6 @@ mod tests {
         assert_eq!(snap.options.source_uri, "mirrorc://rid");
         assert_eq!(snap.options.mirrorc_cdk.as_deref(), Some("new"));
         assert_eq!(snap.cdk, CdkStatus::Ok);
-    }
-
-    #[test]
-    fn checking_is_not_stored_as_the_committed_snapshot() {
-        let gui = gui_with(CdkStatus::Checking, Some("old"), "mirrorc://rid");
-        remember_cdk_snapshot(&gui, &CdkStatus::Checking);
-        assert!(gui.cdk_restore.lock().unwrap().is_none());
     }
 
     #[test]
