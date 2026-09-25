@@ -2,8 +2,8 @@ use crate::utils::code::Attach;
 use crate::{
     dfs::{apply_insight_error, InsightItem},
     fs::{
-        create_http_stream, create_local_stream, create_staged_file, progressed_copy,
-        progressed_hpatch, sync_staged_file, verify_hash,
+        create_http_stream, create_local_stream, create_resolved_stream, create_staged_file,
+        progressed_copy, progressed_hpatch, sync_staged_file, verify_hash,
     },
     ipc::{progress_notify, IpcError, Progress, ProgressNotify},
     utils::error::TAResult,
@@ -81,11 +81,13 @@ impl InstallFileSource {
         }
     }
 
-    /// Byte range inside a merged request. Sliced sources are not merged.
+    /// Package range of a merged-request member: a single-part `Sliced` source.
     fn positioned(&self) -> (usize, usize) {
         match self {
-            Self::Url { offset, size, .. } | Self::Local { offset, size, .. } => (*offset, *size),
-            Self::Sliced { .. } => unreachable!("sliced source in merged request"),
+            Self::Sliced { parts, .. } if parts.len() == 1 => {
+                (parts[0].0 as usize, parts[0].1 as usize)
+            }
+            _ => unreachable!("merged member is not a single package range"),
         }
     }
 }
@@ -253,15 +255,9 @@ async fn create_stream_by_source(
             skip_decompress,
         } => {
             if let [(offset, len)] = parts.as_slice() {
-                let url = super::download::resolve(*offset, *len).await?;
-                let (reader, _, insight) = create_http_stream(
-                    &url,
-                    *offset as usize,
-                    *len as usize,
-                    skip_decompress,
-                    None,
-                )
-                .await?;
+                let (reader, _, insight) =
+                    create_resolved_stream(*offset as usize, *len as usize, skip_decompress, None)
+                        .await?;
                 return Ok((reader, Some(insight)));
             }
             let reader = super::download::sliced(parts);
@@ -459,7 +455,6 @@ pub async fn install_file_by_reader(
 
 #[derive(serde::Deserialize, serde::Serialize, Clone, Debug)]
 pub struct InstallMultiStreamArgs {
-    pub url: String,
     pub range: String,
     pub chunks: Vec<InstallFileArgs>,
 }
@@ -477,23 +472,26 @@ pub async fn ipc_install_multichunk_stream(
     args: InstallMultiStreamArgs,
     notify: ProgressNotify,
 ) -> TAResult<MultichunkResult> {
-    let mut chunks: Vec<_> = args
-        .chunks
-        .into_iter()
-        .map(|args| ChunkWithPosition {
-            position: chunk_span(&args).0,
-            args,
-        })
-        .collect();
-    chunks.sort_by_key(|chunk| chunk.position);
     let (start, end) = args
         .range
         .split_once('-')
         .ok_or_else(|| anyhow::anyhow!("invalid merged range"))?;
     let start: usize = start.parse().map_err(anyhow::Error::from)?;
     let end: usize = end.parse().map_err(anyhow::Error::from)?;
+    let mut chunks = args
+        .chunks
+        .into_iter()
+        .map(|args| {
+            let position = chunk_span(&args)
+                .0
+                .checked_sub(start)
+                .ok_or_else(|| anyhow::anyhow!("merged member before range start"))?;
+            Ok(ChunkWithPosition { position, args })
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    chunks.sort_by_key(|chunk| chunk.position);
     let (mut reader, _, insight_handle) =
-        create_http_stream(&args.url, start, end - start + 1, true, Some(&args.range)).await?;
+        create_resolved_stream(start, end - start + 1, true, Some(&args.range)).await?;
     let mut results = Vec::new();
     let mut position = 0;
     for (index, chunk) in chunks.iter().enumerate() {

@@ -250,9 +250,7 @@ async fn open_part(
     offset: u64,
     len: u64,
 ) -> anyhow::Result<Box<dyn tokio::io::AsyncRead + Unpin + Send>> {
-    let url = resolve(offset, len).await?;
-    match crate::fs::create_http_stream(
-        &url,
+    match crate::fs::create_resolved_stream(
         usize::try_from(offset)?,
         usize::try_from(len)?,
         true,
@@ -555,5 +553,48 @@ mod tests {
         assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
         tokio::fs::remove_file(target).await.unwrap();
         tokio::fs::remove_dir(dir).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn cancel_while_waiting_for_slot_requests_no_url() {
+        let id = uuid::Uuid::new_v4().to_string();
+        begin(Config {
+            id: id.clone(),
+            concurrency: 1,
+            dl_dir: String::new(),
+            prefetch_bytes: 0,
+        });
+        let ctx = context(
+            &Job {
+                session: id.clone(),
+                large: true,
+            },
+            true,
+        )
+        .unwrap();
+        let held = ctx.session.large.clone().acquire_owned().await.unwrap();
+        let (tx, mut rx) = mpsc::unbounded_channel::<(Resolve, bool)>();
+        let open = tokio::spawn(RESOLVER.scope(
+            tx,
+            CURRENT.scope(ctx.clone(), async {
+                crate::fs::create_resolved_stream(0, 16, true, None)
+                    .await
+                    .map(|_| ())
+                    .map_err(|err| err.error)
+            }),
+        ));
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        cancel(&id);
+        let result = tokio::time::timeout(std::time::Duration::from_secs(5), open)
+            .await
+            .unwrap()
+            .unwrap();
+        drop(held);
+        end(&id);
+        assert!(result
+            .unwrap_err()
+            .downcast_ref::<crate::utils::code::Cancelled>()
+            .is_some());
+        assert!(rx.try_recv().is_err());
     }
 }

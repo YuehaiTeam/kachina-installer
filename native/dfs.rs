@@ -78,11 +78,6 @@ pub struct Dfs2SessionResponse {
 }
 
 #[derive(Deserialize, Serialize, Debug)]
-pub struct Dfs2ChunkResponse {
-    pub url: String,
-}
-
-#[derive(Deserialize, Serialize, Debug)]
 pub struct Dfs2BatchChunkRequest {
     pub chunks: Vec<String>,
 }
@@ -363,31 +358,6 @@ pub async fn create_dfs2_session(
             body_text,
         )));
     }
-
-    parse_json(&body_text)
-}
-
-pub async fn get_dfs2_chunk_url(
-    session_api_url: String,
-    range: String,
-) -> anyhow::Result<Dfs2ChunkResponse> {
-    let url = format!("{}?range={}", session_api_url, range);
-
-    let res = REQUEST_CLIENT
-        .get(&url)
-        .send()
-        .await
-        .with_http_context("get_dfs2_chunk_url", &url)?;
-
-    if !res.status().is_success() {
-        return Err(status_error(res).await);
-    }
-
-    let body_text = res
-        .text()
-        .await
-        .with_http_context("get_dfs2_chunk_url", &url)
-        .context("read response body")?;
 
     parse_json(&body_text)
 }

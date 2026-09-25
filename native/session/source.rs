@@ -6,9 +6,8 @@ use anyhow::anyhow;
 use serde_json::Value;
 
 use crate::dfs::{
-    create_dfs2_session, end_dfs2_session, get_dfs, get_dfs2_batch_chunk_urls, get_dfs2_chunk_url,
-    get_dfs2_metadata, get_http_with_range, solve_dfs2_challenge, Dfs2Data, Dfs2SessionInsights,
-    InsightItem,
+    create_dfs2_session, end_dfs2_session, get_dfs, get_dfs2_batch_chunk_urls, get_dfs2_metadata,
+    get_http_with_range, solve_dfs2_challenge, Dfs2Data, Dfs2SessionInsights, InsightItem,
 };
 use crate::local::Embedded;
 use crate::session::plan::HashKey;
@@ -115,13 +114,16 @@ pub struct SourceCtx {
     plugin_session: bool,
     plugin: Option<Arc<dyn PluginHost>>,
     insights: Arc<Mutex<Vec<InsightItem>>>,
-    chunk_urls: Mutex<HashMap<String, String>>,
 }
 
 impl SourceCtx {
     /// DFS2 session id once a session exists; hung on session errors as `DfsSession`.
     pub fn dfs2_session_id(&self) -> Option<String> {
         self.dfs2.as_ref().map(|s| s.session_id.clone())
+    }
+
+    pub fn has_dfs2_session(&self) -> bool {
+        self.dfs2.is_some()
     }
 
     pub fn from_embedded(files: &[Embedded]) -> Self {
@@ -139,7 +141,6 @@ impl SourceCtx {
             plugin_session: false,
             plugin: None,
             insights: Arc::new(Mutex::new(Vec::new())),
-            chunk_urls: Mutex::new(HashMap::new()),
         }
     }
 
@@ -171,28 +172,12 @@ impl SourceCtx {
             .unwrap_or_default()
     }
 
-    pub fn chunk_url(&self, range: &str) -> Option<String> {
-        self.chunk_urls
-            .lock()
-            .ok()
-            .and_then(|urls| urls.get(range).cloned())
-    }
-
-    pub fn put_chunk_urls(&self, urls: HashMap<String, String>) {
-        if let Ok(mut cache) = self.chunk_urls.lock() {
-            cache.extend(urls);
-        }
-    }
-
     pub fn restore_local_package(
         &mut self,
         embedded_index: Option<&[Embedded]>,
         resource_version: Option<String>,
     ) {
         self.index.clear();
-        if let Ok(mut cache) = self.chunk_urls.lock() {
-            cache.clear();
-        }
         if let Some(index) = embedded_index {
             for file in index {
                 self.index.insert(file.name.clone(), file.clone());
@@ -539,7 +524,9 @@ pub async fn resolve_file_location(
             storage,
             url,
         } => match remote {
-            RemoteKind::Dfs2 => resolve_dfs2_location(ctx, hash, installer).await,
+            // Index entries and the installer prefix become `Sliced` sources that
+            // the executor resolves once it holds a request slot.
+            RemoteKind::Dfs2 => Err(anyhow!("no file in dfs2 index").attach(REMOTE_FILE_MISSING)),
             _ => match storage {
                 StorageKind::Hashed => {
                     let file_url = if *remote == RemoteKind::Direct {
@@ -585,58 +572,66 @@ pub async fn resolve_file_location(
     }
 }
 
-async fn resolve_dfs2_location(
+/// Resolves one window of range requests, one result per input range. DFS2
+/// asks the session API for all distinct ranges in one batch request: a range
+/// the answer leaves without a URL fails alone, a failed batch fails every
+/// range. Other sources resolve each range on its own.
+pub async fn resolve_range_urls(
     ctx: &SourceCtx,
-    hash: &str,
-    installer: bool,
-) -> anyhow::Result<FileLocation> {
-    let session = ctx
-        .dfs2
-        .as_ref()
-        .ok_or_else(|| anyhow!("DFS2 session not found").attach(NO_DOWNLOAD_NODE))?;
+    extras: Option<&str>,
+    ranges: &[(u64, u64)],
+) -> Vec<Result<String, String>> {
+    let session = match (&ctx.parsed, &ctx.dfs2) {
+        (
+            Some(ParsedSource::Http {
+                remote: RemoteKind::Dfs2,
+                ..
+            }),
+            Some(session),
+        ) => session,
+        _ => {
+            return futures::future::join_all(ranges.iter().map(|&(start, len)| async move {
+                resolve_range_url(ctx, extras, start as usize, len as usize)
+                    .await
+                    .map_err(|err| format!("{err:#}"))
+            }))
+            .await
+        }
+    };
+    let keys: Vec<String> = ranges
+        .iter()
+        .map(|&(start, len)| format!("{start}-{}", start + len.saturating_sub(1)))
+        .collect();
+    let mut distinct = keys.clone();
+    distinct.sort();
+    distinct.dedup();
     let session_api = format!(
         "{}/session/{}/{}",
         session.base_url, session.session_id, session.res_id
     );
-    if let Some(file) = ctx.find(hash) {
-        let range = format!(
-            "{}-{}",
-            file.offset,
-            file.offset + file.size.saturating_sub(1)
-        );
-        let url = dfs2_chunk_url(ctx, &session_api, &range).await?;
-        Ok(FileLocation::remote(
-            url,
-            file.offset,
-            file.size,
-            false,
-            Some(range),
-        ))
-    } else if installer {
-        let end = ctx.installer_end.max(1);
-        let range = format!("0-{}", end - 1);
-        let url = dfs2_chunk_url(ctx, &session_api, &range).await?;
-        Ok(FileLocation::remote(
-            url,
-            0,
-            ctx.installer_end,
-            true,
-            Some(range),
-        ))
-    } else {
-        Err(anyhow!("no file in dfs2 index").attach(REMOTE_FILE_MISSING))
+    match get_dfs2_batch_chunk_urls(session_api, distinct).await {
+        Ok(resp) => keys
+            .iter()
+            .map(|key| {
+                let entry = resp.urls.get(key);
+                entry.and_then(|e| e.url.clone()).ok_or_else(|| {
+                    entry
+                        .and_then(|e| e.error.clone())
+                        .unwrap_or_else(|| format!("no url for range {key}"))
+                })
+            })
+            .collect(),
+        Err(err) => {
+            let err = format!(
+                "{:#}",
+                attach_download_or(err, NO_DOWNLOAD_NODE, None, None)
+            );
+            keys.iter().map(|_| Err(err.clone())).collect()
+        }
     }
 }
 
-async fn dfs2_chunk_url(ctx: &SourceCtx, session_api: &str, range: &str) -> anyhow::Result<String> {
-    if let Some(url) = ctx.chunk_url(range) {
-        return Ok(url);
-    }
-    let resp = get_dfs2_chunk_url(session_api.to_string(), range.to_string()).await?;
-    Ok(resp.url)
-}
-
-pub async fn resolve_range_url(
+async fn resolve_range_url(
     ctx: &SourceCtx,
     extras: Option<&str>,
     start: usize,
@@ -657,21 +652,7 @@ pub async fn resolve_range_url(
         ParsedSource::Http { remote, url, .. } => match remote {
             RemoteKind::Direct => Ok(url.clone()),
             RemoteKind::Dfs => resolve_dfs_file_url(url, extras, Some(size), start).await,
-            RemoteKind::Dfs2 => {
-                let session = ctx
-                    .dfs2
-                    .as_ref()
-                    .ok_or_else(|| anyhow!("DFS2 session not found").attach(NO_DOWNLOAD_NODE))?;
-                let session_api = format!(
-                    "{}/session/{}/{}",
-                    session.base_url, session.session_id, session.res_id
-                );
-                let end = start + size.saturating_sub(1);
-                let range = format!("{start}-{end}");
-                dfs2_chunk_url(ctx, &session_api, &range)
-                    .await
-                    .map_err(|e| attach_download_or(e, NO_DOWNLOAD_NODE, None, None))
-            }
+            RemoteKind::Dfs2 => Err(anyhow!("DFS2 session not found").attach(NO_DOWNLOAD_NODE)),
         },
     }
 }
@@ -1128,39 +1109,6 @@ fn read_u32be(data: &[u8], offset: usize) -> anyhow::Result<u32> {
         .try_into()
         .unwrap();
     Ok(u32::from_be_bytes(bytes))
-}
-
-pub async fn prefetch_chunk_urls(ctx: &SourceCtx, ranges: Vec<String>) {
-    if ranges.is_empty() || ctx.dfs2.is_none() {
-        return;
-    }
-    match prefetch_batch_urls(ctx, ranges).await {
-        Ok(urls) => ctx.put_chunk_urls(urls),
-        Err(err) => tracing::warn!("prefetch chunk urls failed: {err:#}"),
-    }
-}
-
-async fn prefetch_batch_urls(
-    ctx: &SourceCtx,
-    ranges: Vec<String>,
-) -> anyhow::Result<HashMap<String, String>> {
-    let Some(session) = ctx.dfs2.as_ref() else {
-        return Ok(HashMap::new());
-    };
-    let session_api = format!(
-        "{}/session/{}/{}",
-        session.base_url, session.session_id, session.res_id
-    );
-    let resp = get_dfs2_batch_chunk_urls(session_api, ranges)
-        .await
-        .map_err(|e| attach_download_or(e, NO_DOWNLOAD_NODE, None, None))?;
-    let mut out = HashMap::new();
-    for (k, v) in resp.urls {
-        if let Some(url) = v.url {
-            out.insert(k, url);
-        }
-    }
-    Ok(out)
 }
 
 #[cfg(test)]

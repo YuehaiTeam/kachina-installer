@@ -799,19 +799,66 @@ pub async fn ensure_dir(path: String) -> Result<(), anyhow::Error> {
     Ok(())
 }
 
+type HttpStream = (
+    Box<dyn AsyncRead + Unpin + Send>,
+    u64,
+    Arc<Mutex<InsightItem>>,
+);
+
 pub async fn create_http_stream(
     url: &str,
     offset: usize,
     size: usize,
     skip_decompress: bool,
     request_range: Option<&str>,
-) -> TAResult<(
-    Box<dyn AsyncRead + Unpin + Send>,
-    u64,
-    Arc<Mutex<InsightItem>>,
-)> {
+) -> TAResult<HttpStream> {
     let reading = crate::ipc::network::Reading::begin();
     let permit = crate::ipc::download::request().await?;
+    open_http_stream(
+        url,
+        offset,
+        size,
+        skip_decompress,
+        request_range,
+        reading,
+        permit,
+    )
+    .await
+}
+
+/// Opens a package range whose URL the session resolves. The request slot is
+/// taken before the URL is requested: the DFS2 server counts a URL request as
+/// the range being downloaded next. Must run inside a download job context.
+pub async fn create_resolved_stream(
+    offset: usize,
+    size: usize,
+    skip_decompress: bool,
+    request_range: Option<&str>,
+) -> TAResult<HttpStream> {
+    let reading = crate::ipc::network::Reading::begin();
+    let permit = crate::ipc::download::request().await?;
+    let url = crate::ipc::download::resolve(offset as u64, size as u64).await?;
+    open_http_stream(
+        &url,
+        offset,
+        size,
+        skip_decompress,
+        request_range,
+        reading,
+        permit,
+    )
+    .await
+}
+
+async fn open_http_stream(
+    url: &str,
+    offset: usize,
+    size: usize,
+    skip_decompress: bool,
+    request_range: Option<&str>,
+    reading: crate::ipc::network::Reading,
+    permit: Option<tokio::sync::OwnedSemaphorePermit>,
+) -> TAResult<HttpStream> {
     let request_start_time = Instant::now();
     let has_range = size > 0;
     let insight_range = insight_range_vec(request_range, offset, size);

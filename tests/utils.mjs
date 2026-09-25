@@ -313,6 +313,15 @@ export function assertDfs2BatchCoverage(state, label) {
       `${label}: downloads were not covered by batch URLs: ${missing.join(', ')}`,
     );
   }
+  const downloaded = new Set(
+    state.downloadRequests.map((request) => request.range),
+  );
+  const unused = [...batchRanges].filter((range) => !downloaded.has(range));
+  if (unused.length > 0) {
+    throw new Error(
+      `${label}: batch URLs were fetched for ranges never downloaded: ${unused.join(', ')}`,
+    );
+  }
 }
 
 export function spawnInstaller(exe, args) {

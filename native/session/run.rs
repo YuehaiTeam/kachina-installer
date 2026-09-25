@@ -35,8 +35,7 @@ use crate::session::plan::{
 };
 use crate::session::source::{
     cleanup_dfs2, ensure_dfs2_session, fetch_metadata, hash_of_item, needs_js_plugin, parse_source,
-    prefetch_chunk_urls, resolve_file_location, resolve_range_url, FileLocation, ParsedSource,
-    SourceCtx,
+    resolve_file_location, resolve_range_urls, FileLocation, ParsedSource, SourceCtx,
 };
 use crate::session::state::{
     ByteProgress, CancelState, FileAction, FileProgress, Phase, Progress as UiProgress,
@@ -1621,7 +1620,6 @@ async fn dfs_staged(
             None => err,
         };
         log_task_plan(&tasks, &ranges);
-        prefetch_chunk_urls(source_ctx, ranges).await;
 
         progress(
             ui,
@@ -2196,6 +2194,40 @@ fn log_task(
     }
 }
 
+const RESOLVE_WINDOW: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// Answers the executor's URL requests. Requests arriving within a 50ms window,
+/// reset by each new request, are resolved together so DFS2 pays for one batch
+/// request. Every waiting request holds a request slot, so the window closes
+/// once all slots are waiting. Never returns.
+async fn resolve_in_windows(mgr: &ManagedElevate, ctx: &SourceCtx, extras: Option<&str>) {
+    let mut window = Vec::new();
+    let mut inflight = futures::stream::FuturesUnordered::new();
+    let timer = tokio::time::sleep(RESOLVE_WINDOW);
+    tokio::pin!(timer);
+    loop {
+        tokio::select! {
+            Some(query) = mgr.next_resolution() => {
+                window.push(query);
+                timer.as_mut().reset(tokio::time::Instant::now() + RESOLVE_WINDOW);
+            }
+            _ = &mut timer, if !window.is_empty() => {
+                let queries: Vec<(crate::ipc::download::Resolve, bool)> = std::mem::take(&mut window);
+                inflight.push(async move {
+                    let ranges: Vec<_> = queries.iter().map(|(q, _)| (q.offset, q.len)).collect();
+                    let urls = resolve_range_urls(ctx, extras, &ranges).await;
+                    for ((query, remote), url) in queries.into_iter().zip(urls) {
+                        mgr.resolve_reply(crate::ipc::download::Reply { id: query.id, url }, remote)
+                            .await;
+                    }
+                });
+            }
+            Some(()) = futures::StreamExt::next(&mut inflight), if !inflight.is_empty() => {}
+            else => std::future::pending::<()>().await,
+        }
+    }
+}
+
 async fn install_files(
     settings: &Settings,
     config: &InstallerConfig,
@@ -2222,6 +2254,13 @@ async fn install_files(
     let threshold = size_threshold(&sizes);
     let session = uuid::Uuid::new_v4().to_string();
     let (large_limit, small_limit) = crate::ipc::download::limits(source_ctx.policy.concurrency);
+    tracing::info!(
+        policy = ?source_ctx.policy,
+        threshold,
+        large_limit,
+        small_limit,
+        "download plan limits"
+    );
     run_op(
         mgr,
         settings.elevate,
@@ -2243,24 +2282,10 @@ async fn install_files(
     let local_sem = Arc::new(Semaphore::new(16));
     let large_sem = Arc::new(Semaphore::new(large_limit));
     let small_sem = Arc::new(Semaphore::new(small_limit));
-    let requests = async_stream::stream! {
-        while let Some(query) = mgr.next_resolution().await { yield query; }
-    };
-    let mut resolving = Box::pin(futures::StreamExt::for_each_concurrent(
-        requests,
-        16,
-        |(query, remote)| async move {
-            let url = resolve_range_url(
-                source_ctx,
-                settings.dfs_extras.as_deref(),
-                query.offset as usize,
-                query.len as usize,
-            )
-            .await
-            .map_err(|err| format!("{err:#}"));
-            mgr.resolve_reply(crate::ipc::download::Reply { id: query.id, url }, remote)
-                .await;
-        },
+    let mut resolving = Box::pin(resolve_in_windows(
+        mgr,
+        source_ctx,
+        settings.dfs_extras.as_deref(),
     ));
     let mut file_cursor = 0usize;
     let mut futs = Vec::new();
@@ -2323,8 +2348,8 @@ async fn install_files(
                 InstallTask::Merged {
                     files,
                     range,
-                    start,
                     download_size,
+                    ..
                 } => {
                     match install_merged(
                         settings,
@@ -2333,12 +2358,11 @@ async fn install_files(
                         hash_key,
                         files,
                         range,
-                        *start,
                         *download_size,
                         source_ctx,
                         staging,
                         mgr,
-                        Some(handle.clone()),
+                        handle.clone(),
                     )
                     .await
                     {
@@ -2373,12 +2397,11 @@ async fn install_files(
                                 hash_key,
                                 files,
                                 range,
-                                *start,
                                 *download_size,
                                 source_ctx,
                                 staging,
                                 mgr,
-                                Some(handle.clone()),
+                                handle.clone(),
                             )
                             .await
                             {
@@ -2622,30 +2645,19 @@ async fn install_merged(
     hash_key: HashKey,
     files: &[FilePos],
     range: &str,
-    start: usize,
     download_size: usize,
     source_ctx: &SourceCtx,
     staging: &Staging,
     mgr: &ManagedElevate,
-    handle: Option<ProgressHandle>,
+    handle: ProgressHandle,
 ) -> anyhow::Result<MergedResult> {
-    let url = resolve_range_url(
-        source_ctx,
-        settings.dfs_extras.as_deref(),
-        start,
-        download_size,
-    )
-    .await?;
     let chunks: Vec<InstallFileArgs> = files
         .iter()
         .map(|file| InstallFileArgs {
             mode: {
-                let source = InstallFileSource::Url {
-                    url: url.clone(),
-                    offset: file.offset - start,
-                    size: file.size,
+                let source = InstallFileSource::Sliced {
+                    parts: vec![(file.offset as u64, file.size as u64)],
                     skip_decompress: false,
-                    request_range: Some(range.to_string()),
                 };
                 if let Some(patch) = &file.patch {
                     InstallFileMode::Patch {
@@ -2668,32 +2680,19 @@ async fn install_merged(
         })
         .collect();
     let ipc = IpcOperation::InstallMultichunkStream(InstallMultiStreamArgs {
-        url,
         range: range.to_string(),
         chunks,
     });
     let mode = merged_mode(files, local_files, &latest.patches, hash_key);
-    let (value, insight) = if let Some(handle) = handle.clone() {
-        run_download_op(
-            mgr,
-            settings.elevate,
-            IpcOperation::Download(handle.job.clone(), Box::new(ipc.clone())),
-            source_ctx,
-            Some(mode),
-            handle.callback(),
-        )
-        .await?
-    } else {
-        run_download_op(
-            mgr,
-            settings.elevate,
-            ipc.clone(),
-            source_ctx,
-            Some(mode),
-            progress_noop(),
-        )
-        .await?
-    };
+    let (value, insight) = run_download_op(
+        mgr,
+        settings.elevate,
+        IpcOperation::Download(handle.job.clone(), Box::new(ipc.clone())),
+        source_ctx,
+        Some(mode),
+        handle.callback(),
+    )
+    .await?;
     let IpcResult::InstallMultichunkStream(multi) = value else {
         bail!("IPC_SHAPE_ERR");
     };
@@ -2856,6 +2855,12 @@ async fn resolve_install_source(
         return Ok(InstallFileSource::Sliced {
             parts: parts.into_iter().map(|p| (p.start, p.len)).collect(),
             skip_decompress: false,
+        });
+    }
+    if installer && ctx.has_dfs2_session() && ctx.installer_end > 0 {
+        return Ok(InstallFileSource::Sliced {
+            parts: vec![(0, ctx.installer_end as u64)],
+            skip_decompress: true,
         });
     }
     Ok(file_source(

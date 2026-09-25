@@ -16,11 +16,11 @@ Status: implemented
 
 `POST <api>` 创建 session；challenge 场景先返回 HTTP 402、`challenge: "md5"`、`data: "<hash>/<source>"` 和 `sid`，再校验客户端携带的 challenge response。challenge 数据遵循 `dfs.rs::solve_dfs2_challenge` 的 MD5 后缀搜索规则。
 
-`POST <api>/session/<sid>/<res>` 接收全部 ranges 并返回覆盖这些 ranges 的 `Dfs2BatchChunkResponse`。签名 URL 指向 stub 的实际 Range 下载端点，该端点返回 packed resource 中对应的字节。`GET <api>/session/<sid>/<res>?range=` 保留为单个 URL 接口，批量用例通过状态断言实际下载没有走 fallback。`DELETE <api>/session/<sid>/<res>` 接收并记录 `Dfs2DeleteRequest`。
+`POST <api>/session/<sid>/<res>` 接收一批 ranges 并返回覆盖这些 ranges 的 `Dfs2BatchChunkResponse`。签名 URL 指向 stub 的实际 Range 下载端点，该端点返回 packed resource 中对应的字节。`GET <api>/session/<sid>/<res>?range=` 保留为单个 URL 接口，批量用例通过状态断言实际下载没有走 fallback。`DELETE <api>/session/<sid>/<res>` 接收并记录 `Dfs2DeleteRequest`。
 
 ### E2E 场景
 
-`tests/dfs2.mjs` 提供 `online-install-dfs2` 和 `online-update-dfs2`。两个场景验证 metadata、session、MD5 challenge、批量签名 URL、Range 下载、session 删除和最终文件集；`assertDfs2BatchCoverage` 要求 batch endpoint 被调用、single URL 请求为零、实际下载 ranges 全部由 batch response 覆盖。
+`tests/dfs2.mjs` 提供 `online-install-dfs2` 和 `online-update-dfs2`。两个场景验证 metadata、session、MD5 challenge、批量签名 URL、Range 下载、session 删除和最终文件集；`assertDfs2BatchCoverage` 要求 batch endpoint 被调用、single URL 请求为零、实际下载 ranges 全部由 batch response 覆盖，且 batch 请求过的每个 range 都被实际下载。
 
 `tests/updater-survival.mjs` 使用普通 packed HTTP source，不绑定 DFS2。测试 server 在 v2 metadata/index 请求完成并开始实际 Range 下载后持续断开连接；更新进程失败，安装目录中的受管文件和 canonical updater 保持 v1，staging 被清理；关闭故障后再次运行 updater 成功更新到 v2。该场景代表阶段一网络失败，并不为每种故障变体增加独立矩阵项。
 
@@ -52,7 +52,7 @@ DFS1 不增加独立 E2E，该路径已 deprecated。H3 / QUIC 夹具和 `update
 | 判据 | 结果 |
 |---|---|
 | DFS2 install/update 验证 metadata、challenge、batch signed URL、Range 下载和 session 删除 | PASS：`pnpm run test:dfs2` 本地通过；GitHub Actions Windows 2022 release artifact 的 `test (dfs2)` job 通过 |
-| DFS2 正常下载不走单 URL fallback，实际 ranges 均由 batch response 覆盖 | PASS：`assertDfs2BatchCoverage` 检查 batch 请求存在、single 请求为零、下载 ranges 全部被 batch 覆盖 |
+| DFS2 正常下载不走单 URL fallback，实际 ranges 与 batch 请求的 ranges 一致 | PASS：`assertDfs2BatchCoverage` 检查 batch 请求存在、single 请求为零、下载 ranges 全部被 batch 覆盖、batch ranges 全部被下载 |
 | updater 阶段一网络失败后仍保留 v1 文件和 canonical updater，staging 清理，重试更新到 v2 | PASS：`pnpm run test:updater-survival` 本地通过；GitHub Actions 的 `test (updater-survival)` job 通过；server 确认实际 v2 Range 下载发生中断 |
 | offline install 成功后不留下对应 staging candidate | PASS：`pnpm run test:offline-install` 在新增同级 candidate 与 `%TEMP%\\kachina-staged\\<path-hash>` 检查后通过 |
 | 新增聚合入口接入完整回归，CI 不为故障变体逐项增加 job | PASS：`package.json` 的 `test:all` 包含 `test:dfs2` 与 `test:updater-survival`；CI matrix 含各一个聚合 job；最近一次 Windows 2022 run 的原有十项、两个聚合 E2E job 均通过 |
