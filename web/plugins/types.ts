@@ -9,7 +9,7 @@ export interface KachinaInstallSource {
 
   // 可选：会话管理（插件自己管理sessionId）
   createSession?: (url: string, diffchunks: string[]) => Promise<string>;
-  endSession?: (url: string, insights: any) => Promise<void>;
+  endSession?: (url: string, insights: unknown) => Promise<void>;
 
   // 必需：获取文件块URL
   getChunkUrl: (

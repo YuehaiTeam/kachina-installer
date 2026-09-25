@@ -3,7 +3,7 @@ import type { KachinaInstallSource } from '../types';
 export class StubPlugin implements KachinaInstallSource {
   name = 'stub';
 
-  matchUrl(_url: string): boolean {
+  matchUrl(): boolean {
     return false;
   }
 

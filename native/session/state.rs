@@ -663,14 +663,18 @@ mod tests {
             .status();
         if let Ok(meta) = std::fs::metadata(dir) {
             let mut perms = meta.permissions();
+            // Windows: clears FILE_ATTRIBUTE_READONLY so the test directory can be deleted.
+            #[allow(clippy::permissions_set_readonly_false)]
             perms.set_readonly(false);
             let _ = std::fs::set_permissions(dir, perms);
         }
     }
 
     fn session_with_sources(sources: Vec<SourceItem>) -> UiSession {
-        let mut state = UiState::default();
-        state.sources = sources;
+        let state = UiState {
+            sources,
+            ..Default::default()
+        };
         UiSession::new(state)
     }
 

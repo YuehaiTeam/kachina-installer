@@ -38,13 +38,13 @@ function lastIntent() {
 }
 
 function listedSourceNames() {
-  return [...document.querySelectorAll('.card-container .card')].map(
+  return Array.from(document.querySelectorAll('.card-container .card')).map(
     (el) => el.querySelector('span:last-child')?.textContent,
   );
 }
 
 function cardNamed(name: string) {
-  return [...document.querySelectorAll('.card-container .card')].find(
+  return Array.from(document.querySelectorAll('.card-container .card')).find(
     (el) => el.querySelector('span:last-child')?.textContent === name,
   ) as HTMLElement;
 }

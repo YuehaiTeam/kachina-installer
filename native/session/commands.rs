@@ -267,8 +267,10 @@ async fn ready_runtime(
 }
 
 fn failed_runtime(args: InstallArgs, coded: Coded) -> Arc<GuiRuntime> {
-    let mut state = UiState::default();
-    state.phase = Phase::Failed(coded);
+    let mut state = UiState {
+        phase: Phase::Failed(coded),
+        ..Default::default()
+    };
     state.project.lang = crate::utils::i18n::lang().to_string();
     let config = InstallerConfig {
         install_path: String::new(),
@@ -301,8 +303,10 @@ fn failed_runtime(args: InstallArgs, coded: Coded) -> Arc<GuiRuntime> {
 }
 
 fn failed_runtime_with_config(config: InstallerConfig, coded: Coded) -> Arc<GuiRuntime> {
-    let mut state = UiState::default();
-    state.phase = Phase::Failed(coded);
+    let mut state = UiState {
+        phase: Phase::Failed(coded),
+        ..Default::default()
+    };
     state.project.lang = crate::utils::i18n::lang().to_string();
     Arc::new(GuiRuntime {
         session: Arc::new(Mutex::new(UiSession::with_renderer(
@@ -631,7 +635,7 @@ async fn handle_set_cdk(
     handle: &HostHandle,
 ) {
     let committed = gui.snapshot().options.source_uri;
-    let verify_uri = uri.filter(|u| !u.is_empty()).unwrap_or_else(|| committed);
+    let verify_uri = uri.filter(|u| !u.is_empty()).unwrap_or(committed);
     if cdk.is_empty() {
         commit_empty_cdk(&gui, &verify_uri);
         gui.emit(handle);
@@ -775,8 +779,10 @@ mod tests {
     }
 
     fn gui_with(cdk: CdkStatus, committed: Option<&str>, uri: &str) -> Arc<GuiRuntime> {
-        let mut state = UiState::default();
-        state.cdk = cdk;
+        let mut state = UiState {
+            cdk,
+            ..Default::default()
+        };
         state.options.mirrorc_cdk = committed.map(str::to_string);
         state.options.source_uri = uri.into();
         Arc::new(GuiRuntime {

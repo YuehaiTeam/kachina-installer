@@ -72,6 +72,8 @@ mod tests {
 
     fn cleanup(dir: std::path::PathBuf, path: &str) {
         let mut perms = std::fs::metadata(path).unwrap().permissions();
+        // Windows: clears FILE_ATTRIBUTE_READONLY so the test file can be deleted.
+        #[allow(clippy::permissions_set_readonly_false)]
         perms.set_readonly(false);
         let _ = std::fs::set_permissions(path, perms);
         let _ = std::fs::remove_dir_all(dir);

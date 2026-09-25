@@ -565,10 +565,10 @@ fn reqwest_ref<'a>(err: &'a (dyn std::error::Error + 'static)) -> Option<&'a req
     if let Some(e) = err.downcast_ref::<reqwest::Error>() {
         return Some(e);
     }
-    if let Some(e) = err.downcast_ref::<reqwest_middleware::Error>() {
-        if let reqwest_middleware::Error::Reqwest(inner) = e {
-            return Some(inner);
-        }
+    if let Some(reqwest_middleware::Error::Reqwest(inner)) =
+        err.downcast_ref::<reqwest_middleware::Error>()
+    {
+        return Some(inner);
     }
     None
 }

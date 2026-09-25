@@ -2228,6 +2228,7 @@ async fn resolve_in_windows(mgr: &ManagedElevate, ctx: &SourceCtx, extras: Optio
     }
 }
 
+#[allow(clippy::too_many_arguments)] // independent session values; a context struct would not change the call
 async fn install_files(
     settings: &Settings,
     config: &InstallerConfig,
@@ -2498,6 +2499,7 @@ fn collect_ops<T>(results: impl IntoIterator<Item = anyhow::Result<T>>) -> anyho
     }
 }
 
+#[allow(clippy::too_many_arguments)] // independent session values; a context struct would not change the call
 async fn fallback_merged_files(
     settings: &Settings,
     local_files: &[Embedded],
@@ -2540,6 +2542,7 @@ async fn fallback_merged_files(
     last.ok_or_else(|| Cancelled.into())
 }
 
+#[allow(clippy::too_many_arguments)] // independent session values; a context struct would not change the call
 async fn install_one(
     settings: &Settings,
     local_files: &[Embedded],
@@ -2638,6 +2641,7 @@ struct MergedResult {
     failed: Vec<usize>,
 }
 
+#[allow(clippy::too_many_arguments)] // independent session values; a context struct would not change the call
 async fn install_merged(
     settings: &Settings,
     local_files: &[Embedded],
@@ -2729,6 +2733,7 @@ async fn install_merged(
     Ok(MergedResult { op: ipc, failed })
 }
 
+#[allow(clippy::too_many_arguments)] // independent session values; a context struct would not change the call
 async fn build_install_op(
     settings: &Settings,
     local_files: &[Embedded],
@@ -3048,6 +3053,7 @@ async fn install_runtimes(
     }
 }
 
+#[allow(clippy::too_many_arguments)] // independent session values; a context struct would not change the call
 async fn write_registration(
     settings: &Settings,
     project: &ProjectConfig,

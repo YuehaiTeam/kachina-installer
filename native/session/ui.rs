@@ -47,11 +47,13 @@ pub enum PluginResult {
     Unimplemented,
 }
 
+#[allow(clippy::double_must_use)] // async_trait adds #[must_use] to methods that already return one
 #[async_trait]
 pub trait PluginHost: Send + Sync {
     async fn call(&self, args: PluginArgs) -> anyhow::Result<PluginResult>;
 }
 
+#[allow(clippy::double_must_use)] // async_trait adds #[must_use] to methods that already return one
 #[async_trait]
 pub trait SessionUi: Send + Sync {
     fn state(&self, state: &UiState);

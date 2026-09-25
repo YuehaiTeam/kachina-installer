@@ -34,6 +34,7 @@ use crate::utils::taskdialog::{
     ID_CLOSE, ID_INSTALL, ID_LAUNCH, ID_RADIO_BASE,
 };
 
+#[allow(clippy::large_enum_variant)] // returned once; Web is not stored in a collection
 pub enum NativeOutcome {
     Exit,
     Again {

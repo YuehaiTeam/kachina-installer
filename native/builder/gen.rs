@@ -147,10 +147,10 @@ pub async fn gen_cli(args: GenArgs) {
                 let display_name = file.file_name.clone().replace("\\", "/");
                 // copy file to output_dir
                 let file_path = input.join(&file.file_name);
-                let hash = if file.xxh.is_some() {
-                    file.xxh.as_ref().unwrap()
-                } else if file.md5.is_some() {
-                    file.md5.as_ref().unwrap()
+                let hash = if let Some(hash) = file.xxh.as_ref() {
+                    hash
+                } else if let Some(hash) = file.md5.as_ref() {
+                    hash
                 } else {
                     panic!("file has no hash");
                 };

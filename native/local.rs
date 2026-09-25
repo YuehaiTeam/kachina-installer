@@ -9,7 +9,10 @@ use tokio::sync::OnceCell;
 use crate::utils::error::return_anyhow_result;
 use crate::utils::metadata::RepoMetadata;
 
+// Shared with the builder, which calls the length checks. This binary only
+// calls `is_embedded_name`.
 #[path = "embedded_name.rs"]
+#[allow(dead_code)]
 mod embedded_name;
 use embedded_name::is_embedded_name;
 static MMAP_SELF: OnceCell<AsyncMmapFile> = OnceCell::const_new();

@@ -101,7 +101,7 @@ export class GitHubPlugin implements KachinaInstallSource {
           return expiryTime;
         }
       }
-    } catch (e) {
+    } catch {
       // URL解析失败，返回默认过期时间
     }
 

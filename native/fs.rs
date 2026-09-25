@@ -596,11 +596,13 @@ fn parent_dirs(rel: &str) -> impl Iterator<Item = String> + '_ {
     }))
 }
 
+type Enumerated = (Vec<(String, u64)>, Vec<String>, Vec<String>);
+
 fn enumerate(
     source: &Path,
     managed: &HashMap<String, String>,
     skip_hash: &HashSet<String>,
-) -> Result<(Vec<(String, u64)>, Vec<String>, Vec<String>)> {
+) -> Result<Enumerated> {
     let mut managed_dirs: HashSet<String> = HashSet::new();
     let mut dir_files: HashMap<String, (usize, usize)> = HashMap::new();
     for m in managed.keys() {
@@ -682,7 +684,7 @@ pub async fn check_local_files(
         }
     }
 
-    files.sort_by(|a, b| b.size.cmp(&a.size));
+    files.sort_by_key(|file| std::cmp::Reverse(file.size));
     let len = files.len() + stated.len();
     notify(Progress::CountOf {
         done: 0,
@@ -1249,6 +1251,8 @@ mod tests {
         );
 
         let mut perms = std::fs::metadata(&path).unwrap().permissions();
+        // Windows: clears FILE_ATTRIBUTE_READONLY so the test file can be deleted.
+        #[allow(clippy::permissions_set_readonly_false)]
         perms.set_readonly(false);
         let _ = std::fs::set_permissions(&path, perms);
         let _ = std::fs::remove_dir_all(&dir);

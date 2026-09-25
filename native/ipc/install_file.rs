@@ -515,6 +515,7 @@ pub async fn ipc_install_multichunk_stream(
                 }
                 let error =
                     IpcError::from_ta(&fail_with_insight(err, &Some(insight_handle.clone())));
+                #[allow(clippy::result_large_err)] // IpcError carries InsightItem across the pipe
                 results.extend((index..chunks.len()).map(|_| Err(error.clone())));
                 break;
             }

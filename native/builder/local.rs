@@ -106,9 +106,9 @@ pub fn preferred_file_hash<'a>(
 
 #[path = "../embedded_name.rs"]
 mod embedded_name;
-pub use embedded_name::{
-    check_index_name, check_tlv_name, is_embedded_name, EmbeddedNameError, INDEX_NAME_MAX,
-};
+#[cfg(test)]
+pub use embedded_name::INDEX_NAME_MAX;
+pub use embedded_name::{check_index_name, check_tlv_name, is_embedded_name, EmbeddedNameError};
 
 pub async fn get_embedded(file: &AsyncMmapFile) -> anyhow::Result<Vec<Embedded>> {
     let offsets = search_pattern_for_extract(file).await?;
@@ -192,7 +192,7 @@ fn is_pe_at(bytes: &[u8], offset: usize) -> bool {
     }
     let e_lfanew =
         u32::from_le_bytes(bytes[offset + 0x3C..offset + 0x40].try_into().unwrap()) as usize;
-    if e_lfanew < PE_LFANEW_MIN || e_lfanew > PE_LFANEW_MAX {
+    if !(PE_LFANEW_MIN..=PE_LFANEW_MAX).contains(&e_lfanew) {
         return false;
     }
     let pe = offset.saturating_add(e_lfanew);
