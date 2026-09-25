@@ -23,7 +23,7 @@ fn devtools_enabled() -> bool {
 use super::assets;
 use super::bridge;
 use super::window;
-use super::{HostCtx, HostHandle, UiAction, UI_HOST};
+use super::{HostCtx, HostHandle, UiAction, WebViewLost, UI_HOST};
 use crate::utils::gui::is_dark_mode;
 
 /// Host→page `PostWebMessageAsJson` posted before the first
@@ -43,6 +43,22 @@ pub struct WebViewHost {
 }
 
 impl WebViewHost {
+    /// Reload the page after its renderer exited. Posts wait for the new
+    /// document's `NavigationCompleted`.
+    pub fn reload(&self) -> anyhow::Result<()> {
+        self.posts.borrow_mut().ready = false;
+        unsafe { self.webview.Reload() }.context("Reload")
+    }
+
+    pub fn resize(&self, hwnd: HWND) -> anyhow::Result<()> {
+        resize_controller(&self.controller, hwnd)
+    }
+
+    /// Release the controller before a rebuild.
+    pub fn close(&self) {
+        let _ = unsafe { self.controller.Close() };
+    }
+
     pub fn open_devtools(&self) -> anyhow::Result<()> {
         unsafe { self.webview.OpenDevToolsWindow() }.context("OpenDevToolsWindow")?;
         Ok(())
@@ -82,6 +98,8 @@ impl WebViewHost {
             UiAction::SetBackground { dark } => {
                 set_background(&self.controller, self.mica, dark)?;
             }
+            // only the visible window's loop rebuilds its WebView
+            UiAction::Recover(_) => {}
         }
         Ok(())
     }
@@ -224,10 +242,13 @@ pub fn attach(
         webview.add_NavigationCompleted(
             &NavigationCompletedEventHandler::create(Box::new(move |_sender, args| {
                 let mut ok = windows::core::BOOL::default();
+                let mut status = COREWEBVIEW2_WEB_ERROR_STATUS::default();
                 if let Some(args) = args {
                     let _ = args.IsSuccess(&mut ok);
+                    let _ = args.WebErrorStatus(&mut status);
                 }
                 if !ok.as_bool() {
+                    tracing::warn!("webview2 navigation failed: status={}", status.0);
                     return Ok(());
                 }
                 let pending = {
@@ -246,6 +267,20 @@ pub fn attach(
         )?;
     }
 
+    unsafe {
+        let mut token = 0;
+        let handle_fail = handle.clone();
+        webview.add_ProcessFailed(
+            &ProcessFailedEventHandler::create(Box::new(move |_sender, args| {
+                if let Some(args) = args {
+                    on_process_failed(&handle_fail, &args);
+                }
+                Ok(())
+            })),
+            &mut token,
+        )?;
+    }
+
     let start_w = wide(start);
     unsafe { webview.Navigate(PCWSTR(start_w.as_ptr())) }?;
 
@@ -255,6 +290,30 @@ pub fn attach(
         mica: is_win11,
         posts,
     })
+}
+
+/// Browser and main-frame renderer exits leave the window blank until the
+/// host recovers; the other kinds recover by themselves and are only logged.
+fn on_process_failed(handle: &HostHandle, args: &ICoreWebView2ProcessFailedEventArgs) {
+    let mut kind = COREWEBVIEW2_PROCESS_FAILED_KIND::default();
+    let _ = unsafe { args.ProcessFailedKind(&mut kind) };
+    let exit_code = args
+        .cast::<ICoreWebView2ProcessFailedEventArgs2>()
+        .ok()
+        .and_then(|args| {
+            let mut code = 0;
+            unsafe { args.ExitCode(&mut code) }.ok().map(|_| code)
+        });
+    tracing::error!(
+        "webview2 process failed: kind={} exit_code={exit_code:?}",
+        kind.0
+    );
+    let lost = match kind {
+        COREWEBVIEW2_PROCESS_FAILED_KIND_BROWSER_PROCESS_EXITED => WebViewLost::Browser,
+        COREWEBVIEW2_PROCESS_FAILED_KIND_RENDER_PROCESS_EXITED => WebViewLost::Renderer,
+        _ => return,
+    };
+    handle.send(UiAction::Recover(lost));
 }
 
 fn bind_devtools_shortcut(

@@ -18,7 +18,7 @@ pub mod session;
 pub mod thirdparty;
 pub mod utils;
 use cli::arg::{Command, InstallArgs};
-use std::{sync::atomic::AtomicBool, time::Duration};
+use std::time::Duration;
 
 pub(crate) fn windows_text_scale_factor() -> f64 {
     // Read TextScaleFactor from registry: HKEY_CURRENT_USER\Software\Microsoft\Accessibility\TextScaleFactor
@@ -92,10 +92,6 @@ lazy_static::lazy_static! {
 
     /// Legacy alias - will be removed after migration
     pub static ref REQUEST_CLIENT: &'static reqwest_middleware::ClientWithMiddleware = &*API_CLIENT;
-    /// 前端页面已完成监听并就绪（host/bridge 的 `frontend_ready` 置位）。
-    /// 30s WebView 看门狗据此判断页面是否成功初始化；配置准备完成不代表
-    /// 页面可用，两者必须是不同的状态。
-    pub static ref FRONTEND_READY: AtomicBool = AtomicBool::new(false);
 }
 
 fn main() {

@@ -49,6 +49,7 @@ UNINSTALL_INCOMPLETE	卸载完成，但部分内容未能删除，可手动删�
 UNINSTALL_INFO_MISSING	未找到卸载配置文件，请重新安装后再卸载
 VERSION_REGEX_INVALID	版本号规则无效
 WEBVIEW2_FAILED	WebView2 安装失败
+WEBVIEW2_FAULT	安装界面无法显示，请重新运行安装器
 WEBVIEW2_REQUIRED	该安装源需要 WebView2，请使用「高级安装」
 dialog.cancel	取消
 dialog.copy	复制

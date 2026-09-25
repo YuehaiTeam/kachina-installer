@@ -29,6 +29,7 @@ pub const ELEVATE_FAILED: &str = "ELEVATE_FAILED";
 pub const RUNTIME_INSTALL_FAILED: &str = "RUNTIME_INSTALL_FAILED";
 pub const WEBVIEW2_REQUIRED: &str = "WEBVIEW2_REQUIRED";
 pub const WEBVIEW2_FAILED: &str = "WEBVIEW2_FAILED";
+pub const WEBVIEW2_FAULT: &str = "WEBVIEW2_FAULT";
 pub const SELF_UPDATE_FAILED: &str = "SELF_UPDATE_FAILED";
 pub const STAGING_IN_USE: &str = "STAGING_IN_USE";
 
@@ -94,6 +95,7 @@ pub const ALL_CODES: &[&str] = &[
     RUNTIME_INSTALL_FAILED,
     WEBVIEW2_REQUIRED,
     WEBVIEW2_FAILED,
+    WEBVIEW2_FAULT,
     SELF_UPDATE_FAILED,
     STAGING_IN_USE,
     MIRRORC_CDK_MISSING,
@@ -398,6 +400,7 @@ pub fn class_of(code: &str) -> Option<Class> {
         | RUNTIME_INSTALL_FAILED
         | WEBVIEW2_REQUIRED
         | WEBVIEW2_FAILED
+        | WEBVIEW2_FAULT
         | SELF_UPDATE_FAILED
         | STAGING_IN_USE => Some(Class::E),
         MIRRORC_CDK_MISSING

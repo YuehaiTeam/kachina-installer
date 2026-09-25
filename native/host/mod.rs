@@ -4,8 +4,10 @@ pub mod native;
 mod webview;
 mod window;
 
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use anyhow::Context;
 use serde_json::Value;
@@ -22,25 +24,122 @@ use crate::cli::arg::InstallArgs;
 use crate::installer::uninstall::delete_self_on_exit;
 use crate::session::commands::{GuiRuntime, SessionState};
 use crate::session::types::SessionInput;
-use crate::utils::code::{
-    Attach, Coded, PLUGIN_HOST_FAILED, TEMP_DIR_UNAVAILABLE, WEBVIEW2_FAILED,
-};
+use crate::utils::code::{Attach, Coded, PLUGIN_HOST_FAILED, TEMP_DIR_UNAVAILABLE, WEBVIEW2_FAULT};
 use crate::utils::taskdialog::{show_error, ErrorDialog};
-use crate::FRONTEND_READY;
 
 pub use window::HwndParent;
 
 const UI_HOST: &str = "https://app.localhost";
 
 pub enum UiAction {
-    Emit { event: String, payload: Value },
-    Reply { id: u64, ok: bool, data: Value },
+    Emit {
+        event: String,
+        payload: Value,
+    },
+    Reply {
+        id: u64,
+        ok: bool,
+        data: Value,
+    },
     Close,
     Show,
     Minimize,
     SetTitle(String),
     SetDecorations(bool),
-    SetBackground { dark: bool },
+    SetBackground {
+        dark: bool,
+    },
+    /// The page went blank: a WebView2 process died or a load never reported
+    /// ready. The hidden plugin host is not rebuilt; a plugin call it was
+    /// serving times out.
+    Recover(WebViewLost),
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum WebViewLost {
+    Browser,
+    Renderer,
+    /// The page did not report `frontend_ready` within [`PAGE_READY_TIMEOUT`].
+    Stalled,
+}
+
+/// An injected module that crashes the browser process crashes each new one
+/// too, so rebuilding stops after this many attempts.
+const MAX_WEBVIEW_RECOVERIES: u32 = 2;
+
+const PAGE_READY_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Page loads of the visible window. Each load (WebView creation plus
+/// navigation) is a new generation with its own deadline; a deadline whose
+/// generation was superseded or reported ready does nothing.
+#[derive(Default)]
+pub struct LoadWatch {
+    current: AtomicU64,
+    ready: AtomicU64,
+    /// The UI thread is inside [`webview::attach`]. A hung WebView2 creation
+    /// blocks it there, so a deadline cannot be recovered on that thread.
+    attaching: AtomicBool,
+}
+
+impl LoadWatch {
+    pub fn mark_ready(&self) {
+        self.ready
+            .store(self.current.load(Ordering::SeqCst), Ordering::SeqCst);
+    }
+
+    /// Supersede the pending deadline without starting a new load.
+    fn abandon(&self) {
+        self.current.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+/// Start the deadline for the load about to begin. Called before `attach` or
+/// `Reload` pumps messages, so the page cannot report ready ahead of it.
+fn watch_load(ctx: &Arc<HostCtx>, handle: &HostHandle) {
+    let generation = ctx.load.current.fetch_add(1, Ordering::SeqCst) + 1;
+    let ctx = ctx.clone();
+    let handle = handle.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(PAGE_READY_TIMEOUT).await;
+        if ctx.load.current.load(Ordering::SeqCst) != generation
+            || ctx.load.ready.load(Ordering::SeqCst) == generation
+        {
+            return;
+        }
+        if !ctx.load.attaching.load(Ordering::SeqCst) {
+            tracing::error!("page load {generation} not ready within {PAGE_READY_TIMEOUT:?}");
+            handle.send(UiAction::Recover(WebViewLost::Stalled));
+            return;
+        }
+        tracing::error!("webview2 creation {generation} hung for {PAGE_READY_TIMEOUT:?}");
+        show_error(ErrorDialog::code(WEBVIEW2_FAULT), HWND::default());
+        while session_running(&ctx) {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+        delete_self_on_exit();
+        std::process::exit(1);
+    });
+}
+
+fn attach_watched(
+    handle: &HostHandle,
+    ctx: &Arc<HostCtx>,
+    is_win11: bool,
+    start: &str,
+) -> anyhow::Result<webview::WebViewHost> {
+    watch_load(ctx, handle);
+    ctx.load.attaching.store(true, Ordering::SeqCst);
+    let result = webview::attach(handle.hwnd(), handle.clone(), ctx.clone(), is_win11, start);
+    ctx.load.attaching.store(false, Ordering::SeqCst);
+    result
+}
+
+fn session_running(ctx: &HostCtx) -> bool {
+    ctx.gui
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+        .is_some_and(|gui| gui.running.load(Ordering::SeqCst))
 }
 
 #[derive(Clone)]
@@ -98,6 +197,7 @@ pub struct HostCtx {
     pub plugin_ready: Mutex<Option<oneshot::Sender<()>>>,
     pub preset: Option<SessionInput>,
     pub gui: Mutex<Option<std::sync::Arc<GuiRuntime>>>,
+    pub load: LoadWatch,
 }
 
 pub struct PluginRuntime {
@@ -174,19 +274,7 @@ pub fn run(
         plugin_ready: Mutex::new(None),
         preset,
         gui: Mutex::new(gui),
-    });
-
-    tokio::spawn({
-        async move {
-            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
-            if FRONTEND_READY.load(std::sync::atomic::Ordering::SeqCst) {
-                tracing::info!("Frontend is ready");
-                return;
-            }
-            show_error(ErrorDialog::code(WEBVIEW2_FAILED), HWND::default());
-            tracing::error!("Frontend failed to become ready within 30s");
-            std::process::exit(1);
-        }
+        load: LoadWatch::default(),
     });
 
     let start = if cfg!(debug_assertions) {
@@ -194,8 +282,8 @@ pub fn run(
     } else {
         format!("{UI_HOST}/index.html")
     };
-    let webview = webview::attach(hwnd, handle.clone(), ctx.clone(), is_win11, &start)
-        .context("attach webview2")?;
+    let mut webview = attach_watched(&handle, &ctx, is_win11, &start).context("attach webview2")?;
+    let mut recoveries = 0;
     if let Some(gui) = ctx.gui.lock().unwrap_or_else(|e| e.into_inner()).clone() {
         let st = gui.snapshot();
         handle.send(UiAction::SetTitle(st.project.window_title.clone()));
@@ -231,6 +319,19 @@ pub fn run(
             if !matches!(action, UiAction::Close) && !unsafe { IsWindow(Some(hwnd)) }.as_bool() {
                 continue;
             }
+            if let UiAction::Recover(lost) = action {
+                recoveries += 1;
+                recover(
+                    &mut webview,
+                    lost,
+                    recoveries,
+                    &handle,
+                    &ctx,
+                    is_win11,
+                    &start,
+                );
+                continue;
+            }
             if let Err(err) = webview.apply(hwnd, action) {
                 tracing::warn!("ui action failed: {err}");
             }
@@ -254,6 +355,11 @@ pub fn run(
                         tracing::warn!("ui action failed: {err}");
                     }
                 }
+                if msg.message == window::WM_RESIZE_WEBVIEW {
+                    if let Err(err) = webview.resize(hwnd) {
+                        tracing::warn!("resize webview failed: {err}");
+                    }
+                }
                 if msg.message != WM_APP {
                     unsafe {
                         let _ = TranslateMessage(&msg);
@@ -262,6 +368,47 @@ pub fn run(
                 }
             }
         }
+    }
+}
+
+/// Bring the page back after a WebView2 process exit or a stalled load. The
+/// page pulls the session state from the host when it loads, so it returns to
+/// the current screen. Every attempt is a new load with its own deadline.
+/// Past the cap the window is closed unless a session is running.
+fn recover(
+    webview: &mut webview::WebViewHost,
+    lost: WebViewLost,
+    attempt: u32,
+    handle: &HostHandle,
+    ctx: &Arc<HostCtx>,
+    is_win11: bool,
+    start: &str,
+) {
+    let result = if attempt > MAX_WEBVIEW_RECOVERIES {
+        Err(anyhow::anyhow!(
+            "gave up after {MAX_WEBVIEW_RECOVERIES} recoveries"
+        ))
+    } else {
+        tracing::warn!("recovering webview2 ({lost:?}), attempt {attempt}");
+        match lost {
+            WebViewLost::Renderer => {
+                watch_load(ctx, handle);
+                webview.reload()
+            }
+            WebViewLost::Browser | WebViewLost::Stalled => {
+                webview.close();
+                attach_watched(handle, ctx, is_win11, start).map(|fresh| *webview = fresh)
+            }
+        }
+    };
+    let Err(err) = result else {
+        return;
+    };
+    ctx.load.abandon();
+    tracing::error!("webview2 recovery failed: {err:#}");
+    show_error(ErrorDialog::code(WEBVIEW2_FAULT), handle.hwnd());
+    if !session_running(ctx) {
+        handle.close();
     }
 }
 
@@ -349,6 +496,7 @@ fn plugin_runtime_setup(
         plugin_ready: Mutex::new(Some(ready_tx)),
         preset: None,
         gui: Mutex::new(None),
+        load: LoadWatch::default(),
     });
     let start = format!("{UI_HOST}/index.html?pluginHost=1");
     let webview = webview::attach(hwnd, handle.clone(), ctx, is_win11, &start)

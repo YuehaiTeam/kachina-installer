@@ -34,7 +34,9 @@ type Pending = {
 
 const pending = new Map<number, Pending>();
 const listeners = new Map<string, Set<(payload: unknown) => void>>();
-let nextId = 1;
+// After a WebView2 recovery the host may still reply to the previous
+// document's requests; a random start keeps those ids apart from ours.
+let nextId = Math.floor(Math.random() * 2 ** 30) + 1;
 
 function webview(): {
   postMessage: (msg: unknown) => void;

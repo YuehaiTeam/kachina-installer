@@ -19,11 +19,12 @@ use windows::Win32::UI::WindowsAndMessaging::{
     AdjustWindowRectEx, CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect,
     GetSystemMetrics, GetWindowLongPtrW, LoadCursorW, PostMessageW, PostQuitMessage,
     RegisterClassExW, SendMessageW, SetWindowLongPtrW, SetWindowPos, SetWindowTextW, ShowWindow,
-    GWLP_USERDATA, GWL_STYLE, HICON, ICON_BIG, ICON_SMALL, IDC_ARROW, SM_CXSCREEN, SM_CYSCREEN,
-    SWP_FRAMECHANGED, SWP_NOMOVE, SWP_NOZORDER, SW_HIDE, SW_MINIMIZE, SW_SHOW, SW_SHOWNA,
-    WINDOW_EX_STYLE, WM_APP, WM_CLOSE, WM_DESTROY, WM_SETICON, WM_SETTINGCHANGE, WNDCLASSEXW,
-    WS_CAPTION, WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_MAXIMIZE,
-    WS_MINIMIZE, WS_MINIMIZEBOX, WS_OVERLAPPED, WS_POPUP, WS_SYSMENU, WS_VISIBLE,
+    GWLP_USERDATA, GWL_STYLE, HICON, ICON_BIG, ICON_SMALL, IDC_ARROW, SIZE_MINIMIZED, SM_CXSCREEN,
+    SM_CYSCREEN, SWP_FRAMECHANGED, SWP_NOMOVE, SWP_NOZORDER, SW_HIDE, SW_MINIMIZE, SW_SHOW,
+    SW_SHOWNA, WINDOW_EX_STYLE, WM_APP, WM_CLOSE, WM_DESTROY, WM_SETICON, WM_SETTINGCHANGE,
+    WM_SIZE, WNDCLASSEXW, WS_CAPTION, WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP,
+    WS_EX_TOOLWINDOW, WS_MAXIMIZE, WS_MINIMIZE, WS_MINIMIZEBOX, WS_OVERLAPPED, WS_POPUP,
+    WS_SYSMENU, WS_VISIBLE,
 };
 
 use crate::installer::uninstall::delete_self_on_exit;
@@ -50,6 +51,10 @@ const PLUGIN_CLASS: PCWSTR = w!("KachinaPluginHost");
 
 /// Posted by wndproc on theme change so the UI loop can refresh WebView background.
 pub const WM_THEME_BACKGROUND: u32 = WM_APP + 1;
+
+/// Posted by wndproc when the client area changes size. A WebView rebuilt
+/// while the window was minimized starts with an empty client rect.
+pub const WM_RESIZE_WEBVIEW: u32 = WM_APP + 2;
 
 pub fn is_win11() -> bool {
     let (major, minor, build) = nt_version::get();
@@ -420,6 +425,14 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
             if is_color_theme_change(lparam) {
                 apply_mica(hwnd);
                 post_theme_background(hwnd);
+            }
+            unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
+        }
+        WM_SIZE => {
+            if wparam.0 != SIZE_MINIMIZED as usize {
+                unsafe {
+                    let _ = PostMessageW(Some(hwnd), WM_RESIZE_WEBVIEW, WPARAM(0), LPARAM(0));
+                }
             }
             unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
         }

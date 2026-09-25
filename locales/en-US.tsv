@@ -49,6 +49,7 @@ UNINSTALL_INCOMPLETE	Uninstall complete, but some items could not be removed. Yo
 UNINSTALL_INFO_MISSING	Uninstall information not found. Reinstall before uninstalling
 VERSION_REGEX_INVALID	Invalid version pattern
 WEBVIEW2_FAILED	WebView2 installation failed
+WEBVIEW2_FAULT	The installer window could not be displayed. Run the installer again
 WEBVIEW2_REQUIRED	This source requires WebView2. Use "Advanced install"
 dialog.cancel	Cancel
 dialog.copy	Copy
