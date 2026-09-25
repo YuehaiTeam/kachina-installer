@@ -35,7 +35,8 @@ use crate::session::plan::{
 };
 use crate::session::source::{
     cleanup_dfs2, ensure_dfs2_session, fetch_metadata, hash_of_item, needs_js_plugin, parse_source,
-    resolve_file_location, resolve_range_url, FileLocation, ParsedSource, SourceCtx,
+    prefetch_chunk_urls, resolve_file_location, resolve_range_url, FileLocation, ParsedSource,
+    SourceCtx,
 };
 use crate::session::state::{
     ByteProgress, CancelState, FileAction, FileProgress, Phase, Progress as UiProgress,
@@ -1620,6 +1621,7 @@ async fn dfs_staged(
             None => err,
         };
         log_task_plan(&tasks, &ranges);
+        prefetch_chunk_urls(source_ctx, ranges).await;
 
         progress(
             ui,
