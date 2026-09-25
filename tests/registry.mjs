@@ -41,6 +41,16 @@ async function loadMetadata(version) {
   return fs.readJSON(`./fixtures/${version}-metadata.json`);
 }
 
+/** The manifest an update from online metadata installs: the package's
+ * `installer` image also lands as the updater. */
+function withUpdater(metadata) {
+  const { size, xxh, md5 } = metadata.installer;
+  return {
+    ...metadata,
+    hashed: [...metadata.hashed, { file_name: 'updater.exe', size, xxh, md5 }],
+  };
+}
+
 function manifestKeys(meta) {
   return (meta.hashed ?? [])
     .map((e) => `${e.file_name}|${e.xxh ?? e.md5}`)
@@ -217,7 +227,7 @@ async function registeredUpdate(dir, v2) {
   const check = new Check('Direct-launch update refreshes the matching record');
   await runUpdaterInDir(dir, 'Registered update');
   await expectAppVersion(check, dir, 'APP_V2');
-  await expectRecord(check, 'HKCU', dir, v2);
+  await expectRecord(check, 'HKCU', dir, withUpdater(v2));
   await expectAbsent(check, 'HKLM');
   check.finish();
 }
@@ -324,7 +334,7 @@ async function machineUpdate(dir, v1, v2) {
   await runUpdaterInDir(dir, 'Helper update', [HELPER]);
   await expectHelperUsed(check);
   await expectAppVersion(check, dir, 'APP_V2');
-  await expectRecord(check, 'HKLM', dir, v2);
+  await expectRecord(check, 'HKLM', dir, withUpdater(v2));
   await expectAbsent(check, 'HKCU');
   check.finish();
 }
