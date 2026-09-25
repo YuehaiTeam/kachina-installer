@@ -104,6 +104,15 @@ const OPTS: &[OptSpec] = &[
         help: "Write session dump JSON here (dev / tests only)",
         apply: |a, v| a.dump_dir = v.map(PathBuf::from),
     },
+    OptSpec {
+        short: None,
+        long: Some("assume-unelevated"),
+        takes_value: false,
+        hidden: true,
+        value_name: "",
+        help: "Route elevated operations through the helper even when elevated (tests only)",
+        apply: |a, _| a.assume_unelevated = true,
+    },
 ];
 
 fn lossy(v: OsString) -> String {
@@ -576,5 +585,7 @@ mod tests {
         assert!(text.contains("--help"));
         assert!(!text.contains("--source"));
         assert!(!text.contains("--mirrorc-cdk"));
+        assert!(!text.contains("--assume-unelevated"));
+        assert!(install(&["-S", "--assume-unelevated"]).assume_unelevated);
     }
 }

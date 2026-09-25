@@ -99,6 +99,11 @@ fn main() {
     let _ = unsafe { AttachConsole(ATTACH_PARENT_PROCESS) };
 
     let command = cli::parse();
+    if let Command::Install(a) | Command::NativeUi(a) = &command {
+        if a.assume_unelevated {
+            utils::uac::assume_unelevated();
+        }
+    }
     // 崩溃提示进程只弹框，不初始化遥测与网络探测
     if let Command::CrashDialog { event_id } = &command {
         crash_dialog(event_id.as_deref());

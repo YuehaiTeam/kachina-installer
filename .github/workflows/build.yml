@@ -131,7 +131,7 @@ jobs:
     runs-on: windows-2022
     strategy:
       matrix:
-        test: [offline-install, online-install, offline-update, online-update, dfs2, updater-survival, already-latest, uninstall, userdata-ignore, occupied-process, builder-extract-replace, plugin-stub, machine-acl]
+        test: [offline-install, online-install, offline-update, online-update, dfs2, updater-survival, already-latest, 'uninstall registry', userdata-ignore, occupied-process, builder-extract-replace, plugin-stub, machine-acl]
       fail-fast: false
     steps:
       - uses: actions/checkout@v4
@@ -169,5 +169,10 @@ jobs:
       - name: Prepare test fixtures
         run: npm run test:prepare
       - name: Run ${{ matrix.test }} test
-        run: npm run test:${{ matrix.test }}
+        # 一个矩阵项可列多个空格分隔的脚本，共用同一次夹具准备
+        run: |
+          foreach ($t in '${{ matrix.test }}'.Split(' ')) {
+            npm run test:$t
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
         timeout-minutes: 10

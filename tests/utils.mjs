@@ -13,6 +13,82 @@ export function getTestDir(name) {
   return path.join(os.tmpdir(), `kachina-test-${name}-${Date.now()}`);
 }
 
+const UNINSTALL_KEY = 'SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall';
+const HIVE_ROOTS = { HKCU: 'HKEY_CURRENT_USER', HKLM: 'HKEY_LOCAL_MACHINE' };
+const RECORD_VALUES = [
+  'DisplayName',
+  'DisplayVersion',
+  'InstallLocation',
+  'UninstallString',
+  'DisplayIcon',
+  'Publisher',
+  'EstimatedSize',
+  'InstallerMeta',
+];
+
+function uninstallKey(hive, regName) {
+  return `Registry::${HIVE_ROOTS[hive]}\\${UNINSTALL_KEY}\\${regName}`;
+}
+
+/** Uninstall record values, or `null` when the key is absent. Runs in 64-bit
+ * pwsh, the same registry view as the installer. */
+export async function readUninstallRecord(hive, regName) {
+  const { $, usePwsh } = await import('zx');
+  usePwsh();
+  const key = uninstallKey(hive, regName);
+  const names = RECORD_VALUES.join(',');
+  const out =
+    await $`if (Test-Path -LiteralPath ${key}) { Get-ItemProperty -LiteralPath ${key} | Select-Object -Property (${names} -split ',') | ConvertTo-Json -Compress }`.quiet();
+  const text = out.stdout.trim();
+  return text ? JSON.parse(text) : null;
+}
+
+/** Create or overwrite string values on an uninstall record. */
+export async function writeUninstallRecord(hive, regName, values) {
+  const { $, usePwsh } = await import('zx');
+  usePwsh();
+  const key = uninstallKey(hive, regName);
+  const json = JSON.stringify(values);
+  await $`New-Item -Path ${key} -Force | Out-Null; foreach ($p in (${json} | ConvertFrom-Json).PSObject.Properties) { New-ItemProperty -LiteralPath ${key} -Name $p.Name -Value ([string]$p.Value) -PropertyType String -Force | Out-Null }`.quiet();
+}
+
+/** Move a record to the other hive, keeping value types. */
+export async function moveUninstallRecord(from, to, regName) {
+  const { $, usePwsh } = await import('zx');
+  usePwsh();
+  const source = uninstallKey(from, regName);
+  const parent = `Registry::${HIVE_ROOTS[to]}\\${UNINSTALL_KEY}`;
+  await $`Copy-Item -LiteralPath ${source} -Destination ${parent} -Recurse -Force; Remove-Item -LiteralPath ${source} -Recurse -Force`.quiet();
+}
+
+export async function removeUninstallRecord(hive, regName) {
+  const { $, usePwsh } = await import('zx');
+  usePwsh();
+  const key = uninstallKey(hive, regName);
+  await $`Remove-Item -LiteralPath ${key} -Recurse -Force -ErrorAction SilentlyContinue`.quiet();
+}
+
+/** Desktop and Start menu shortcuts a new install creates for the user. */
+export async function removeUserShortcuts(appName) {
+  const { $, usePwsh } = await import('zx');
+  usePwsh();
+  const desktop = (
+    await $`[Environment]::GetFolderPath('Desktop')`.quiet()
+  ).stdout.trim();
+  const programs = (
+    await $`[Environment]::GetFolderPath('Programs')`.quiet()
+  ).stdout.trim();
+  await fs.remove(path.join(desktop, `${appName}.lnk`));
+  await fs.remove(path.join(programs, appName));
+}
+
+export function normalizeInstallPath(p) {
+  return p
+    .replaceAll('/', '\\')
+    .replace(/[\\]+$/, '')
+    .toLowerCase();
+}
+
 /** Both places a staging directory for `installDir` can live: beside it
  * (elevated writer or another volume) and under `%TEMP%`. */
 export function stagingCandidates(installDir) {
@@ -201,11 +277,12 @@ export async function clearLogFile() {
   }
 }
 
-export async function runInstaller(exe, args, label, timeout = '3m') {
+export async function runInstaller(exe, args, label, timeout = '3m', cwd) {
   const { $, usePwsh } = await import('zx');
   usePwsh();
+  const run = cwd ? $({ cwd }) : $;
   try {
-    const result = await $`& ${exe} ${args}`.timeout(timeout);
+    const result = await run`& ${exe} ${args}`.timeout(timeout);
     return result;
   } catch (error) {
     if (error.message && error.message.includes('timed out')) {

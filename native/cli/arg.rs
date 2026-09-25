@@ -14,6 +14,7 @@ pub struct InstallArgs {
     pub dfs_extras: Option<String>,
     pub mirrorc_cdk: Option<String>,
     pub dump_dir: Option<PathBuf>,
+    pub assume_unelevated: bool,
 }
 
 #[allow(dead_code)]

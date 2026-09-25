@@ -1,6 +1,7 @@
 use std::ffi::{c_void, OsStr};
 use std::mem::{size_of, zeroed};
 use std::ptr::null_mut;
+use std::sync::atomic::{AtomicBool, Ordering};
 use windows::core::{w, HSTRING, PCWSTR};
 use windows::Win32::Foundation::HANDLE;
 use windows::Win32::Security::{GetTokenInformation, TokenElevation, TOKEN_ELEVATION, TOKEN_QUERY};
@@ -13,7 +14,19 @@ pub struct SendableHandle(pub HANDLE);
 unsafe impl Send for SendableHandle {}
 unsafe impl Sync for SendableHandle {}
 
+static ASSUME_UNELEVATED: AtomicBool = AtomicBool::new(false);
+
+/// Make [`check_elevated`] report `false` in this process, so an elevated
+/// test run takes the helper path a standard user takes. The helper is
+/// launched without this flag and keeps its real answer.
+pub fn assume_unelevated() {
+    ASSUME_UNELEVATED.store(true, Ordering::Relaxed);
+}
+
 pub fn check_elevated() -> windows::core::Result<bool> {
+    if ASSUME_UNELEVATED.load(Ordering::Relaxed) {
+        return Ok(false);
+    }
     unsafe {
         let h_process = GetCurrentProcess();
         let mut h_token = HANDLE(null_mut());
