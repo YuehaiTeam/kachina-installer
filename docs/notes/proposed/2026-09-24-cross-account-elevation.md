@@ -15,7 +15,7 @@ Status: proposed
 | 映射盘与 `subst` 盘在提权令牌中不可见 | 启动进程按用户会话中的盘符判断目录；`EnableLinkedConnections` 为默认值时，提权令牌看不到该用户映射的网络盘和 `subst` 盘，子进程写入失败。跨账号时访问 UNC 共享使用的也是管理员凭据。同账号提权同样触发。 | [目录检查](../../../native/installer/mod.rs) |
 | 卸载按本次是否提权选择快捷方式位置 | 卸载用 `get_dirs(settings.elevate)` 只清理一侧。按用户安装后改为按机器更新时，更新不重建应用快捷方式，用户目录中的快捷方式在卸载后残留。 | [卸载](../../../native/session/run.rs)、[快捷方式目录](../../../native/installer/lnk.rs) |
 
-本提案取代[重构审阅修复](./2026-09-20-refactor-review-fixes.md)中暂存 ACL 一项，并修改[根据安装记录决定注册行为](./2026-09-20-install-identity-registry.md)中提权时保留 HKCU 归属的部分；其余登记规则不变。
+本提案取代[重构审阅修复](./2026-09-20-refactor-review-fixes.md)中暂存 ACL 一项，并修改[根据安装记录决定注册行为](../implemented/2026-09-20-install-identity-registry.md)中提权时保留 HKCU 归属的部分；其余登记规则不变。
 
 ## Proposal
 
@@ -28,7 +28,7 @@ Status: proposed
 | 情形 | 登记行为 |
 |---|---|
 | 更新 HKCU 记录所在目录 | 子进程先写 HKLM，成功后启动进程删除该 HKCU 记录；HKLM 写入失败时保留 HKCU 记录，按 `REGISTRY_WRITE_FAILED` 提示 |
-| 用户把目录改离发现位置，发现目录的记录在 HKCU | 与更新相同：在新目录写 HKLM，成功后删除发现目录的 HKCU 记录，保持[按记录决定注册行为](./2026-09-20-install-identity-registry.md)中不另建记录的规则 |
+| 用户把目录改离发现位置，发现目录的记录在 HKCU | 与更新相同：在新目录写 HKLM，成功后删除发现目录的 HKCU 记录，保持[按记录决定注册行为](../implemented/2026-09-20-install-identity-registry.md)中不另建记录的规则 |
 | 新建安装，HKCU 记录指向其他目录且未经用户改路径 | 只写 HKLM，不修改 HKCU 记录；同名的两条记录按 `InstallLocation` 区分 |
 
 登记计划因此同时给出要写的 hive 与要删的 HKCU 记录。HKCU 的读取与删除只在启动进程执行，它们属于启动用户；子进程只写或删 HKLM，`WriteRegistry` 与 `RemoveRegistry` 去掉 `hive` 字段，由类型保证子进程不打开自己的当前用户键。
