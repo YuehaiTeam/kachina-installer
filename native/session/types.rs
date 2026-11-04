@@ -26,16 +26,26 @@ pub enum SourceField {
     List(Vec<SourceItem>),
 }
 
+/// The packed `\0CONFIG`. A field the package leaves out takes the value
+/// below, so a package that only sets some fields still starts.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProjectConfig {
+    #[serde(default = "default_source")]
     pub source: SourceField,
+    #[serde(default = "default_app_name")]
     pub app_name: String,
+    #[serde(default = "default_publisher")]
     pub publisher: String,
+    #[serde(default = "default_app_name")]
     pub reg_name: String,
+    #[serde(default = "default_exe_name")]
     pub exe_name: String,
+    #[serde(default = "default_uninstall_name")]
     pub uninstall_name: String,
+    #[serde(default = "default_updater_name")]
     pub updater_name: String,
+    #[serde(default = "default_app_name")]
     pub program_files_path: String,
     #[serde(default)]
     pub user_data_path: Vec<String>,
@@ -43,8 +53,11 @@ pub struct ProjectConfig {
     pub ignore_folder_path: Vec<String>,
     #[serde(default)]
     pub extra_uninstall_path: Vec<String>,
+    #[serde(default = "default_title")]
     pub title: String,
+    #[serde(default = "default_description")]
     pub description: String,
+    #[serde(default = "default_window_title")]
     pub window_title: String,
     #[serde(default = "default_uac")]
     pub uac_strategy: String,
@@ -52,6 +65,42 @@ pub struct ProjectConfig {
     pub window_borderless: Option<bool>,
     #[serde(default = "default_true")]
     pub need_web_view2: bool,
+}
+
+fn default_source() -> SourceField {
+    SourceField::Single(String::new())
+}
+
+fn default_app_name() -> String {
+    "Kachina".to_string()
+}
+
+fn default_publisher() -> String {
+    "YuehaiTeam".to_string()
+}
+
+fn default_exe_name() -> String {
+    "inst.exe".to_string()
+}
+
+fn default_uninstall_name() -> String {
+    "uninst.exe".to_string()
+}
+
+fn default_updater_name() -> String {
+    "update.exe".to_string()
+}
+
+fn default_title() -> String {
+    "Title".to_string()
+}
+
+fn default_description() -> String {
+    "description".to_string()
+}
+
+fn default_window_title() -> String {
+    " ".to_string()
 }
 
 fn default_uac() -> String {

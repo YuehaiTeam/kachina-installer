@@ -827,7 +827,8 @@ async fn commit_staged(
                 progress(
                     ui,
                     2,
-                    95.0 + (*done as f64 / total.max(1) as f64) * 3.0,
+                    // 95–97; runtimes follow at 97, shortcuts 98, registry 99
+                    95.0 + (*done as f64 / total.max(1) as f64) * 2.0,
                     ProgressStage::Commit,
                     None,
                     Some(*done),
@@ -1352,8 +1353,13 @@ async fn run_dfs_install(
     result.map(|(r, _)| r)
 }
 
-fn has_runtimes(runtimes: Option<&[String]>) -> bool {
-    runtimes.is_some_and(|r| !r.is_empty())
+/// A configured runtime is not installed yet (or cannot be checked): the
+/// session goes on to the runtime step instead of reporting "already latest".
+fn runtimes_missing(runtimes: Option<&[String]>) -> bool {
+    runtimes.is_some_and(|tags| {
+        tags.iter()
+            .any(|tag| crate::installer::runtimes::runtime_installed(tag) != Some(true))
+    })
 }
 
 /// Everything between "target known" and "files swapped in", with the staging
@@ -1482,7 +1488,7 @@ async fn dfs_staged(
 
     if to_install.is_empty()
         && plan.deletes.is_empty()
-        && !has_runtimes(project.runtimes.as_deref())
+        && !runtimes_missing(project.runtimes.as_deref())
     {
         session_dump!(
             settings.dump_dir.as_deref(),
@@ -1763,10 +1769,10 @@ async fn pick_metadata(
                     .as_ref()
                     .map(|i| i.is_empty())
                     .unwrap_or(true);
-                let take_online = if settings.auto_answer {
-                    settings.is_update && no_index
-                } else {
-                    (settings.is_update && no_index)
+                // `-S` / `-I` install the version packed in this installer:
+                // unattended deployments pin it
+                let take_online = !settings.auto_answer
+                    && ((settings.is_update && no_index)
                         || ui
                             .confirm(Prompt {
                                 id: String::new(),
@@ -1774,8 +1780,7 @@ async fn pick_metadata(
                                 items: Vec::new(),
                                 params: std::collections::BTreeMap::new(),
                             })
-                            .await
-                };
+                            .await);
                 if take_online {
                     tracing::info!("use online meta, tag={}", online.tag_name);
                     return Ok((online, true));
@@ -2569,7 +2574,9 @@ async fn install_one(
     let mut last_insight = None;
     for attempt in 1..=if skip_patch_first { 2 } else { 3 } {
         let skip_patch = skip_patch_first || attempt > 1;
-        let ipc = build_install_op(
+        // resolving a node is part of the attempt: a failed resolution is
+        // retried, and from the second attempt on the whole file is fetched
+        let ipc = match build_install_op(
             settings,
             local_files,
             disk_files,
@@ -2580,7 +2587,15 @@ async fn install_one(
             staging,
             skip_patch,
         )
-        .await?;
+        .await
+        {
+            Ok(ipc) => ipc,
+            Err(err) if is_cancelled(&err) => return Err(err),
+            Err(err) => {
+                last_err = Some(err);
+                continue;
+            }
+        };
         if first_op.is_none() {
             first_op = Some(ipc.clone());
         }
@@ -2793,25 +2808,28 @@ async fn build_install_op(
                 && side_hash(&p.from, hash_key)
                     .is_some_and(|from| local_files.iter().any(|l| l.name == from))
         });
+        // a patch that cannot be resolved falls through to the next source
         if let Some(patch) = lpatch {
             if let Some(from) = side_hash(&patch.from, hash_key) {
                 if let Some(local) = local_files.iter().find(|l| l.name == from) {
-                    let loc = resolve_install_source(
+                    if let Ok(loc) = resolve_install_source(
                         source_ctx,
                         &format!("{from}_{hash}"),
                         settings.dfs_extras.as_deref(),
                         false,
                         true,
                     )
-                    .await?;
-                    return Ok(hybrid_op(
-                        local,
-                        loc,
-                        &target,
-                        item,
-                        patch.size as usize,
-                        patch.from.size,
-                    ));
+                    .await
+                    {
+                        return Ok(hybrid_op(
+                            local,
+                            loc,
+                            &target,
+                            item,
+                            patch.size as usize,
+                            patch.from.size,
+                        ));
+                    }
                 }
             }
         }
@@ -3001,7 +3019,7 @@ async fn install_runtimes(
         progress(
             ui,
             3,
-            96.0,
+            97.0,
             ProgressStage::InstallRuntime,
             Some(name),
             None,
@@ -3012,7 +3030,7 @@ async fn install_runtimes(
             progress(
                 ui,
                 3,
-                96.0,
+                97.0,
                 ProgressStage::DownloadRuntime,
                 Some(name),
                 None,
@@ -3032,7 +3050,7 @@ async fn install_runtimes(
                     Progress::BytesOf { done, total } => progress(
                         ui,
                         3,
-                        96.0,
+                        97.0,
                         ProgressStage::DownloadRuntime,
                         Some(name),
                         Some(*done),
@@ -3041,7 +3059,7 @@ async fn install_runtimes(
                     Progress::Stage(ProgressStage::InstallRuntime) => progress(
                         ui,
                         3,
-                        96.0,
+                        97.0,
                         ProgressStage::InstallRuntime,
                         Some(name),
                         None,

@@ -270,9 +270,12 @@ pub fn build_plan(input: &PlanInput) -> InstallPlan {
         });
     }
 
+    // only deletes whose file the scan found: one that is already gone needs
+    // no commit and must not keep an up-to-date install from being latest
     let deletes = input
         .deletes
         .iter()
+        .filter(|delete_file| find_local(&input.local, delete_file).is_some())
         .filter(|delete_file| {
             if !input.is_update || ignore_dirs.is_empty() {
                 return true;
@@ -535,9 +538,14 @@ mod tests {
     }
 
     #[test]
-    fn deletes_skip_ignored_folder() {
+    fn deletes_skip_ignored_folder_and_missing_files() {
         let mut input = base_input();
-        input.deletes = vec!["readme.txt".to_string(), "cache/old.dat".to_string()];
+        input.deletes = vec![
+            "readme.txt".to_string(),
+            "cache/old.dat".to_string(),
+            "gone.txt".to_string(),
+        ];
+        input.local = vec![local("readme.txt", "r"), local("cache/old.dat", "c")];
         input.ignore_nonempty = vec![r"C:\app\cache".to_string()];
         let plan = build_plan(&input);
         assert_eq!(plan.deletes, vec!["readme.txt".to_string()]);

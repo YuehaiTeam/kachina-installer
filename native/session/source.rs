@@ -1010,23 +1010,28 @@ async fn resolve_dfs_file_url(
     if let Some(url) = dfs.url {
         return Ok(url);
     }
+    // a node whose probe answers first, else the origin, else the first node
+    let first_test = dfs
+        .tests
+        .as_ref()
+        .and_then(|t| t.first())
+        .map(|t| t.1.clone());
     if let Some(tests) = dfs.tests {
         if let Some(url) = pick_fastest_test(tests).await {
             return Ok(url);
         }
     }
-    if let Some(source) = dfs.source {
-        return Ok(source);
+    if let Some(url) = dfs.source.or(first_test) {
+        return Ok(url);
     }
     Err(anyhow::Error::from(Coded::bare(NO_DOWNLOAD_NODE)))
 }
 
+/// The download URL of the first node whose probe answers `HEAD` with a
+/// success status within 2 s; `None` when every probe fails.
 async fn pick_fastest_test(tests: Vec<(String, String)>) -> Option<String> {
-    if tests.is_empty() {
-        return None;
-    }
     let mut joins = tokio::task::JoinSet::new();
-    for (probe, url) in tests.clone() {
+    for (probe, url) in tests {
         joins.spawn(async move {
             let client = reqwest::Client::builder()
                 .timeout(Duration::from_millis(2000))
@@ -1045,7 +1050,7 @@ async fn pick_fastest_test(tests: Vec<(String, String)>) -> Option<String> {
             return Some(url);
         }
     }
-    tests.into_iter().next().map(|t| t.1)
+    None
 }
 
 #[cfg(test)]
