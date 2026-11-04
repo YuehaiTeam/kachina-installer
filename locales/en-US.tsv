@@ -33,6 +33,7 @@ PLUGIN_NOT_FOUND	Plugin not found
 PLUGIN_NO_UI	This source requires a graphical interface
 PROCESS_KILL_FAILED	Failed to terminate the process
 REGISTRY_READ_FAILED	Could not read the install record. Cannot continue
+ROLLBACK_INCOMPLETE	The update could not finish and some files could not be put back yet. Close programs using the install folder, then run the installer again to repair it
 REGISTRY_WRITE_FAILED	Failed to write to the registry
 REMOTE_FILE_MISSING	Could not fetch a required file. Check your network connection or switch to another source
 RUNTIME_INSTALL_FAILED	Failed to install {subject}. Please install it manually

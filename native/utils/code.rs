@@ -19,6 +19,9 @@ pub const PERMISSION_DENIED: &str = "PERMISSION_DENIED";
 pub const DISK_FULL: &str = "DISK_FULL";
 pub const FILE_IN_USE: &str = "FILE_IN_USE";
 pub const FILE_IO_FAILED: &str = "FILE_IO_FAILED";
+/// A failed commit could not put every file back; the staging directory and
+/// its journal are kept for the next session's recovery.
+pub const ROLLBACK_INCOMPLETE: &str = "ROLLBACK_INCOMPLETE";
 pub const UNINSTALL_INCOMPLETE: &str = "UNINSTALL_INCOMPLETE";
 pub const TEMP_DIR_UNAVAILABLE: &str = "TEMP_DIR_UNAVAILABLE";
 pub const PROCESS_KILL_FAILED: &str = "PROCESS_KILL_FAILED";
@@ -85,6 +88,7 @@ pub const ALL_CODES: &[&str] = &[
     DISK_FULL,
     FILE_IN_USE,
     FILE_IO_FAILED,
+    ROLLBACK_INCOMPLETE,
     UNINSTALL_INCOMPLETE,
     TEMP_DIR_UNAVAILABLE,
     PROCESS_KILL_FAILED,
@@ -390,6 +394,7 @@ pub fn class_of(code: &str) -> Option<Class> {
         | DISK_FULL
         | FILE_IN_USE
         | FILE_IO_FAILED
+        | ROLLBACK_INCOMPLETE
         | UNINSTALL_INCOMPLETE
         | TEMP_DIR_UNAVAILABLE
         | PROCESS_KILL_FAILED

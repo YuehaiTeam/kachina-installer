@@ -844,6 +844,15 @@ async fn commit_staged(
     Ok(outcome.self_replaced)
 }
 
+/// A failed commit that could not roll every file back (`ROLLBACK_INCOMPLETE`)
+/// leaves the staging directory and its journal for the next session's
+/// recovery; the session must not discard it.
+fn keeps_staging_for_recovery<T>(result: &anyhow::Result<T>) -> bool {
+    result.as_ref().err().is_some_and(|err| {
+        matches!(extract(err), Extracted::Coded(c) if c.code == crate::utils::code::ROLLBACK_INCOMPLETE)
+    })
+}
+
 /// End-of-session staging cleanup: the directory outlives the process only
 /// when it parks the running executable.
 async fn finish_staging(staged: &SessionStaging, self_replaced: bool, mgr: &ManagedElevate) {
@@ -1349,7 +1358,9 @@ async fn run_dfs_install(
     )
     .await;
     let self_replaced = recovered_self || matches!(result, Ok((_, true)));
-    finish_staging(&staged, self_replaced, mgr).await;
+    if !keeps_staging_for_recovery(&result) {
+        finish_staging(&staged, self_replaced, mgr).await;
+    }
     result.map(|(r, _)| r)
 }
 
@@ -3406,7 +3417,9 @@ async fn run_mirrorc(
     )
     .await;
     let self_replaced = recovered_self || matches!(result, Ok((_, true)));
-    finish_staging(&staged, self_replaced, mgr).await;
+    if !keeps_staging_for_recovery(&result) {
+        finish_staging(&staged, self_replaced, mgr).await;
+    }
     result.map(|(r, _)| r)
 }
 

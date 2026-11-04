@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::fs::staging::{is_safe_rel, join_rel, remove_tree, Staging};
 use crate::ipc::{Progress, ProgressNotify};
-use crate::utils::code::{code_for_local_io, Attach, FILE_IO_FAILED};
+use crate::utils::code::{code_for_local_io, Attach, Coded, FILE_IO_FAILED, ROLLBACK_INCOMPLETE};
 use crate::utils::hash::hash_file;
 
 pub const JOURNAL_VERSION: &str = "kachina-journal 1";
@@ -392,17 +392,24 @@ fn apply_file(ctx: &Ctx, rel: &str, state: &mut FileState) -> anyhow::Result<()>
     Ok(())
 }
 
-fn undo_file(ctx: &Ctx, rel: &str, state: &FileState) {
+fn undo_file(ctx: &Ctx, rel: &str, state: &FileState, unrestored: &mut Unrestored) {
     let target = ctx.target(rel);
+    let mut new_moved_back = true;
     if state.new_placed {
         if let Err(err) = rename_retry(&target, &ctx.new_of(rel), ctx.backoff) {
             tracing::warn!("rollback {rel}: move new back failed: {err}");
+            new_moved_back = false;
         }
     }
     if state.old_moved {
+        // replaces the new file as well when it could not be moved back
         if let Err(err) = rename_retry(&ctx.old_of(rel), &target, ctx.backoff) {
             tracing::warn!("rollback {rel}: restore old failed: {err}");
+            unrestored.push(rel.to_string());
         }
+    } else if !new_moved_back {
+        // a file the install did not have before is still in place
+        unrestored.push(rel.to_string());
     }
 }
 
@@ -439,7 +446,7 @@ fn apply_copy(ctx: &Ctx, entry: &FileEntry, state: &mut FileState) -> anyhow::Re
     Ok(())
 }
 
-fn undo_copy(ctx: &Ctx, rel: &str, state: &FileState) {
+fn undo_copy(ctx: &Ctx, rel: &str, state: &FileState, unrestored: &mut Unrestored) {
     let target = ctx.target(rel);
     let (tmp, old) = copy_paths(&target);
     if state.new_placed {
@@ -449,6 +456,7 @@ fn undo_copy(ctx: &Ctx, rel: &str, state: &FileState) {
     if state.old_moved {
         if let Err(err) = rename_retry(&old, &target, ctx.backoff) {
             tracing::warn!("rollback copy {rel}: restore old failed: {err}");
+            unrestored.push(rel.to_string());
         }
     }
 }
@@ -459,14 +467,14 @@ fn finish_copy(target: &Path) {
     let _ = std::fs::remove_file(old);
 }
 
-fn apply_unit(ctx: &Ctx, unit: &Unit) -> anyhow::Result<UnitState> {
+fn apply_unit(ctx: &Ctx, unit: &Unit, unrestored: &mut Unrestored) -> anyhow::Result<UnitState> {
     match unit {
         Unit::File(f) => {
             let mut st = FileState::default();
             match apply_file(ctx, &f.rel, &mut st) {
                 Ok(()) => Ok(UnitState::File(st)),
                 Err(e) => {
-                    undo_file(ctx, &f.rel, &st);
+                    undo_file(ctx, &f.rel, &st, unrestored);
                     Err(e)
                 }
             }
@@ -476,7 +484,7 @@ fn apply_unit(ctx: &Ctx, unit: &Unit) -> anyhow::Result<UnitState> {
             match apply_copy(ctx, f, &mut st) {
                 Ok(()) => Ok(UnitState::Copy(st)),
                 Err(e) => {
-                    undo_copy(ctx, &f.rel, &st);
+                    undo_copy(ctx, &f.rel, &st, unrestored);
                     Err(e)
                 }
             }
@@ -489,11 +497,16 @@ fn apply_unit(ctx: &Ctx, unit: &Unit) -> anyhow::Result<UnitState> {
             rename_retry(&target, &ctx.old_of(rel), ctx.backoff).map_err(|e| local_err(e, rel))?;
             Ok(UnitState::Del { old_moved: true })
         }
-        Unit::Dir { rel, files } => apply_dir(ctx, rel, files),
+        Unit::Dir { rel, files } => apply_dir(ctx, rel, files, unrestored),
     }
 }
 
-fn apply_dir(ctx: &Ctx, rel: &str, files: &[FileEntry]) -> anyhow::Result<UnitState> {
+fn apply_dir(
+    ctx: &Ctx,
+    rel: &str,
+    files: &[FileEntry],
+    unrestored: &mut Unrestored,
+) -> anyhow::Result<UnitState> {
     let target = ctx.target(rel);
     let mut old_moved = false;
     let mut removed_empty_root = false;
@@ -512,7 +525,7 @@ fn apply_dir(ctx: &Ctx, rel: &str, files: &[FileEntry]) -> anyhow::Result<UnitSt
                 Ok(()) => old_moved = true,
                 Err(err) => {
                     tracing::warn!("dir unit {rel:?} rename failed ({err}), degrading to files");
-                    return apply_degraded(ctx, files);
+                    return apply_degraded(ctx, files, unrestored);
                 }
             }
         }
@@ -529,19 +542,23 @@ fn apply_dir(ctx: &Ctx, rel: &str, files: &[FileEntry]) -> anyhow::Result<UnitSt
                 new_placed: false,
                 removed_empty_root,
             };
-            undo_unit(ctx, rel, &st);
+            undo_unit(ctx, rel, &st, unrestored);
             Err(local_err(err, rel))
         }
     }
 }
 
-fn apply_degraded(ctx: &Ctx, files: &[FileEntry]) -> anyhow::Result<UnitState> {
+fn apply_degraded(
+    ctx: &Ctx,
+    files: &[FileEntry],
+    unrestored: &mut Unrestored,
+) -> anyhow::Result<UnitState> {
     let mut states: Vec<(FileEntry, FileState)> = Vec::new();
     for f in files {
         let mut st = FileState::default();
         if let Err(err) = apply_file(ctx, &f.rel, &mut st) {
             states.push((f.clone(), st));
-            undo_unit(ctx, "", &UnitState::Degraded(states));
+            undo_unit(ctx, "", &UnitState::Degraded(states), unrestored);
             return Err(err);
         }
         states.push((f.clone(), st));
@@ -549,14 +566,15 @@ fn apply_degraded(ctx: &Ctx, files: &[FileEntry]) -> anyhow::Result<UnitState> {
     Ok(UnitState::Degraded(states))
 }
 
-fn undo_unit(ctx: &Ctx, rel: &str, state: &UnitState) {
+fn undo_unit(ctx: &Ctx, rel: &str, state: &UnitState, unrestored: &mut Unrestored) {
     match state {
-        UnitState::File(st) => undo_file(ctx, rel, st),
-        UnitState::Copy(st) => undo_copy(ctx, rel, st),
+        UnitState::File(st) => undo_file(ctx, rel, st, unrestored),
+        UnitState::Copy(st) => undo_copy(ctx, rel, st, unrestored),
         UnitState::Del { old_moved } => {
             if *old_moved {
                 if let Err(err) = rename_retry(&ctx.old_of(rel), &ctx.target(rel), ctx.backoff) {
                     tracing::warn!("rollback del {rel}: {err}");
+                    unrestored.push(rel.to_string());
                 }
             }
         }
@@ -569,11 +587,15 @@ fn undo_unit(ctx: &Ctx, rel: &str, state: &UnitState) {
             if *new_placed {
                 if let Err(err) = rename_retry(&target, &ctx.new_of(rel), ctx.backoff) {
                     tracing::warn!("rollback dir {rel:?}: move new back failed: {err}");
+                    // the old directory cannot be renamed onto an existing one
+                    unrestored.push(rel.to_string());
+                    return;
                 }
             }
             if *old_moved {
                 if let Err(err) = rename_retry(&ctx.old_of(rel), &target, ctx.backoff) {
                     tracing::warn!("rollback dir {rel:?}: restore old failed: {err}");
+                    unrestored.push(rel.to_string());
                 }
             } else if *removed_empty_root {
                 let _ = std::fs::create_dir_all(&target);
@@ -581,7 +603,7 @@ fn undo_unit(ctx: &Ctx, rel: &str, state: &UnitState) {
         }
         UnitState::Degraded(states) => {
             for (f, st) in states.iter().rev() {
-                undo_file(ctx, &f.rel, st);
+                undo_file(ctx, &f.rel, st, unrestored);
             }
         }
         UnitState::Skipped => {}
@@ -625,6 +647,7 @@ fn run_units(
     ctx: &Ctx,
     units: &[Unit],
     states: &mut Vec<UnitState>,
+    unrestored: &mut Unrestored,
     notify: &ProgressNotify,
     stop_after: Option<usize>,
 ) -> anyhow::Result<()> {
@@ -633,7 +656,7 @@ fn run_units(
         if stop_after.is_some_and(|n| i >= n) {
             return Err(anyhow::anyhow!("commit interrupted (test hook)"));
         }
-        let st = apply_unit(ctx, unit)?;
+        let st = apply_unit(ctx, unit, unrestored)?;
         states.push(st);
         notify(Progress::CountOf {
             done: (i + 1) as u64,
@@ -643,9 +666,30 @@ fn run_units(
     Ok(())
 }
 
-fn rollback_all(ctx: &Ctx, units: &[Unit], states: &[UnitState]) {
+/// Paths a rollback could not put back: the new file still holds the name,
+/// or the old one stayed in `old\`.
+type Unrestored = Vec<String>;
+
+/// After a rollback: a complete one drops the journal and the staging
+/// directory and returns `err`. An incomplete one keeps both, so the next
+/// session finds the journal and recovers from `new\` and `old\`, and
+/// returns `ROLLBACK_INCOMPLETE` naming the first path left behind.
+fn end_rollback(staging: &Staging, err: anyhow::Error, unrestored: Unrestored) -> anyhow::Error {
+    if unrestored.is_empty() {
+        let _ = std::fs::remove_file(staging.journal_path());
+        staging.discard();
+        return err;
+    }
+    tracing::error!(
+        "rollback left {} path(s) unrestored after {err:#}: {unrestored:?}",
+        unrestored.len()
+    );
+    anyhow::Error::from(Coded::bare_with(ROLLBACK_INCOMPLETE, unrestored[0].clone()))
+}
+
+fn rollback_all(ctx: &Ctx, units: &[Unit], states: &[UnitState], unrestored: &mut Unrestored) {
     for (unit, st) in units.iter().zip(states.iter()).rev() {
-        undo_unit(ctx, unit.rel(), st);
+        undo_unit(ctx, unit.rel(), st, unrestored);
     }
 }
 
@@ -681,17 +725,23 @@ fn commit_sync(
     };
     write_journal(&staging, &journal)?;
     let mut states = Vec::with_capacity(journal.units.len());
-    match run_units(&ctx, &journal.units, &mut states, &notify, stop_after) {
+    let mut unrestored = Unrestored::new();
+    match run_units(
+        &ctx,
+        &journal.units,
+        &mut states,
+        &mut unrestored,
+        &notify,
+        stop_after,
+    ) {
         Ok(()) => {}
         Err(err) => {
             if stop_after.is_some() {
                 // test hook: leave the half-committed state and the journal behind
                 return Err(err);
             }
-            rollback_all(&ctx, &journal.units, &states);
-            let _ = std::fs::remove_file(staging.journal_path());
-            staging.discard();
-            return Err(err);
+            rollback_all(&ctx, &journal.units, &states, &mut unrestored);
+            return Err(end_rollback(&staging, err, unrestored));
         }
     }
     finish_copies(&ctx, &journal.units);
@@ -859,22 +909,29 @@ fn recover_sync(
                 _ => UnitState::Skipped,
             })
             .collect();
-        rollback_all(&ctx, units, &done);
+        let mut unrestored = Unrestored::new();
+        rollback_all(&ctx, units, &done, &mut unrestored);
+        if !unrestored.is_empty() {
+            return Err(end_rollback(
+                &staging,
+                anyhow::anyhow!("staged files missing"),
+                unrestored,
+            ));
+        }
         staging.discard();
         return Ok(RecoverOutcome::Discarded);
     }
     let mut states: Vec<UnitState> = Vec::with_capacity(units.len());
+    let mut unrestored = Unrestored::new();
     let total = units.len() as u64;
     for (i, (unit, status)) in units.iter().zip(statuses.iter()).enumerate() {
         let st = match status {
             Status::Done => done_state(&ctx, unit),
-            Status::Pending => match apply_unit(&ctx, unit) {
+            Status::Pending => match apply_unit(&ctx, unit, &mut unrestored) {
                 Ok(st) => st,
                 Err(err) => {
-                    rollback_all(&ctx, units, &states);
-                    let _ = std::fs::remove_file(staging.journal_path());
-                    staging.discard();
-                    return Err(err);
+                    rollback_all(&ctx, units, &states, &mut unrestored);
+                    return Err(end_rollback(&staging, err, unrestored));
                 }
             },
             Status::Changed | Status::Unrecoverable => unreachable!(),
@@ -1276,6 +1333,54 @@ mod tests {
         assert_eq!(read(&fx.target("b.txt")), Some(b"b-old".to_vec()));
         assert_eq!(read(&fx.target("c.txt")), Some(b"c-old".to_vec()));
         assert!(!fx.staging.root().exists());
+    }
+
+    /// A rollback that cannot put a.txt back keeps the journal, `new\` and
+    /// `old\`; once the file is free, the next recovery finishes the update.
+    #[test]
+    fn incomplete_rollback_keeps_staging_for_the_next_recovery() {
+        let fx = Fixture::new();
+        let units = fx.three_files();
+        let args = fx.args(units);
+        let _ = commit_sync(args.clone(), progress_notify(|_| {}), FAST, Some(2));
+        let journal_text = std::fs::read_to_string(fx.staging.journal_path()).unwrap();
+        // c.txt fails to swap, and a.txt (already new) cannot be moved back
+        let hold_a = lock(&fx.target("a.txt"));
+        let hold_c = lock(&fx.target("c.txt"));
+        let err = recover_sync(
+            CommitArgs {
+                journal: Journal::parse(&journal_text).unwrap(),
+                ..args.clone()
+            },
+            progress_notify(|_| {}),
+            FAST,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            crate::utils::code::extract(&err),
+            crate::utils::code::Extracted::Coded(c)
+                if c.code == ROLLBACK_INCOMPLETE && c.subject.as_deref() == Some("a.txt")
+        ));
+        drop((hold_a, hold_c));
+        assert!(fx.staging.journal_path().exists());
+        assert_eq!(read(&fx.staging.old_path("a.txt")), Some(b"a-old".to_vec()));
+
+        let journal =
+            Journal::parse(&std::fs::read_to_string(fx.staging.journal_path()).unwrap()).unwrap();
+        let out = recover_sync(
+            CommitArgs { journal, ..args },
+            progress_notify(|_| {}),
+            FAST,
+        )
+        .unwrap();
+        assert_eq!(
+            out,
+            RecoverOutcome::Completed {
+                self_replaced: false
+            }
+        );
+        fx.assert_new();
+        assert!(!fx.staging.journal_path().exists());
     }
 
     #[test]

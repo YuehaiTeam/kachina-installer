@@ -33,6 +33,7 @@ PLUGIN_NOT_FOUND	未找到插件
 PLUGIN_NO_UI	该安装源需要图形界面
 PROCESS_KILL_FAILED	结束进程失败
 REGISTRY_READ_FAILED	无法读取安装记录，不能继续
+ROLLBACK_INCOMPLETE	更新未能完成，部分文件暂时无法恢复。请关闭正在使用安装目录的程序，然后重新运行安装程序完成修复
 REGISTRY_WRITE_FAILED	写入注册表失败
 REMOTE_FILE_MISSING	无法获取所需文件，请检查网络连接或更换下载源
 RUNTIME_INSTALL_FAILED	安装{subject}失败，请手动安装
