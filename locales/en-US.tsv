@@ -126,6 +126,10 @@ running.cancel_message	Downloaded data will be discarded. Files already on disk 
 running.cancel_no	No, continue
 running.cancel_title	Are you sure you want to cancel?
 running.cancel_yes	Yes, cancel
+running.force_exit_message	Quitting now ends the installer immediately and the current operation will not finish. What is left unfinished is handled the next time the installer runs.
+running.force_exit_no	Keep waiting
+running.force_exit_title	Force quit now?
+running.force_exit_yes	Force quit
 shortcut.uninstall	Uninstall {subject}
 step.default.0	Fetching the latest version
 step.default.1	Verifying update contents

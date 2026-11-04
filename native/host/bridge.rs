@@ -29,7 +29,7 @@ pub fn on_message(ctx: &Arc<HostCtx>, handle: &HostHandle, json: &str) {
     let ctx = ctx.clone();
     let handle = handle.clone();
     tokio::spawn(async move {
-        let closing = msg.cmd == "window_close" || msg.cmd == "launch_and_exit";
+        let closing = msg.cmd == "launch_and_exit";
         let result = dispatch(&ctx, &handle, &msg.cmd, msg.args).await;
         let (ok, data) = match result {
             Ok(data) => (true, data),
@@ -282,7 +282,10 @@ async fn dispatch(
             }
             ok(())
         }
-        "window_close" => ok(()),
+        "window_close" => {
+            super::request_close(ctx, handle);
+            ok(())
+        }
         "window_minimize" => {
             handle.send(UiAction::Minimize);
             ok(())

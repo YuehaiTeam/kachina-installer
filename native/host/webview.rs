@@ -20,6 +20,21 @@ fn devtools_enabled() -> bool {
     cfg!(debug_assertions) || cfg!(feature = "webview-devtools")
 }
 
+/// Edge features the installer page has no use for: the text-selection mini
+/// menu, the PDF one, and SmartScreen checks of every page load.
+const BROWSER_ARGS: &str = "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection";
+
+/// `scheme://host[:port]/` of `url`, always with the trailing slash so a
+/// prefix check cannot match a longer host. Navigations and web messages are
+/// only accepted from URIs under it.
+fn page_origin(url: &str) -> String {
+    let host_start = url.find("://").map_or(0, |i| i + 3);
+    match url[host_start..].find('/') {
+        Some(i) => url[..host_start + i + 1].to_string(),
+        None => format!("{url}/"),
+    }
+}
+
 use super::assets;
 use super::bridge;
 use super::window;
@@ -134,10 +149,12 @@ pub fn attach(
         let (tx, rx) = mpsc::channel();
         CreateCoreWebView2EnvironmentCompletedHandler::wait_for_async_operation(
             Box::new(move |handler| unsafe {
+                let options = CoreWebView2EnvironmentOptions::default();
+                options.set_additional_browser_arguments(BROWSER_ARGS.to_string());
                 CreateCoreWebView2EnvironmentWithOptions(
                     PCWSTR::null(),
                     PCWSTR(user_data_w.as_ptr()),
-                    None,
+                    &ICoreWebView2EnvironmentOptions::from(options),
                     &handler,
                 )
                 .map_err(webview2_com::Error::WindowsError)
@@ -187,7 +204,24 @@ pub fn attach(
         settings.SetIsStatusBarEnabled(false)?;
         settings.SetIsZoomControlEnabled(false)?;
         settings.SetIsWebMessageEnabled(true)?;
+        // Cast, don't fail: Settings9 needs a newer runtime than the last
+        // one for Windows 7 (109), and an older runtime keeps its default.
+        if let Ok(settings5) = settings.cast::<ICoreWebView2Settings5>() {
+            settings5.SetIsPinchZoomEnabled(false)?;
+        }
+        if let Ok(settings6) = settings.cast::<ICoreWebView2Settings6>() {
+            settings6.SetIsSwipeNavigationEnabled(false)?;
+        }
+        // `app-region: drag` in the page moves a borderless window
+        if let Ok(settings9) = settings.cast::<ICoreWebView2Settings9>() {
+            settings9.SetIsNonClientRegionSupportEnabled(true)?;
+        }
+        // a file or link dropped on the page would navigate away from it
+        if let Ok(controller4) = controller.cast::<ICoreWebView2Controller4>() {
+            controller4.SetAllowExternalDrop(false)?;
+        }
     }
+    let origin = page_origin(start);
     if devtools_enabled() {
         bind_devtools_shortcut(&controller, &webview)?;
     }
@@ -214,11 +248,40 @@ pub fn attach(
 
     unsafe {
         let mut token = 0;
+        let origin_nav = origin.clone();
+        webview.add_NavigationStarting(
+            &NavigationStartingEventHandler::create(Box::new(move |_sender, args| {
+                if let Some(args) = args {
+                    let mut uri = PWSTR::null();
+                    if args.Uri(&mut uri).is_ok() {
+                        let uri = CoTaskMemPWSTR::from(uri).to_string();
+                        if !uri.starts_with(&origin_nav) {
+                            tracing::warn!("blocked navigation away from the installer page");
+                            args.SetCancel(true)?;
+                        }
+                    }
+                }
+                Ok(())
+            })),
+            &mut token,
+        )?;
+    }
+
+    unsafe {
+        let mut token = 0;
         let handle_for_msg = handle.clone();
         let ctx_for_msg = ctx.clone();
         webview.add_WebMessageReceived(
             &WebMessageReceivedEventHandler::create(Box::new(move |_sender, args| {
                 if let Some(args) = args {
+                    let mut source = PWSTR::null();
+                    if args.Source(&mut source).is_err()
+                        || !CoTaskMemPWSTR::from(source)
+                            .to_string()
+                            .starts_with(&origin)
+                    {
+                        return Ok(());
+                    }
                     let mut message = PWSTR::null();
                     if args.WebMessageAsJson(&mut message).is_ok() {
                         let json = CoTaskMemPWSTR::from(message).to_string();
@@ -525,4 +588,25 @@ fn set_background(
 
 fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::page_origin;
+
+    #[test]
+    fn page_origin_ends_at_the_host() {
+        assert_eq!(
+            page_origin("https://app.localhost/index.html?pluginHost=1"),
+            "https://app.localhost/"
+        );
+        assert_eq!(
+            page_origin("http://localhost:1420"),
+            "http://localhost:1420/"
+        );
+        // a longer host with the same prefix is another origin
+        assert!(!"https://app.localhost.example/"
+            .starts_with(&page_origin("https://app.localhost/index.html")));
+        assert!(!"http://localhost:14200/".starts_with(&page_origin("http://localhost:1420")));
+    }
 }

@@ -67,6 +67,16 @@ impl GuiRuntime {
         }
     }
 
+    /// Cancel state shown for the running session; `Unavailable` when no
+    /// progress is shown.
+    pub fn cancel_state(&self) -> crate::session::state::CancelState {
+        let session = self.session.lock().unwrap_or_else(|e| e.into_inner());
+        match &session.state.phase {
+            Phase::Running(progress) => progress.cancel,
+            _ => crate::session::state::CancelState::Unavailable,
+        }
+    }
+
     fn fresh_cancel(&self) -> tokio_util::sync::CancellationToken {
         let token = tokio_util::sync::CancellationToken::new();
         *self.cancel.lock().unwrap_or_else(|e| e.into_inner()) = token.clone();

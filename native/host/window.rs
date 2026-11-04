@@ -20,14 +20,13 @@ use windows::Win32::UI::WindowsAndMessaging::{
     GetSystemMetrics, GetWindowLongPtrW, LoadCursorW, PostMessageW, PostQuitMessage,
     RegisterClassExW, SendMessageW, SetWindowLongPtrW, SetWindowPos, SetWindowTextW, ShowWindow,
     GWLP_USERDATA, GWL_STYLE, HICON, ICON_BIG, ICON_SMALL, IDC_ARROW, SIZE_MINIMIZED, SM_CXSCREEN,
-    SM_CYSCREEN, SWP_FRAMECHANGED, SWP_NOMOVE, SWP_NOZORDER, SW_HIDE, SW_MINIMIZE, SW_SHOW,
-    SW_SHOWNA, WINDOW_EX_STYLE, WM_APP, WM_CLOSE, WM_DESTROY, WM_SETICON, WM_SETTINGCHANGE,
-    WM_SIZE, WNDCLASSEXW, WS_CAPTION, WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP,
-    WS_EX_TOOLWINDOW, WS_MAXIMIZE, WS_MINIMIZE, WS_MINIMIZEBOX, WS_OVERLAPPED, WS_POPUP,
-    WS_SYSMENU, WS_VISIBLE,
+    SM_CYSCREEN, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER, SW_HIDE, SW_MINIMIZE,
+    SW_SHOW, SW_SHOWNA, WINDOW_EX_STYLE, WM_APP, WM_CLOSE, WM_DESTROY, WM_DPICHANGED, WM_SETICON,
+    WM_SETTINGCHANGE, WM_SIZE, WNDCLASSEXW, WS_CAPTION, WS_EX_NOACTIVATE,
+    WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_MAXIMIZE, WS_MINIMIZE, WS_MINIMIZEBOX,
+    WS_OVERLAPPED, WS_POPUP, WS_SYSMENU, WS_VISIBLE,
 };
 
-use crate::installer::uninstall::delete_self_on_exit;
 use crate::utils::gui::is_dark_mode;
 
 #[derive(Clone, Copy)]
@@ -55,6 +54,10 @@ pub const WM_THEME_BACKGROUND: u32 = WM_APP + 1;
 /// Posted by wndproc when the client area changes size. A WebView rebuilt
 /// while the window was minimized starts with an empty client rect.
 pub const WM_RESIZE_WEBVIEW: u32 = WM_APP + 2;
+
+/// Posted by wndproc in place of closing on `WM_CLOSE` (title bar, Alt+F4,
+/// taskbar).
+pub const WM_CLOSE_REQUEST: u32 = WM_APP + 3;
 
 pub fn is_win11() -> bool {
     let (major, minor, build) = nt_version::get();
@@ -410,10 +413,27 @@ pub fn is_color_theme_change(lparam: LPARAM) -> bool {
 
 extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     match msg {
+        // the UI loop decides: a running session asks first
         WM_CLOSE => {
-            delete_self_on_exit();
             unsafe {
-                let _ = DestroyWindow(hwnd);
+                let _ = PostMessageW(Some(hwnd), WM_CLOSE_REQUEST, WPARAM(0), LPARAM(0));
+            }
+            LRESULT(0)
+        }
+        // per-monitor v2: move to the size Windows suggests for the new DPI;
+        // the WebView follows the monitor scale by itself
+        WM_DPICHANGED => {
+            let suggested = unsafe { &*(lparam.0 as *const RECT) };
+            unsafe {
+                let _ = SetWindowPos(
+                    hwnd,
+                    None,
+                    suggested.left,
+                    suggested.top,
+                    suggested.right - suggested.left,
+                    suggested.bottom - suggested.top,
+                    SWP_NOZORDER | SWP_NOACTIVATE,
+                );
             }
             LRESULT(0)
         }

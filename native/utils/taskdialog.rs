@@ -3,7 +3,6 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::Context;
 use tokio::sync::oneshot;
-use tokio_util::sync::CancellationToken;
 use windows::core::{w, BOOL, HRESULT, PCWSTR};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, S_FALSE, S_OK, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -215,14 +214,18 @@ unsafe extern "system" fn ready_elevate_callback(
     S_OK
 }
 
+/// Runs on the progress dialog's thread when its Cancel button is clicked,
+/// with the dialog's window as argument.
+pub type CancelHandler = Box<dyn Fn(HWND) + Send + Sync>;
+
 struct ProgressShared {
     hwnd: Mutex<Option<isize>>,
     closing: AtomicBool,
     created: Mutex<Option<oneshot::Sender<()>>>,
     marquee: bool,
-    /// When set, the Cancel button fires this token and the dialog stays
-    /// open until the session closes it; the close box is disabled.
-    cancel: Option<CancellationToken>,
+    /// When set, the Cancel button calls this and the dialog stays open until
+    /// the session closes it; the close box is disabled.
+    on_cancel: Option<CancelHandler>,
 }
 
 pub struct ProgressDialog {
@@ -245,7 +248,7 @@ impl ProgressDialog {
         heading: &str,
         content: &str,
         marquee: bool,
-        cancel: Option<CancellationToken>,
+        on_cancel: Option<CancelHandler>,
     ) -> anyhow::Result<Self> {
         let title = title.to_string();
         let heading = heading.to_string();
@@ -255,7 +258,7 @@ impl ProgressDialog {
             closing: AtomicBool::new(false),
             created: Mutex::new(None),
             marquee,
-            cancel,
+            on_cancel,
         });
         let (tx, rx) = oneshot::channel();
         *shared.created.lock().unwrap_or_else(|e| e.into_inner()) = Some(tx);
@@ -393,7 +396,7 @@ fn progress_thread(
     let content = wide(&content);
     let icon = load_main_icon();
     let mut flags = TDF_USE_HICON_MAIN | TDF_SIZE_TO_CONTENT;
-    if shared.cancel.is_none() {
+    if shared.on_cancel.is_none() {
         flags |= TDF_ALLOW_DIALOG_CANCELLATION;
     }
     flags |= if marquee {
@@ -430,27 +433,9 @@ unsafe extern "system" fn progress_callback(
     let shared = unsafe { &*(lp_ref_data as *const ProgressShared) };
     match msg {
         TDN_BUTTON_CLICKED if w_param.0 as i32 == IDCANCEL.0 => {
-            if let Some(token) = &shared.cancel {
+            if let Some(on_cancel) = &shared.on_cancel {
                 if !shared.closing.load(Ordering::SeqCst) {
-                    tracing::info!("cancel accepted from progress dialog");
-                    token.cancel();
-                    unsafe {
-                        SendMessageW(
-                            hwnd,
-                            windows::Win32::UI::Controls::TDM_ENABLE_BUTTON.0 as u32,
-                            Some(WPARAM(IDCANCEL.0 as usize)),
-                            Some(LPARAM(0)),
-                        );
-                    }
-                    let text = wide(&crate::utils::i18n::t("running.cancelling", &[]));
-                    unsafe {
-                        SendMessageW(
-                            hwnd,
-                            TDM_UPDATE_ELEMENT_TEXT.0 as u32,
-                            Some(WPARAM(TDE_CONTENT.0 as usize)),
-                            Some(LPARAM(text.as_ptr() as isize)),
-                        );
-                    }
+                    on_cancel(hwnd);
                     // the session decides when the dialog goes away
                     return S_FALSE;
                 }
@@ -480,7 +465,8 @@ unsafe extern "system" fn progress_callback(
         TDN_DESTROYED => {
             *shared.hwnd.lock().unwrap_or_else(|e| e.into_inner()) = None;
             if !shared.closing.load(Ordering::SeqCst) {
-                // Match WebUI window close: dismiss is process teardown, not session cancel.
+                // The user closed a dialog that has a close box (no cancel
+                // handler, e.g. the WebView2 download): end the process.
                 std::process::exit(1);
             }
         }

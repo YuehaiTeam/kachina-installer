@@ -7,7 +7,7 @@ use windows::Win32::Foundation::HWND;
 use windows::Win32::UI::WindowsAndMessaging::{GetDesktopWindow, IDOK};
 
 use crate::cli::arg::InstallArgs;
-use crate::host::HwndParent;
+use crate::host::{confirm_close, force_exit, CloseAction, HwndParent};
 use crate::installer::config::{resolve_installer_config, InstallerConfig};
 use crate::ipc::manager::ManagedElevate;
 use crate::session::commands::{
@@ -551,13 +551,20 @@ async fn native_session(
         Some(0),
         Some(0.0),
     ));
-    let cancel = tokio_util::sync::CancellationToken::new();
+    let cancel = Arc::new(NativeCancel {
+        token: tokio_util::sync::CancellationToken::new(),
+        state: std::sync::Mutex::new(CancelState::Available),
+    });
+    let on_cancel = {
+        let cancel = cancel.clone();
+        Box::new(move |dialog: HWND| cancel.clicked(dialog))
+    };
     let dialog = ProgressDialog::show_with_cancel(
         &project.window_title,
         &heading,
         &prepare,
         false,
-        Some(cancel.clone()),
+        Some(on_cancel),
     )
     .await?;
     let ui = NativeUi::new(dialog.hwnd_arc(), cancel);
@@ -654,13 +661,69 @@ async fn show_finish(state: &UiState, exe_name: &str) {
     }
 }
 
+/// The progress dialog's Cancel button, the native renderer's only way out of
+/// a running session. While cancel is available it cancels after a
+/// confirmation; once cancel was requested, or during a step that cannot be
+/// cancelled, it offers a forced exit.
+struct NativeCancel {
+    token: tokio_util::sync::CancellationToken,
+    /// Cancel state of the progress last shown, with the user's cancel
+    /// applied. Commit closes it under this lock.
+    state: std::sync::Mutex<CancelState>,
+}
+
+impl NativeCancel {
+    /// Runs on the dialog's thread; the confirmation is owned by the dialog.
+    fn clicked(&self, dialog: HWND) {
+        let shown = *self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let action = CloseAction::for_cancel_state(shown);
+        if !confirm_close(action, dialog) {
+            return;
+        }
+        if action == CloseAction::ForceExit {
+            force_exit();
+        }
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        // commit may have started while the question was open
+        if *state != CancelState::Available {
+            return;
+        }
+        tracing::info!("cancel accepted from progress dialog");
+        self.token.cancel();
+        *state = CancelState::Requested;
+        drop(state);
+        set_content_hwnd(dialog, &i18n::t("running.cancelling", &[]));
+    }
+
+    /// Shown state for `progress`: a requested cancel stays requested until
+    /// the session reaches a step that cannot be cancelled.
+    fn track(&self, progress: &Progress) -> CancelState {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        *state = if self.token.is_cancelled() && progress.cancel == CancelState::Available {
+            CancelState::Requested
+        } else {
+            progress.cancel
+        };
+        *state
+    }
+
+    fn begin_commit(&self) -> bool {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if self.token.is_cancelled() {
+            return false;
+        }
+        *state = CancelState::Unavailable;
+        true
+    }
+}
+
 struct NativeUi {
     hwnd: Arc<ProgressHwnd>,
-    cancel: tokio_util::sync::CancellationToken,
+    cancel: Arc<NativeCancel>,
 }
 
 impl NativeUi {
-    fn new(hwnd: Arc<ProgressHwnd>, cancel: tokio_util::sync::CancellationToken) -> Self {
+    fn new(hwnd: Arc<ProgressHwnd>, cancel: Arc<NativeCancel>) -> Self {
         Self { hwnd, cancel }
     }
 
@@ -687,38 +750,15 @@ fn cdk_should_reopen(err: &anyhow::Error) -> bool {
 impl SessionUi for NativeUi {
     fn state(&self, state: &UiState) {
         if let Phase::Running(p) = &state.phase {
+            let cancelling = self.cancel.track(p) == CancelState::Requested;
             if let Some(hwnd) = self.hwnd.get() {
-                set_progress_hwnd(hwnd, p.percent, &progress_current(p));
-                unsafe {
-                    windows::Win32::UI::WindowsAndMessaging::SendMessageW(
-                        hwnd,
-                        windows::Win32::UI::Controls::TDM_ENABLE_BUTTON.0 as u32,
-                        Some(windows::Win32::Foundation::WPARAM(
-                            windows::Win32::UI::WindowsAndMessaging::IDCANCEL.0 as usize,
-                        )),
-                        Some(windows::Win32::Foundation::LPARAM(
-                            (p.cancel == CancelState::Available) as isize,
-                        )),
-                    );
-                }
+                set_progress_hwnd(hwnd, p.percent, &progress_current(p, cancelling));
             }
         }
     }
 
     fn begin_commit(&self) -> bool {
-        if let Some(hwnd) = self.hwnd.get() {
-            unsafe {
-                windows::Win32::UI::WindowsAndMessaging::SendMessageW(
-                    hwnd,
-                    windows::Win32::UI::Controls::TDM_ENABLE_BUTTON.0 as u32,
-                    Some(windows::Win32::Foundation::WPARAM(
-                        windows::Win32::UI::WindowsAndMessaging::IDCANCEL.0 as usize,
-                    )),
-                    Some(windows::Win32::Foundation::LPARAM(0)),
-                );
-            }
-        }
-        !self.cancel.is_cancelled()
+        self.cancel.begin_commit()
     }
 
     async fn confirm(&self, prompt: Prompt) -> bool {
@@ -760,13 +800,13 @@ impl SessionUi for NativeUi {
     }
 
     fn cancel_token(&self) -> tokio_util::sync::CancellationToken {
-        self.cancel.clone()
+        self.cancel.token.clone()
     }
 }
 
-fn progress_current(p: &Progress) -> String {
+fn progress_current(p: &Progress, cancelling: bool) -> String {
     let subject = p.subject.as_deref().unwrap_or_default();
-    let mut text = if p.cancel == CancelState::Requested {
+    let mut text = if cancelling {
         i18n::t("running.cancelling", &[])
     } else {
         i18n::t(p.stage.i18n_key(), &[("subject", subject)])
@@ -824,12 +864,23 @@ fn prompt_copy(prompt: &Prompt) -> (String, String) {
     )
 }
 
+fn set_content_hwnd(hwnd: HWND, text: &str) {
+    use windows::Win32::Foundation::{LPARAM, WPARAM};
+    use windows::Win32::UI::Controls::{TDE_CONTENT, TDM_UPDATE_ELEMENT_TEXT};
+    let wide: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
+    unsafe {
+        windows::Win32::UI::WindowsAndMessaging::SendMessageW(
+            hwnd,
+            TDM_UPDATE_ELEMENT_TEXT.0 as u32,
+            Some(WPARAM(TDE_CONTENT.0 as usize)),
+            Some(LPARAM(wide.as_ptr() as isize)),
+        );
+    }
+}
+
 fn set_progress_hwnd(hwnd: HWND, percent: Option<f64>, text: &str) {
     use windows::Win32::Foundation::{LPARAM, WPARAM};
-    use windows::Win32::UI::Controls::{
-        TDE_CONTENT, TDM_SET_PROGRESS_BAR_POS, TDM_UPDATE_ELEMENT_TEXT,
-    };
-    let wide: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
+    use windows::Win32::UI::Controls::TDM_SET_PROGRESS_BAR_POS;
     let pos = percent.unwrap_or(0.0).round().clamp(0.0, 100.0) as usize;
     unsafe {
         windows::Win32::UI::WindowsAndMessaging::SendMessageW(
@@ -844,12 +895,9 @@ fn set_progress_hwnd(hwnd: HWND, percent: Option<f64>, text: &str) {
             Some(WPARAM(percent.is_none() as usize)),
             Some(LPARAM(30)),
         );
-        windows::Win32::UI::WindowsAndMessaging::SendMessageW(
-            hwnd,
-            TDM_UPDATE_ELEMENT_TEXT.0 as u32,
-            Some(WPARAM(TDE_CONTENT.0 as usize)),
-            Some(LPARAM(wide.as_ptr() as isize)),
-        );
+    }
+    set_content_hwnd(hwnd, text);
+    unsafe {
         windows::Win32::UI::WindowsAndMessaging::SendMessageW(
             hwnd,
             TDM_SET_PROGRESS_BAR_POS.0 as u32,

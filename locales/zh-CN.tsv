@@ -126,6 +126,10 @@ running.cancel_message	已下载的内容将被丢弃，当前已安装的文件
 running.cancel_no	否，继续
 running.cancel_title	确定要取消吗？
 running.cancel_yes	是，取消
+running.force_exit_message	现在退出会立即结束安装程序，正在进行的操作不会完成；未完成的部分在下次运行安装程序时处理。
+running.force_exit_no	继续等待
+running.force_exit_title	要强制退出吗？
+running.force_exit_yes	强制退出
 shortcut.uninstall	卸载{subject}
 step.default.0	获取最新版本
 step.default.1	校验更新内容

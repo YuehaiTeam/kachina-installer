@@ -23,9 +23,13 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use crate::cli::arg::InstallArgs;
 use crate::installer::uninstall::delete_self_on_exit;
 use crate::session::commands::{GuiRuntime, SessionState};
+use crate::session::state::CancelState;
 use crate::session::types::SessionInput;
 use crate::utils::code::{Attach, Coded, PLUGIN_HOST_FAILED, TEMP_DIR_UNAVAILABLE, WEBVIEW2_FAULT};
-use crate::utils::taskdialog::{show_error, ErrorDialog};
+use crate::utils::taskdialog::{
+    show_error, task_dialog, CommandLink, ErrorDialog, TaskDialogRequest, ID_CLOSE,
+};
+use windows::Win32::UI::WindowsAndMessaging::IDOK;
 
 pub use window::HwndParent;
 
@@ -140,6 +144,116 @@ fn session_running(ctx: &HostCtx) -> bool {
         .unwrap_or_else(|e| e.into_inner())
         .as_ref()
         .is_some_and(|gui| gui.running.load(Ordering::SeqCst))
+}
+
+/// What closing the installer does while a session runs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CloseAction {
+    /// Phase one: cancel the session, keep the window.
+    Cancel,
+    /// Cancel was already requested, or the current step cannot be cancelled.
+    ForceExit,
+}
+
+impl CloseAction {
+    pub(crate) fn for_cancel_state(cancel: CancelState) -> Self {
+        match cancel {
+            CancelState::Available => Self::Cancel,
+            CancelState::Requested | CancelState::Unavailable => Self::ForceExit,
+        }
+    }
+}
+
+/// Ask before `action` in a TaskDialog owned by `parent`. Blocks the calling
+/// thread until answered.
+pub(crate) fn confirm_close(action: CloseAction, parent: HWND) -> bool {
+    use crate::utils::i18n::t;
+    let (title, message, yes, no) = match action {
+        CloseAction::Cancel => (
+            "running.cancel_title",
+            "running.cancel_message",
+            "running.cancel_yes",
+            "running.cancel_no",
+        ),
+        CloseAction::ForceExit => (
+            "running.force_exit_title",
+            "running.force_exit_message",
+            "running.force_exit_yes",
+            "running.force_exit_no",
+        ),
+    };
+    task_dialog(
+        TaskDialogRequest {
+            title: t(title, &[]),
+            content: t(message, &[]),
+            expanded: None,
+            footer: None,
+            buttons: vec![
+                CommandLink {
+                    id: IDOK.0,
+                    text: t(yes, &[]),
+                },
+                CommandLink {
+                    id: ID_CLOSE,
+                    text: t(no, &[]),
+                },
+            ],
+        },
+        parent,
+    ) == IDOK.0
+}
+
+/// End the process without waiting for the running session. What it leaves
+/// in the staging directory is cleaned up or recovered by the next run.
+pub(crate) fn force_exit() -> ! {
+    tracing::warn!("forced exit while a session was running");
+    delete_self_on_exit();
+    std::process::exit(1);
+}
+
+/// One close question at a time; the owner window is disabled while it is
+/// open, this only covers requests that arrive through other paths.
+static CLOSE_PROMPT_OPEN: AtomicBool = AtomicBool::new(false);
+
+/// The user asked to close the window (title bar, Alt+F4, taskbar, the page's
+/// close button). Without a running session the window closes. Otherwise the
+/// user confirms a cancel, or, once cancel was requested or the current step
+/// cannot be cancelled, a forced exit.
+pub(crate) fn request_close(ctx: &HostCtx, handle: &HostHandle) {
+    let gui = ctx.gui.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    let Some(gui) = gui.filter(|gui| gui.running.load(Ordering::SeqCst)) else {
+        handle.close();
+        return;
+    };
+    if CLOSE_PROMPT_OPEN.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let handle = handle.clone();
+    tokio::spawn(async move {
+        let action = CloseAction::for_cancel_state(gui.cancel_state());
+        let parent = handle.parent();
+        let confirmed = tokio::task::spawn_blocking(move || confirm_close(action, parent.hwnd()))
+            .await
+            .unwrap_or(false);
+        CLOSE_PROMPT_OPEN.store(false, Ordering::SeqCst);
+        if !confirmed {
+            return;
+        }
+        if !gui.running.load(Ordering::SeqCst) {
+            // the session ended while the question was open
+            if action == CloseAction::ForceExit {
+                handle.close();
+            }
+            return;
+        }
+        match action {
+            CloseAction::Cancel => {
+                gui.cancel_running();
+                gui.emit(&handle);
+            }
+            CloseAction::ForceExit => force_exit(),
+        }
+    });
 }
 
 #[derive(Clone)]
@@ -359,6 +473,9 @@ pub fn run(
                     if let Err(err) = webview.resize(hwnd) {
                         tracing::warn!("resize webview failed: {err}");
                     }
+                }
+                if msg.message == window::WM_CLOSE_REQUEST {
+                    request_close(&ctx, &handle);
                 }
                 if msg.message != WM_APP {
                     unsafe {
