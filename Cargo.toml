@@ -125,6 +125,10 @@ path = "native/main.rs"
 name = "kachina-builder"
 path = "native/builder/main.rs"
 
+[[bin]]
+name = "kachina-sfx"
+path = "native/sfx/main.rs"
+
 [profile.dev]
 incremental = true # Compile your binary in smaller steps.
 rustflags = ["-Zthreads=16"] # Better compile performance.

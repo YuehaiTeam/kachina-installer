@@ -246,11 +246,18 @@ pub async fn replace_bin_cli(args: ReplaceBinArgs) -> Result<(), String> {
     println!("Original layout: {:?}", old_index);
 
     println!("Loading new base binary...");
-    let mut new_base_data = Vec::new();
-    let mut reader = get_reader_for_bundle().await.map_err(|e| e.to_string())?;
-    tokio::io::copy(&mut reader, &mut new_base_data)
-        .await
-        .map_err(|e| e.to_string())?;
+    let new_base_data = if let Some(base) = &args.base {
+        tokio::fs::read(base)
+            .await
+            .map_err(|e| format!("Failed to read base binary {}: {e}", base.display()))?
+    } else {
+        let mut data = Vec::new();
+        let mut reader = get_reader_for_bundle().await.map_err(|e| e.to_string())?;
+        tokio::io::copy(&mut reader, &mut data)
+            .await
+            .map_err(|e| e.to_string())?;
+        data
+    };
 
     println!("New base size: {} bytes", new_base_data.len());
     println!("Old base size: {} bytes", old_index.base_end);

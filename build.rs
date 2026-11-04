@@ -157,7 +157,7 @@ fn embed_app_icon(crate_dir: &Path) {
     println!("cargo:rerun-if-changed={}", rc.display());
     embed_resource::compile_for(
         rc,
-        ["kachina-installer", "kachina-builder"],
+        ["kachina-installer", "kachina-builder", "kachina-sfx"],
         embed_resource::NONE,
     )
     .manifest_optional()
