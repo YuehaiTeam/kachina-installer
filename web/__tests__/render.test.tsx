@@ -143,6 +143,9 @@ describe('screens', () => {
     await mount(ready({ theme: 'image' }));
     expect(document.querySelector('.image img')).not.toBeNull();
     expect(document.querySelector('.image-default')).toBeNull();
+    // the theme's stylesheet draws the column
+    await mount(ready({ theme: 'css' }));
+    expect(document.querySelector('.image')!.children.length).toBe(0);
   });
 
   it('renders English copy when project.lang is en-US', async () => {
@@ -181,6 +184,14 @@ describe('screens', () => {
     await waitFor(() => {
       expect(lastIntent()).toEqual({ kind: 'answer', id: 'p1', ok: true });
     });
+  });
+
+  it('lists the items once, below copy that does not name them', async () => {
+    await mount(pendingOccupied());
+    expect(screen.getAllByText('a.dll')).toHaveLength(1);
+    expect(document.querySelector('.prompt-items')).not.toBeNull();
+    await mount(pendingProcess());
+    expect(document.querySelector('.prompt-items')).toBeNull();
   });
 
   it('renders occupied_files prompt cancel', async () => {

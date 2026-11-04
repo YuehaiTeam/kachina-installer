@@ -83,6 +83,7 @@ export type Phase =
 
 export type ProjectView = {
   window_title: string;
+  app_name: string;
   title: string;
   description: string;
   borderless: boolean;

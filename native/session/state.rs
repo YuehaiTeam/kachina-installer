@@ -114,6 +114,7 @@ pub enum Mode {
 #[derive(Debug, Clone, Serialize)]
 pub struct ProjectView {
     pub window_title: String,
+    pub app_name: String,
     pub title: String,
     pub description: String,
     pub borderless: bool,
@@ -407,6 +408,7 @@ impl Default for UiState {
             mode: Mode::Install,
             project: ProjectView {
                 window_title: String::new(),
+                app_name: String::new(),
                 title: String::new(),
                 description: String::new(),
                 borderless: false,

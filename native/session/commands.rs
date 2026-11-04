@@ -221,6 +221,7 @@ async fn ready_runtime(
         },
         project: ProjectView {
             window_title: project.window_title.clone(),
+            app_name: project.app_name.clone(),
             title: project.title.clone(),
             description: project.description.clone(),
             borderless: project.window_borderless.unwrap_or(false),

@@ -62,6 +62,33 @@ pub fn sanitize_url_for_logging(url: &str) -> String {
 ///
 /// # Returns
 /// A formatted error context string
+/// `text` with every `http(s)://` URL in it cut to protocol, host and path
+/// ([`sanitize_url_for_logging`]). A URL ends at whitespace or at one of
+/// `)`, `,`, `"`, `'`, `>`, `]`, `;`.
+pub fn sanitize_urls_in_text(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    loop {
+        let start = match (rest.find("http://"), rest.find("https://")) {
+            (Some(a), Some(b)) => a.min(b),
+            (Some(a), None) | (None, Some(a)) => a,
+            (None, None) => {
+                out.push_str(rest);
+                return out;
+            }
+        };
+        out.push_str(&rest[..start]);
+        let url_and_rest = &rest[start..];
+        let end = url_and_rest
+            .find(|c: char| {
+                c.is_whitespace() || matches!(c, ')' | ',' | '"' | '\'' | '>' | ']' | ';')
+            })
+            .unwrap_or(url_and_rest.len());
+        out.push_str(&sanitize_url_for_logging(&url_and_rest[..end]));
+        rest = &url_and_rest[end..];
+    }
+}
+
 pub fn create_reqwest_context(function_name: &str, url: &str, error_type: &str) -> String {
     let sanitized_url = sanitize_url_for_logging(url);
     format!("{} in {}: {}", error_type, function_name, sanitized_url)
@@ -209,6 +236,19 @@ mod tests {
             sanitize_url_for_logging("https://api.example.com/users/123/profile?token=secret"),
             "https://api.example.com/users/123/profile"
         );
+    }
+
+    #[test]
+    fn urls_in_text_lose_query_and_fragment() {
+        assert_eq!(
+            sanitize_urls_in_text(
+                "error sending request for url (https://a.example/r/latest?cdk=SECRET&x=1): reset; \
+                 retry http://b.example:8080/p#frag, done"
+            ),
+            "error sending request for url (https://a.example/r/latest): reset; \
+             retry http://b.example:8080/p, done"
+        );
+        assert_eq!(sanitize_urls_in_text("no url here"), "no url here");
     }
 
     #[test]

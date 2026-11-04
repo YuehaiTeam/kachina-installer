@@ -69,7 +69,7 @@ export function CdkPanel({
           style={{ cursor: 'pointer' }}
           onClick={() =>
             void invoke('launch', {
-              path: `https://mirrorchyan.com/?source=Kachina${ui.project.title}`,
+              path: `https://mirrorchyan.com/?source=${encodeURIComponent(`Kachina${ui.project.app_name}`)}`,
             })
           }
         >

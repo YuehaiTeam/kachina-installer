@@ -2,6 +2,7 @@ import type { UiState } from '../state';
 
 const project = {
   window_title: 'Test',
+  app_name: 'Demo',
   title: 'Demo App',
   description: 'A demo',
   borderless: false,

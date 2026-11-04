@@ -153,6 +153,7 @@ async fn ui_session_from(
         },
         project: crate::session::state::ProjectView {
             window_title: project.window_title.clone(),
+            app_name: project.app_name.clone(),
             title: project.title.clone(),
             description: project.description.clone(),
             borderless: project.window_borderless.unwrap_or(false),
@@ -848,9 +849,11 @@ fn progress_current(p: &Progress, cancelling: bool) -> String {
     text
 }
 
+/// Title and message of `prompt`. Copy that names the items in its sentence
+/// (`{items}`) gets them there; otherwise they follow as a list, one per line.
 fn prompt_copy(prompt: &Prompt) -> (String, String) {
     let items = prompt.items.join("\n");
-    let mut owned: Vec<(String, String)> = vec![("items".into(), items)];
+    let mut owned: Vec<(String, String)> = vec![("items".into(), items.clone())];
     for (k, v) in &prompt.params {
         owned.push(((*k).to_string(), v.clone()));
     }
@@ -858,9 +861,15 @@ fn prompt_copy(prompt: &Prompt) -> (String, String) {
         .iter()
         .map(|(k, v)| (k.as_str(), v.as_str()))
         .collect();
+    let message_key = format!("prompt.{}.message", prompt.kind);
+    let mut message = i18n::t(&message_key, &params);
+    if !items.is_empty() && !i18n::t(&message_key, &[]).contains("{items}") {
+        message.push_str("\n\n");
+        message.push_str(&items);
+    }
     (
         i18n::t(&format!("prompt.{}.title", prompt.kind), &params),
-        i18n::t(&format!("prompt.{}.message", prompt.kind), &params),
+        message,
     )
 }
 

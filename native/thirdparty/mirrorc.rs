@@ -217,6 +217,45 @@ pub fn run_mirrorc_install_sync(
     })
 }
 
+/// The status API URL; every value is percent-encoded.
+fn status_url(
+    resource_id: &str,
+    current_version: &str,
+    cdk: &str,
+    channel: &str,
+    arch: Option<&str>,
+    os: Option<&str>,
+) -> url::Url {
+    let mut url = url::Url::parse("https://mirrorchyan.com/api/resources").expect("static url");
+    url.path_segments_mut()
+        .expect("https url has a path")
+        .push(resource_id)
+        .push("latest");
+    let mut query = url.query_pairs_mut();
+    query
+        .append_pair("current_version", current_version)
+        .append_pair("cdk", cdk)
+        .append_pair("channel", channel);
+    if let Some(arch) = arch {
+        query.append_pair("arch", arch);
+    }
+    if let Some(os) = os {
+        query.append_pair("os", os);
+    }
+    query.append_pair("user_agent", "KachinaInstaller");
+    drop(query);
+    url
+}
+
+fn without_url(err: reqwest_middleware::Error) -> reqwest_middleware::Error {
+    match err {
+        reqwest_middleware::Error::Reqwest(err) => {
+            reqwest_middleware::Error::Reqwest(err.without_url())
+        }
+        other => other,
+    }
+}
+
 pub async fn get_mirrorc_status(
     resource_id: &str,
     current_version: &str,
@@ -231,24 +270,21 @@ pub async fn get_mirrorc_status(
             "MIRRORC_INVALID_PARAMS",
         );
     }
-    let mut opts = String::new();
-    if let Some(arch) = arch {
-        opts.push_str(&format!("&arch={arch}"));
-    }
-    if let Some(os) = os {
-        opts.push_str(&format!("&os={os}"));
-    }
-    let mirrorc_url = format!("https://mirrorchyan.com/api/resources/{resource_id}/latest?current_version={current_version}&cdk={cdk}&channel={channel}{opts}&user_agent=KachinaInstaller");
+    let url = status_url(resource_id, current_version, cdk, channel, arch, os);
+    // the query carries the CDK: request errors drop the URL before they join
+    // an error chain that may be reported
     let resp = crate::REQUEST_CLIENT
-        .get(&mirrorc_url)
+        .get(url.as_str())
         .send()
         .await
-        .with_http_context("get_mirrorc_status", &mirrorc_url)?;
+        .map_err(without_url)
+        .with_http_context("get_mirrorc_status", url.as_str())?;
 
     let body_text = resp
         .text()
         .await
-        .with_http_context("get_mirrorc_status", &mirrorc_url)?;
+        .map_err(reqwest::Error::without_url)
+        .with_http_context("get_mirrorc_status", url.as_str())?;
     let status: serde_json::Value = serde_json::from_str(&body_text)
         .map_err(|e| anyhow::anyhow!("Failed to parse JSON ({}): {}", e, body_text))?;
     Ok(status)
@@ -274,42 +310,25 @@ pub async fn run_mirrorc_download(
     Ok(())
 }
 
-/// Zip-root `.metadata.json` means the archive is already at package root
-/// (files may still share a directory like `Assets/`). Otherwise strip the
-/// shared parent of remaining entries (`root/` in the changeset layout).
+/// The directory the package was uploaded in, as the location of its
+/// `.metadata.json`: at the archive root (`""`) or in one top-level directory
+/// (`App/`). Mirror酱 incremental archives keep the uploaded paths, and the
+/// metadata changes with every release, so they carry it too. Without
+/// `.metadata.json` nothing is stripped: files that all sit in one directory
+/// may simply be the only ones that changed.
 fn archive_wrapper_prefix(names: &[String]) -> String {
-    if names.iter().any(|n| n == ".metadata.json") {
-        return String::new();
-    }
-    let file_lists: Vec<String> = names
+    names
         .iter()
-        .filter(|s| s.as_str() != "changes.json" && s.as_str() != ".metadata.json")
-        .cloned()
-        .collect();
-    let prefix = longest_common_prefix(file_lists);
-    let mut prefix = prefix.split('/').collect::<Vec<&str>>();
-    prefix.pop();
-    let mut prefix = prefix.join("/");
-    if !prefix.is_empty() && !prefix.ends_with('/') {
-        prefix.push('/');
-    }
-    prefix
-}
-
-pub fn longest_common_prefix(strs: Vec<String>) -> String {
-    if strs.is_empty() {
-        return String::new();
-    }
-    let mut prefix = strs[0].clone();
-    for s in strs.iter() {
-        while !s.starts_with(&prefix) {
-            if prefix.is_empty() {
-                return String::new();
-            }
-            prefix.pop();
-        }
-    }
-    prefix
+        .filter_map(|name| name.strip_suffix(".metadata.json"))
+        .filter(|dir| {
+            dir.is_empty()
+                || dir
+                    .strip_suffix('/')
+                    .is_some_and(|top| !top.is_empty() && !top.contains('/'))
+        })
+        .min_by_key(|dir| dir.len())
+        .unwrap_or("")
+        .to_string()
 }
 
 #[cfg(test)]
@@ -352,6 +371,10 @@ mod tests {
             &zip_path,
             &[
                 ("changes.json", br#"{"deleted":["root/old.dll"]}"#),
+                (
+                    "root/.metadata.json",
+                    br#"{"tag_name":"v2","hashed":[],"deletes":[]}"#,
+                ),
                 ("root/app.exe", b"app"),
                 ("root/sub/lib.dll", b"lib"),
                 (exe_entry.as_str(), b"self"),
@@ -377,7 +400,8 @@ mod tests {
         assert_eq!(std::fs::read(new_dir.join(&exe_name)).unwrap(), b"self");
         assert_eq!(std::fs::read(install.join("app.exe")).unwrap(), b"before");
         assert_eq!(out.deletes, vec!["old.dll".to_string()]);
-        assert!(out.metadata.is_none());
+        assert!(out.metadata.is_some());
+        assert!(!new_dir.join(".metadata.json").exists());
         let app = out.files.iter().find(|(r, _)| r == "app.exe").unwrap();
         assert_eq!(app.1, chksum_md5::hash(b"app").to_hex_lowercase());
         assert!(!zip_path.exists(), "archive removed after extraction");
@@ -437,7 +461,17 @@ mod tests {
     }
 
     #[test]
-    fn root_metadata_does_not_strip_shared_content_dir() {
+    fn status_url_encodes_every_value() {
+        let url = status_url("r/1", "1.0 beta", "a&b=c d", "stable", Some("x64"), None);
+        assert_eq!(
+            url.as_str(),
+            "https://mirrorchyan.com/api/resources/r%2F1/latest?current_version=1.0+beta\
+             &cdk=a%26b%3Dc+d&channel=stable&arch=x64&user_agent=KachinaInstaller"
+        );
+    }
+
+    #[test]
+    fn wrapper_dir_is_where_metadata_sits() {
         assert_eq!(
             archive_wrapper_prefix(&[
                 ".metadata.json".into(),
@@ -446,17 +480,27 @@ mod tests {
             ]),
             ""
         );
+        // an increment whose only change is in one directory keeps it
         assert_eq!(
-            archive_wrapper_prefix(&["changes.json".into(), "root/app.exe".into()]),
-            "root/"
+            archive_wrapper_prefix(&["changes.json".into(), "Assets/a.bin".into()]),
+            ""
         );
         assert_eq!(
             archive_wrapper_prefix(&[
+                "changes.json".into(),
                 "pkg/.metadata.json".into(),
                 "pkg/Assets/a.txt".into(),
-                "pkg/b.txt".into(),
             ]),
             "pkg/"
+        );
+        // a metadata file deeper down or with another name is content
+        assert_eq!(
+            archive_wrapper_prefix(&[
+                "changes.json".into(),
+                "pkg/sub/.metadata.json".into(),
+                "pkg/x.metadata.json".into(),
+            ]),
+            ""
         );
 
         let dir = tmp();

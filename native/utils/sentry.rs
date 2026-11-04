@@ -175,9 +175,13 @@ fn base_event(event_id: &str) -> Value {
 /// 过滤由调用方负责，本函数无条件发送。返回事件 id，供错误对话框的复制内容携带。
 pub fn capture_anyhow(err: &anyhow::Error) -> String {
     // exception.values 按协议要求 root cause 在前、最外层（主异常）在后
+    // URL queries carry credentials (Mirror酱 CDK, signed download tokens)
     let mut values: Vec<Value> = err
         .chain()
-        .map(|cause| json!({ "type": "Error", "value": cause.to_string() }))
+        .map(|cause| {
+            let value = crate::utils::url::sanitize_urls_in_text(&cause.to_string());
+            json!({ "type": "Error", "value": value })
+        })
         .collect();
     values.reverse();
     let event_id = new_uuid();
@@ -193,6 +197,7 @@ pub fn capture_anyhow(err: &anyhow::Error) -> String {
 pub fn capture_panic(event_id: &str, message: String) {
     let mut event = base_event(event_id);
     event["level"] = json!("fatal");
+    let message = crate::utils::url::sanitize_urls_in_text(&message);
     event["exception"] = json!({ "values": [{ "type": "panic", "value": message }] });
     event["breadcrumbs"] = breadcrumbs_snapshot();
     dispatch(envelope(event_id, "event", &event), true);
