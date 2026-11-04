@@ -7,7 +7,7 @@ fn main() {
     let manifest = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
     win7_delayload(&manifest);
     embed_app_manifest(&manifest);
-    embed_app_icon(&manifest);
+    embed_app_resources(&manifest);
     let dist = manifest.join("dist");
     let html = dist.join("index.html");
     println!("cargo:rerun-if-changed={}", html.display());
@@ -150,11 +150,26 @@ fn embed_app_manifest(crate_dir: &Path) {
     );
 }
 
-fn embed_app_icon(crate_dir: &Path) {
+/// 图标与版本信息。版本号取 Cargo 包版本，写成 app.rc 引用的头文件；embed-resource 把
+/// OUT_DIR 加入 rc.exe 的 include 路径。
+fn embed_app_resources(crate_dir: &Path) {
     let icon = crate_dir.join("resources/icons/icon.ico");
     let rc = crate_dir.join("resources/app.rc");
     println!("cargo:rerun-if-changed={}", icon.display());
     println!("cargo:rerun-if-changed={}", rc.display());
+    let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
+    let version = |key: &str| env::var(key).unwrap();
+    fs::write(
+        out_dir.join("app_version.h"),
+        format!(
+            "#define APP_VERSION_BIN {},{},{},0\n#define APP_VERSION_STR \"{}\"\n",
+            version("CARGO_PKG_VERSION_MAJOR"),
+            version("CARGO_PKG_VERSION_MINOR"),
+            version("CARGO_PKG_VERSION_PATCH"),
+            version("CARGO_PKG_VERSION"),
+        ),
+    )
+    .expect("write app_version.h");
     embed_resource::compile_for(
         rc,
         ["kachina-installer", "kachina-builder", "kachina-sfx"],

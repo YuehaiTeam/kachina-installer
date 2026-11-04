@@ -9,7 +9,7 @@ use crate::dfs::{
     create_dfs2_session, end_dfs2_session, get_dfs, get_dfs2_batch_chunk_urls, get_dfs2_metadata,
     get_http_with_range, solve_dfs2_challenge, Dfs2Data, Dfs2SessionInsights, InsightItem,
 };
-use crate::local::Embedded;
+use crate::pack_format::{parse_index, parse_pack_layout, read_tlv, Embedded};
 use crate::session::plan::HashKey;
 use crate::session::plugin::{
     clean_plugin_url, forced_plugin_name, is_github_source, resolve_github_file_url,
@@ -342,46 +342,24 @@ async fn refresh_packed_index(
     let (_status, pre) = get_http_with_range(binurl.clone(), 0, 256)
         .await
         .into_anyhow()?;
-    let header_offset = find_subslice(&pre, b"!KachinaInstaller!").ok_or_else(|| {
+    let layout = parse_pack_layout(&pre).ok_or_else(|| {
         anyhow!("invalid remote index header").attach(crate::utils::code::METADATA_INVALID)
     })?;
-    let index_offset = header_offset + 18;
-    let index_start = read_u32be(&pre, index_offset)? as u64;
-    let config_sz = read_u32be(&pre, index_offset + 4)? as u64;
-    let theme_sz = read_u32be(&pre, index_offset + 8)? as u64;
-    let index_sz = read_u32be(&pre, index_offset + 12)? as u64;
-    let metadata_sz = read_u32be(&pre, index_offset + 16)? as u64;
-    let data_end = index_start + index_sz + config_sz + theme_sz + metadata_sz;
+    let index_start = layout.base_end as u64;
+    let config_sz = layout.config_len as u64;
+    let theme_sz = layout.theme_len as u64;
+    let data_end =
+        index_start + layout.index_len as u64 + config_sz + theme_sz + layout.manifest_len as u64;
     let (_status, index_data) = get_http_with_range(binurl, index_start, data_end - index_start)
         .await
         .into_anyhow()?;
+    // 取回的是 \0CONFIG、\0IMAGE、\0INDEX、\0META 首尾相接的一段
     let mut metadata = None;
-    let mut offset = 0usize;
-    while offset + 4 <= index_data.len() {
-        if &index_data[offset..offset + 4] != b"!IN\0" {
-            offset += 1;
-            continue;
-        }
-        offset += 4;
-        if offset + 2 > index_data.len() {
-            break;
-        }
-        let name_len =
-            u16::from_be_bytes(index_data[offset..offset + 2].try_into().unwrap()) as usize;
-        offset += 2;
-        if offset + name_len + 4 > index_data.len() {
-            break;
-        }
-        let name = String::from_utf8_lossy(&index_data[offset..offset + name_len]).to_string();
-        offset += name_len;
-        let size = read_u32be(&index_data, offset)? as usize;
-        offset += 4;
-        if offset + size > index_data.len() {
-            break;
-        }
-        let data = &index_data[offset..offset + size];
-        offset += size;
-        match name.as_str() {
+    let mut pos = 0;
+    while let Some(entry) = read_tlv(&index_data, pos) {
+        pos = entry.offset + entry.size;
+        let data = &index_data[entry.offset..pos];
+        match entry.name.as_str() {
             "\0META" => {
                 // 走 from_str：RepoMetadata 的反序列化按 Deserializer 类型单态化，
                 // 只用 StrRead 一种可省掉整棵 SliceRead 副本。
@@ -392,7 +370,12 @@ async fn refresh_packed_index(
                 );
             }
             "\0INDEX" => {
-                parse_packed_index(data, index_start as usize, &mut ctx.index)?;
+                let index = parse_index(data, index_start as usize).ok_or_else(|| {
+                    anyhow!("malformed remote index").attach(crate::utils::code::METADATA_INVALID)
+                })?;
+                for file in index {
+                    ctx.index.insert(file.name.clone(), file);
+                }
             }
             _ => {}
         }
@@ -401,37 +384,6 @@ async fn refresh_packed_index(
     metadata.ok_or_else(|| {
         anyhow!("packed index has no metadata").attach(crate::utils::code::METADATA_INVALID)
     })
-}
-
-fn parse_packed_index(
-    data: &[u8],
-    index_start: usize,
-    out: &mut HashMap<String, Embedded>,
-) -> anyhow::Result<()> {
-    let mut idx = 0usize;
-    while idx < data.len() {
-        let name_len = *data.get(idx).ok_or_else(|| anyhow!("No index"))? as usize;
-        idx += 1;
-        if idx + name_len + 8 > data.len() {
-            break;
-        }
-        let name = String::from_utf8_lossy(&data[idx..idx + name_len]).to_string();
-        idx += name_len;
-        let size = read_u32be(data, idx)? as usize;
-        idx += 4;
-        let rel = read_u32be(data, idx)? as usize;
-        idx += 4;
-        out.insert(
-            name.clone(),
-            Embedded {
-                name,
-                offset: index_start + rel,
-                raw_offset: 0,
-                size,
-            },
-        );
-    }
-    Ok(())
 }
 
 pub async fn fetch_metadata(
@@ -1094,21 +1046,6 @@ async fn pick_fastest_test(tests: Vec<(String, String)>) -> Option<String> {
         }
     }
     tests.into_iter().next().map(|t| t.1)
-}
-
-fn find_subslice(hay: &[u8], needle: &[u8]) -> Option<usize> {
-    hay.windows(needle.len()).position(|w| w == needle)
-}
-
-fn read_u32be(data: &[u8], offset: usize) -> anyhow::Result<u32> {
-    let bytes: [u8; 4] = data
-        .get(offset..offset + 4)
-        .ok_or_else(|| {
-            anyhow!("invalid remote index").attach(crate::utils::code::METADATA_INVALID)
-        })?
-        .try_into()
-        .unwrap();
-    Ok(u32::from_be_bytes(bytes))
 }
 
 #[cfg(test)]

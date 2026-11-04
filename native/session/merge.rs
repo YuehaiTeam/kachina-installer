@@ -1,4 +1,4 @@
-use crate::local::Embedded;
+use crate::pack_format::Embedded;
 use crate::session::plan::{find_local, HashKey, LocalFile};
 use crate::session::source::{hash_of_item, SourceCtx};
 use crate::utils::metadata::{FileMeta, PatchInfo, PatchSide};

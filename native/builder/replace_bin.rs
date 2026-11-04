@@ -4,22 +4,12 @@ use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt, SeekFrom};
 
 use super::pack::gen_index_header;
+use crate::pack_format::{
+    parse_pack_layout, read_json, scan_embedded, PackLayout, LAYOUT_SEARCH_LEN,
+};
 use crate::{cli::ReplaceBinArgs, local::get_reader_for_bundle};
 
-const MARKER: &[u8] = b"!KachinaInstaller!";
 const DOS_STUB: &[u8] = b"This program cannot be run in DOS mode";
-const TLV_MAGIC: &[u8] = b"!IN\0";
-
-/// Values stored after `!KachinaInstaller!` in the DOS stub.
-/// `base_end` is an absolute file offset; the rest are section *lengths*.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PackLayout {
-    pub base_end: u32,
-    pub config_len: u32,
-    pub theme_len: u32,
-    pub index_len: u32,
-    pub manifest_len: u32,
-}
 
 impl PackLayout {
     pub fn to_header(&self) -> Vec<u8> {
@@ -33,54 +23,92 @@ impl PackLayout {
     }
 }
 
-pub fn parse_pack_layout(header_region: &[u8]) -> Result<PackLayout, String> {
-    let pattern_pos = header_region
-        .windows(MARKER.len())
-        .position(|window| window == MARKER)
-        .ok_or_else(|| "Failed to find !KachinaInstaller! pattern in file".to_string())?;
-    let data_start = pattern_pos + MARKER.len();
-    if data_start + 20 > header_region.len() {
-        return Err("Not enough data after !KachinaInstaller! pattern".to_string());
-    }
-    Ok(PackLayout {
-        base_end: read_u32be(header_region, data_start)?,
-        config_len: read_u32be(header_region, data_start + 4)?,
-        theme_len: read_u32be(header_region, data_start + 8)?,
-        index_len: read_u32be(header_region, data_start + 12)?,
-        manifest_len: read_u32be(header_region, data_start + 16)?,
-    })
-}
-
-fn read_u32be(data: &[u8], offset: usize) -> Result<u32, String> {
-    data.get(offset..offset + 4)
-        .and_then(|b| b.try_into().ok())
-        .map(u32::from_be_bytes)
-        .ok_or_else(|| "Truncated installer index".to_string())
-}
-
 async fn parse_installer_index(input: &Path) -> Result<PackLayout, String> {
     let file = AsyncMmapFile::open(input)
         .await
         .map_err(|e| e.to_string())?;
-    let search_len = file.len().min(65536);
+    let search_len = file.len().min(LAYOUT_SEARCH_LEN);
     parse_pack_layout(file.slice(0, search_len))
+        .ok_or_else(|| "Failed to find a complete !KachinaInstaller! header in file".to_string())
 }
 
-async fn payload_start(input: &Path, layout: &PackLayout) -> Result<u64, String> {
+async fn payload_start(input: &Path) -> Result<u64, String> {
     let file = AsyncMmapFile::open(input)
         .await
         .map_err(|e| e.to_string())?;
-    let base = layout.base_end as usize;
-    if base > 0 && base + 4 <= file.len() && file.slice(base, 4) == TLV_MAGIC {
-        return Ok(layout.base_end as u64);
-    }
-    let embedded = crate::local::get_embedded(&file)
-        .await
-        .map_err(|e| e.to_string())?;
-    let first = embedded
-        .first()
+    let first = scan_embedded(file.as_slice())
+        .into_iter()
+        .next()
         .ok_or_else(|| "Input has no packed !IN payload".to_string())?;
     Ok(first.raw_offset as u64)
+}
+
+/// 换上的 base 不带包内应用的名称与图标。按原包 `\0CONFIG` 的 `windowTitle`（FileDescription）、
+/// `appName`（ProductName）写入版本字符串，有 `--icon` 时写入图标，规则与 pack 相同。
+async fn apply_app_resources(
+    input: &Path,
+    base: Vec<u8>,
+    icon: Option<&Path>,
+) -> Result<Vec<u8>, String> {
+    let file = AsyncMmapFile::open(input)
+        .await
+        .map_err(|e| e.to_string())?;
+    let bytes = file.as_slice();
+    let config: Option<serde_json::Value> = read_json(bytes, &scan_embedded(bytes), "\0CONFIG")
+        .map_err(|e| format!("Malformed \\0CONFIG in input: {e}"))?;
+    drop(file);
+    let field = |key: &str| {
+        config
+            .as_ref()
+            .and_then(|c| c.get(key))
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+    };
+    let strings = [
+        ("FileDescription", field("windowTitle")),
+        ("ProductName", field("appName")),
+    ];
+    if strings.iter().all(|(_, v)| v.is_none()) && icon.is_none() {
+        return Ok(base);
+    }
+
+    let tmp = std::env::temp_dir().join(format!(
+        "kachina_replace_bin_{}_{}.exe",
+        std::process::id(),
+        uuid::Uuid::new_v4()
+    ));
+    tokio::fs::write(&tmp, &base)
+        .await
+        .map_err(|e| format!("Failed to write {}: {e}", tmp.display()))?;
+    let updated = (|| {
+        let mut updater = rcedit::ResourceUpdater::new();
+        updater
+            .load(&tmp)
+            .map_err(|e| format!("rcedit failed to load new base: {e:?}"))?;
+        for (key, value) in &strings {
+            if let Some(value) = value {
+                updater
+                    .set_version_string(key, value)
+                    .map_err(|e| format!("rcedit failed to set {key}: {e:?}"))?;
+            }
+        }
+        if let Some(icon) = icon {
+            updater
+                .set_icon(icon)
+                .map_err(|e| format!("rcedit failed to set icon {}: {e:?}", icon.display()))?;
+        }
+        updater
+            .commit()
+            .map_err(|e| format!("rcedit failed to write new base: {e:?}"))
+    })();
+    let result = match updated {
+        Ok(()) => tokio::fs::read(&tmp)
+            .await
+            .map_err(|e| format!("Failed to read {}: {e}", tmp.display())),
+        Err(e) => Err(e),
+    };
+    let _ = tokio::fs::remove_file(&tmp).await;
+    result
 }
 
 async fn copy_data_range(
@@ -167,7 +195,7 @@ pub async fn replace_base(
         return Err("New base is larger than 4GiB".to_string());
     }
     let old_layout = parse_installer_index(input).await?;
-    let start = payload_start(input, &old_layout).await?;
+    let start = payload_start(input).await?;
     let input_file = AsyncMmapFile::open(input)
         .await
         .map_err(|e| e.to_string())?;
@@ -258,6 +286,14 @@ pub async fn replace_bin_cli(args: ReplaceBinArgs) -> Result<(), String> {
             .map_err(|e| e.to_string())?;
         data
     };
+    if let Some(icon) = &args.icon {
+        if !icon.exists() {
+            return Err(format!("Icon file not found: {}", icon.display()));
+        }
+    }
+    println!("Updating resources of new base...");
+    let new_base_data =
+        apply_app_resources(&args.input, new_base_data, args.icon.as_deref()).await?;
 
     println!("New base size: {} bytes", new_base_data.len());
     println!("Old base size: {} bytes", old_index.base_end);
@@ -275,7 +311,7 @@ pub async fn replace_bin_cli(args: ReplaceBinArgs) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pack::get_header_size;
+    use crate::pack_format::TLV_MAGIC;
 
     fn pe_with(marker: &[u8], pad: usize) -> Vec<u8> {
         let mut data = b"MZ\x90\x00".to_vec();
@@ -422,10 +458,5 @@ mod tests {
         assert_eq!(names, vec!["old.exe".to_string()]);
 
         let _ = tokio::fs::remove_dir_all(&dir).await;
-    }
-
-    #[test]
-    fn config_tlv_header_size_matches_pack() {
-        assert_eq!(get_header_size("\0CONFIG"), 4 + 2 + "\0CONFIG".len() + 4);
     }
 }

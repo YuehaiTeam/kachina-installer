@@ -5,7 +5,7 @@ use fmmap::tokio::{AsyncMmapFile, AsyncMmapFileExt};
 
 use crate::{
     cli::ExtractArgs,
-    local::{get_embedded, preferred_file_hash, Embedded},
+    pack_format::{preferred_file_hash, relative_under_root, scan_embedded, Embedded},
     utils::metadata::RepoMetadata,
 };
 
@@ -82,7 +82,7 @@ fn validate_args(args: &ExtractArgs) -> Result<(), String> {
 
 // 解析metadata功能
 async fn parse_metadata(file: &AsyncMmapFile) -> Result<Option<RepoMetadata>, String> {
-    let embedded = get_embedded(file).await.map_err(|e| e.to_string())?;
+    let embedded = scan_embedded(file.as_slice());
 
     // 查找 \0META 文件
     let meta_file = embedded.iter().find(|e| e.name == "\0META");
@@ -169,7 +169,7 @@ fn build_name_to_hash_map(metadata: &RepoMetadata) -> HashMap<String, String> {
 
 // 收集文件信息
 async fn collect_file_info(file: &AsyncMmapFile) -> Result<Vec<FileInfo>, String> {
-    let embedded = get_embedded(file).await.map_err(|e| e.to_string())?;
+    let embedded = scan_embedded(file.as_slice());
     let metadata = parse_metadata(file).await?;
 
     let mut file_infos = Vec::new();
@@ -310,7 +310,7 @@ async fn extract_by_meta_name(
     metadata: &RepoMetadata,
     input_path: &std::path::Path,
 ) -> Result<(), String> {
-    let embedded = get_embedded(file).await.map_err(|e| e.to_string())?;
+    let embedded = scan_embedded(file.as_slice());
     let name_to_hash = build_name_to_hash_map(metadata);
 
     for (i, meta_name) in meta_names.iter().enumerate() {
@@ -361,24 +361,9 @@ async fn extract_by_meta_name(
     Ok(())
 }
 
-/// 归档 metadata 派生的相对路径只允许 Normal 组件（子目录合法）；`..`、
-/// 绝对路径、盘符、UNC 一律拒绝，防止包内路径把文件写到输出根之外。
-fn relative_under_root(root: &Path, relative: &str) -> Result<std::path::PathBuf, String> {
-    let mut path = root.to_path_buf();
-    let mut normal_count = 0;
-    for component in Path::new(relative).components() {
-        match component {
-            std::path::Component::Normal(part) => {
-                path.push(part);
-                normal_count += 1;
-            }
-            _ => return Err(format!("unsafe path in archive: {relative:?}")),
-        }
-    }
-    if normal_count == 0 {
-        return Err(format!("empty path in archive: {relative:?}"));
-    }
-    Ok(path)
+fn archive_path(root: &Path, relative: &str) -> Result<std::path::PathBuf, String> {
+    relative_under_root(root, relative)
+        .ok_or_else(|| format!("unsafe or empty path in archive: {relative:?}"))
 }
 
 /// 解析 symlink/junction 后仍须位于 root 内。从已 canonicalize 的 root 逐
@@ -422,7 +407,7 @@ async fn extract_all_files(
     output_dir: &Path,
     metadata: Option<&RepoMetadata>,
 ) -> Result<(), String> {
-    let embedded = get_embedded(file).await.map_err(|e| e.to_string())?;
+    let embedded = scan_embedded(file.as_slice());
 
     // 确保输出目录存在
     tokio::fs::create_dir_all(output_dir).await.map_err(|e| {
@@ -455,7 +440,7 @@ async fn extract_all_files(
                 continue;
             };
             for file_name in names {
-                let output_path = relative_under_root(output_dir, file_name)?;
+                let output_path = archive_path(output_dir, file_name)?;
                 verify_within_root(output_dir, &output_path).await?;
                 if planned_paths.insert(output_path.to_string_lossy().into_owned()) {
                     plan.push((file_name.clone(), output_path, embedded_file));
@@ -473,7 +458,7 @@ async fn extract_all_files(
         if claimed.contains(embedded_file.name.as_str()) {
             continue;
         }
-        let output_path = relative_under_root(output_dir, &embedded_file.name)?;
+        let output_path = archive_path(output_dir, &embedded_file.name)?;
         verify_within_root(output_dir, &output_path).await?;
         if planned_paths.insert(output_path.to_string_lossy().into_owned()) {
             plan.push((embedded_file.name.clone(), output_path, embedded_file));
@@ -540,7 +525,7 @@ pub async fn extract_cli(args: ExtractArgs) -> Result<(), String> {
         return extract_by_meta_name(&mmap, &args.meta_name, &args.file, &metadata, &args.input)
             .await;
     }
-    let embedded = get_embedded(&mmap).await.map_err(|e| e.to_string())?;
+    let embedded = scan_embedded(mmap.as_slice());
     extract_by_hash_name(&mmap, &embedded, &args.name, &args.file, &args.input).await
 }
 
@@ -655,27 +640,5 @@ mod tests {
     #[test]
     fn sanitize_null_internal_names() {
         assert_eq!(sanitize_output_name("\0CONFIG"), "_CONFIG");
-    }
-
-    #[test]
-    fn relative_paths_stay_under_root() {
-        let root = Path::new("out");
-        assert!(relative_under_root(root, "app.exe").is_ok());
-        assert!(relative_under_root(root, "User/settings.json").is_ok());
-
-        for evil in [
-            "../outside.txt",
-            "a/../../outside.txt",
-            "..\\outside.txt",
-            "C:\\Windows\\evil.exe",
-            "\\\\server\\share\\evil.exe",
-            "/abs/path.txt",
-            "",
-        ] {
-            assert!(
-                relative_under_root(root, evil).is_err(),
-                "must reject {evil:?}"
-            );
-        }
     }
 }

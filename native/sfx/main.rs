@@ -7,7 +7,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod dialog;
-mod local;
 mod reaper;
 mod run;
 
@@ -23,7 +22,7 @@ mod utils {
     }
 }
 
-// 共享模块里 sfx 只用得到一部分（日志、进程拉起、提权、元数据），
+// 共享模块里 sfx 只用得到一部分（日志、进程拉起、提权、元数据、包格式读取），
 // 其余导出属于安装器侧，这里整体允许未使用。
 #[path = "../utils/log.rs"]
 #[allow(dead_code)]
@@ -31,6 +30,9 @@ mod log;
 #[path = "../utils/metadata.rs"]
 #[allow(dead_code)]
 mod metadata;
+#[path = "../pack_format.rs"]
+#[allow(dead_code)]
+mod pack_format;
 #[path = "../utils/process.rs"]
 #[allow(dead_code)]
 mod process;

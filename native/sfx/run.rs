@@ -11,8 +11,10 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use async_compression::tokio::bufread::ZstdDecoder;
 use fmmap::tokio::{AsyncMmapFile, AsyncMmapFileExt};
 
-use crate::local::{preferred_file_hash, scan_embedded, Embedded};
-use crate::metadata::FileMeta;
+use crate::metadata::{FileMeta, RepoMetadata};
+use crate::pack_format::{
+    preferred_file_hash, read_json, relative_under_root, scan_embedded, Embedded,
+};
 use crate::{dialog, process, reaper, uac};
 
 /// \0CONFIG 中 sfx 关心的子集；serde 忽略其余字段，与安装器配置双向兼容。
@@ -56,19 +58,22 @@ async fn run_inner(console: bool) -> Result<i32> {
     // 先清理历史残留，再做正事；失败不阻塞本次运行。
     reaper::sweep();
 
-    let mmap = crate::local::open_self().await?;
-    let embedded = scan_embedded(&mmap).await?;
+    let mmap = open_self().await?;
+    let embedded = scan_embedded(mmap.as_slice());
     if embedded.is_empty() {
         bail!("此程序不含自解压数据");
     }
-    let config: SfxConfig =
-        crate::local::read_json(&mmap, &embedded, "\0CONFIG")?.context("包内缺少 \0CONFIG")?;
+    // 错误文本里的块名写成可见的 `\0`：真正的 NUL 会截断对话框里的宽字符串。
+    let config: SfxConfig = read_json(mmap.as_slice(), &embedded, "\0CONFIG")
+        .context("LOCAL_CONFIG_ERR: malformed \\0CONFIG")?
+        .context("包内缺少 \\0CONFIG")?;
     let window_title = config
         .window_title
         .clone()
         .or_else(|| config.app_name.clone())
         .unwrap_or_else(|| "kachina-sfx".to_string());
-    let meta = crate::local::slice_json_metadata(&mmap, &embedded)?
+    let meta: RepoMetadata = read_json(mmap.as_slice(), &embedded, "\0META")
+        .context("LOCAL_CONFIG_ERR: malformed \\0META")?
         .context("此包不含离线数据，不能作为自解压程序运行")?;
     if meta.hashed.is_empty() {
         bail!("此包不含离线数据，不能作为自解压程序运行");
@@ -85,6 +90,22 @@ async fn run_inner(console: bool) -> Result<i32> {
         return Ok(1);
     }
     result
+}
+
+async fn open_self() -> Result<AsyncMmapFile> {
+    let exe = std::env::current_exe().context("CURRENT_EXE_ERR")?;
+    // 与安装器一致的调试约定：debug 构建读同目录的 .bin 副本（pack 产物）。
+    let path = if cfg!(debug_assertions) {
+        let bin = exe.with_extension("bin");
+        if bin.exists() {
+            bin
+        } else {
+            exe
+        }
+    } else {
+        exe
+    };
+    AsyncMmapFile::open(path).await.context("MMAP_ERR")
 }
 
 #[derive(Debug)]
@@ -174,7 +195,8 @@ async fn extract_one(
     temp_dir: &Path,
     progress: Option<&dialog::Progress>,
 ) -> Result<()> {
-    let out_path = relative_under_root(temp_dir, &item.file_name)?;
+    let out_path = relative_under_root(temp_dir, &item.file_name)
+        .with_context(|| format!("包内路径不安全: {:?}", item.file_name))?;
     verify_within_root(temp_dir, &out_path).await?;
     if let Some(parent) = out_path.parent() {
         tokio::fs::create_dir_all(parent)
@@ -256,26 +278,6 @@ async fn decode_verify_write(
         }
     }
     Ok(())
-}
-
-/// 归档 metadata 派生的相对路径只允许 Normal 组件；..、绝对路径、盘符、
-/// UNC 一律拒绝。与 builder extract 的同名函数同一规则。
-fn relative_under_root(root: &Path, relative: &str) -> Result<PathBuf> {
-    let mut path = root.to_path_buf();
-    let mut normal_count = 0;
-    for component in Path::new(relative).components() {
-        match component {
-            std::path::Component::Normal(part) => {
-                path.push(part);
-                normal_count += 1;
-            }
-            _ => bail!("包内路径不安全: {relative:?}"),
-        }
-    }
-    if normal_count == 0 {
-        bail!("包内路径为空: {relative:?}");
-    }
-    Ok(path)
 }
 
 /// 解析 symlink/junction 后仍须位于 root 内。与 builder extract 的同名函数同一规则。
@@ -442,17 +444,6 @@ fn free_space(path: &Path) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn relative_path_guard() {
-        let root = Path::new(r"C:\temp\sfx");
-        assert!(relative_under_root(root, "a/b.txt").is_ok());
-        assert!(relative_under_root(root, "a\\b.txt").is_ok());
-        assert!(relative_under_root(root, "../evil").is_err());
-        assert!(relative_under_root(root, "/abs").is_err());
-        assert!(relative_under_root(root, "C:/abs").is_err());
-        assert!(relative_under_root(root, "").is_err());
-    }
 
     #[test]
     fn quote_args_windows_rules() {

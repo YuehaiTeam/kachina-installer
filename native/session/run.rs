@@ -24,7 +24,7 @@ use crate::ipc::install_file::{
 use crate::ipc::manager::ManagedElevate;
 use crate::ipc::operation::IpcOperation;
 use crate::ipc::{progress_noop, progress_notify, IpcResult, Progress, ProgressNotify};
-use crate::local::Embedded;
+use crate::pack_format::Embedded;
 use crate::session::commands::SessionState;
 use crate::session::dump::session_dump;
 use crate::session::merge::{dfs2_ranges, file_mode, plan_tasks, FileMode, FilePos, InstallTask};

@@ -14,6 +14,9 @@ pub mod installer;
 pub mod ipc;
 pub mod local;
 pub mod module;
+// 与 builder、sfx 共用，各二进制只用到其中一部分
+#[allow(dead_code)]
+pub mod pack_format;
 pub mod session;
 pub mod thirdparty;
 pub mod utils;

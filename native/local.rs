@@ -1,22 +1,17 @@
+use std::sync::OnceLock;
+
 use anyhow::Context;
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use fmmap::tokio::{AsyncMmapFile, AsyncMmapFileExt, AsyncMmapFileReader};
-use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tokio::io::AsyncReadExt;
 use tokio::sync::OnceCell;
 
+use crate::pack_format::{parse_index, read_json, scan_embedded, Embedded};
 use crate::utils::error::return_anyhow_result;
 use crate::utils::metadata::RepoMetadata;
 
-// Shared with the builder, which calls the length checks. This binary only
-// calls `is_embedded_name`.
-#[path = "embedded_name.rs"]
-#[allow(dead_code)]
-mod embedded_name;
-use embedded_name::is_embedded_name;
 static MMAP_SELF: OnceCell<AsyncMmapFile> = OnceCell::const_new();
-static EMBEDDED_FILES: OnceCell<Vec<Embedded>> = OnceCell::const_new();
+static EMBEDDED_FILES: OnceLock<Vec<Embedded>> = OnceLock::new();
 static PARSED_PACK: OnceCell<ParsedPack> = OnceCell::const_new();
 
 #[derive(Clone)]
@@ -48,111 +43,10 @@ pub async fn mmap() -> &'static AsyncMmapFile {
         .await
 }
 
-async fn search_pattern(file: &'static AsyncMmapFile) -> anyhow::Result<Vec<usize>> {
-    let pattern = "!in\0".to_ascii_uppercase();
-    let pattern: &[u8; 4] = pattern.as_bytes().try_into().unwrap();
-    let mut reader = file.reader(0).context("MMAP_ERR")?;
-    let mut buffer = [0u8; 4096];
-    let mut offset: usize = 0;
-    let mut founds = Vec::new();
-    let mut read = 0;
-
-    loop {
-        // move last 4 bytes to the beginning of the buffer
-        if read > 4 {
-            buffer[0] = buffer[read + 4 - 4];
-            buffer[1] = buffer[read + 4 - 3];
-            buffer[2] = buffer[read + 4 - 2];
-            buffer[3] = buffer[read + 4 - 1];
-        }
-        read = reader.read(&mut buffer[4..]).await.context("MMAP_ERR")?;
-        if read == 0 {
-            break;
-        }
-        for i in 0..read + 4 - 1 {
-            if buffer[i] == pattern[0] {
-                if i + 3 > read + 3 {
-                    continue;
-                }
-                if buffer[i + 1] == pattern[1]
-                    && buffer[i + 2] == pattern[2]
-                    && buffer[i + 3] == pattern[3]
-                {
-                    founds.push(offset + i - 4);
-                }
-            }
-        }
-        offset += read;
-    }
-
-    Ok(founds)
-}
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct Embedded {
-    pub name: String,
-    pub offset: usize,
-    pub raw_offset: usize,
-    pub size: usize,
-}
-pub async fn get_embedded(file: &'static AsyncMmapFile) -> anyhow::Result<Vec<Embedded>> {
+pub fn get_embedded(file: &'static AsyncMmapFile) -> Vec<Embedded> {
     EMBEDDED_FILES
-        .get_or_try_init(|| scan_embedded(file))
-        .await
-        .cloned()
-}
-
-async fn scan_embedded(file: &'static AsyncMmapFile) -> anyhow::Result<Vec<Embedded>> {
-    let offsets = search_pattern(file).await?;
-    let mut entries = Vec::new();
-    let mut last_offset: usize = 0;
-    let file_len = file.len();
-    for offset in offsets.iter() {
-        if *offset < last_offset {
-            // in case of content includes header
-            continue;
-        }
-        // TLV
-        // header: !IN\0
-        // name length: 2 bytes big endian
-        // name: variable length
-        // content length: 4 bytes big endian
-        // content: variable length
-        let mem_pos_name_length = *offset + 4;
-        if mem_pos_name_length + 2 > file_len {
-            continue;
-        }
-        let name_length =
-            u16::from_be_bytes(file.slice(mem_pos_name_length, 2).try_into().unwrap()) as usize;
-        if name_length == 0 {
-            continue;
-        }
-        let mem_pos_name = mem_pos_name_length + 2;
-        let mem_pos_content_length = mem_pos_name + name_length;
-        if mem_pos_content_length + 4 > file_len {
-            continue;
-        }
-        let name_bytes = file.slice(mem_pos_name, name_length);
-        let Ok(name) = std::str::from_utf8(name_bytes) else {
-            continue;
-        };
-        if !is_embedded_name(name) {
-            continue;
-        }
-        let content_length =
-            u32::from_be_bytes(file.slice(mem_pos_content_length, 4).try_into().unwrap()) as usize;
-        let mem_pos_content = mem_pos_content_length + 4;
-        if mem_pos_content.saturating_add(content_length) > file_len {
-            continue;
-        }
-        entries.push(Embedded {
-            name: name.to_string(),
-            offset: mem_pos_content,
-            size: content_length,
-            raw_offset: *offset,
-        });
-        last_offset = mem_pos_content + content_length;
-    }
-    Ok(entries)
+        .get_or_init(|| scan_embedded(file.as_slice()))
+        .clone()
 }
 
 pub async fn get_config_from_embedded(
@@ -178,76 +72,41 @@ pub async fn get_config_from_embedded(
 }
 
 async fn parse_embedded(embedded: &[Embedded]) -> anyhow::Result<ParsedPack> {
-    let file = mmap().await;
-    let mut config = None;
-    let mut metadata = None;
-    let mut index: Option<Vec<Embedded>> = None;
-    let start_offset = if embedded.is_empty() {
-        0
-    } else {
-        embedded[0].raw_offset
-    };
-    for entry in embedded.iter() {
-        if entry.name == "\0CONFIG" {
-            let content = file.slice(entry.offset, entry.size);
-            let content = String::from_utf8_lossy(content);
-            config = Some(serde_json::from_str(&content).context("LOCAL_CONFIG_ERR")?);
-        } else if entry.name == "\0META" {
-            let content = file.slice(entry.offset, entry.size);
-            let content = String::from_utf8_lossy(content);
-            metadata = Some(serde_json::from_str(&content).context("LOCAL_CONFIG_ERR")?);
-        } else if entry.name == "\0INDEX" {
-            // u8: name_len var: name u32: size u32: offset
-            let content: &[u8] = file.slice(entry.offset, entry.size);
-            let mut index_entries = Vec::new();
-            let mut offset = 0;
-            while offset < content.len() {
-                let name_len = content[offset] as usize;
-                offset += 1;
-                let name = String::from_utf8_lossy(&content[offset..offset + name_len]).to_string();
-                offset += name_len;
-                let size =
-                    u32::from_be_bytes(content[offset..offset + 4].try_into().unwrap()) as usize;
-                offset += 4;
-                let file_offset =
-                    u32::from_be_bytes(content[offset..offset + 4].try_into().unwrap()) as usize;
-                offset += 4;
-                index_entries.push(Embedded {
-                    raw_offset: start_offset + file_offset - get_header_size(&name),
-                    name,
-                    offset: start_offset + file_offset,
-                    size,
-                });
+    let bytes = mmap().await.as_slice();
+    let config = read_json(bytes, embedded, "\0CONFIG").context("LOCAL_CONFIG_ERR")?;
+    let metadata = read_json(bytes, embedded, "\0META").context("LOCAL_CONFIG_ERR")?;
+    let index = match embedded.iter().find(|e| e.name == "\0INDEX") {
+        Some(entry) => {
+            // 索引偏移相对首个 TLV 头
+            let start = embedded[0].raw_offset;
+            let content = &bytes[entry.offset..entry.offset + entry.size];
+            match parse_index(content, start) {
+                Some(index) => Some(index),
+                None => {
+                    return return_anyhow_result(
+                        "Malformed packed files: truncated index".to_string(),
+                        "LOCAL_PACK_ERR",
+                    )
+                }
             }
-            index = Some(index_entries);
         }
-    }
-
-    // Process \0IMAGE if it exists
-    let mut image_base64 = None;
-    for entry in embedded.iter() {
-        if entry.name == "\0IMAGE" {
-            let content: &[u8] = file.slice(entry.offset, entry.size);
-            image_base64 = Some(BASE64.encode(content));
-            break;
-        }
-    }
-
+        None => None,
+    };
+    let image = embedded
+        .iter()
+        .find(|e| e.name == "\0IMAGE")
+        .map(|e| BASE64.encode(&bytes[e.offset..e.offset + e.size]));
     Ok(ParsedPack {
         config,
         metadata,
         index,
-        image: image_base64,
+        image,
     })
-}
-
-pub fn get_header_size(name: &str) -> usize {
-    "!in\0".len() + 2 + name.len() + 4
 }
 
 pub async fn get_base_with_config() -> anyhow::Result<AsyncMmapFileReader<'static>> {
     let file = mmap().await;
-    let embedded = get_embedded(file).await?;
+    let embedded = get_embedded(file);
     let config_index = embedded.iter().position(|x| x.name == "\0CONFIG");
     let image_index = embedded.iter().position(|x| x.name == "\0IMAGE");
     if config_index.is_none() {

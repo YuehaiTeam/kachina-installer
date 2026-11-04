@@ -2,8 +2,8 @@ use tokio::io::AsyncSeekExt;
 
 use crate::{
     cli::AppendArgs,
-    local::check_tlv_name,
     pack::{write_file, PackFile},
+    pack_format::embedded_name::check_tlv_name,
 };
 
 pub async fn append_cli(args: AppendArgs) {

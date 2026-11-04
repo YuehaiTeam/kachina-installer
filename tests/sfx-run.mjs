@@ -1,3 +1,4 @@
+import { spawnSync } from 'child_process';
 import { dev, getTestDir, cleanupTestDir } from './utils.mjs';
 import 'zx/globals';
 import { usePowerShell, usePwsh } from 'zx';
@@ -26,10 +27,15 @@ async function runBuilder(args, label) {
   return result;
 }
 
-async function runSfx(exe, args, label) {
-  const result = await $({ nothrow: true })`& ${exe} ${args}`;
-  console.log(chalk.gray('  ' + label + ': exit=' + result.exitCode));
-  return result;
+// release 的 kachina-sfx 是 GUI 子系统程序，经 shell 的 `& exe` 调用时 shell 不等它退出；
+// 直接拉起进程才能拿到退出码。
+function runSfx(exe, args, label) {
+  const result = spawnSync(exe, args, { encoding: 'utf8', windowsHide: true });
+  if (result.error) {
+    throw result.error;
+  }
+  console.log(chalk.gray('  ' + label + ': exit=' + result.status));
+  return { exitCode: result.status, stdout: result.stdout, stderr: result.stderr };
 }
 
 function sfxTempDirs() {
@@ -104,7 +110,18 @@ async function test() {
   );
 
   console.log('Swapping base to kachina-sfx...');
-  await runBuilder(['replace-bin', installerPath, '--base', sfxPath, '-o', portablePath], 'replace-bin');
+  await runBuilder(
+    ['replace-bin', installerPath, '--base', sfxPath, '--icon', iconPath, '-o', portablePath],
+    'replace-bin',
+  );
+  // 换上的 base 写入包内配置的窗口标题与应用名
+  const info = await $`(Get-Item -LiteralPath ${portablePath}).VersionInfo | ConvertTo-Json -Compress`;
+  const { FileDescription, ProductName } = JSON.parse(info.stdout);
+  if (FileDescription !== 'Sfx Test' || ProductName !== 'Sfx Test App') {
+    throw new Error(
+      'portable version info: FileDescription=' + FileDescription + ' ProductName=' + ProductName,
+    );
+  }
 
   const before = new Set(sfxTempDirs());
 

@@ -1,14 +1,9 @@
 use std::path::PathBuf;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 
-use crate::{
-    cli::PackArgs,
-    local::{
-        check_index_name, check_tlv_name, get_reader_for_bundle, preferred_file_hash,
-        EmbeddedNameError,
-    },
-    utils::metadata::RepoMetadata,
-};
+use crate::pack_format::embedded_name::{check_index_name, check_tlv_name, EmbeddedNameError};
+use crate::pack_format::{get_header_size, preferred_file_hash, LAYOUT_MARKER, TLV_MAGIC};
+use crate::{cli::PackArgs, local::get_reader_for_bundle, utils::metadata::RepoMetadata};
 
 pub struct PackFile {
     pub name: String,
@@ -458,8 +453,6 @@ pub async fn write_header(
     check_tlv_name(name).map_err(|err| {
         tokio::io::Error::new(tokio::io::ErrorKind::InvalidInput, err.to_string())
     })?;
-    let header = "!in\0".to_ascii_uppercase();
-    let header = header.as_bytes();
     let name = name.as_bytes();
     let namelen = u16::try_from(name.len()).map_err(|_| {
         tokio::io::Error::new(
@@ -472,15 +465,11 @@ pub async fn write_header(
         )
     })?;
     let size = size.to_be_bytes();
-    output.write_all(header).await?;
+    output.write_all(TLV_MAGIC).await?;
     output.write_all(&namelen.to_be_bytes()).await?;
     output.write_all(name).await?;
     output.write_all(&size).await?;
     Ok(())
-}
-
-pub fn get_header_size(name: &str) -> usize {
-    "!in\0".len() + 2 + name.len() + 4
 }
 
 pub fn index_to_bin(index: &[(String, u32, u32)]) -> Result<Vec<u8>, EmbeddedNameError> {
@@ -504,7 +493,7 @@ pub fn gen_index_header(
     index_end: u32,
     manifest_end: u32,
 ) -> Vec<u8> {
-    let mut data = "!KachinaInstaller!".as_bytes().to_vec();
+    let mut data = LAYOUT_MARKER.to_vec();
     data.extend_from_slice(&base_end.to_be_bytes());
     data.extend_from_slice(&config_end.to_be_bytes());
     data.extend_from_slice(&theme_end.to_be_bytes());
@@ -550,7 +539,7 @@ fn get_file_pack_priority(
 #[cfg(test)]
 mod tests {
     use super::{embed_metadata_bytes, index_to_bin, write_header};
-    use crate::local::{get_embedded, INDEX_NAME_MAX};
+    use crate::pack_format::{embedded_name::INDEX_NAME_MAX, scan_embedded};
     use crate::utils::metadata::{FileMeta, InstallerInfo, PatchInfo, PatchSide, RepoMetadata};
     use serde::Serialize;
     use tokio::io::AsyncWriteExt;
@@ -570,13 +559,7 @@ mod tests {
         write_header(&mut bytes, &name, 3).await.unwrap();
         bytes.write_all(b"abc").await.unwrap();
 
-        let path = std::env::temp_dir().join(format!("kachina-tlv-{}.bin", uuid::Uuid::new_v4()));
-        tokio::fs::write(&path, &bytes).await.unwrap();
-        let file = fmmap::tokio::AsyncMmapFile::open(&path).await.unwrap();
-        let entries = get_embedded(&file).await.unwrap();
-        drop(file);
-        let _ = tokio::fs::remove_file(&path).await;
-
+        let entries = scan_embedded(&bytes);
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].name, name);
         assert_eq!(entries[0].size, 3);

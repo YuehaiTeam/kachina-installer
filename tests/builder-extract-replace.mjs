@@ -97,6 +97,17 @@ async function test() {
       ),
     );
 
+    // pack 与 replace-bin 都把包内配置的窗口标题、应用名写进版本信息
+    for (const exe of [installerPath, replaced]) {
+      const info = await $`(Get-Item -LiteralPath ${exe}).VersionInfo | ConvertTo-Json -Compress`;
+      const { FileDescription, ProductName } = JSON.parse(info.stdout);
+      if (FileDescription !== config.windowTitle || ProductName !== config.appName) {
+        throw new Error(
+          `${path.basename(exe)} version info: FileDescription=${FileDescription} ProductName=${ProductName}`,
+        );
+      }
+    }
+
     console.log('Listing replaced package...');
     const relisted = await runBuilder(
       ['extract', '-i', replaced, '--list'],

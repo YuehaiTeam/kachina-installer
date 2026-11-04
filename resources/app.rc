@@ -1,1 +1,35 @@
+// ASCII only: rc.exe reads this file in the build machine's ANSI code page.
+// APP_VERSION_BIN / APP_VERSION_STR come from the Cargo package version (build.rs, OUT_DIR).
+#include "app_version.h"
+
 1 ICON "icons/icon.ico"
+
+// pack and replace-bin rewrite FileDescription (windowTitle) and ProductName (appName) with
+// rcedit, which only edits an existing StringFileInfo block.
+// Numeric values of VS_FFI_FILEFLAGSMASK, VOS_NT_WINDOWS32, VFT_APP, VFT2_UNKNOWN (winver.h).
+1 VERSIONINFO
+FILEVERSION APP_VERSION_BIN
+PRODUCTVERSION APP_VERSION_BIN
+FILEFLAGSMASK 0x3F
+FILEFLAGS 0x0
+FILEOS 0x40004
+FILETYPE 0x1
+FILESUBTYPE 0x0
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904B0"
+        BEGIN
+            VALUE "CompanyName", "kachina"
+            VALUE "FileDescription", "Kachina Installer"
+            VALUE "FileVersion", APP_VERSION_STR
+            VALUE "LegalCopyright", "Built by Kachina Installer"
+            VALUE "ProductName", "Kachina Installer"
+            VALUE "ProductVersion", APP_VERSION_STR
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END

@@ -1,6 +1,7 @@
 use crate::{
     cli::arg::InstallArgs,
-    local::{get_config_from_embedded, get_embedded, mmap, Embedded},
+    local::{get_config_from_embedded, get_embedded, mmap},
+    pack_format::Embedded,
     utils::{error::TAResult, uac::check_elevated},
 };
 use anyhow::Context;
@@ -39,15 +40,14 @@ pub async fn get_config_pre(
     let mut embedded_image = None;
     if scan_exe {
         let file = mmap().await;
-        if let Ok(embedded_files_res) = get_embedded(file).await {
-            if let Ok(res) = get_config_from_embedded(&embedded_files_res).await {
-                embedded_config = res.0;
-                enbedded_metadata = res.1;
-                embedded_index = res.2;
-                embedded_image = res.3;
-            }
-            embedded_files = Some(embedded_files_res);
+        let embedded_files_res = get_embedded(file);
+        if let Ok(res) = get_config_from_embedded(&embedded_files_res).await {
+            embedded_config = res.0;
+            enbedded_metadata = res.1;
+            embedded_index = res.2;
+            embedded_image = res.3;
         }
+        embedded_files = Some(embedded_files_res);
         #[cfg(debug_assertions)]
         {
             if embedded_config.is_none() {

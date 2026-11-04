@@ -8,6 +8,10 @@ mod gen;
 mod local;
 mod metadata;
 mod pack;
+// 与安装器、sfx 共用，各二进制只用到其中一部分
+#[path = "../pack_format.rs"]
+#[allow(dead_code)]
+mod pack_format;
 mod replace_bin;
 mod utils;
 
