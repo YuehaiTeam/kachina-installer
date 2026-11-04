@@ -462,33 +462,22 @@ pub async fn clear_index_mark(path: &PathBuf) -> anyhow::Result<()> {
         .open(&path)
         .await
         .context("SELF_UPDATE_ERR")?;
-    // read first 256 bytes to buffer
-    let mut buffer = [0u8; 256];
-    output_file
-        .read_exact(&mut buffer)
+    // 布局头在 DOS stub 里，读文件开头一段即可
+    let mut head = Vec::with_capacity(512);
+    (&mut output_file)
+        .take(512)
+        .read_to_end(&mut head)
         .await
         .context("SELF_UPDATE_ERR")?;
-
-    // check ! and K
-    let mark_pos = buffer.windows(2).position(|w| w == b"!K".as_ref());
-    if let Some(mark_pos) = mark_pos {
-        // check if equals !KachinaInstaller!
-        let mark_str = "!KachinaInstaller!";
-        let mark_real = String::from_utf8_lossy(&buffer[mark_pos..mark_pos + mark_str.len()]);
-        if mark_real == mark_str {
-            let index_start = mark_pos + mark_str.len();
-            // PE header replaced with index. Remove it.
-            // write 5*4 bytes of 0 after index_start
-            output_file
-                .seek(tokio::io::SeekFrom::Start(index_start as u64))
-                .await
-                .context("SELF_UPDATE_ERR")?;
-            let zero = [0u8; 5 * 4];
-            output_file
-                .write_all(&zero)
-                .await
-                .context("SELF_UPDATE_ERR")?;
-        }
+    if crate::pack_format::clear_layout(&mut head) {
+        output_file
+            .seek(tokio::io::SeekFrom::Start(0))
+            .await
+            .context("SELF_UPDATE_ERR")?;
+        output_file
+            .write_all(&head)
+            .await
+            .context("SELF_UPDATE_ERR")?;
     }
     // close file
     output_file.flush().await.context("SELF_UPDATE_ERR")?;

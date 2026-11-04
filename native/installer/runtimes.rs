@@ -125,7 +125,7 @@ pub async fn install_dotnet(
         .context("CREATE_TARGET_FILE_ERR")?;
     let (mut stream, len) = if offset.is_some() || size.is_some() {
         // runtime packed, just extract and run
-        let stream = create_local_stream(offset.unwrap(), size.unwrap(), true)
+        let stream = create_local_stream(offset.unwrap(), size.unwrap())
             .await
             .context("RUNTIME_EXTRACT_ERR")?;
         tracing::info!(
@@ -156,7 +156,7 @@ pub async fn install_dotnet(
         }
         // get real download url
         let url = runtime.1.replace("$", &vernum);
-        let (stream, len, _insight) = create_http_stream(&url, 0, 0, true, None)
+        let (stream, len, _insight) = create_http_stream(&url, 0, 0, None)
             .await
             .map_err(|e| e.error)
             .context("RUNTIME_DOWNLOAD_ERR")?;
@@ -228,7 +228,7 @@ pub async fn install_vcredist(
     let installer_path = dl_dir.join(format!("Kachina.RuntimePackage.{tag}.exe"));
     let (mut stream, len) = if offset.is_some() || size.is_some() {
         // runtime packed, just extract and run
-        let stream = create_local_stream(offset.unwrap(), size.unwrap(), true)
+        let stream = create_local_stream(offset.unwrap(), size.unwrap())
             .await
             .context("RUNTIME_EXTRACT_ERR")?;
         tracing::info!(
@@ -239,7 +239,7 @@ pub async fn install_vcredist(
         );
         (stream, size.unwrap())
     } else {
-        let (stream, len, _insight) = create_http_stream(url, 0, 0, true, None)
+        let (stream, len, _insight) = create_http_stream(url, 0, 0, None)
             .await
             .map_err(|e| e.error)
             .context("RUNTIME_DOWNLOAD_ERR")?;

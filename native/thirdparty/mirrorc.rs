@@ -260,7 +260,7 @@ pub async fn run_mirrorc_download(
     url: &str,
     notify: ProgressNotify,
 ) -> TAResult<()> {
-    let (mut stream, len, _insight) = create_http_stream(url, 0, 0, true, None).await?;
+    let (mut stream, len, _insight) = create_http_stream(url, 0, 0, None).await?;
     let mut target = create_staged_file(Path::new(zip_path)).await?;
     let on_progress = |downloaded| {
         notify(Progress::BytesOf {

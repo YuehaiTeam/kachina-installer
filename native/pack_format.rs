@@ -56,6 +56,25 @@ pub fn parse_pack_layout(header_region: &[u8]) -> Option<PackLayout> {
     })
 }
 
+/// 把 `head`（文件开头一段）里布局头的 5 个字段抹零：落盘的卸载器、更新器与自更新写出的
+/// 安装器只保留 base 与配置，布局头不能再指向包内数据。找不到完整布局头时不改动。
+pub fn clear_layout(head: &mut [u8]) -> bool {
+    let Some(pos) = head
+        .windows(LAYOUT_MARKER.len())
+        .position(|w| w == LAYOUT_MARKER)
+    else {
+        return false;
+    };
+    let start = pos + LAYOUT_MARKER.len();
+    match head.get_mut(start..start + 20) {
+        Some(fields) => {
+            fields.fill(0);
+            true
+        }
+        None => false,
+    }
+}
+
 pub fn get_header_size(name: &str) -> usize {
     TLV_MAGIC.len() + 2 + name.len() + 4
 }
@@ -692,6 +711,23 @@ mod tests {
         let at = short.len() - 4;
         short[at..].copy_from_slice(&1u32.to_be_bytes());
         assert!(parse_index(&short, 0).is_none());
+    }
+
+    #[test]
+    fn clear_layout_zeroes_only_the_layout_fields() {
+        let mut head = pe(0x400)[..0x200].to_vec();
+        write_layout(&mut head, [0x400, 1, 2, 3, 4]);
+        let original = head.clone();
+        assert!(clear_layout(&mut head));
+        assert_eq!(parse_pack_layout(&head).unwrap().base_end, 0);
+        let fields = DOS_STUB_AT + LAYOUT_MARKER.len();
+        assert!(head[fields..fields + 20].iter().all(|b| *b == 0));
+        assert_eq!(head[..fields], original[..fields]);
+        assert_eq!(head[fields + 20..], original[fields + 20..]);
+        // 字段被截断时不改动
+        let mut short = original[..fields + 10].to_vec();
+        assert!(!clear_layout(&mut short));
+        assert_eq!(short, original[..fields + 10]);
     }
 
     #[test]

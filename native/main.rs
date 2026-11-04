@@ -20,6 +20,7 @@ pub mod pack_format;
 pub mod session;
 pub mod thirdparty;
 pub mod utils;
+pub mod verified_write;
 use cli::arg::{Command, InstallArgs};
 use std::time::Duration;
 

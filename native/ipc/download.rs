@@ -250,13 +250,8 @@ async fn open_part(
     offset: u64,
     len: u64,
 ) -> anyhow::Result<Box<dyn tokio::io::AsyncRead + Unpin + Send>> {
-    match crate::fs::create_resolved_stream(
-        usize::try_from(offset)?,
-        usize::try_from(len)?,
-        true,
-        None,
-    )
-    .await
+    match crate::fs::create_resolved_stream(usize::try_from(offset)?, usize::try_from(len)?, None)
+        .await
     {
         Ok((reader, _, insight)) => {
             CURRENT.with(|ctx| ctx.insights.lock().unwrap().push(insight));
@@ -580,7 +575,7 @@ mod tests {
         let open = tokio::spawn(RESOLVER.scope(
             tx,
             CURRENT.scope(ctx.clone(), async {
-                crate::fs::create_resolved_stream(0, 16, true, None)
+                crate::fs::create_resolved_stream(0, 16, None)
                     .await
                     .map(|_| ())
                     .map_err(|err| err.error)

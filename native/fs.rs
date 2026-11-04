@@ -1,8 +1,7 @@
 pub mod commit;
 pub mod staging;
 
-use crate::utils::code::{code_for_network_type, Attach};
-use async_compression::tokio::bufread::ZstdDecoder as TokioZstdDecoder;
+use crate::utils::code::code_for_network_type;
 use bytes::Bytes;
 use fmmap::tokio::AsyncMmapFileExt;
 use futures::Stream;
@@ -10,7 +9,6 @@ use futures::TryStreamExt;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
-    os::windows::fs::MetadataExt,
     path::{Path, PathBuf},
     pin::Pin,
     sync::{
@@ -20,7 +18,7 @@ use std::{
     task::{Context as TaskContext, Poll},
     time::{Duration, Instant},
 };
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader, ReadBuf};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 
 use crate::{
     dfs::{apply_insight_io_error, InsightItem},
@@ -28,8 +26,7 @@ use crate::{
     local::mmap,
     utils::{
         error::{TACommandError, TAResult, DOWNLOAD_STALLED, DOWNLOAD_TOO_SLOW},
-        hash::{hash_file_with, run_hash, HASH_BUFFER_SIZE},
-        progressed_read::ReadWithCallback,
+        hash::{hash_file_with, HASH_BUFFER_SIZE},
         url::HttpContextExt,
     },
     DOWNLOAD_CLIENT,
@@ -860,25 +857,17 @@ type HttpStream = (
     Arc<Mutex<InsightItem>>,
 );
 
+/// Raw bytes of `url` (or of `offset..offset+size` when `size > 0`); callers
+/// decompress themselves.
 pub async fn create_http_stream(
     url: &str,
     offset: usize,
     size: usize,
-    skip_decompress: bool,
     request_range: Option<&str>,
 ) -> TAResult<HttpStream> {
     let reading = crate::ipc::network::Reading::begin();
     let permit = crate::ipc::download::request().await?;
-    open_http_stream(
-        url,
-        offset,
-        size,
-        skip_decompress,
-        request_range,
-        reading,
-        permit,
-    )
-    .await
+    open_http_stream(url, offset, size, request_range, reading, permit).await
 }
 
 /// Opens a package range whose URL the session resolves. The request slot is
@@ -887,29 +876,18 @@ pub async fn create_http_stream(
 pub async fn create_resolved_stream(
     offset: usize,
     size: usize,
-    skip_decompress: bool,
     request_range: Option<&str>,
 ) -> TAResult<HttpStream> {
     let reading = crate::ipc::network::Reading::begin();
     let permit = crate::ipc::download::request().await?;
     let url = crate::ipc::download::resolve(offset as u64, size as u64).await?;
-    open_http_stream(
-        &url,
-        offset,
-        size,
-        skip_decompress,
-        request_range,
-        reading,
-        permit,
-    )
-    .await
+    open_http_stream(&url, offset, size, request_range, reading, permit).await
 }
 
 async fn open_http_stream(
     url: &str,
     offset: usize,
     size: usize,
-    skip_decompress: bool,
     request_range: Option<&str>,
     reading: crate::ipc::network::Reading,
     permit: Option<tokio::sync::OwnedSemaphorePermit>,
@@ -988,16 +966,7 @@ async fn open_http_stream(
     let insight_handle = insight_stream.get_insight_handle();
     let insight_stream =
         crate::ipc::network::Reader::new(insight_stream, reading, permit, exact_length);
-
-    if skip_decompress {
-        Ok((Box::new(insight_stream), content_length, insight_handle))
-    } else {
-        // 在NetworkInsightStream外层套一个BufReader，然后再解压缩
-        let buf_reader = BufReader::new(insight_stream);
-        let decompressed = TokioZstdDecoder::new(buf_reader);
-        // ✅ 关键：即使被解压缩包装，insight_handle仍然可用！
-        Ok((Box::new(decompressed), content_length, insight_handle))
-    }
+    Ok((Box::new(insight_stream), content_length, insight_handle))
 }
 
 /// 包内范围必须保持原始字节位置；拒绝服务器返回其他范围或额外内容编码。
@@ -1057,18 +1026,22 @@ fn insight_range_vec(request_range: Option<&str>, offset: usize, size: usize) ->
     vec![(offset as u32, (offset + size - 1) as u32)]
 }
 
+/// Raw bytes of a block inside the running package.
 pub async fn create_local_stream(
     offset: usize,
     size: usize,
-    skip_decompress: bool,
 ) -> Result<Box<dyn tokio::io::AsyncRead + Unpin + std::marker::Send>, anyhow::Error> {
     let mmap_file = mmap().await;
     let reader = mmap_file.range_reader(offset, size).context("MMAP_ERR")?;
-    if skip_decompress {
-        return Ok(Box::new(reader));
+    Ok(Box::new(reader))
+}
+
+/// [`create_staged_file`] for blocking writers; the handle is unbuffered.
+pub fn create_staged_file_blocking(path: &Path) -> Result<std::fs::File, anyhow::Error> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).context("CREATE_PARENT_DIR_ERR")?;
     }
-    let decoder = TokioZstdDecoder::new(reader);
-    Ok(Box::new(decoder))
+    std::fs::File::create(path).context("CREATE_TARGET_FILE_ERR")
 }
 
 /// Create a file under the staging directory (parents included). This is the
@@ -1103,6 +1076,26 @@ pub async fn sync_staged_file(path: &Path) -> Result<(), anyhow::Error> {
     Ok(())
 }
 
+/// 读源数据时的错误：带网络错误标记的原样传播，其余视为解压失败。
+pub fn read_failure(e: std::io::Error) -> anyhow::Error {
+    let anyhow_err = anyhow::Error::new(e);
+    // 使用 Debug 格式获取完整错误链信息
+    let full_error_debug = format!("{:?}", anyhow_err);
+    if full_error_debug.contains("ERR_CONNECTION_")
+        || full_error_debug.contains("ERR_STREAM_")
+        || full_error_debug.contains("ERR_NETWORK_")
+        || full_error_debug.contains("ERR_RESPONSE_BODY_")
+        || full_error_debug.contains("ERR_DNS_")
+        || full_error_debug.contains("ERR_TLS_")
+        || full_error_debug.contains("ERR_REQUEST_")
+        || full_error_debug.contains("ERR_DOWNLOAD_")
+    {
+        anyhow_err
+    } else {
+        anyhow_err.context("DECOMPRESS_ERR")
+    }
+}
+
 pub async fn progressed_copy(
     source: &mut (dyn AsyncRead + Unpin + Send),
     target: &mut (dyn AsyncWrite + Unpin + Send),
@@ -1114,29 +1107,7 @@ pub async fn progressed_copy(
     let mut now = std::time::Instant::now();
 
     loop {
-        let read = source.read(buffer).await.map_err(|e| {
-            let anyhow_err = anyhow::Error::new(e);
-
-            // 使用 Debug 格式获取完整错误链信息
-            let full_error_debug = format!("{:?}", anyhow_err);
-
-            // 检查完整错误链中是否包含我们的网络错误码
-            if full_error_debug.contains("ERR_CONNECTION_")
-                || full_error_debug.contains("ERR_STREAM_")
-                || full_error_debug.contains("ERR_NETWORK_")
-                || full_error_debug.contains("ERR_RESPONSE_BODY_")
-                || full_error_debug.contains("ERR_DNS_")
-                || full_error_debug.contains("ERR_TLS_")
-                || full_error_debug.contains("ERR_REQUEST_")
-                || full_error_debug.contains("ERR_DOWNLOAD_")
-            {
-                // 找到我们的网络错误标记，直接传播
-                anyhow_err
-            } else {
-                // 没有找到网络错误标记，说明是真正的解压错误
-                anyhow_err.context("DECOMPRESS_ERR")
-            }
-        })?;
+        let read = source.read(buffer).await.map_err(read_failure)?;
         if read == 0 {
             break;
         }
@@ -1156,92 +1127,6 @@ pub async fn progressed_copy(
     on_progress(downloaded);
 
     Ok(downloaded)
-}
-
-/// Apply an hpatch diff stream to `old_path`, writing the result to
-/// `out_path` (under the staging directory). No renames: the caller decides
-/// what happens to the output.
-pub async fn progressed_hpatch(
-    old_path: &Path,
-    diff: Box<dyn AsyncRead + Unpin + Send>,
-    diff_size: usize,
-    out_path: &Path,
-    on_progress: Box<dyn Fn(usize) + Send>,
-) -> Result<usize, anyhow::Error> {
-    // 与 progressed_copy 同一节流：每 20ms 至多一次，读完补丁时补报一次
-    let mut downloaded = 0;
-    let mut last = std::time::Instant::now();
-    let decoder = ReadWithCallback {
-        reader: diff,
-        callback: move |chunk| {
-            downloaded += chunk;
-            if downloaded >= diff_size || last.elapsed().as_millis() >= 20 {
-                last = std::time::Instant::now();
-                on_progress(downloaded);
-            }
-        },
-    };
-    if let Some(parent) = out_path.parent() {
-        tokio::fs::create_dir_all(parent)
-            .await
-            .context("CREATE_PARENT_DIR_ERR")?;
-    }
-    let old_size = old_path.metadata().context("GET_TARGET_SIZE_ERR")?;
-    let out_file = std::fs::File::create(out_path).context("CREATE_NEW_TARGET_ERR")?;
-    let old_file = std::fs::File::open(old_path).context("OPEN_TARGET_ERR")?;
-    let diff_file = tokio_util::io::SyncIoBridge::new(decoder);
-    let res = tokio::task::spawn_blocking(move || {
-        hpatch_sys::safe_patch_single_stream(
-            out_file,
-            diff_file,
-            diff_size,
-            old_file,
-            old_size.file_size() as usize,
-        )
-    })
-    .await
-    .context("RUN_HPATCH_ERR")?;
-    if let Err(err) = res {
-        let _ = tokio::fs::remove_file(out_path).await;
-        // 读写器的错误原样带回，网络取消与断流仍能被识别
-        return Err(anyhow::Error::new(err).context("PATCH_FAILED_ERR"));
-    }
-    Ok(diff_size)
-}
-
-pub async fn verify_hash(
-    target: &str,
-    md5: Option<String>,
-    xxh: Option<String>,
-) -> Result<(), anyhow::Error> {
-    let alg = if md5.is_some() {
-        "md5"
-    } else if xxh.is_some() {
-        "xxh"
-    } else {
-        return Err(
-            anyhow::Error::new(std::io::Error::other("No hash algorithm specified"))
-                .context("NO_HASH_ALGO_ERR"),
-        );
-    };
-    let expected = if let Some(md5) = md5 {
-        md5
-    } else if let Some(xxh) = xxh {
-        xxh
-    } else {
-        return Err(
-            anyhow::Error::new(std::io::Error::other("No hash data provided"))
-                .context("NO_HASH_DATA_ERR"),
-        );
-    };
-    let hash = run_hash(alg, target).await.context("HASH_CHECK_ERR")?;
-    if hash != expected {
-        return Err(anyhow::Error::new(std::io::Error::other(format!(
-            "File {target} hash mismatch: expected {expected}, got {hash}"
-        )))
-        .attach(crate::utils::code::HASH_MISMATCH));
-    }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -1544,88 +1429,6 @@ mod tests {
         // 待删文件仍按未托管内容算：lib 是脏目录，不会被整目录换入
         scanned.dirty_dirs.sort();
         assert_eq!(scanned.dirty_dirs, vec![String::new(), "lib".to_string()]);
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// 1 MiB 伪随机旧文件，新文件把前后两半对调并插入一段新内容：打补丁时要跳着读旧文件。
-    fn patch_fixture() -> (Vec<u8>, Vec<u8>, Vec<u8>) {
-        let mut seed = 0x2545_f491_4f6c_dd1du64;
-        let old: Vec<u8> = (0..1 << 20)
-            .map(|_| {
-                seed ^= seed << 13;
-                seed ^= seed >> 7;
-                seed ^= seed << 17;
-                seed as u8
-            })
-            .collect();
-        let mid = old.len() / 2;
-        let mut new = old[mid..].to_vec();
-        new.extend_from_slice(b"inserted between the halves");
-        new.extend_from_slice(&old[..mid]);
-        let mut diff = std::io::Cursor::new(Vec::new());
-        hdiff_sys::safe_create_single_patch(&new, &old, &mut diff, 7).unwrap();
-        (old, new, diff.into_inner())
-    }
-
-    #[tokio::test]
-    async fn hpatch_reproduces_new_file_and_reports_full_progress() {
-        let (old, new, diff) = patch_fixture();
-        let dir = temp_dir();
-        let old_path = write_file(&dir, "old.bin", &old);
-        let out = dir.join("new.bin");
-        let reported = Arc::new(Mutex::new(0usize));
-        let sink = reported.clone();
-        let diff_len = diff.len();
-        progressed_hpatch(
-            &old_path,
-            Box::new(std::io::Cursor::new(diff)),
-            diff_len,
-            &out,
-            Box::new(move |n| *sink.lock().unwrap() = n),
-        )
-        .await
-        .unwrap();
-        assert!(std::fs::read(&out).unwrap() == new);
-        assert_eq!(*reported.lock().unwrap(), diff_len);
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[tokio::test]
-    async fn hpatch_returns_the_diff_reader_error() {
-        struct Broken;
-        impl tokio::io::AsyncRead for Broken {
-            fn poll_read(
-                self: std::pin::Pin<&mut Self>,
-                _: &mut std::task::Context<'_>,
-                _: &mut tokio::io::ReadBuf<'_>,
-            ) -> std::task::Poll<std::io::Result<()>> {
-                std::task::Poll::Ready(Err(std::io::Error::new(
-                    std::io::ErrorKind::ConnectionReset,
-                    "diff stream reset",
-                )))
-            }
-        }
-        let (old, _, diff) = patch_fixture();
-        let dir = temp_dir();
-        let old_path = write_file(&dir, "old.bin", &old);
-        let out = dir.join("new.bin");
-        let diff_len = diff.len();
-        let reader = std::io::Cursor::new(diff[..diff_len / 2].to_vec()).chain(Broken);
-        let err = progressed_hpatch(
-            &old_path,
-            Box::new(reader),
-            diff_len,
-            &out,
-            Box::new(|_| {}),
-        )
-        .await
-        .unwrap_err();
-        let io = err
-            .chain()
-            .find_map(|e| e.downcast_ref::<std::io::Error>())
-            .expect("io error in chain");
-        assert_eq!(io.kind(), std::io::ErrorKind::ConnectionReset);
-        assert!(!out.exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
