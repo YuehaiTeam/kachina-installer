@@ -53,15 +53,6 @@ pub fn sanitize_url_for_logging(url: &str) -> String {
     }
 }
 
-/// Creates a standardized error context for reqwest HTTP requests
-///
-/// # Arguments
-/// * `function_name` - Name of the function where the error occurred
-/// * `url` - The URL that was being requested (will be sanitized)
-/// * `error_type` - Type of error (e.g., "HTTP_REQUEST_ERR", "HTTP_STATUS_ERR")
-///
-/// # Returns
-/// A formatted error context string
 /// `text` with every `http(s)://` URL in it cut to protocol, host and path
 /// ([`sanitize_url_for_logging`]). A URL ends at whitespace or at one of
 /// `)`, `,`, `"`, `'`, `>`, `]`, `;`.
@@ -89,6 +80,15 @@ pub fn sanitize_urls_in_text(text: &str) -> String {
     }
 }
 
+/// Creates a standardized error context for reqwest HTTP requests
+///
+/// # Arguments
+/// * `function_name` - Name of the function where the error occurred
+/// * `url` - The URL that was being requested (will be sanitized)
+/// * `error_type` - Type of error (e.g., "HTTP_REQUEST_ERR", "HTTP_STATUS_ERR")
+///
+/// # Returns
+/// A formatted error context string
 pub fn create_reqwest_context(function_name: &str, url: &str, error_type: &str) -> String {
     let sanitized_url = sanitize_url_for_logging(url);
     format!("{} in {}: {}", error_type, function_name, sanitized_url)

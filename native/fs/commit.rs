@@ -449,15 +449,16 @@ fn apply_copy(ctx: &Ctx, entry: &FileEntry, state: &mut FileState) -> anyhow::Re
 fn undo_copy(ctx: &Ctx, rel: &str, state: &FileState, unrestored: &mut Unrestored) {
     let target = ctx.target(rel);
     let (tmp, old) = copy_paths(&target);
-    if state.new_placed {
-        let _ = std::fs::remove_file(&target);
-    }
+    let new_removed = !state.new_placed || std::fs::remove_file(&target).is_ok();
     let _ = std::fs::remove_file(&tmp);
     if state.old_moved {
         if let Err(err) = rename_retry(&old, &target, ctx.backoff) {
             tracing::warn!("rollback copy {rel}: restore old failed: {err}");
             unrestored.push(rel.to_string());
         }
+    } else if !new_removed {
+        // a file the install did not have before is still in place
+        unrestored.push(rel.to_string());
     }
 }
 

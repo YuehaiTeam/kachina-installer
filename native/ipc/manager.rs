@@ -398,8 +398,13 @@ async fn accept_helper(server: &mut NamedPipeServer, helper: isize) -> anyhow::R
     let pipe = HANDLE(std::os::windows::io::AsRawHandle::as_raw_handle(server));
     unsafe { GetNamedPipeClientProcessId(pipe, &mut client_pid) }
         .context("query elevation pipe client")?;
+    // 0 when the handle from the elevation lacks query rights; the pipe's
+    // DACL already limits clients to elevated processes, and the helper
+    // checks this side's pid in turn
     let helper_pid = unsafe { GetProcessId(helper_handle()) };
-    if client_pid != helper_pid {
+    if helper_pid == 0 {
+        tracing::warn!("helper pid unavailable, client {client_pid} not matched");
+    } else if client_pid != helper_pid {
         anyhow::bail!("elevation pipe client {client_pid} is not the helper {helper_pid}");
     }
     tracing::info!("Client connected to pipe");
