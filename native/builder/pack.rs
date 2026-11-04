@@ -19,44 +19,39 @@ pub struct PackConfig {
     pub icon_path: Option<PathBuf>,
 }
 
-pub async fn pack_cli(args: PackArgs) {
+pub async fn pack_cli(args: PackArgs) -> Result<(), String> {
     let reader = get_reader_for_bundle().await;
     if reader.is_err() {
-        eprintln!("Failed to get reader: {:?}", reader.err());
-        std::process::exit(1);
+        return Err(format!("Failed to get reader: {:?}", reader.err()));
     }
     let reader = reader.unwrap();
     let config = tokio::fs::read(&args.config).await;
     if config.is_err() {
-        eprintln!(
+        return Err(format!(
             "Failed to read config {:?} : {:?}",
             args.config,
             config.err()
-        );
-        return;
+        ));
     }
     let config = config.unwrap();
     let config = serde_json::from_slice(&config);
     if config.is_err() {
-        eprintln!("Failed to parse config: {:?}", config.err());
-        return;
+        return Err(format!("Failed to parse config: {:?}", config.err()));
     }
     let config = config.unwrap();
     let metadata = if let Some(metadata) = args.metadata {
         let metadataf = tokio::fs::read(&metadata).await;
         if metadataf.is_err() {
-            eprintln!(
+            return Err(format!(
                 "Failed to read metadata {:?} : {:?}",
                 metadata,
                 metadataf.err()
-            );
-            return;
+            ));
         }
         let metadataf = metadataf.unwrap();
         let json = serde_json::from_slice::<RepoMetadata>(&metadataf);
         if json.is_err() {
-            eprintln!("Failed to parse metadata: {:?}", json.err());
-            return;
+            return Err(format!("Failed to parse metadata: {:?}", json.err()));
         }
         Some(json.unwrap())
     } else {
@@ -65,14 +60,12 @@ pub async fn pack_cli(args: PackArgs) {
     let image = if let Some(image) = args.image {
         let image_size = tokio::fs::metadata(&image).await;
         if image_size.is_err() {
-            eprintln!("Failed to get image size: {:?}", image_size.err());
-            return;
+            return Err(format!("Failed to get image size: {:?}", image_size.err()));
         }
         let image_size = image_size.unwrap().len() as u32;
         let imagef = tokio::fs::File::open(image).await;
         if imagef.is_err() {
-            eprintln!("Failed to open image: {:?}", imagef.err());
-            return;
+            return Err(format!("Failed to open image: {:?}", imagef.err()));
         }
         Some(PackFile {
             name: "\0IMAGE".to_string(),
@@ -89,8 +82,7 @@ pub async fn pack_cli(args: PackArgs) {
             if !metadata.hashed.is_empty() {
                 for file in metadata.hashed.iter() {
                     let Some(hash) = preferred_file_hash(&file.md5, &file.xxh) else {
-                        eprintln!("No hash found for file: {:?}", file.file_name);
-                        return;
+                        return Err(format!("No hash found for file: {:?}", file.file_name));
                     };
                     if files.iter().any(|x: &PackFile| x.name == *hash) {
                         continue;
@@ -99,8 +91,7 @@ pub async fn pack_cli(args: PackArgs) {
                     let size = tokio::fs::metadata(&path).await.unwrap().len() as usize;
                     let f = tokio::fs::File::open(path).await;
                     if f.is_err() {
-                        eprintln!("Failed to open file {}: {:?}", hash, f.err());
-                        return;
+                        return Err(format!("Failed to open file {}: {:?}", hash, f.err()));
                     }
                     let data = Box::new(f.unwrap()) as Box<dyn AsyncRead + Unpin + Send>;
                     files.push(PackFile {
@@ -114,12 +105,10 @@ pub async fn pack_cli(args: PackArgs) {
                 for patch in metadata.patches.iter() {
                     let Some(from_hash) = preferred_file_hash(&patch.from.md5, &patch.from.xxh)
                     else {
-                        eprintln!("No hash found for patch: {:?}", patch.file_name);
-                        return;
+                        return Err(format!("No hash found for patch: {:?}", patch.file_name));
                     };
                     let Some(to_hash) = preferred_file_hash(&patch.to.md5, &patch.to.xxh) else {
-                        eprintln!("No hash found for patch: {:?}", patch.file_name);
-                        return;
+                        return Err(format!("No hash found for patch: {:?}", patch.file_name));
                     };
                     let patch_fn = format!("{from_hash}_{to_hash}");
                     if files.iter().any(|x: &PackFile| x.name == *patch_fn) {
@@ -129,8 +118,7 @@ pub async fn pack_cli(args: PackArgs) {
                     let size = tokio::fs::metadata(&path).await.unwrap().len() as usize;
                     let f = tokio::fs::File::open(path).await;
                     if f.is_err() {
-                        eprintln!("Failed to open file {}: {:?}", patch_fn, f.err());
-                        return;
+                        return Err(format!("Failed to open file {}: {:?}", patch_fn, f.err()));
                     }
                     let data = Box::new(f.unwrap()) as Box<dyn AsyncRead + Unpin + Send>;
                     files.push(PackFile {
@@ -144,8 +132,7 @@ pub async fn pack_cli(args: PackArgs) {
             // if no metadata set, just pack all files without '_'
             let entries = tokio::fs::read_dir(data_dir).await;
             if entries.is_err() {
-                eprintln!("Failed to read data dir: {:?}", entries.err());
-                return;
+                return Err(format!("Failed to read data dir: {:?}", entries.err()));
             }
             let mut entries = entries.unwrap();
             while let Some(entry) = entries.next_entry().await.unwrap() {
@@ -158,8 +145,7 @@ pub async fn pack_cli(args: PackArgs) {
                 let size = tokio::fs::metadata(&path).await.unwrap().len() as usize;
                 let f = tokio::fs::File::open(path).await;
                 if f.is_err() {
-                    eprintln!("Failed to open file {}: {:?}", name, f.err());
-                    return;
+                    return Err(format!("Failed to open file {}: {:?}", name, f.err()));
                 }
                 let data = Box::new(f.unwrap()) as Box<dyn AsyncRead + Unpin + Send>;
                 files.push(PackFile { name, size, data });
@@ -173,28 +159,31 @@ pub async fn pack_cli(args: PackArgs) {
         files,
         icon_path: args.icon,
     };
-    if let Err(err) = validate_pack_names(&config) {
-        eprintln!("{err}");
-        return;
-    }
-    let output = tokio::fs::File::create(args.output).await.unwrap();
+    validate_pack_names(&config).map_err(|err| err.to_string())?;
+    let output = tokio::fs::File::create(&args.output)
+        .await
+        .map_err(|err| format!("Failed to create output {:?}: {err}", args.output))?;
     println!(
         "Packing: metadata: {:?}, image: {:?}, files: {}",
         config.metadata.is_some(),
         config.image.is_some(),
         config.files.len()
     );
-    pack(reader, output, config).await;
+    let result = pack(reader, output, config).await;
+    if result.is_err() {
+        // a half-written installer must not be mistaken for a build output
+        let _ = tokio::fs::remove_file(&args.output).await;
+    }
+    result
 }
 
 pub async fn pack(
     mut base: impl AsyncRead + std::marker::Unpin,
     mut output: impl AsyncWrite + std::marker::Unpin,
     mut config: PackConfig,
-) {
+) -> Result<(), String> {
     if let Err(err) = validate_pack_names(&config) {
-        eprintln!("{err}");
-        return;
+        return Err(format!("{err}"));
     }
     println!("Generating exe with version info...");
     let tmppath = std::env::temp_dir().join(format!(
@@ -318,8 +307,7 @@ pub async fn pack(
     let index_len = match index_to_bin(&index) {
         Ok(bytes) => bytes.len() + get_header_size("\0INDEX"),
         Err(err) => {
-            eprintln!("{err}");
-            return;
+            return Err(format!("{err}"));
         }
     };
     // add index_len to offset
@@ -356,8 +344,7 @@ pub async fn pack(
     // check if pe_str is really 'This program cannot be run in DOS mode'
     let pe_string = std::str::from_utf8_mut(pe_str).unwrap();
     if pe_string != "This program cannot be run in DOS mode" {
-        eprintln!("Failed to find pe string: {pe_string:?}");
-        return;
+        return Err(format!("Failed to find pe string: {pe_string:?}"));
     }
     pe_str.copy_from_slice(&index_pre);
     // copy base to output, not closing output file
@@ -368,21 +355,18 @@ pub async fn pack(
     let config_bytes = config_bytes.as_bytes();
     let res = write_header(&mut output, "\0CONFIG", config_bytes.len() as u32).await;
     if res.is_err() {
-        eprintln!("Failed to write header: {:?}", res.err());
-        return;
+        return Err(format!("Failed to write header: {:?}", res.err()));
     }
     let res = output.write_all(config_bytes).await;
     if res.is_err() {
-        eprintln!("Failed to write config: {:?}", res.err());
-        return;
+        return Err(format!("Failed to write config: {:?}", res.err()));
     }
     // if theme exists, write theme
     if let Some(image) = config.image.as_mut() {
         println!("Writing image...");
         let res = write_file(&mut output, image).await;
         if res.is_err() {
-            eprintln!("Failed to write image: {:?}", res.err());
-            return;
+            return Err(format!("Failed to write image: {:?}", res.err()));
         }
     }
     if !files.is_empty() {
@@ -391,8 +375,7 @@ pub async fn pack(
         let index_bytes = match index_to_bin(&index) {
             Ok(bytes) => bytes,
             Err(err) => {
-                eprintln!("{err}");
-                return;
+                return Err(format!("{err}"));
             }
         };
         write_header(&mut output, "\0INDEX", index_bytes.len() as u32)
@@ -405,13 +388,11 @@ pub async fn pack(
     if let Some(metadata_bytes) = metadata_bytes {
         let res = write_header(&mut output, "\0META", metadata_bytes.len() as u32).await;
         if res.is_err() {
-            eprintln!("Failed to write header: {:?}", res.err());
-            return;
+            return Err(format!("Failed to write header: {:?}", res.err()));
         }
         let res = output.write_all(&metadata_bytes).await;
         if res.is_err() {
-            eprintln!("Failed to write metadata: {:?}", res.err());
-            return;
+            return Err(format!("Failed to write metadata: {:?}", res.err()));
         }
     }
     // write files
@@ -419,18 +400,21 @@ pub async fn pack(
         println!("Writing file: {}", file.name);
         let res = write_file(&mut output, file).await;
         if res.is_err() {
-            eprintln!("Failed to write file {}: {:?}", file.name, res.err());
-            return;
+            return Err(format!(
+                "Failed to write file {}: {:?}",
+                file.name,
+                res.err()
+            ));
         }
     }
     // flush
     println!("Finalizing...");
     let res = output.flush().await;
     if res.is_err() {
-        eprintln!("Failed to flush: {:?}", res.err());
-        return;
+        return Err(format!("Failed to flush: {:?}", res.err()));
     }
     println!("Done");
+    Ok(())
 }
 
 fn validate_pack_names(config: &PackConfig) -> Result<(), EmbeddedNameError> {

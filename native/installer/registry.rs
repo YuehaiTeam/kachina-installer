@@ -123,12 +123,18 @@ pub fn write_at_hive(hive: RegHive, params: &WriteRegistryParams) -> Result<()> 
         key.set_u32("NoModify", 1u32)?;
         key.set_u32("NoRepair", 1u32)?;
         if let Some(manifest) = &params.manifest {
-            key.set_u32("EstimatedSize", (manifest.size as u32) / 1024)?;
+            key.set_u32("EstimatedSize", estimated_size_kb(manifest.size))?;
             key.set_string("InstallerMeta", &manifest.metadata)?;
         }
         Ok::<(), anyhow::Error>(())
     }
     .context("WRITE_REG_ERR")
+}
+
+/// `EstimatedSize` is a DWORD in KiB; an install too large for it shows the
+/// maximum instead of a wrapped value.
+fn estimated_size_kb(bytes: u64) -> u32 {
+    u32::try_from(bytes / 1024).unwrap_or(u32::MAX)
 }
 
 pub fn remove_record(hive: RegHive, reg_name: &str) -> Result<()> {
@@ -313,6 +319,12 @@ fn classify_open(io: std::io::Error) -> HiveRead {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn estimated_size_keeps_installs_over_4_gib() {
+        assert_eq!(estimated_size_kb(5 << 30), 5 << 20);
+        assert_eq!(estimated_size_kb(u64::MAX), u32::MAX);
+    }
 
     fn present(location: &str) -> HiveRead {
         HiveRead::Present {

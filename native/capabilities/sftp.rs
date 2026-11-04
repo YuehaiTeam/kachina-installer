@@ -405,6 +405,17 @@ impl SftpMiddleware {
                                 "SFTP: empty DATA response",
                             ))?;
                         }
+                        // more than asked for would overlap the next request's
+                        // range, and the in-order output could never continue
+                        if data.len() as u64 > req_len as u64 {
+                            Err(std::io::Error::new(
+                                std::io::ErrorKind::InvalidData,
+                                format!(
+                                    "SFTP: DATA of {} bytes for a {req_len}-byte read at {req_off}",
+                                    data.len()
+                                ),
+                            ))?;
+                        }
                         // 短读：服务端有权少给，补发缺口
                         if (data.len() as u32) < req_len {
                             let gap_off = req_off + data.len() as u64;

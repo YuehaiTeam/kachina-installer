@@ -33,7 +33,12 @@ async fn async_main() {
     }
     let command = command.take().unwrap();
     match command {
-        Command::Pack(args) => pack::pack_cli(args).await,
+        Command::Pack(args) => {
+            if let Err(e) = pack::pack_cli(args).await {
+                eprintln!("Pack failed: {e}");
+                std::process::exit(1);
+            }
+        }
         Command::Gen(args) => gen::gen_cli(args).await,
         Command::Append(args) => append::append_cli(args).await,
         Command::Extract(args) => {
