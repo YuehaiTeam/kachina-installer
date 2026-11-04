@@ -4,17 +4,20 @@ use std::ffi::OsString;
 use std::io;
 use std::path::{Path, PathBuf};
 
+use std::collections::HashSet;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::Mutex;
+
 use anyhow::{bail, Context, Result};
 use serde::Deserialize;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-use async_compression::tokio::bufread::ZstdDecoder;
 use fmmap::tokio::{AsyncMmapFile, AsyncMmapFileExt};
 
 use crate::metadata::{FileMeta, RepoMetadata};
 use crate::pack_format::{
     preferred_file_hash, read_json, relative_under_root, scan_embedded, Embedded,
 };
+use crate::verified_write::{copy_into, Expected, Failure, HashingWriter};
 use crate::{dialog, process, reaper, uac};
 
 /// \0CONFIG 中 sfx 关心的子集；serde 忽略其余字段，与安装器配置双向兼容。
@@ -227,9 +230,8 @@ async fn run_staged(
     } else {
         dialog::Progress::show(title, "正在解压…", total).ok()
     };
-    for item in plan {
-        extract_one(mmap, item, temp_dir, progress.as_ref()).await?;
-    }
+    // 运行时是单线程的，这里没有别的任务；解压线程在 extract_all 里自己起
+    extract_all(mmap.as_slice(), plan, temp_dir, progress.as_ref())?;
     if let Some(p) = progress {
         if p.cancelled() {
             return Err(Cancelled.into());
@@ -242,97 +244,134 @@ async fn run_staged(
     Ok(code as i32)
 }
 
-/// 解码一个数据块到临时目录，边写边算 hash；失败时删掉半成品文件。
-/// 临时目录是本进程刚建的空目录，`rel` 只含普通组件，路径不会落到目录之外。
-async fn extract_one(
-    mmap: &AsyncMmapFile,
-    item: &ExtractItem,
+/// 解压线程数上限，与安装器的本地解压并发一致。
+const MAX_WORKERS: usize = 16;
+
+/// 先建好全部目录，再由每个 CPU 一个线程（至多 [`MAX_WORKERS`]）按计划顺序领取文件
+/// 写出。任一文件失败或用户取消后，其余线程在下一次写入时停下；返回最先记下的错误。
+fn extract_all(
+    package: &[u8],
+    plan: &[ExtractItem],
     temp_dir: &Path,
     progress: Option<&dialog::Progress>,
 ) -> Result<()> {
-    let out_path = temp_dir.join(&item.rel);
-    if let Some(parent) = out_path.parent() {
-        tokio::fs::create_dir_all(parent)
-            .await
-            .with_context(|| format!("创建目录失败 {}", parent.display()))?;
+    let dirs: HashSet<PathBuf> = plan
+        .iter()
+        .filter_map(|item| temp_dir.join(&item.rel).parent().map(Path::to_path_buf))
+        .collect();
+    for dir in &dirs {
+        std::fs::create_dir_all(dir).with_context(|| format!("创建目录失败 {}", dir.display()))?;
     }
 
-    let result = decode_verify_write(mmap, item, &out_path, progress).await;
+    let next = AtomicUsize::new(0);
+    let stop = AtomicBool::new(false);
+    let first_error: Mutex<Option<anyhow::Error>> = Mutex::new(None);
+    let workers = std::thread::available_parallelism()
+        .map(std::num::NonZeroUsize::get)
+        .unwrap_or(1)
+        .min(MAX_WORKERS)
+        .min(plan.len());
+    std::thread::scope(|scope| {
+        for _ in 0..workers {
+            scope.spawn(|| {
+                while !stop.load(Ordering::SeqCst) {
+                    let Some(item) = plan.get(next.fetch_add(1, Ordering::Relaxed)) else {
+                        break;
+                    };
+                    if let Err(err) = extract_one(package, item, temp_dir, progress, &stop) {
+                        // 先记错误再置停止位：被停止位打断的线程报的 Cancelled 不会抢先
+                        first_error
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .get_or_insert(err);
+                        stop.store(true, Ordering::SeqCst);
+                        break;
+                    }
+                }
+            });
+        }
+    });
+    match first_error.into_inner().unwrap_or_else(|e| e.into_inner()) {
+        Some(err) => Err(err),
+        None => Ok(()),
+    }
+}
+
+/// 解码一个数据块到临时目录，边写边算 hash；失败时删掉半成品文件。
+/// 临时目录是本进程刚建的空目录，`rel` 只含普通组件，路径不会落到目录之外。
+fn extract_one(
+    package: &[u8],
+    item: &ExtractItem,
+    temp_dir: &Path,
+    progress: Option<&dialog::Progress>,
+    stop: &AtomicBool,
+) -> Result<()> {
+    let out_path = temp_dir.join(&item.rel);
+    let result = decode_verify_write(package, item, &out_path, progress, stop);
     if result.is_err() {
-        let _ = tokio::fs::remove_file(&out_path).await;
+        let _ = std::fs::remove_file(&out_path);
     }
     result
 }
 
-async fn decode_verify_write(
-    mmap: &AsyncMmapFile,
+fn decode_verify_write(
+    package: &[u8],
     item: &ExtractItem,
     out_path: &Path,
     progress: Option<&dialog::Progress>,
+    stop: &AtomicBool,
 ) -> Result<()> {
-    let reader = mmap.range_reader(item.block.offset, item.block.size)?;
-    let mut decoder = ZstdDecoder::new(reader);
-    let file = tokio::fs::File::create(out_path)
-        .await
+    let block = package
+        .get(item.block.offset..item.block.offset + item.block.size)
+        .with_context(|| format!("{} 的数据块越过包尾", item.file_name))?;
+    let mut decoder = zstd::stream::read::Decoder::with_buffer(std::io::Cursor::new(block))
+        .context("初始化解压失败")?
+        .single_frame();
+    let file = std::fs::File::create(out_path)
         .with_context(|| format!("创建文件失败 {}", out_path.display()))?;
-    let mut writer = tokio::io::BufWriter::new(file);
 
-    // 与安装器 verify_hash 同一语义：md5 优先于 xxh；xxh 为 XxHash3_128 的
-    // finish_128 十六进制。
-    enum Hasher {
-        Md5(chksum_md5::MD5),
-        // 装进 Box 避免两个变体的体积差过大
-        Xxh(Box<twox_hash::XxHash3_128>),
-    }
-    let mut hasher = if item.md5.is_some() {
-        Hasher::Md5(chksum_md5::MD5::new())
-    } else {
-        Hasher::Xxh(Box::new(twox_hash::XxHash3_128::new()))
+    let cancelled =
+        || stop.load(Ordering::SeqCst) || progress.is_some_and(dialog::Progress::cancelled);
+    let expected = Expected {
+        size: item.output_size,
+        md5: item.md5.clone(),
+        xxh: item.xxh.clone(),
     };
-
-    let mut buf = [0u8; 65536];
-    let mut written: u64 = 0;
-    loop {
-        if progress.is_some_and(dialog::Progress::cancelled) {
-            return Err(Cancelled.into());
-        }
-        let n = decoder.read(&mut buf).await?;
-        if n == 0 {
-            break;
-        }
-        writer.write_all(&buf[..n]).await?;
-        match &mut hasher {
-            Hasher::Md5(h) => h.update(&buf[..n]),
-            Hasher::Xxh(h) => h.write(&buf[..n]),
-        }
-        written += n as u64;
+    // 进度框按字节累加，写出侧回报的是本文件累计值
+    let mut reported = 0;
+    let mut writer = HashingWriter::new(
+        std::io::BufWriter::with_capacity(256 * 1024, file),
+        expected,
+        false,
+        &cancelled,
+    )
+    .with_progress(|written| {
         if let Some(p) = progress {
-            p.add_bytes(n as u64);
+            p.add_bytes(written - reported);
         }
-    }
-    writer.flush().await?;
-
-    if written != item.output_size {
-        bail!(
-            "{} 大小校验失败：期望 {} 字节，实际 {} 字节",
-            item.file_name,
-            item.output_size,
-            written
-        );
-    }
-    let expected = item.md5.as_ref().or(item.xxh.as_ref());
-    if let Some(expected) = expected {
-        let actual = match hasher {
-            Hasher::Md5(h) => h.digest().to_hex_lowercase(),
-            Hasher::Xxh(h) => format!("{:x}", h.finish_128()),
-        };
-        if &actual != expected {
-            bail!(
+        reported = written;
+    });
+    let failed = |failure: Failure| -> anyhow::Error {
+        match failure {
+            Failure::Cancelled => Cancelled.into(),
+            Failure::Read(e) => {
+                anyhow::Error::new(e).context(format!("{} 解压失败", item.file_name))
+            }
+            Failure::Write(e) => {
+                anyhow::Error::new(e).context(format!("写入失败 {}", out_path.display()))
+            }
+            Failure::Size { expected, actual } => anyhow::anyhow!(
+                "{} 大小校验失败：期望 {expected} 字节，实际 {actual} 字节",
+                item.file_name
+            ),
+            Failure::Hash { expected, actual } => anyhow::anyhow!(
                 "{} 校验失败：期望 {expected}，实际 {actual}",
                 item.file_name
-            );
+            ),
         }
-    }
+    };
+    copy_into(&mut decoder, &mut writer).map_err(failed)?;
+    writer.finish().map_err(failed)?;
     Ok(())
 }
 
@@ -474,67 +513,82 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn decode_verify_write_roundtrip() {
-        let data: Vec<u8> = (0..200000u32).map(|i| (i % 251) as u8).collect();
-        // 压缩成 zstd 帧落盘，再经 mmap + 解码路径还原
+    /// 把每段内容压成一个 zstd 帧依次拼成"包"，返回包字节与对应的解压计划。
+    fn packed(files: &[(&str, Vec<u8>)]) -> (Vec<u8>, Vec<ExtractItem>) {
+        let mut package = Vec::new();
+        let mut plan = Vec::new();
+        for (name, data) in files {
+            let frame = zstd::encode_all(&data[..], 3).unwrap();
+            let mut xxh = twox_hash::XxHash3_128::new();
+            xxh.write(data);
+            plan.push(ExtractItem {
+                file_name: name.to_string(),
+                rel: relative_under_root(Path::new(""), name).unwrap(),
+                output_size: data.len() as u64,
+                md5: None,
+                xxh: Some(format!("{:x}", xxh.finish_128())),
+                block: Embedded {
+                    name: name.to_string(),
+                    offset: package.len(),
+                    raw_offset: 0,
+                    size: frame.len(),
+                },
+            });
+            package.extend_from_slice(&frame);
+        }
+        (package, plan)
+    }
+
+    fn temp_dir() -> PathBuf {
         let dir = std::env::temp_dir().join(format!("kachina-sfx-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
-        let packed = dir.join("block");
-        {
-            let mut encoder = async_compression::tokio::write::ZstdEncoder::new(Vec::new());
-            encoder.write_all(&data).await.unwrap();
-            encoder.shutdown().await.unwrap();
-            std::fs::write(&packed, encoder.into_inner()).unwrap();
+        dir
+    }
+
+    #[test]
+    fn extract_all_writes_every_file_under_its_directory() {
+        let files: Vec<(String, Vec<u8>)> = (0..24u32)
+            .map(|i| {
+                let data = (0..(i * 997 + 1)).map(|b| (b % 251) as u8).collect();
+                (format!("d{}/sub/f{i}.bin", i % 4), data)
+            })
+            .collect();
+        let refs: Vec<(&str, Vec<u8>)> =
+            files.iter().map(|(n, d)| (n.as_str(), d.clone())).collect();
+        let (package, plan) = packed(&refs);
+        let dir = temp_dir();
+        extract_all(&package, &plan, &dir, None).unwrap();
+        for (name, data) in &files {
+            assert_eq!(&std::fs::read(dir.join(name)).unwrap(), data, "{name}");
         }
-        let packed_len = std::fs::metadata(&packed).unwrap().len() as usize;
-        let mmap = AsyncMmapFile::open(&packed).await.unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
-        let mut xxh = twox_hash::XxHash3_128::new();
-        xxh.write(&data);
-        let xxh_hex = format!("{:x}", xxh.finish_128());
-
-        let item = ExtractItem {
-            file_name: "a/b.bin".to_string(),
-            rel: PathBuf::from(r"a\b.bin"),
-            output_size: data.len() as u64,
-            md5: None,
-            xxh: Some(xxh_hex),
-            block: Embedded {
-                name: "x".into(),
-                offset: 0,
-                raw_offset: 0,
-                size: packed_len,
-            },
-        };
-        let out = dir.join("out/b.bin");
-        tokio::fs::create_dir_all(out.parent().unwrap())
-            .await
-            .unwrap();
-        decode_verify_write(&mmap, &item, &out, None).await.unwrap();
-        assert_eq!(tokio::fs::read(&out).await.unwrap(), data);
+    #[test]
+    fn extract_reports_size_and_hash_mismatch_and_removes_the_file() {
+        let data: Vec<u8> = (0..200000u32).map(|i| (i % 251) as u8).collect();
+        let (package, plan) = packed(&[("a/b.bin", data)]);
+        let dir = temp_dir();
+        std::fs::create_dir_all(dir.join("a")).unwrap();
+        let stop = AtomicBool::new(false);
 
         // 解出的字节数与 meta 声明不符必须失败
         let longer = ExtractItem {
-            output_size: data.len() as u64 + 1,
-            ..item.clone()
+            output_size: plan[0].output_size + 1,
+            ..plan[0].clone()
         };
-        let err = decode_verify_write(&mmap, &longer, &out, None)
-            .await
-            .unwrap_err();
+        let err = extract_one(&package, &longer, &dir, None, &stop).unwrap_err();
         assert!(format!("{err:#}").contains("大小校验失败"));
+        assert!(!dir.join("a/b.bin").exists());
 
-        // 篡改期望 hash 必须失败
-        let bad = ExtractItem {
+        // 篡改期望 hash 必须失败，并让 extract_all 报出同一错误
+        let bad = vec![ExtractItem {
             xxh: Some("0".into()),
-            ..item
-        };
-        let err = decode_verify_write(&mmap, &bad, &out, None)
-            .await
-            .unwrap_err();
+            ..plan[0].clone()
+        }];
+        let err = extract_all(&package, &bad, &dir, None).unwrap_err();
         assert!(format!("{err:#}").contains("校验失败"));
-
-        drop(mmap);
+        assert!(!dir.join("a/b.bin").exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

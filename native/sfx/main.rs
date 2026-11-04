@@ -10,7 +10,7 @@ mod dialog;
 mod reaper;
 mod run;
 
-// 共享模块里 sfx 只用得到一部分（进程拉起、提权、元数据、包格式读取），
+// 共享模块里 sfx 只用得到一部分（进程拉起、提权、元数据、包格式读取、校验写出），
 // 其余导出属于安装器侧，这里整体允许未使用。sfx 不接日志：被包装应用继承同一
 // 控制台，sfx 不往 stdout 写任何东西。
 #[path = "../utils/metadata.rs"]
@@ -25,6 +25,9 @@ mod process;
 #[path = "../utils/uac.rs"]
 #[allow(dead_code)]
 mod uac;
+#[path = "../verified_write.rs"]
+#[allow(dead_code)]
+mod verified_write;
 
 fn main() {
     use windows::Win32::System::Console::{AttachConsole, GetConsoleWindow, ATTACH_PARENT_PROCESS};
