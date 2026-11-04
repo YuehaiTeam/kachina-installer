@@ -5,60 +5,61 @@
 // x86_64 Windows 上与 stdlib 期望的 usize ABI 一致。
 #![allow(suspicious_runtime_symbol_definitions)]
 
-use std::{ffi::c_void, mem::ManuallyDrop};
+use std::ffi::c_void;
+use std::io::{self, Read, Seek, SeekFrom, Write};
 
 include!("../binding.rs");
 
+/// `patch_types.h` 的 `hpatch_kNullStreamPos`（`~(hpatch_StreamPos_t)0`）；bindgen 不展开带类型转换的宏。
+const hpatch_kNullStreamPos: hpatch_StreamPos_t = hpatch_StreamPos_t::MAX;
+
+/// `patch_single_stream` 不分配内存，读出补丁头后经此回调向调用方要工作区：
+/// `stepMemSize` 之外的部分被三等分，分别作 diff 读取块、old 读取步长与输出写缓冲。
+/// 每份取上游推荐的文件 I/O 粒度 `hpatch_kFileIOBufBetterSize`（64 KiB）。
 extern "C" fn on_diff_info(
     listener: *mut sspatch_listener_t,
-    _info: *const hpatch_singleCompressedDiffInfo,
+    info: *const hpatch_singleCompressedDiffInfo,
     _out_decompress_plugin: *mut *mut hpatch_TDecompress,
     out_temp_cache: *mut *mut u8,
     out_temp_cache_end: *mut *mut u8,
 ) -> i32 {
     let listener = unsafe { &mut *listener };
-    let info = unsafe { &*(_info as *const hpatch_singleCompressedDiffInfo) };
-    let buffer_size = info.stepMemSize as usize + hpatch_kStreamCacheSize as usize * 3;
-    let mut buffer = ManuallyDrop::new(vec![0u8; buffer_size]);
-    let buffer_info = unsafe { &mut *(listener.import as *mut BufferInfo) };
-    let buffer_slice = buffer.as_mut_ptr();
-    let buffer_end = unsafe { buffer_slice.add(buffer_size) };
-    buffer_info.buffer = Some(buffer);
-    buffer_info.buffer_size = buffer_size;
+    let info = unsafe { &*info };
+    let cache = unsafe { &mut *(listener.import as *mut Vec<u8>) };
+    let size = info.stepMemSize as usize + hpatch_kFileIOBufBetterSize as usize * 3;
+    *cache = vec![0u8; size];
+    // Vec 的堆内存在 cache 被释放前不会移动，patch 期间指针一直有效
     unsafe {
-        *out_temp_cache = buffer_slice;
-        *out_temp_cache_end = buffer_end;
+        *out_temp_cache = cache.as_mut_ptr();
+        *out_temp_cache_end = cache.as_mut_ptr().add(size);
     }
     1
 }
 
-pub struct BufferInfo {
-    buffer: Option<ManuallyDrop<Vec<u8>>>,
-    buffer_size: usize,
-}
+trait ReadSeek: Read + Seek {}
 
-impl sspatch_listener_t {
-    pub fn new_dummy(buffer: &mut BufferInfo) -> sspatch_listener_t {
-        sspatch_listener_t {
-            import: buffer as *mut BufferInfo as *mut c_void,
-            onDiffInfo: Some(on_diff_info),
-            onPatchFinish: None,
-        }
-    }
-}
+impl<T: Read + Seek> ReadSeek for T {}
 
-trait ReadSeek: std::io::Read + std::io::Seek {}
-
-impl<T: std::io::Read + std::io::Seek> ReadSeek for T {}
-
+/// 回调里出错时只能向 C 返回失败；首个 I/O 错误留在这里，由 Rust 侧在 patch 返回后取出。
 struct ReadSeekStreamWrapper<'a> {
     stream: &'a mut dyn ReadSeek,
+    /// 当前文件游标；与本次读取起点相同时省掉 seek。出错后置空。
+    pos: Option<u64>,
+    error: Option<io::Error>,
 }
 struct ReadStreamWrapper<'a> {
-    stream: &'a mut dyn std::io::Read,
+    stream: &'a mut dyn Read,
+    error: Option<io::Error>,
 }
 struct WriteStreamWrapper<'a> {
-    stream: &'a mut dyn std::io::Write,
+    stream: &'a mut dyn Write,
+    error: Option<io::Error>,
+}
+
+/// 记下首个错误，向 C 返回失败。
+fn fail(slot: &mut Option<io::Error>, err: io::Error) -> i32 {
+    slot.get_or_insert(err);
+    0
 }
 
 extern "C" fn read_seek_callback(
@@ -67,85 +68,85 @@ extern "C" fn read_seek_callback(
     out_data: *mut u8,
     out_data_end: *mut u8,
 ) -> i32 {
-    let read_size = unsafe { out_data_end.offset_from(out_data) };
+    let read_size = unsafe { out_data_end.offset_from(out_data) } as usize;
     let stream = unsafe { &*stream };
-    let input_wrapper = unsafe { &mut *(stream.streamImport as *mut ReadSeekStreamWrapper) };
-    // seek
-    if let Err(err) = input_wrapper
-        .stream
-        .seek(std::io::SeekFrom::Start(read_from))
-    {
-        println!("Error in read_seek: {:?}", err);
-        return 0;
+    let wrapper = unsafe { &mut *(stream.streamImport as *mut ReadSeekStreamWrapper) };
+    if wrapper.pos != Some(read_from) {
+        if let Err(err) = wrapper.stream.seek(SeekFrom::Start(read_from)) {
+            wrapper.pos = None;
+            return fail(&mut wrapper.error, err);
+        }
     }
-    // buffer: out_data to out_data_end
-    let buffer = unsafe { std::slice::from_raw_parts_mut(out_data, read_size as usize) };
-    // read exact, return 0 if failed
-    let res = input_wrapper.stream.read_exact(buffer);
-    if let Err(err) = res {
-        println!("Error in read_seek_callback: {:?}", err);
-        return 0;
+    let buffer = unsafe { std::slice::from_raw_parts_mut(out_data, read_size) };
+    if let Err(err) = wrapper.stream.read_exact(buffer) {
+        wrapper.pos = None;
+        return fail(&mut wrapper.error, err);
     }
+    wrapper.pos = Some(read_from + read_size as u64);
     read_size as i32
 }
+
 extern "C" fn read_seq_callback(
     stream: *const hpatch_TStreamInput,
     _read_from: u64,
     out_data: *mut u8,
     out_data_end: *mut u8,
 ) -> i32 {
-    let read_size = unsafe { out_data_end.offset_from(out_data) };
+    let read_size = unsafe { out_data_end.offset_from(out_data) } as usize;
     let stream = unsafe { &*stream };
-    let input_wrapper = unsafe { &mut *(stream.streamImport as *mut ReadStreamWrapper) };
-    // buffer: out_data to out_data_end
-    let buffer = unsafe { std::slice::from_raw_parts_mut(out_data, read_size as usize) };
-    // read exact, return 0 if failed
-    let res = input_wrapper.stream.read_exact(buffer);
-    if let Err(err) = res {
-        println!("Error in read_seq_callback: {:?}", err);
-        return 0;
+    let wrapper = unsafe { &mut *(stream.streamImport as *mut ReadStreamWrapper) };
+    let buffer = unsafe { std::slice::from_raw_parts_mut(out_data, read_size) };
+    if let Err(err) = wrapper.stream.read_exact(buffer) {
+        return fail(&mut wrapper.error, err);
     }
     read_size as i32
 }
+
 extern "C" fn write_seq_callback(
     stream: *const hpatch_TStreamOutput,
     _write_to: u64,
     out_data: *const u8,
     out_data_end: *const u8,
 ) -> i32 {
-    let write_size = unsafe { out_data_end.offset_from(out_data) };
-    let stream: &hpatch_TStreamOutput = unsafe { &*stream };
-    let input_wrapper = unsafe { &mut *(stream.streamImport as *mut WriteStreamWrapper) };
-    // buffer: out_data to out_data_end
-    let buffer = unsafe { std::slice::from_raw_parts(out_data, write_size as usize) };
-    // read exact, return 0 if failed
-    let res = input_wrapper.stream.write_all(buffer);
-    if let Err(err) = res {
-        println!("Error in write_seq_callback: {:?}", err);
-        return 0;
+    let write_size = unsafe { out_data_end.offset_from(out_data) } as usize;
+    let stream = unsafe { &*stream };
+    let wrapper = unsafe { &mut *(stream.streamImport as *mut WriteStreamWrapper) };
+    let buffer = unsafe { std::slice::from_raw_parts(out_data, write_size) };
+    if let Err(err) = wrapper.stream.write_all(buffer) {
+        return fail(&mut wrapper.error, err);
     }
     write_size as i32
 }
 
+/// 把单流补丁 `diff` 应用到 `input`（旧文件，需随机读），结果顺序写入 `output`。
+///
+/// 任一流回调出错时返回该 `io::Error`（调用方的读写器报出的错误原样带回，例如取消）；
+/// 否则 HPatch 返回失败码时报 `io::ErrorKind::Other`，消息含失败码。
 pub fn safe_patch_single_stream(
-    mut output: impl std::io::Write,
-    mut diff: impl std::io::Read,
+    mut output: impl Write,
+    mut diff: impl Read,
     diff_size: usize,
-    mut input: impl std::io::Read + std::io::Seek,
+    mut input: impl Read + Seek,
     input_size: usize,
-) -> i32 {
-    // 10k buffer
-    let mut buffer_info = BufferInfo {
-        buffer: None,
-        buffer_size: 0,
+) -> io::Result<()> {
+    let mut cache: Vec<u8> = Vec::new();
+    let mut listener = sspatch_listener_t {
+        import: &mut cache as *mut Vec<u8> as *mut c_void,
+        onDiffInfo: Some(on_diff_info),
+        onPatchFinish: None,
     };
-    let mut listener = sspatch_listener_t::new_dummy(&mut buffer_info);
-    let listener_ptr = &mut listener as *mut sspatch_listener_t;
-    let coverlistener_ptr = std::ptr::null_mut();
-    let mut input_wrapper = ReadSeekStreamWrapper { stream: &mut input };
-    let mut diff_wrapper = ReadStreamWrapper { stream: &mut diff };
+    let mut input_wrapper = ReadSeekStreamWrapper {
+        stream: &mut input,
+        pos: None,
+        error: None,
+    };
+    let mut diff_wrapper = ReadStreamWrapper {
+        stream: &mut diff,
+        error: None,
+    };
     let mut output_wrapper = WriteStreamWrapper {
         stream: &mut output,
+        error: None,
     };
     let mut stream_input = hpatch_TStreamInput {
         streamSize: input_size as u64,
@@ -160,27 +161,31 @@ pub fn safe_patch_single_stream(
         read: Some(read_seq_callback),
     };
     let mut stream_output = hpatch_TStreamOutput {
-        // 1G
-        streamSize: 1 << 30,
+        // 输出长度不设上限；patch 以补丁头里的 newDataSize 为准
+        streamSize: hpatch_kNullStreamPos,
         streamImport: &mut output_wrapper as *mut WriteStreamWrapper as *mut c_void,
         write: Some(write_seq_callback),
         read_writed: None,
     };
     let res: i32 = unsafe {
         patch_single_stream(
-            listener_ptr,
-            &mut stream_output as *mut hpatch_TStreamOutput,
-            &mut stream_input as *mut hpatch_TStreamInput,
-            &mut diff_input as *mut hpatch_TStreamInput,
+            &mut listener,
+            &mut stream_output,
+            &mut stream_input,
+            &mut diff_input,
             0,
-            coverlistener_ptr,
+            std::ptr::null_mut(),
         )
     };
-    if buffer_info.buffer.is_some() {
-        let mut buffer = buffer_info.buffer.take().unwrap();
-        unsafe {
-            ManuallyDrop::drop(&mut buffer);
-        }
+    if let Some(err) = diff_wrapper
+        .error
+        .or(input_wrapper.error)
+        .or(output_wrapper.error)
+    {
+        return Err(err);
     }
-    res
+    if res != 1 {
+        return Err(io::Error::other(format!("hpatch failed with code {res}")));
+    }
+    Ok(())
 }

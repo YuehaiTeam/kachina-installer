@@ -375,9 +375,12 @@ pub fn sliced(parts: Vec<(u64, u64)>) -> Box<dyn tokio::io::AsyncRead + Unpin + 
                     }
                 }
                 let mut received = 0;
+                // 读进同一块 BytesMut 的空闲容量再切走：不逐次清零 64 KiB，零碎的小读共享一块
+                // 分配，接收方释放先前的块后 reserve 可以回收原分配。
+                let mut buffer = bytes::BytesMut::new();
                 loop {
-                    let mut buffer = vec![0; 64 * 1024];
-                    let read = reader.read(&mut buffer).await;
+                    buffer.reserve(64 * 1024);
+                    let read = reader.read_buf(&mut buffer).await;
                     if (read.is_err() || matches!(read, Ok(0))) && received == 0 && part.is_none() && !retried && !ctx.stop.is_cancelled() {
                         drop(reader);
                         retried = true;
@@ -388,10 +391,10 @@ pub fn sliced(parts: Vec<(u64, u64)>) -> Box<dyn tokio::io::AsyncRead + Unpin + 
                     if n == 0 { break; }
                     received += n as u64;
                     anyhow::ensure!(received <= len, "range body exceeds declared length");
-                    buffer.truncate(n);
+                    let chunk = buffer.split().freeze();
                     tokio::select! {
                         _ = ctx.stop.cancelled() => return Err(crate::utils::code::Cancelled.into()),
-                        sent = tx.send(Ok(buffer.into())) => { sent?; }
+                        sent = tx.send(Ok(chunk)) => { sent?; }
                     }
                 }
                 anyhow::ensure!(received == len, "incomplete range body");

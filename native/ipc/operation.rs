@@ -43,6 +43,9 @@ pub enum IpcOperation {
         file_list: Vec<String>,
         #[serde(default)]
         skip_hash: Vec<String>,
+        /// Planned deletes, see [`crate::fs::check_local_files`].
+        #[serde(default)]
+        delete_list: Vec<String>,
     },
     ProbeWritable(Vec<String>),
     RunMirrorcDownload {
@@ -184,9 +187,17 @@ pub async fn run_opr(op: IpcOperation, notify: ProgressNotify) -> TAResult<IpcRe
             hash_algorithm,
             file_list,
             skip_hash,
+            delete_list,
         } => Ok(IpcResult::CheckLocalFiles(
-            crate::fs::check_local_files(source, hash_algorithm, file_list, skip_hash, notify)
-                .await?,
+            crate::fs::check_local_files(
+                source,
+                hash_algorithm,
+                file_list,
+                skip_hash,
+                delete_list,
+                notify,
+            )
+            .await?,
         )),
         IpcOperation::ProbeWritable(file_list) => Ok(IpcResult::ProbeWritable(
             crate::fs::probe_writable(file_list).await,

@@ -1859,6 +1859,8 @@ async fn scan_local(
         HashKey::Xxh => "xxh",
     };
     let files: Vec<String> = latest.hashed.iter().map(|e| e.file_name.clone()).collect();
+    // 待删文件的旧 hash 写进 journal 的 Unit::Del，崩溃恢复据此判断它是否被外部改过
+    let delete_list = latest.deletes.clone();
     let skip_hash = collect_skip_hash(
         &latest.hashed,
         &settings.install_path,
@@ -1875,6 +1877,7 @@ async fn scan_local(
             hash_algorithm: algo.to_string(),
             file_list: files,
             skip_hash,
+            delete_list,
         },
         progress_notify(move |p| {
             let _ = tx.send(p);
@@ -2389,6 +2392,8 @@ async fn install_files(
                             )
                             .await
                         }
+                        // 取消时既不重试合并请求，也不退回逐个下载
+                        Err(err) if is_cancelled(&err) => Err(err),
                         Err(err) => {
                             tracing::warn!("merged download failed, retry: {err:#}");
                             match install_merged(
@@ -2424,6 +2429,7 @@ async fn install_files(
                                     )
                                     .await
                                 }
+                                Err(err) if is_cancelled(&err) => Err(err),
                                 Err(err) => {
                                     tracing::warn!("merged download failed, fallback: {err:#}");
                                     let all: Vec<usize> = (0..files.len()).collect();
@@ -2700,12 +2706,7 @@ async fn install_merged(
     let IpcResult::InstallMultichunkStream(multi) = value else {
         bail!("IPC_SHAPE_ERR");
     };
-    let mut failed = Vec::new();
-    for (i, res) in multi.results.iter().enumerate() {
-        if res.is_err() {
-            failed.push(i);
-        }
-    }
+    let failed = failed_chunks(&multi.results)?;
     let names = files
         .iter()
         .map(|f| f.item.file_name.as_str())
@@ -2731,6 +2732,20 @@ async fn install_merged(
         );
     }
     Ok(MergedResult { op: ipc, failed })
+}
+
+/// 合并流里失败分块的下标。任一分块是取消就整体按取消返回：取消不是单个文件失败，
+/// 不能落到逐个重试。
+fn failed_chunks(results: &[Result<usize, crate::ipc::IpcError>]) -> anyhow::Result<Vec<usize>> {
+    let mut failed = Vec::new();
+    for (i, res) in results.iter().enumerate() {
+        match res {
+            Err(err) if err.cancelled => return Err(Cancelled.into()),
+            Err(_) => failed.push(i),
+            Ok(_) => {}
+        }
+    }
+    Ok(failed)
 }
 
 #[allow(clippy::too_many_arguments)] // independent session values; a context struct would not change the call
@@ -3872,6 +3887,24 @@ mod tests {
 
         let only_cancel: Vec<anyhow::Result<u8>> = vec![Ok(1), Err(Cancelled.into())];
         assert!(is_cancelled(&collect_ops(only_cancel).unwrap_err()));
+    }
+
+    #[test]
+    fn cancelled_chunk_cancels_the_merged_request() {
+        let chunk_err = |cancelled| crate::ipc::IpcError {
+            message: String::new(),
+            code: None,
+            subject: None,
+            sid: None,
+            cancelled,
+            insight: None,
+        };
+        assert_eq!(
+            failed_chunks(&[Ok(1), Err(chunk_err(false)), Ok(2)]).unwrap(),
+            vec![1]
+        );
+        let err = failed_chunks(&[Err(chunk_err(false)), Err(chunk_err(true))]).unwrap_err();
+        assert!(is_cancelled(&err));
     }
 
     #[test]

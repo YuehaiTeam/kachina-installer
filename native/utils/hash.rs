@@ -1,10 +1,16 @@
 use anyhow::{Context, Result};
 use std::{io::Read, os::windows::fs::OpenOptionsExt, path::Path};
 
-const HASH_BUFFER_SIZE: usize = 1024 * 1024;
+pub const HASH_BUFFER_SIZE: usize = 1024 * 1024;
 const FILE_FLAG_SEQUENTIAL_SCAN: u32 = 0x0800_0000;
 
 pub fn hash_file(hash_algorithm: &str, path: &str) -> Result<String> {
+    let mut buffer = vec![0u8; HASH_BUFFER_SIZE];
+    hash_file_with(hash_algorithm, path, &mut buffer)
+}
+
+/// 与 [`hash_file`] 相同，读缓冲由调用方提供，连续计算多个文件时复用同一块。
+pub fn hash_file_with(hash_algorithm: &str, path: &str, buffer: &mut [u8]) -> Result<String> {
     let mut file = std::fs::OpenOptions::new()
         .read(true)
         .write(false)
@@ -12,11 +18,10 @@ pub fn hash_file(hash_algorithm: &str, path: &str) -> Result<String> {
         .open(Path::new(path))
         .context("OPEN_TARGET_ERR")?;
 
-    let mut buffer = vec![0u8; HASH_BUFFER_SIZE];
     if hash_algorithm == "md5" {
         let mut hasher = chksum_md5::MD5::new();
         loop {
-            let read = file.read(&mut buffer).context("READ_FILE_ERR")?;
+            let read = file.read(buffer).context("READ_FILE_ERR")?;
             if read == 0 {
                 break;
             }
@@ -27,7 +32,7 @@ pub fn hash_file(hash_algorithm: &str, path: &str) -> Result<String> {
         use twox_hash::XxHash3_128;
         let mut hasher = XxHash3_128::new();
         loop {
-            let read = file.read(&mut buffer).context("READ_FILE_ERR")?;
+            let read = file.read(buffer).context("READ_FILE_ERR")?;
             if read == 0 {
                 break;
             }

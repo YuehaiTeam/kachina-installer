@@ -28,7 +28,7 @@ use crate::{
     local::mmap,
     utils::{
         error::{TACommandError, TAResult, DOWNLOAD_STALLED, DOWNLOAD_TOO_SLOW},
-        hash::run_hash,
+        hash::{hash_file_with, run_hash, HASH_BUFFER_SIZE},
         progressed_read::ReadWithCallback,
         url::HttpContextExt,
     },
@@ -633,11 +633,19 @@ fn enumerate(
     Ok((walk.stat, walk.dirty, walk.reparse))
 }
 
+/// Stat and hash the managed files (`file_list`) under `source`, and report
+/// which directories are not wholly managed.
+///
+/// `delete_list` holds the planned deletes. Those that exist as files are
+/// hashed too, so the journal records the hash a delete expects to remove;
+/// they stay unmanaged for the directory check, because a directory swapped
+/// as one unit must contain only the files the journal lists.
 pub async fn check_local_files(
     source: String,
     hash_algorithm: String,
     file_list: Vec<String>,
     skip_hash: Vec<String>,
+    delete_list: Vec<String>,
     notify: ProgressNotify,
 ) -> Result<LocalScan> {
     let source_path = PathBuf::from(&source);
@@ -683,8 +691,36 @@ pub async fn check_local_files(
             files.push(item);
         }
     }
+    let mut seen: HashSet<String> = managed.keys().cloned().collect();
+    for rel in delete_list {
+        if !seen.insert(norm_rel(&rel)) {
+            continue;
+        }
+        let Some(abs) = staging::try_join_rel(&source_path, &rel) else {
+            continue;
+        };
+        if let Ok(meta) = std::fs::metadata(&abs) {
+            if meta.is_file() {
+                files.push(Metadata {
+                    file_name: abs.to_string_lossy().to_string(),
+                    hash: String::new(),
+                    size: meta.len(),
+                    unwritable: false,
+                });
+            }
+        }
+    }
 
-    files.sort_by_key(|file| std::cmp::Reverse(file.size));
+    // 大文件按大小降序排在最前，避免最后剩一个大文件拖尾；小文件保持目录枚举顺序，
+    // 同一目录的文件连续读取。sort_by_key 是稳定排序。
+    const LARGE_FILE: u64 = 1024 * 1024;
+    files.sort_by_key(|file| {
+        std::cmp::Reverse(if file.size >= LARGE_FILE {
+            file.size
+        } else {
+            0
+        })
+    });
     let len = files.len() + stated.len();
     notify(Progress::CountOf {
         done: 0,
@@ -709,26 +745,39 @@ pub async fn check_local_files(
         });
     }
 
-    let hash_concurrency = std::thread::available_parallelism()
+    // 每个 CPU 一个阻塞线程，按顺序领取文件，整个扫描期间复用各自的读缓冲。
+    let workers = std::thread::available_parallelism()
         .map(std::num::NonZeroUsize::get)
-        .unwrap_or(1);
-    let semaphore = Arc::new(tokio::sync::Semaphore::new(hash_concurrency));
-    let mut joinset = tokio::task::JoinSet::new();
-
-    for file in files.iter() {
+        .unwrap_or(1)
+        .min(files.len());
+    let files = Arc::new(files);
+    let next = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Result<Metadata>>();
+    for _ in 0..workers {
+        let (files, next, tx) = (files.clone(), next.clone(), tx.clone());
         let hash_algorithm = hash_algorithm.clone();
-        let mut file = file.clone();
-        let semaphore = semaphore.clone();
-        joinset.spawn(async move {
-            let _permit = semaphore
-                .acquire_owned()
-                .await
-                .context("HASH_SEMAPHORE_ERR")?;
-            file.hash = run_hash(&hash_algorithm, &file.file_name).await?;
-            file.unwritable = false;
-            Ok::<Metadata, anyhow::Error>(file)
+        tokio::task::spawn_blocking(move || {
+            let mut buffer = vec![0u8; HASH_BUFFER_SIZE];
+            loop {
+                let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let Some(file) = files.get(i) else { break };
+                let res =
+                    hash_file_with(&hash_algorithm, &file.file_name, &mut buffer).map(|hash| {
+                        Metadata {
+                            hash,
+                            unwritable: false,
+                            ..file.clone()
+                        }
+                    });
+                let failed = res.is_err();
+                // 接收端已因错误返回时停止
+                if tx.send(res).is_err() || failed {
+                    break;
+                }
+            }
         });
     }
+    drop(tx);
 
     let mut finished = stated.len();
     let mut finished_hashes = Vec::with_capacity(len);
@@ -736,8 +785,7 @@ pub async fn check_local_files(
     let mut last_notify = Instant::now();
     const PROGRESS_FRAME: Duration = Duration::from_millis(50);
 
-    while let Some(res) = joinset.join_next().await {
-        let res = res.context("HASH_THREAD_ERR")?;
+    while let Some(res) = rx.recv().await {
         let res = res.context("HASH_COMPLETE_ERR")?;
         finished += 1;
         finished_hashes.push(res);
@@ -749,6 +797,10 @@ pub async fn check_local_files(
             last_notify = Instant::now();
         }
     }
+    // 工作线程 panic 时通道提前关闭
+    if finished != len {
+        return Err(anyhow::anyhow!("hash worker exited early")).context("HASH_THREAD_ERR");
+    }
 
     Ok(LocalScan {
         files: finished_hashes,
@@ -757,19 +809,20 @@ pub async fn check_local_files(
 }
 
 pub async fn probe_writable(file_list: Vec<String>) -> Vec<String> {
-    let mut unwritable = Vec::new();
-    for path in file_list {
-        let writable = tokio::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(&path)
-            .await
-            .is_ok();
-        if !writable {
-            unwritable.push(path);
-        }
-    }
-    unwritable
+    tokio::task::spawn_blocking(move || {
+        file_list
+            .into_iter()
+            .filter(|path| {
+                std::fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open(path)
+                    .is_err()
+            })
+            .collect()
+    })
+    .await
+    .unwrap_or_default()
 }
 
 pub async fn is_dir_empty(path: String, exe_name: String) -> (bool, bool) {
@@ -1115,12 +1168,17 @@ pub async fn progressed_hpatch(
     out_path: &Path,
     on_progress: Box<dyn Fn(usize) + Send>,
 ) -> Result<usize, anyhow::Error> {
+    // 与 progressed_copy 同一节流：每 20ms 至多一次，读完补丁时补报一次
     let mut downloaded = 0;
+    let mut last = std::time::Instant::now();
     let decoder = ReadWithCallback {
         reader: diff,
         callback: move |chunk| {
             downloaded += chunk;
-            on_progress(downloaded);
+            if downloaded >= diff_size || last.elapsed().as_millis() >= 20 {
+                last = std::time::Instant::now();
+                on_progress(downloaded);
+            }
         },
     };
     if let Some(parent) = out_path.parent() {
@@ -1143,12 +1201,10 @@ pub async fn progressed_hpatch(
     })
     .await
     .context("RUN_HPATCH_ERR")?;
-    if res != 1 {
+    if let Err(err) = res {
         let _ = tokio::fs::remove_file(out_path).await;
-        return Err(anyhow::Error::new(std::io::Error::other(format!(
-            "Patch failed with code {res}"
-        ))))
-        .context("PATCH_FAILED_ERR");
+        // 读写器的错误原样带回，网络取消与断流仍能被识别
+        return Err(anyhow::Error::new(err).context("PATCH_FAILED_ERR"));
     }
     Ok(diff_size)
 }
@@ -1230,6 +1286,7 @@ mod tests {
             "md5".to_string(),
             vec!["app.exe".to_string()],
             vec![],
+            vec![],
             progress_notify(move |v| reports_cb.lock().unwrap().push(v)),
         )
         .await
@@ -1268,6 +1325,7 @@ mod tests {
             "md5".to_string(),
             vec!["app.exe".to_string(), "User/settings.json".to_string()],
             vec!["User/settings.json".to_string()],
+            vec![],
             progress_notify(|_| {}),
         )
         .await
@@ -1299,6 +1357,7 @@ mod tests {
             "md5".to_string(),
             managed.iter().map(|s| s.to_string()).collect(),
             skip.iter().map(|s| s.to_string()).collect(),
+            vec![],
             progress_notify(|_| {}),
         )
         .await
@@ -1416,6 +1475,157 @@ mod tests {
         assert!(!unwritable.iter().any(|p| p.ends_with("free.dll")));
         assert!(unwritable.iter().any(|p| p.ends_with("locked.dll")));
         drop(_hold);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn check_local_files_hashes_every_file_once() {
+        let dir = temp_dir();
+        let mut names = Vec::new();
+        for i in 0..40 {
+            let name = format!("d{}/f{i}.bin", i % 3);
+            write_file(&dir, &name, format!("content-{i}").as_bytes());
+            names.push(name);
+        }
+        write_file(&dir, "big.bin", &vec![7u8; 2 * 1024 * 1024]);
+        names.push("big.bin".into());
+        let scanned = check_local_files(
+            dir.to_string_lossy().to_string(),
+            "md5".to_string(),
+            names.clone(),
+            vec![],
+            vec![],
+            progress_notify(|_| {}),
+        )
+        .await
+        .unwrap()
+        .files;
+        assert_eq!(scanned.len(), names.len());
+        for name in &names {
+            let path = dir.join(name);
+            let file = scanned
+                .iter()
+                .find(|f| Path::new(&f.file_name) == path)
+                .unwrap_or_else(|| panic!("{name} missing"));
+            let expected = chksum_md5::hash(std::fs::read(&path).unwrap()).to_hex_lowercase();
+            assert_eq!(file.hash, expected, "{name}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn planned_deletes_are_hashed_but_stay_unmanaged() {
+        let dir = temp_dir();
+        write_file(&dir, "app.exe", b"a");
+        write_file(&dir, "lib/new.dll", b"n");
+        write_file(&dir, "lib/old.dll", b"retired");
+        let mut scanned = check_local_files(
+            dir.to_string_lossy().to_string(),
+            "md5".to_string(),
+            vec!["app.exe".into(), "lib/new.dll".into()],
+            vec![],
+            vec![
+                "lib/old.dll".into(),
+                "lib/missing.dll".into(),
+                "app.exe".into(),
+            ],
+            progress_notify(|_| {}),
+        )
+        .await
+        .unwrap();
+        let old = scanned
+            .files
+            .iter()
+            .find(|f| f.file_name.ends_with("old.dll"))
+            .expect("existing delete is hashed");
+        assert_eq!(old.hash, chksum_md5::hash(b"retired").to_hex_lowercase());
+        // app.exe 同时在两张表里也只算一次；不存在的待删文件不出现
+        assert_eq!(scanned.files.len(), 3);
+        // 待删文件仍按未托管内容算：lib 是脏目录，不会被整目录换入
+        scanned.dirty_dirs.sort();
+        assert_eq!(scanned.dirty_dirs, vec![String::new(), "lib".to_string()]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 1 MiB 伪随机旧文件，新文件把前后两半对调并插入一段新内容：打补丁时要跳着读旧文件。
+    fn patch_fixture() -> (Vec<u8>, Vec<u8>, Vec<u8>) {
+        let mut seed = 0x2545_f491_4f6c_dd1du64;
+        let old: Vec<u8> = (0..1 << 20)
+            .map(|_| {
+                seed ^= seed << 13;
+                seed ^= seed >> 7;
+                seed ^= seed << 17;
+                seed as u8
+            })
+            .collect();
+        let mid = old.len() / 2;
+        let mut new = old[mid..].to_vec();
+        new.extend_from_slice(b"inserted between the halves");
+        new.extend_from_slice(&old[..mid]);
+        let mut diff = std::io::Cursor::new(Vec::new());
+        hdiff_sys::safe_create_single_patch(&new, &old, &mut diff, 7).unwrap();
+        (old, new, diff.into_inner())
+    }
+
+    #[tokio::test]
+    async fn hpatch_reproduces_new_file_and_reports_full_progress() {
+        let (old, new, diff) = patch_fixture();
+        let dir = temp_dir();
+        let old_path = write_file(&dir, "old.bin", &old);
+        let out = dir.join("new.bin");
+        let reported = Arc::new(Mutex::new(0usize));
+        let sink = reported.clone();
+        let diff_len = diff.len();
+        progressed_hpatch(
+            &old_path,
+            Box::new(std::io::Cursor::new(diff)),
+            diff_len,
+            &out,
+            Box::new(move |n| *sink.lock().unwrap() = n),
+        )
+        .await
+        .unwrap();
+        assert!(std::fs::read(&out).unwrap() == new);
+        assert_eq!(*reported.lock().unwrap(), diff_len);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn hpatch_returns_the_diff_reader_error() {
+        struct Broken;
+        impl tokio::io::AsyncRead for Broken {
+            fn poll_read(
+                self: std::pin::Pin<&mut Self>,
+                _: &mut std::task::Context<'_>,
+                _: &mut tokio::io::ReadBuf<'_>,
+            ) -> std::task::Poll<std::io::Result<()>> {
+                std::task::Poll::Ready(Err(std::io::Error::new(
+                    std::io::ErrorKind::ConnectionReset,
+                    "diff stream reset",
+                )))
+            }
+        }
+        let (old, _, diff) = patch_fixture();
+        let dir = temp_dir();
+        let old_path = write_file(&dir, "old.bin", &old);
+        let out = dir.join("new.bin");
+        let diff_len = diff.len();
+        let reader = std::io::Cursor::new(diff[..diff_len / 2].to_vec()).chain(Broken);
+        let err = progressed_hpatch(
+            &old_path,
+            Box::new(reader),
+            diff_len,
+            &out,
+            Box::new(|_| {}),
+        )
+        .await
+        .unwrap_err();
+        let io = err
+            .chain()
+            .find_map(|e| e.downcast_ref::<std::io::Error>())
+            .expect("io error in chain");
+        assert_eq!(io.kind(), std::io::ErrorKind::ConnectionReset);
+        assert!(!out.exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
