@@ -12,7 +12,7 @@ Status: proposed
 |---|---|---|
 | fallback 中止掩盖真实错误 | 某个并发任务失败后，另一任务的 fallback 看到 `has_error`，返回普通错误 `merged fallback cancelled`。`join_all` 的结果按任务排列，后续选择的首个错误可能是中止错误，最终按内部错误弹窗，丢失真正失败的原因。该文本本身不能证明用户点击了取消。 | [下载与 fallback](../../../native/session/run.rs)、[错误分类](../../../native/utils/code.rs) |
 | 取消等待缺乏反馈，且存在取消后仍提交的窗口 | 界面只禁用按钮；丢弃下载 future 不会取消提权进程已经接收的操作，清理暂存目录前仍需 `wait_idle`。DFS 会话结束请求、扫描和解压也可能延长等待。下载成功后，在结束远端会话或准备自身映像期间收到的取消，没有在提交前统一检查，可能继续完成安装。 | [会话取消与提交](../../../native/session/run.rs)、[提权任务等待](../../../native/ipc/manager.rs)、[取消界面](../../../web/screens/Running.tsx) |
-| 嵌入名称限制拒绝受支持的运行库 | 普通条目只接受 ASCII 字母、数字、点、下划线和连字符，而受支持的 `Microsoft.VCRedist.2015+.x64`、`Microsoft.VCRedist.2015+.x86` 含 `+`。运行库按完整 tag 查找条目，改名会使其无法离线匹配。读取器另加了 512 字节上限。 | [追加写入](../../../native/builder/append.rs)、[builder 读取器](../../../native/builder/local.rs)、[安装器读取器](../../../native/local.rs)、[运行库定义](../../../native/installer/runtimes.rs) |
+| 嵌入名称限制拒绝受支持的运行库 | 普通条目只接受 ASCII 字母、数字、点、下划线和连字符，而受支持的 `Microsoft.VCRedist.2015+.x64`、`Microsoft.VCRedist.2015+.x86` 含 `+`。运行库按完整 tag 查找条目，改名会使其无法离线匹配。读取器另加了 512 字节上限。 | [追加写入](../../../native/builder/append.rs)、[包格式读取](../../../native/pack_format.rs)、[运行库定义](../../../native/installer/runtimes.rs) |
 | 退出清理路径进入 shell 命令 | 退出清理用 `cmd /C ... rmdir /s /q`，参数引用只考虑空格和制表符。合法路径中的 `&` 可改变命令含义，例如没有空格的 `D:\Apps&Games.kachina-staged` 会被拆开。旧版已有 shell 引用不足，但递归删除暂存目录扩大了误删范围。 | [退出清理](../../../native/installer/uninstall.rs)、[命令参数构造](../../../native/utils/process.rs) |
 
 ### 重构引入的、未明确说明的功能交互或展示不一致
@@ -59,7 +59,7 @@ fallback 收到非空失败列表却没有有效文件可处理时，属于调�
 
 包内的 `\0CONFIG`、`\0META`、`\0INDEX`、`\0IMAGE`、`\0THEME` 保留精确的内部名称例外，普通条目不得借此接受任意 NUL。将共用名称规则放在 builder 和 installer 都能使用的位置，写入、扫描和提取复用它，避免维护三份相同白名单。
 
-[打包编码](../../../native/builder/pack.rs)与[读取解码](../../../native/local.rs)表明，生产格式存在两种名称长度字段：
+[打包编码](../../../native/builder/pack.rs)与[读取解码](../../../native/pack_format.rs)表明，生产格式存在两种名称长度字段：
 
 | 使用位置 | 现有编码与限制 | 预期处理 |
 |---|---|---|

@@ -46,7 +46,7 @@ Status: implemented
 
 ### 统一写入
 
-所有产出文件——直写、patch 输出、HybridPatch、`install_file_by_reader`、Mirror酱 zip 解压的每个文件——一律写到 `new\<相对路径>`，由 `fs.rs::create_staged_file` 创建。`InstallFileArgs.target` 是 `new\` 下的输出路径，新增 `old: Option<String>` 指向安装目录里当前的文件，只有 `Patch` 模式使用它作为基文件。`install_file.rs::finalize_staged` 在 `new\` 下完成 `clear_index_mark`（打包配置的 installer 项，或目标就是当前运行的 exe）、`verify_hash` 与 `File::sync_all()`（`FlushFileBuffers`），任一失败删该文件并返回错误，目标从未被触碰；刷盘是因为 rename 的原子性只在元数据层，NTFS 不记录数据日志，不刷盘则阶段二之后立刻掉电会换上零长度或半截的文件。`progressed_hpatch(old_path, diff, diff_size, out_path, on_progress)` 只读旧文件、写 `out_path`，没有改名逻辑；HybridPatch 先把内嵌基文件解到 `<out>.hybrid-base`，patch 完删除。`.patching` / `.patchold` / `.old` / `.instbak` / `override_old_path` / `prepare_target` / `create_target_file` 不存在。
+所有产出文件——直写、patch 输出、HybridPatch、合并请求的每个成员、Mirror酱 zip 解压的每个文件——一律写到 `new\<相对路径>`；`InstallFile` 与合并请求的输出由 `fs.rs::create_staged_file_blocking` 创建。`InstallFileArgs.target` 是 `new\` 下的输出路径，`old: Option<String>` 指向安装目录里当前的文件，只有 `Patch` 模式使用它作为基文件。`ipc/install_file.rs` 在一个阻塞任务里用创建文件的那个句柄完成写出、抹布局头（打包配置的 installer 项，或目标就是当前运行的 exe）、大小与 hash 核对和 `File::sync_all()`（`FlushFileBuffers`），任一失败删该文件并返回错误，目标从未被触碰；写出管线见[共享包读取与边写边校验的写出管线](./2026-11-04-pack-reader-and-write-pipeline.md)。刷盘是因为 rename 的原子性只在元数据层，NTFS 不记录数据日志，不刷盘则阶段二之后立刻掉电会换上零长度或半截的文件。补丁只读旧文件、写输出文件，没有改名逻辑；HybridPatch 先把内嵌基文件解到 `<out>.hybrid-base`，patch 完删除。`.patching` / `.patchold` / `.old` / `.instbak` / `override_old_path` / `prepare_target` / `create_target_file` 不存在。
 
 ### 卸载器与更新器
 
@@ -134,11 +134,11 @@ zip 下载到 `<staging>\dl\<sha256>.zip`（`RunMirrorcDownload`）。`run_mirro
 
 ### 端到端验证
 
-本提案的 e2e 用例（DFS2 stub、中断 / 篡改 / 覆盖 / 跨卷各情形）与 DFS2、H3 路径的覆盖补全归入 [核心流程 e2e 补全](../proposed/2026-09-02-e2e-core-coverage.md)；本提案自身以单测验收，见 Verification。
+本提案的 e2e 用例（DFS2 stub、中断 / 篡改 / 覆盖 / 跨卷各情形）与 DFS2、H3 路径的覆盖补全归入 [核心流程 e2e 补全](./2026-09-02-e2e-core-coverage.md)；本提案自身以单测验收，见 Verification。
 
 ## Alternatives considered
 
-- 保留 patch 与直写两条路径、各自加固：两条路径的失败语义仍不一致，自更新的改名顺序问题要在两处分别修；统一写入后 `progressed_hpatch` 与直写只差"产出的方式"。
+- 保留 patch 与直写两条路径、各自加固：两条路径的失败语义仍不一致，自更新的改名顺序问题要在两处分别修；统一写入后补丁与直写只差"产出的方式"。
 - 每个文件旁的 `<target>.kachina-tmp` 作为暂存：目录条目翻倍、半成品对应用和用户可见、同前缀文件名在开启 8.3 短名的卷上加剧碰撞探测；集中暂存目录一处解决。
 - 只用同级 `<安装目录>.kachina-staged`、不用 `%TEMP%`：省掉卷判定与跨用户 `%TEMP%` 的边角，代价是更新期间用户在应用目录旁看到一个暂存目录；选择 `%TEMP%` 优先是为了尽量不让用户看到不该看到的文件。
 - journal 放在安装目录根下：目标目录不存在时无处可放，目标为空目录时会随根目录单元一起被换走；放在确定性路径的暂存目录里两种情形都成立。
@@ -169,7 +169,7 @@ zip 下载到 `<staging>\dl\<sha256>.zip`（`RunMirrorcDownload`）。`run_mirro
 
 | 判据 | 结果 |
 |---|---|
-| `rg -n "File::create\(" src-tauri/src` 的命中仅限写暂存目录的位置、`#[cfg(test)]` 代码与 `src/builder/`；`create_target_file`、`prepare_target` 不再存在 | PASS：命中为 `fs.rs::create_staged_file`、`fs.rs::progressed_hpatch` 输出、`fs/commit.rs` 写 journal、`thirdparty/mirrorc.rs` 解压进 `new\`、`installer/uninstall.rs::stage_self_image` 写 `new\`、测试代码。`create_target_file`、`prepare_target`、`create_uninstaller` 不存在 |
+| `rg -n "File::create\(" src-tauri/src` 的命中仅限写暂存目录的位置、`#[cfg(test)]` 代码与 `src/builder/`；`create_target_file`、`prepare_target` 不再存在 | PASS：命中为 `fs.rs::create_staged_file`、`fs.rs::create_staged_file_blocking`（直写与补丁输出）、`fs/commit.rs` 写 journal、`thirdparty/mirrorc.rs` 解压进 `new\`、`installer/uninstall.rs::stage_self_image` 写 `new\`、测试代码。`create_target_file`、`prepare_target`、`create_uninstaller` 不存在 |
 | `DELETE_SELF_ON_EXIT_PATH` 的写入点全库唯一，位于所有 rename 成功且 journal 删除之后；`mirrorc.rs` 与 `run_uninstall` 不再写它 | PASS：静态量私有于 `installer/uninstall.rs`，唯一写入函数 `schedule_delete_on_exit`；`session/run.rs` 在 `finish_staging`（Commit / Recover 返回 `self_replaced` 之后）与 `run_uninstall_inner`（`UninstallOutcome.self_moved_to`）调用它 |
 | `rg -n "set_current_dir\|env::temp_dir" src-tauri/src --glob '!**/builder/**'` 的命中仅限 `fs::staging`、日志文件路径、`host/webview.rs` 的 WebView2 用户数据目录与测试代码 | PASS：`fs/staging.rs`（`enter_neutral_cwd`、`scratch_file`、`temp_candidate`、`staging_root`）、`main.rs` 的 `utils::log::init(temp_dir().join("KachinaInstaller.log"))`（日志文件路径，位于 `main.rs` 而非 `utils/log.rs`）、`host/webview.rs`、`utils/process.rs` / `utils/hash.rs` / `fs.rs` / `fs/commit.rs` / `fs/staging.rs` 的测试 |
 | 自卸载单测：以 `FILE_SHARE_READ \| FILE_SHARE_DELETE` 打开的文件模拟运行中的卸载器，`run_uninstall` 后该文件位于暂存目录 `old\` 下、`DELETE_SELF_ON_EXIT_PATH == Some(暂存目录)`；安装目录位于盘根时返回安装位置不安全错误且文件未移动 | PASS：`installer::uninstall::tests::park_self_moves_running_image_into_staging_old`（`park_self` 后文件在 `old\uninst.exe`，`schedule_delete_on_exit` 后读回等于暂存根）；盘根拒绝在 `fs::staging::tests::sibling_candidate_shape_and_root_rejection`（`D:\` → `INSTALL_PATH_INVALID`），只对跨卷即需要同级目录的情形生效 |
@@ -190,12 +190,12 @@ zip 下载到 `<staging>\dl\<sha256>.zip`（`RunMirrorcDownload`）。`run_mirro
 | `STAGING_IN_USE`：另一进程持有 `lock` 且 pid 存活时以该码失败、暂存目录不被删除；pid 已死时视为残留、`create_new` 重占 lock 后继续 | PASS：`fs::staging::tests::open_refuses_live_lock`（以 `cmd /C ping` 子进程的 pid 写 `lock`）、`open_keeps_journal_dir_and_deletes_residue`、`open_replaces_stale_lock` |
 | 取消单测：`Running` 中收到 `Intent::Cancel` 后 token 被触发；阶段二与运行库安装进行中无取消按钮；`cancel` 在 WebView 与 native 各有一个入口 | 部分 PASS：`render.test.tsx` 的 `renders running progress with a cancel button`（点击后发 `{kind: "cancel"}`）、`hides cancel during the swap`（`stage == "commit"`）、`hides cancel during runtime install`；`handle_intent(Cancel)` → `GuiRuntime::cancel_running` 与 native `ProgressDialog::show_with_cancel` 的回调无单测（依赖宿主 / TaskDialog）。`wait_idle` 为代码路径，无单测 |
 | 盘根不是安装目录；安装路径本身为 junction 时同样拒绝 | PASS：`installer::tests::drive_root_is_never_an_install_dir`、`install_dir_that_is_a_junction_is_rejected` |
-| 每个产出文件在校验通过后调用 `sync_all` | PASS（代码结构）：`ipc/install_file.rs::finalize_staged` 在 `verify_hash` 之后调 `fs.rs::sync_staged_file`，三种模式与 `install_file_by_reader` 共用；Mirror酱 解压在 `mirrorc.rs` 内逐文件 `sync_all`。无计数器断言 |
+| 每个产出文件在校验通过后调用 `sync_all` | PASS（代码结构）：`ipc/install_file.rs::commit_output` 在 `HashingWriter::finish` 核对大小与 hash 之后对同一句柄调 `sync_all`，三种模式与合并请求的成员共用；卸载器与更新器镜像在 `stage_self_image` 内经 `fs.rs::sync_staged_file` 刷盘；Mirror酱 解压在 `mirrorc.rs` 内逐文件 `sync_all`。无计数器断言 |
 | 删除单元单测：提交后该文件位于 `old\` 下、目标不存在；恢复时删除项同样完成；回滚时该文件回到原位 | PASS：`delete_unit_moves_to_old_and_rolls_back`（含回滚）；恢复路径的删除单元由 `classify` + `apply_unit` 共用同一实现 |
 | `ipc/manager.rs` 单测：服务端在回 `Ok` 前发送 1000 条 `Progress`，客户端 `run` 返回 `Ok` 而非 `IPC_ERR` | PASS：`progress_flood_does_not_lose_result`（`ManagedElevate::detached` 直连 `Pending` 与进度广播，容量 256）；`pipe_roundtrip_and_disconnect` 改为按 `oneshot` 断言，并新增孤儿等待者在断连时收到错误 |
 | 卸载器 / 更新器按会话情形生成或刷新，进同一份 journal；根目录单元存在时并入其文件清单 | PASS：`session::run::tests::self_image_plan_follows_session_kind`（全新安装两者皆生成；更新且清单无 updater 时外来安装器生成 updater、卸载器存在才刷新；清单有 updater 时只刷新卸载器且 `copy_from` 指向 `new\` 或安装目录里的 updater；无卸载器则无事可做）、`self_units_fold_into_root_unit_or_append`。"运行的是 updater 本身"一行依赖 `std::env::current_exe()`，测试进程无法伪装，由代码路径给出 |
 | `locales/zh-CN.tsv` 含 `STAGING_IN_USE`、`progress.commit`，`DISK_FULL` 文案为"磁盘空间不足，无法完成安装/更新"；`locale_covers_codes_stages_prompts` 通过 | PASS |
-| 现有 e2e 十项全绿；`offline-install` 追加断言父目录无 `.kachina-staged` | 未跑：本机未执行 `test:all`，待 CI；`offline-install` 的追加断言归入 [核心流程 e2e 补全](../proposed/2026-09-02-e2e-core-coverage.md) |
+| 现有 e2e 十项全绿；`offline-install` 追加断言父目录无 `.kachina-staged` | 未跑：本机未执行 `test:all`，待 CI；`offline-install` 的追加断言归入 [核心流程 e2e 补全](./2026-09-02-e2e-core-coverage.md) |
 | 单测与前端 | PASS：`cargo test`（`src-tauri` 内）13 passed（kachina-builder）+ 113 passed / 1 ignored（kachina-installer）；`pnpm exec vitest run` 20 passed；`pnpm exec tsc --noEmit` 零错误 |
 | 体积 | 本机 x86_64-pc-windows-msvc、opt-level=z + LTO、非 build-std、`src-tauri` 内构建、含前端 HTML：3,046,912 → 3,142,656 字节（+95,744）。增量来自 `fs/staging.rs`、`fs/commit.rs`、目录枚举与四个新 `IpcOperation` / `IpcResult` 变体的 postcard 单态化 |
 
