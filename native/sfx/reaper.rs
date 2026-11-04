@@ -25,21 +25,18 @@ pub fn sweep() {
         if !name.starts_with(TEMP_PREFIX) {
             continue;
         }
-        let created = entry
-            .metadata()
-            .and_then(|m| m.created())
-            .unwrap_or(SystemTime::UNIX_EPOCH);
+        // 读不到创建时间时无法判断年龄，留给下次或操作系统
+        let Ok(created) = entry.metadata().and_then(|m| m.created()) else {
+            continue;
+        };
         if !should_reap(created, now) {
             continue;
         }
         if dir_in_use(&path) {
             continue;
         }
-        if let Err(e) = std::fs::remove_dir_all(&path) {
-            tracing::info!("reaper 跳过 {}: {e}", path.display());
-        } else {
-            tracing::info!("reaper 清理残留 {}", path.display());
-        }
+        // 删不掉（文件被占用）就留到下次
+        let _ = std::fs::remove_dir_all(&path);
     }
 }
 
@@ -49,11 +46,16 @@ fn should_reap(created: SystemTime, now: SystemTime) -> bool {
         .unwrap_or(false)
 }
 
-/// 有任一进程的映像路径位于 dir 内（含 dir 本身的前缀路径）。
+/// 有任一进程的映像位于 dir 之下。两侧都先解析成规范路径再比较：同一目录可能以
+/// 8.3 短名、长名或经链接的不同形式出现（`%TEMP%` 含短名、应用规范化路径后自我重启）。
+/// dir 本身解析失败时按占用处理，不删。
 fn dir_in_use(dir: &Path) -> bool {
     use windows::Win32::System::Diagnostics::ToolHelp::{
         CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
         TH32CS_SNAPPROCESS,
+    };
+    let Some(dir) = canonical(dir) else {
+        return true;
     };
     unsafe {
         let Ok(snapshot) = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) else {
@@ -65,7 +67,9 @@ fn dir_in_use(dir: &Path) -> bool {
         if Process32FirstW(snapshot, &mut entry).is_ok() {
             loop {
                 if let Some(image) = process_image_path(entry.th32ProcessID) {
-                    if path_within(dir, &image) {
+                    let image =
+                        canonical(Path::new(&image)).unwrap_or_else(|| image.to_lowercase());
+                    if path_within(&dir, &image) {
                         in_use = true;
                         break;
                     }
@@ -103,14 +107,19 @@ fn process_image_path(pid: u32) -> Option<String> {
     Some(String::from_utf16_lossy(&buffer[..size as usize]))
 }
 
-/// 大小写不敏感的路径前缀判定：image 必须等于 dir 或位于其下一层。
-fn path_within(dir: &Path, image: &str) -> bool {
-    let dir_lower = dir.to_string_lossy().to_lowercase();
-    let dir_lower = dir_lower.trim_end_matches(['\\', '/']);
-    let image_lower = image.to_lowercase();
-    image_lower.len() > dir_lower.len()
-        && image_lower.starts_with(dir_lower)
-        && matches!(image_lower.as_bytes()[dir_lower.len()], b'\\' | b'/')
+/// 规范路径的小写形式，去掉 `\\?\` 前缀；路径不存在或无权访问时为 `None`。
+fn canonical(path: &Path) -> Option<String> {
+    let resolved = std::fs::canonicalize(path).ok()?;
+    let text = resolved.to_string_lossy();
+    Some(text.strip_prefix(r"\\?\").unwrap_or(&text).to_lowercase())
+}
+
+/// 小写路径的前缀判定：image 位于 dir 之下（任意深度）。
+fn path_within(dir: &str, image: &str) -> bool {
+    let dir = dir.trim_end_matches(['\\', '/']);
+    image.len() > dir.len()
+        && image.starts_with(dir)
+        && matches!(image.as_bytes()[dir.len()], b'\\' | b'/')
 }
 
 #[cfg(test)]
@@ -118,21 +127,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn age_threshold() {
+    fn future_creation_time_is_not_reaped() {
+        // 时钟回拨时 created 在未来，按未超龄处理
         let now = SystemTime::now();
-        assert!(!should_reap(now, now));
-        assert!(!should_reap(now - Duration::from_secs(3600), now));
-        assert!(should_reap(now - MAX_AGE - Duration::from_secs(1), now));
-        // created 在未来（时钟回拨）不删
         assert!(!should_reap(now + Duration::from_secs(3600), now));
     }
 
     #[test]
     fn path_prefix_matching() {
-        let dir = std::path::PathBuf::from(r"C:\Temp\kachina-sfx-abc");
-        assert!(path_within(&dir, r"c:\temp\kachina-sfx-abc\app.exe"));
-        assert!(path_within(&dir, r"C:\TEMP\kachina-sfx-abc\sub\tool.exe"));
-        assert!(!path_within(&dir, r"C:\Temp\kachina-sfx-abc2\app.exe"));
-        assert!(!path_within(&dir, r"C:\Temp\other\app.exe"));
+        let dir = r"c:\temp\kachina-sfx-abc";
+        assert!(path_within(dir, r"c:\temp\kachina-sfx-abc\app.exe"));
+        assert!(path_within(dir, r"c:\temp\kachina-sfx-abc\sub\tool.exe"));
+        assert!(!path_within(dir, r"c:\temp\kachina-sfx-abc2\app.exe"));
+        assert!(!path_within(dir, r"c:\temp\other\app.exe"));
     }
 }

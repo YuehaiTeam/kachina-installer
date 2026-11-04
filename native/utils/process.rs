@@ -10,7 +10,7 @@
 
 use std::ffi::{OsStr, OsString};
 use std::io;
-use std::os::windows::ffi::OsStrExt;
+use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::path::PathBuf;
 
 use windows::core::{HSTRING, PCWSTR, PWSTR};
@@ -32,6 +32,16 @@ pub struct Child(HANDLE);
 unsafe impl Send for Child {}
 
 impl Child {
+    /// 接管一个进程句柄，例如 `ShellExecuteExW` 在 `SEE_MASK_NOCLOSEPROCESS` 下返回的
+    /// `hProcess`；Drop 时关闭。
+    ///
+    /// # Safety
+    /// `handle` 必须是有效的进程句柄，且此后不再由别处关闭。
+    #[allow(dead_code)] // kachina-sfx 的提权拉起用；安装器的提权助手自己持有句柄
+    pub unsafe fn from_raw(handle: HANDLE) -> Self {
+        Self(handle)
+    }
+
     /// 阻塞等待子进程退出并返回退出码。
     pub async fn wait(self) -> io::Result<u32> {
         tokio::task::spawn_blocking(move || self.wait_blocking())
@@ -200,6 +210,19 @@ pub fn shell_open<P: AsRef<OsStr>>(target: P) -> io::Result<()> {
     Ok(())
 }
 
+/// 参数按 [`spawn`] 的规则拼成一条不含程序名的命令行，用作 `ShellExecuteExW` 的 `lpParameters`。
+#[allow(dead_code)] // kachina-sfx 的提权拉起用；安装器的提权助手参数自行拼接
+pub fn join_args<A: AsRef<OsStr>>(args: &[A]) -> OsString {
+    let mut line = Vec::new();
+    for (i, arg) in args.iter().enumerate() {
+        if i > 0 {
+            line.push(b' ' as u16);
+        }
+        append_arg(&mut line, arg.as_ref(), false);
+    }
+    OsString::from_wide(&line)
+}
+
 /// 与 `std::process::Command` 在 Windows 上的拼接规则一致：argv[0] 总是加引号；
 /// 其余参数为空或含空格 / 制表符时加引号，引号前的反斜杠成倍转义。
 fn make_command_line<'a>(program: &OsStr, args: impl Iterator<Item = &'a OsStr>) -> Vec<u16> {
@@ -267,6 +290,13 @@ mod tests {
             r#""C:\Program Files\x.exe" "a b" "" C:\dir\ "say \"hi\"""#
         );
         assert_eq!(cmdline("x", &[r"C:\my dir\"]), r#""x" "C:\my dir\\""#);
+    }
+
+    #[test]
+    fn joined_args_have_no_program_and_same_escaping() {
+        let joined = join_args(&["/c", "exit 42", r#"say "hi""#]);
+        assert_eq!(joined, OsString::from(r#"/c "exit 42" "say \"hi\"""#));
+        assert_eq!(join_args::<&str>(&[]), OsString::new());
     }
 
     #[test]

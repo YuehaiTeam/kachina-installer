@@ -1,4 +1,4 @@
-import { spawnSync } from 'child_process';
+import { spawn, spawnSync } from 'child_process';
 import { dev, getTestDir, cleanupTestDir } from './utils.mjs';
 import 'zx/globals';
 import { usePowerShell, usePwsh } from 'zx';
@@ -10,8 +10,9 @@ try {
 }
 
 // 自解压运行器 e2e：自建可运行应用（cmd.exe 副本充当 app.exe），走 gen + pack +
-// replace-bin --base 产出 sfx 包，验证运行、参数与退出码透传、临时目录清理与
-// reaper 行为。fixture 的 app.exe 是假 PE 不可运行，所以本测试不复用 prepare.mjs 的产物。
+// replace-bin --base 产出 sfx 包，验证解压结果、cwd 继承、参数与退出码透传、sfx 不写 stdout、
+// 临时目录清理与 reaper 行为。fixture 的 app.exe 是假 PE 不可运行，所以本测试不复用
+// prepare.mjs 的产物。
 
 const profileDir = dev
   ? path.resolve('..', 'target', 'debug')
@@ -36,6 +37,16 @@ function runSfx(exe, args, label) {
   }
   console.log(chalk.gray('  ' + label + ': exit=' + result.status));
   return { exitCode: result.status, stdout: result.stdout, stderr: result.stderr };
+}
+
+async function waitFor(check, label, timeoutMs = 15000) {
+  const deadline = Date.now() + timeoutMs;
+  while (!check()) {
+    if (Date.now() > deadline) {
+      throw new Error('timed out waiting for ' + label);
+    }
+    await new Promise((r) => setTimeout(r, 100));
+  }
 }
 
 function sfxTempDirs() {
@@ -125,17 +136,58 @@ async function test() {
 
   const before = new Set(sfxTempDirs());
 
-  console.log('Running portable package (/c exit 42)...');
-  const run1 = await runSfx(portablePath, ['/c', 'exit 42'], 'exit code passthrough');
-  if (run1.exitCode !== 42) {
-    throw new Error('expected exit code 42, got ' + run1.exitCode + '; stderr: ' + run1.stderr);
+  // app.exe（cmd）先在调用者的 cwd 写下 cwd，停留几秒再以 42 退出；
+  // 停留期间核对解压结果，并验证另一次启动的 reaper 不删运行中的目录。
+  console.log('Running portable package...');
+  const cwdFile = path.join(testDir, 'cwd.txt');
+  const first = spawn(
+    portablePath,
+    ['/c', 'cd > cwd.txt & ping -n 6 127.0.0.1 > nul & exit 42'],
+    { cwd: testDir, windowsHide: true },
+  );
+  const firstExit = new Promise((resolve, reject) => {
+    first.on('exit', resolve);
+    first.on('error', reject);
+  });
+  await waitFor(() => fs.existsSync(cwdFile), 'app.exe started');
+  const runDir = sfxTempDirs().find((d) => !before.has(d));
+  if (!runDir) {
+    throw new Error('no temp dir for the running app');
   }
+  const data = await fs.readFile(path.join(runDir, 'data.txt'), 'utf8');
+  if (data !== 'SFX-DATA') {
+    throw new Error('unexpected data.txt content: ' + data);
+  }
+  console.log(chalk.gray('  data.txt extracted next to app.exe'));
+
+  await $`(Get-Item -LiteralPath ${runDir}).CreationTime = (Get-Date).AddDays(-2)`;
+  const second = runSfx(portablePath, ['/c', 'exit 0'], 'reaper with a running instance');
+  if (second.exitCode !== 0) {
+    throw new Error('second run failed: ' + second.stderr);
+  }
+  if (second.stdout !== '') {
+    throw new Error('sfx wrote to stdout: ' + JSON.stringify(second.stdout));
+  }
+  if (!(await fs.pathExists(path.join(runDir, 'data.txt')))) {
+    throw new Error('reaper removed the directory of a running app');
+  }
+  console.log(chalk.gray('  reaper kept the directory of a running app'));
+
+  const code = await firstExit;
+  if (code !== 42) {
+    throw new Error('expected exit code 42, got ' + code);
+  }
+  const cwd = (await fs.readFile(cwdFile, 'utf8')).trim();
+  if (cwd.toLowerCase() !== testDir.toLowerCase()) {
+    throw new Error('app cwd ' + cwd + ' differs from caller cwd ' + testDir);
+  }
+  console.log(chalk.gray('  exit code and caller cwd passed through'));
 
   const leftovers = sfxTempDirs().filter((d) => !before.has(d));
   if (leftovers.length > 0) {
     throw new Error('temp dirs not cleaned: ' + leftovers.join(', '));
   }
-  console.log(chalk.gray('  temp dir cleaned after app exit'));
+  console.log(chalk.gray('  temp dirs cleaned after app exit'));
 
   console.log('Testing reaper...');
   const stamp = Date.now();
@@ -146,7 +198,7 @@ async function test() {
   await fs.ensureDir(freshDir);
   // reaper 只删超过年龄阈值的目录：把 stale 的创建时间拨到两天前
   await $`(Get-Item -LiteralPath ${staleDir}).CreationTime = (Get-Date).AddDays(-2)`;
-  const run2 = await runSfx(portablePath, ['/c', 'exit 0'], 'reaper run');
+  const run2 = runSfx(portablePath, ['/c', 'exit 0'], 'reaper run');
   if (run2.exitCode !== 0) {
     throw new Error('reaper run failed: ' + run2.stderr);
   }
@@ -162,7 +214,7 @@ async function test() {
   console.log('Testing online-only package rejection...');
   await runBuilder(['pack', '-c', configPath, '--icon', iconPath, '-o', onlineInstaller], 'pack config-only');
   await runBuilder(['replace-bin', onlineInstaller, '--base', sfxPath, '-o', onlinePortable], 'replace-bin config-only');
-  const run3 = await runSfx(onlinePortable, [], 'online-only rejection');
+  const run3 = runSfx(onlinePortable, [], 'online-only rejection');
   if (run3.exitCode !== 1) {
     throw new Error('expected exit code 1 for online-only package, got ' + run3.exitCode);
   }

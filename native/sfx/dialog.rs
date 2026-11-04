@@ -1,6 +1,6 @@
 //! 最小 TaskDialog 封装：错误框与解压进度条。
-//! 模式照抄安装器的 utils/taskdialog.rs；该文件经 utils/code.rs 级联依赖
-//! fs/dfs 模块无法整体复用，这里是按 sfx 需要裁剪的副本。
+//! 安装器的 utils/taskdialog.rs 依赖 i18n 与错误码（经 utils/code.rs 连到 fs/dfs），
+//! sfx 只需要这两种对话框，单独维护。
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -13,8 +13,8 @@ use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Controls::{
     TaskDialogIndirect, TASKDIALOGCONFIG, TASKDIALOGCONFIG_0, TASKDIALOG_NOTIFICATIONS,
     TDCBF_CANCEL_BUTTON, TDCBF_OK_BUTTON, TDF_ALLOW_DIALOG_CANCELLATION, TDF_SHOW_PROGRESS_BAR,
-    TDF_SIZE_TO_CONTENT, TDM_CLICK_BUTTON, TDM_SET_PROGRESS_BAR_POS, TDM_SET_PROGRESS_BAR_RANGE,
-    TDN_CREATED, TDN_DESTROYED, TD_ERROR_ICON,
+    TDF_SIZE_TO_CONTENT, TDM_CLICK_BUTTON, TDM_SET_PROGRESS_BAR_POS, TDN_CREATED, TDN_DESTROYED,
+    TD_ERROR_ICON,
 };
 use windows::Win32::UI::WindowsAndMessaging::{SendMessageW, HICON, IDCANCEL};
 
@@ -51,9 +51,13 @@ pub fn show_error(title: &str, content: &str) {
 struct Shared {
     hwnd: Mutex<Option<isize>>,
     closing: AtomicBool,
+    /// 用户点了取消或关掉了对话框
+    cancelled: AtomicBool,
     created: Mutex<Option<oneshot::Sender<()>>>,
     total: u64,
     done: AtomicU64,
+    /// 最近一次发给进度条的整数百分比
+    shown_pct: AtomicU64,
 }
 
 /// 解压进度对话框：独立线程跑 TaskDialogIndirect，主线程按字节数推进。
@@ -67,9 +71,11 @@ impl Progress {
         let shared = Arc::new(Shared {
             hwnd: Mutex::new(None),
             closing: AtomicBool::new(false),
+            cancelled: AtomicBool::new(false),
             created: Mutex::new(None),
             total: total_bytes,
             done: AtomicU64::new(0),
+            shown_pct: AtomicU64::new(0),
         });
         let (tx, rx) = oneshot::channel();
         *shared.created.lock().unwrap_or_else(|e| e.into_inner()) = Some(tx);
@@ -92,14 +98,18 @@ impl Progress {
         }
     }
 
+    /// 累加已解压字节；只在整数百分比变化时向对话框线程发消息，整个解压最多 100 次。
     pub fn add_bytes(&self, n: u64) {
         let done = self.shared.done.fetch_add(n, Ordering::Relaxed) + n;
-        let Some(hwnd) = self.hwnd() else { return };
         let pct = done
             .saturating_mul(100)
             .checked_div(self.shared.total)
             .unwrap_or(100)
             .min(100);
+        if self.shared.shown_pct.swap(pct, Ordering::Relaxed) == pct {
+            return;
+        }
+        let Some(hwnd) = self.hwnd() else { return };
         unsafe {
             SendMessageW(
                 hwnd,
@@ -108,6 +118,10 @@ impl Progress {
                 Some(LPARAM(0)),
             );
         }
+    }
+
+    pub fn cancelled(&self) -> bool {
+        self.shared.cancelled.load(Ordering::SeqCst)
     }
 
     fn hwnd(&self) -> Option<HWND> {
@@ -193,15 +207,8 @@ unsafe extern "system" fn progress_callback(
     let shared = unsafe { &*(lp_ref_data as *const Shared) };
     match msg {
         TDN_CREATED => {
+            // 进度条默认范围 0..100，与 add_bytes 发的百分比一致
             *shared.hwnd.lock().unwrap_or_else(|e| e.into_inner()) = Some(hwnd.0 as isize);
-            unsafe {
-                SendMessageW(
-                    hwnd,
-                    TDM_SET_PROGRESS_BAR_RANGE.0 as u32,
-                    Some(WPARAM(0)),
-                    Some(LPARAM(100 << 16)),
-                );
-            }
             if let Some(tx) = shared
                 .created
                 .lock()
@@ -214,8 +221,8 @@ unsafe extern "system" fn progress_callback(
         TDN_DESTROYED => {
             *shared.hwnd.lock().unwrap_or_else(|e| e.into_inner()) = None;
             if !shared.closing.load(Ordering::SeqCst) {
-                // 用户点 Cancel/关闭 = 放弃本次运行
-                std::process::exit(1);
+                // 用户点 Cancel/关闭 = 放弃本次运行；解压循环看到后中止，由调用方清理临时目录
+                shared.cancelled.store(true, Ordering::SeqCst);
             }
         }
         _ => {}

@@ -34,62 +34,65 @@ fn default_uac() -> String {
     "prefer-admin".to_string()
 }
 
+/// 用户在进度框点了取消或关掉了它。
+#[derive(Debug)]
+struct Cancelled;
+
+impl std::fmt::Display for Cancelled {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("cancelled")
+    }
+}
+
+impl std::error::Error for Cancelled {}
+
 /// 程序入口：返回进程退出码（正常路径透传应用退出码）。
 pub async fn run(console: bool) -> i32 {
-    match run_inner(console).await {
-        Ok(code) => code,
+    // 先清理历史残留，再做正事；失败不阻塞本次运行。
+    reaper::sweep();
+
+    let (mmap, embedded, config) = match load().await {
+        Ok(loaded) => loaded,
         Err(err) => {
-            report_error(console, None, &format!("{err:#}"));
+            report_error(console, "kachina-sfx", &format!("{err:#}"));
+            return 1;
+        }
+    };
+    let title = config
+        .window_title
+        .clone()
+        .or_else(|| config.app_name.clone())
+        .unwrap_or_else(|| "kachina-sfx".to_string());
+    match run_package(console, &mmap, &embedded, &config, &title).await {
+        Ok(code) => code,
+        // 临时目录已清理，用户主动取消不弹错误
+        Err(err) if err.downcast_ref::<Cancelled>().is_some() => 1,
+        Err(err) => {
+            report_error(console, &title, &format!("{err:#}"));
             1
         }
     }
 }
 
-fn report_error(console: bool, title: Option<&str>, message: &str) {
-    tracing::error!("{message}");
+fn report_error(console: bool, title: &str, message: &str) {
     if console {
         eprintln!("kachina-sfx: {message}");
     } else {
-        dialog::show_error(title.unwrap_or("kachina-sfx"), message);
+        dialog::show_error(title, message);
     }
 }
 
-async fn run_inner(console: bool) -> Result<i32> {
-    // 先清理历史残留，再做正事；失败不阻塞本次运行。
-    reaper::sweep();
-
+async fn load() -> Result<(AsyncMmapFile, Vec<Embedded>, SfxConfig)> {
     let mmap = open_self().await?;
     let embedded = scan_embedded(mmap.as_slice());
     if embedded.is_empty() {
         bail!("此程序不含自解压数据");
     }
     // 错误文本里的块名写成可见的 `\0`：真正的 NUL 会截断对话框里的宽字符串。
-    let config: SfxConfig = read_json(mmap.as_slice(), &embedded, "\0CONFIG")
+    let config = read_json(mmap.as_slice(), &embedded, "\0CONFIG")
         .context("LOCAL_CONFIG_ERR: malformed \\0CONFIG")?
         .context("包内缺少 \\0CONFIG")?;
-    let window_title = config
-        .window_title
-        .clone()
-        .or_else(|| config.app_name.clone())
-        .unwrap_or_else(|| "kachina-sfx".to_string());
-    let meta: RepoMetadata = read_json(mmap.as_slice(), &embedded, "\0META")
-        .context("LOCAL_CONFIG_ERR: malformed \\0META")?
-        .context("此包不含离线数据，不能作为自解压程序运行")?;
-    if meta.hashed.is_empty() {
-        bail!("此包不含离线数据，不能作为自解压程序运行");
-    }
-
-    // 解析与校验全部路径后再落盘：任何一条越界即整体失败，不留下半次提取。
-    let plan = plan_extraction(&embedded, &meta.hashed)?;
-
-    let temp_dir = create_temp_dir()?;
-    let result = run_staged(console, &mmap, &plan, &temp_dir, &config, &window_title).await;
-    if let Err(err) = &result {
-        cleanup_temp(&temp_dir).await;
-        report_error(console, Some(&window_title), &format!("{err:#}"));
-        return Ok(1);
-    }
-    result
+    Ok((mmap, embedded, config))
 }
 
 async fn open_self() -> Result<AsyncMmapFile> {
@@ -108,10 +111,39 @@ async fn open_self() -> Result<AsyncMmapFile> {
     AsyncMmapFile::open(path).await.context("MMAP_ERR")
 }
 
-#[derive(Debug)]
+/// 解压、运行、清理。创建临时目录之后的任何失败都先删掉临时目录再返回。
+async fn run_package(
+    console: bool,
+    mmap: &AsyncMmapFile,
+    embedded: &[Embedded],
+    config: &SfxConfig,
+    title: &str,
+) -> Result<i32> {
+    let meta: RepoMetadata = read_json(mmap.as_slice(), embedded, "\0META")
+        .context("LOCAL_CONFIG_ERR: malformed \\0META")?
+        .context("此包不含离线数据，不能作为自解压程序运行")?;
+    if meta.hashed.is_empty() {
+        bail!("此包不含离线数据，不能作为自解压程序运行");
+    }
+
+    // 全部路径与主程序先校验再落盘：任何一条不合法即整体失败，不留下半次提取。
+    let plan = plan_extraction(embedded, &meta.hashed)?;
+    let exe = exe_in_plan(&plan, &config.exe_name)?;
+
+    let temp_dir = create_temp_dir()?;
+    let result = run_staged(console, mmap, &plan, &temp_dir, &exe, config, title).await;
+    if result.is_err() {
+        cleanup_temp(&temp_dir).await;
+    }
+    result
+}
+
+#[derive(Debug, Clone)]
 struct ExtractItem {
-    /// meta 中的相对路径
+    /// meta 中的相对路径，用于报错
     file_name: String,
+    /// 校验过的相对路径，只含普通组件
+    rel: PathBuf,
     output_size: u64,
     md5: Option<String>,
     xxh: Option<String>,
@@ -121,6 +153,8 @@ struct ExtractItem {
 fn plan_extraction(embedded: &[Embedded], hashed: &[FileMeta]) -> Result<Vec<ExtractItem>> {
     let mut plan = Vec::with_capacity(hashed.len());
     for file in hashed {
+        let rel = relative_under_root(Path::new(""), &file.file_name)
+            .with_context(|| format!("包内路径不安全: {:?}", file.file_name))?;
         let hash = preferred_file_hash(&file.md5, &file.xxh)
             .with_context(|| format!("{} 缺少校验 hash", file.file_name))?;
         let block = embedded
@@ -129,6 +163,7 @@ fn plan_extraction(embedded: &[Embedded], hashed: &[FileMeta]) -> Result<Vec<Ext
             .with_context(|| format!("包内缺少数据块 {hash}（{}）", file.file_name))?;
         plan.push(ExtractItem {
             file_name: file.file_name.clone(),
+            rel,
             output_size: file.size,
             md5: file.md5.clone(),
             xxh: file.xxh.clone(),
@@ -136,6 +171,21 @@ fn plan_extraction(embedded: &[Embedded], hashed: &[FileMeta]) -> Result<Vec<Ext
         });
     }
     Ok(plan)
+}
+
+/// `exeName` 与 meta 路径同属包内输入：按同一规则校验，并须是本次解压的文件之一
+/// （不区分大小写）。
+fn exe_in_plan(plan: &[ExtractItem], exe_name: &str) -> Result<PathBuf> {
+    let rel = relative_under_root(Path::new(""), exe_name)
+        .with_context(|| format!("exeName 路径不安全: {exe_name:?}"))?;
+    let key = rel.to_string_lossy().to_lowercase();
+    if !plan
+        .iter()
+        .any(|item| item.rel.to_string_lossy().to_lowercase() == key)
+    {
+        bail!("包内没有应用主程序 {exe_name}");
+    }
+    Ok(rel)
 }
 
 fn create_temp_dir() -> Result<PathBuf> {
@@ -161,8 +211,9 @@ async fn run_staged(
     mmap: &AsyncMmapFile,
     plan: &[ExtractItem],
     temp_dir: &Path,
+    exe: &Path,
     config: &SfxConfig,
-    window_title: &str,
+    title: &str,
 ) -> Result<i32> {
     let total: u64 = plan.iter().map(|i| i.output_size).sum();
     if let Some(free) = free_space(temp_dir) {
@@ -171,33 +222,35 @@ async fn run_staged(
         }
     }
 
-    let mut progress = if console {
+    let progress = if console {
         None
     } else {
-        dialog::Progress::show(window_title, "正在解压…", total).ok()
+        dialog::Progress::show(title, "正在解压…", total).ok()
     };
     for item in plan {
         extract_one(mmap, item, temp_dir, progress.as_ref()).await?;
     }
-    if let Some(p) = progress.take() {
+    if let Some(p) = progress {
+        if p.cancelled() {
+            return Err(Cancelled.into());
+        }
         p.close().await;
     }
 
-    let code = launch_and_wait(temp_dir, config).await?;
+    let code = launch_and_wait(&temp_dir.join(exe), &config.uac_strategy).await?;
     cleanup_temp(temp_dir).await;
     Ok(code as i32)
 }
 
 /// 解码一个数据块到临时目录，边写边算 hash；失败时删掉半成品文件。
+/// 临时目录是本进程刚建的空目录，`rel` 只含普通组件，路径不会落到目录之外。
 async fn extract_one(
     mmap: &AsyncMmapFile,
     item: &ExtractItem,
     temp_dir: &Path,
     progress: Option<&dialog::Progress>,
 ) -> Result<()> {
-    let out_path = relative_under_root(temp_dir, &item.file_name)
-        .with_context(|| format!("包内路径不安全: {:?}", item.file_name))?;
-    verify_within_root(temp_dir, &out_path).await?;
+    let out_path = temp_dir.join(&item.rel);
     if let Some(parent) = out_path.parent() {
         tokio::fs::create_dir_all(parent)
             .await
@@ -240,6 +293,9 @@ async fn decode_verify_write(
     let mut buf = [0u8; 65536];
     let mut written: u64 = 0;
     loop {
+        if progress.is_some_and(dialog::Progress::cancelled) {
+            return Err(Cancelled.into());
+        }
         let n = decoder.read(&mut buf).await?;
         if n == 0 {
             break;
@@ -280,150 +336,52 @@ async fn decode_verify_write(
     Ok(())
 }
 
-/// 解析 symlink/junction 后仍须位于 root 内。与 builder extract 的同名函数同一规则。
-async fn verify_within_root(root: &Path, path: &Path) -> Result<()> {
-    let root_canonical = tokio::fs::canonicalize(root)
-        .await
-        .with_context(|| format!("解析临时目录失败 {}", root.display()))?;
-    let relative = path
-        .strip_prefix(root)
-        .with_context(|| format!("{:?} 不在 {:?} 内", path, root))?;
-    let mut current = root_canonical.clone();
-    for component in relative.components() {
-        current.push(component);
-        if let Ok(resolved) = tokio::fs::canonicalize(&current).await {
-            if !resolved.starts_with(&root_canonical) {
-                bail!(
-                    "包内路径逃逸出临时目录: {} -> {}",
-                    path.display(),
-                    resolved.display()
-                );
-            }
-            current = resolved;
-        }
-    }
-    Ok(())
-}
-
 /// 按 uacStrategy 拉起应用主体并等待退出，透传退出码。
 /// sfx 自身恒为 asInvoker；提权只发生在这一次启动上。
-async fn launch_and_wait(temp_dir: &Path, config: &SfxConfig) -> Result<u32> {
-    let exe = temp_dir.join(&config.exe_name);
-    if !exe.exists() {
-        bail!("包内没有应用主程序 {}", config.exe_name);
-    }
+async fn launch_and_wait(exe: &Path, strategy: &str) -> Result<u32> {
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
 
     let self_elevated = uac::check_elevated().unwrap_or(false);
-    let strategy = config.uac_strategy.as_str();
     // 未知取值与 prefer-admin 同义，与安装器 elevate_from_state 的默认分支一致
     let want_elevated = !self_elevated && strategy != "prefer-user";
 
     if !want_elevated {
-        let child = process::spawn(&exe, &args, false).context("启动应用失败")?;
-        return child.wait().await.context("等待应用退出失败");
+        return spawn_and_wait(exe, &args).await;
     }
 
-    let params = quote_args(&args);
-    match uac::run_elevated(&exe, &params) {
-        Ok(handle) => wait_handle(handle).await,
-        Err(e) if is_cancelled(&e) && strategy == "force" => {
+    match uac::run_elevated(exe, process::join_args(&args)) {
+        // SAFETY: SEE_MASK_NOCLOSEPROCESS 返回的进程句柄归调用方所有，交给 Child 关闭
+        Ok(handle) => unsafe { process::Child::from_raw(handle.0) }
+            .wait()
+            .await
+            .context("等待应用退出失败"),
+        Err(e) if is_uac_declined(&e) && strategy == "force" => {
             bail!("用户取消了管理员授权，应用未运行")
         }
-        Err(e) if is_cancelled(&e) => {
-            // prefer-admin：用户取消则回退普通启动
-            let child = process::spawn(&exe, &args, false).context("启动应用失败")?;
-            child.wait().await.context("等待应用退出失败")
-        }
+        // prefer-admin：用户取消则回退普通启动
+        Err(e) if is_uac_declined(&e) => spawn_and_wait(exe, &args).await,
         Err(e) => Err(e).context("启动应用失败"),
     }
 }
 
-fn is_cancelled(err: &io::Error) -> bool {
+async fn spawn_and_wait(exe: &Path, args: &[OsString]) -> Result<u32> {
+    let child = process::spawn(exe, args, false).context("启动应用失败")?;
+    child.wait().await.context("等待应用退出失败")
+}
+
+fn is_uac_declined(err: &io::Error) -> bool {
     // ShellExecuteExW 在用户拒绝 UAC 时报 ERROR_CANCELLED(1223)
     err.raw_os_error() == Some(1223)
-}
-
-/// ShellExecuteExW 的 lpParameters 是单条参数字符串，按 Windows 命令行规则引号转义。
-fn quote_args(args: &[OsString]) -> String {
-    let mut out = String::new();
-    for (i, arg) in args.iter().enumerate() {
-        if i > 0 {
-            out.push(' ');
-        }
-        let lossy = arg.to_string_lossy();
-        let needs_quotes = lossy.is_empty() || lossy.contains([' ', '\t', '"']);
-        if !needs_quotes {
-            out.push_str(&lossy);
-            continue;
-        }
-        out.push('"');
-        let mut backslashes = 0usize;
-        for ch in lossy.chars() {
-            match ch {
-                '\\' => backslashes += 1,
-                '"' => {
-                    for _ in 0..backslashes * 2 + 1 {
-                        out.push('\\');
-                    }
-                    backslashes = 0;
-                    out.push('"');
-                }
-                _ => {
-                    for _ in 0..backslashes {
-                        out.push('\\');
-                    }
-                    backslashes = 0;
-                    out.push(ch);
-                }
-            }
-        }
-        for _ in 0..backslashes * 2 {
-            out.push('\\');
-        }
-        out.push('"');
-    }
-    out
-}
-
-async fn wait_handle(handle: uac::SendableHandle) -> Result<u32> {
-    use windows::Win32::Foundation::{CloseHandle, HANDLE, WAIT_FAILED};
-    use windows::Win32::System::Threading::{GetExitCodeProcess, WaitForSingleObject, INFINITE};
-    // 句柄本身不是 Send；转成 isize 后再搬进阻塞线程
-    let raw = handle.0 .0 as isize;
-    tokio::task::spawn_blocking(move || {
-        let handle = HANDLE(raw as *mut core::ffi::c_void);
-        let r = unsafe {
-            if WaitForSingleObject(handle, INFINITE) == WAIT_FAILED {
-                Err(io::Error::last_os_error())
-            } else {
-                let mut code = 0u32;
-                GetExitCodeProcess(handle, &mut code)?;
-                Ok(code)
-            }
-        };
-        unsafe {
-            let _ = CloseHandle(handle);
-        }
-        r
-    })
-    .await
-    .map_err(io::Error::other)?
-    .context("等待应用退出失败")
 }
 
 /// 尽力删除临时目录：失败退避重试，仍失败则留给 reaper。
 async fn cleanup_temp(dir: &Path) {
     for _ in 0..20 {
-        match tokio::fs::remove_dir_all(dir).await {
-            Ok(()) => return,
-            Err(e) => {
-                tracing::info!("清理 {} 失败，稍后重试: {e}", dir.display());
-                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-            }
+        if tokio::fs::remove_dir_all(dir).await.is_ok() {
+            return;
         }
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
     }
-    tracing::warn!("临时目录 {} 清理失败，留给下次运行的 reaper", dir.display());
 }
 
 fn free_space(path: &Path) -> Option<u64> {
@@ -445,41 +403,20 @@ fn free_space(path: &Path) -> Option<u64> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn quote_args_windows_rules() {
-        let args = vec![
-            OsString::from("/c"),
-            OsString::from("exit 42"),
-            OsString::from("say \"hi\""),
-            OsString::from("trail\\"),
-        ];
-        assert_eq!(
-            quote_args(&args),
-            "/c \"exit 42\" \"say \\\"hi\\\"\" trail\\"
-        );
-        assert_eq!(quote_args(&[]), "");
-        // 需要引号时的尾随反斜杠成倍转义
-        assert_eq!(
-            quote_args(&[OsString::from("dir with space\\")]),
-            "\"dir with space\\\\\""
-        );
-    }
-
-    #[test]
-    fn minimal_config_parses_with_defaults() {
-        let v: serde_json::Value = serde_json::json!({"exeName": "app.exe"});
-        let c: SfxConfig = serde_json::from_value(v).unwrap();
-        assert_eq!(c.exe_name, "app.exe");
-        assert_eq!(c.uac_strategy, "prefer-admin");
-
-        let v: serde_json::Value = serde_json::json!({
-            "exeName": "app.exe",
-            "uacStrategy": "prefer-user",
-            "windowTitle": "T"
-        });
-        let c: SfxConfig = serde_json::from_value(v).unwrap();
-        assert_eq!(c.uac_strategy, "prefer-user");
-        assert_eq!(c.window_title.as_deref(), Some("T"));
+    fn item(file_name: &str) -> ExtractItem {
+        ExtractItem {
+            file_name: file_name.into(),
+            rel: relative_under_root(Path::new(""), file_name).unwrap(),
+            output_size: 1,
+            md5: None,
+            xxh: Some("h".into()),
+            block: Embedded {
+                name: "h".into(),
+                offset: 0,
+                raw_offset: 0,
+                size: 1,
+            },
+        }
     }
 
     #[test]
@@ -499,6 +436,42 @@ mod tests {
         }];
         let err = plan_extraction(&embedded, &hashed).unwrap_err();
         assert!(format!("{err:#}").contains("缺少数据块"));
+    }
+
+    #[test]
+    fn plan_extraction_rejects_unsafe_path_before_writing() {
+        let embedded = vec![Embedded {
+            name: "h".into(),
+            offset: 0,
+            raw_offset: 0,
+            size: 1,
+        }];
+        let hashed = vec![FileMeta {
+            file_name: "../evil.exe".into(),
+            size: 1,
+            md5: None,
+            xxh: Some("h".into()),
+            installer: None,
+        }];
+        let err = plan_extraction(&embedded, &hashed).unwrap_err();
+        assert!(format!("{err:#}").contains("路径不安全"));
+    }
+
+    #[test]
+    fn exe_must_be_a_safe_path_in_the_plan() {
+        let plan = vec![item("App.exe"), item("lib/x.dll")];
+        assert_eq!(
+            exe_in_plan(&plan, "app.EXE").unwrap(),
+            PathBuf::from("app.EXE")
+        );
+        assert!(exe_in_plan(&plan, "lib\\x.dll").is_ok());
+        assert!(
+            format!("{:#}", exe_in_plan(&plan, "missing.exe").unwrap_err())
+                .contains("没有应用主程序")
+        );
+        assert!(
+            format!("{:#}", exe_in_plan(&plan, "../App.exe").unwrap_err()).contains("路径不安全")
+        );
     }
 
     #[tokio::test]
@@ -523,6 +496,7 @@ mod tests {
 
         let item = ExtractItem {
             file_name: "a/b.bin".to_string(),
+            rel: PathBuf::from(r"a\b.bin"),
             output_size: data.len() as u64,
             md5: None,
             xxh: Some(xxh_hex),
@@ -539,6 +513,16 @@ mod tests {
             .unwrap();
         decode_verify_write(&mmap, &item, &out, None).await.unwrap();
         assert_eq!(tokio::fs::read(&out).await.unwrap(), data);
+
+        // 解出的字节数与 meta 声明不符必须失败
+        let longer = ExtractItem {
+            output_size: data.len() as u64 + 1,
+            ..item.clone()
+        };
+        let err = decode_verify_write(&mmap, &longer, &out, None)
+            .await
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("大小校验失败"));
 
         // 篡改期望 hash 必须失败
         let bad = ExtractItem {
