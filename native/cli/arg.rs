@@ -23,7 +23,11 @@ pub struct UacArgs {
     pub pipe_id: String,
     /// The launching process's log file. The helper may run as another
     /// account, whose `%TEMP%` the launching user cannot read.
-    pub log_path: Option<PathBuf>,
+    pub log_path: PathBuf,
+    /// The launching process; the pipe's server must be this process.
+    pub launcher_pid: u32,
+    /// The launcher runs silently: no dialogs from the helper either.
+    pub silent: bool,
 }
 
 #[allow(dead_code)]

@@ -5,6 +5,7 @@ use super::{
     Progress, ProgressNotify,
 };
 use crate::utils::acl::create_security_attributes;
+use crate::utils::code::{Attach, ELEVATE_FAILED};
 use crate::utils::error::TAResult;
 use crate::utils::uac::check_elevated;
 use crate::utils::uac::run_elevated;
@@ -21,8 +22,9 @@ use tokio::net::windows::named_pipe::NamedPipeServer;
 use tokio::net::windows::named_pipe::ServerOptions;
 use tokio::sync::oneshot;
 use tokio::time;
-use windows::Win32::Foundation::{ERROR_PIPE_BUSY, HANDLE};
-use windows::Win32::System::Pipes::GetNamedPipeServerProcessId;
+use windows::Win32::Foundation::{ERROR_PIPE_BUSY, HANDLE, WAIT_OBJECT_0};
+use windows::Win32::System::Pipes::{GetNamedPipeClientProcessId, GetNamedPipeServerProcessId};
+use windows::Win32::System::Threading::{GetProcessId, WaitForSingleObject};
 
 const PIPE_BUFFER_SIZE: usize = 64 * 1024;
 
@@ -65,6 +67,8 @@ pub fn disconnect_error() -> IpcError {
 pub struct ManagedElevate {
     process: tokio::sync::RwLock<Option<SendableHandle>>,
     started: AtomicBool,
+    /// [`start`](Self::start) failed once; it is not retried.
+    start_failed: AtomicBool,
     /// The helper holds an exit-time staging cleanup and must outlive this
     /// process.
     holds_cleanup: AtomicBool,
@@ -128,6 +132,7 @@ impl ManagedElevate {
             resolve_rx: tokio::sync::Mutex::new(resolve_rx),
             process: tokio::sync::RwLock::new(None),
             started: AtomicBool::new(false),
+            start_failed: AtomicBool::new(false),
             holds_cleanup: AtomicBool::new(false),
             progress_tx,
             mpsc_tx,
@@ -155,52 +160,80 @@ impl ManagedElevate {
         let progress_tx = me.progress_tx.clone();
         (me, rx, pending, progress_tx)
     }
+    /// The only instance of the pipe. Its DACL admits SYSTEM and enabled
+    /// Administrators only ([`create_security_attributes`]): the helper is
+    /// elevated, while the launching user's other processes (and every
+    /// medium or low integrity process) cannot open it.
     pub fn create_pipe(name: &str) -> anyhow::Result<NamedPipeServer> {
         let mut attr = create_security_attributes();
         Ok(unsafe {
             ServerOptions::new()
                 .first_pipe_instance(true)
+                .max_instances(1)
                 .reject_remote_clients(true)
                 .create_with_security_attributes_raw(name, &mut attr as *mut _ as *mut c_void)
         }?)
     }
+
+    /// Start the helper once per session. A failed start (UAC declined, the
+    /// helper never connected) is final for this manager: later elevated
+    /// operations fail with the same code instead of asking again.
     pub async fn start(&self) -> anyhow::Result<()> {
         let mut process = self.process.write().await;
-        if process.is_none() {
-            let name = self.pipe_id.clone();
-            let name = format!(r"\\.\pipe\Kachina-Elevate-{name}");
-
-            // 先创建pipe服务器
-            let mut server = Self::create_pipe(&name).context("ELEVATE_ERR")?;
-            tracing::info!("Pipe server created at {:?}", name);
-
-            // pipe服务器创建成功后再启动UAC进程
-            let command = run_elevated(
-                std::env::current_exe().unwrap(),
-                format!(
-                    "headless-uac {} \"{}\"",
-                    self.pipe_id,
-                    crate::utils::log::path().display()
-                ),
-            )
-            .context("ELEVATE_ERR")?;
-            process.replace(command);
-            tracing::info!("UAC process started, waiting for pipe connection...");
-
-            let rx = self.mpsc_rx.write().await.take().unwrap();
-            if !wait_conn(&mut server).await {
-                return Err(anyhow::anyhow!("Failed to wait for connection").context("ELEVATE_ERR"));
-            }
-            handle_pipe(
-                server,
-                self.progress_tx.clone(),
-                self.pending.clone(),
-                rx,
-                self.resolve_tx.clone(),
-            )
-            .await;
-            self.started.store(true, Ordering::SeqCst);
+        // checked first: a failed start may still have left a helper handle
+        if self.start_failed.load(Ordering::SeqCst) {
+            return Err(anyhow::anyhow!("elevated helper unavailable").attach(ELEVATE_FAILED));
         }
+        if process.is_some() {
+            return Ok(());
+        }
+        let result = self.start_helper(&mut process).await;
+        if result.is_err() {
+            self.start_failed.store(true, Ordering::SeqCst);
+        }
+        result.map_err(|err| err.attach(ELEVATE_FAILED))
+    }
+
+    async fn start_helper(&self, process: &mut Option<SendableHandle>) -> anyhow::Result<()> {
+        let name = format!(r"\\.\pipe\Kachina-Elevate-{}", self.pipe_id);
+        let mut server = Self::create_pipe(&name).context("create elevation pipe")?;
+        tracing::info!("Pipe server created at {:?}", name);
+
+        // the helper is started only after the pipe exists
+        let mut helper_args = format!(
+            "headless-uac {} \"{}\" {}",
+            self.pipe_id,
+            crate::utils::log::path().display(),
+            std::process::id()
+        );
+        if SILENT_SESSION.load(Ordering::SeqCst) {
+            helper_args.push_str(" --silent");
+        }
+        let helper = run_elevated(
+            std::env::current_exe().context("CURRENT_EXE_ERR")?,
+            helper_args,
+        )
+        .context("start elevated helper")?;
+        let helper_raw = helper.0 .0 as isize;
+        process.replace(helper);
+        tracing::info!("UAC process started, waiting for pipe connection...");
+
+        accept_helper(&mut server, helper_raw).await?;
+        let rx = self
+            .mpsc_rx
+            .write()
+            .await
+            .take()
+            .context("elevation pipe already used")?;
+        handle_pipe(
+            server,
+            self.progress_tx.clone(),
+            self.pending.clone(),
+            rx,
+            self.resolve_tx.clone(),
+        )
+        .await;
+        self.started.store(true, Ordering::SeqCst);
         Ok(())
     }
 
@@ -339,13 +372,38 @@ fn fail_all_pending(pending: &Pending) {
     }
 }
 
-pub async fn wait_conn(server: &mut NamedPipeServer) -> bool {
-    if let Err(err) = server.connect().await {
-        tracing::warn!("Failed to accept pipe connection: {:?}", err);
-        return false;
+/// Set by a silent launch (`-S`): the helper is started with `--silent` and
+/// shows no dialogs either.
+pub static SILENT_SESSION: AtomicBool = AtomicBool::new(false);
+
+/// Accept the helper's connection and check that the client is the helper
+/// process this session started. Fails once the helper exits without
+/// connecting (it could not open the pipe, or was refused).
+async fn accept_helper(server: &mut NamedPipeServer, helper: isize) -> anyhow::Result<()> {
+    // `HANDLE` is not `Send`; it is rebuilt at each use instead of held across awaits
+    let helper_handle = || HANDLE(helper as *mut c_void);
+    let exited = async {
+        loop {
+            if unsafe { WaitForSingleObject(helper_handle(), 0) } == WAIT_OBJECT_0 {
+                return;
+            }
+            time::sleep(Duration::from_millis(100)).await;
+        }
+    };
+    tokio::select! {
+        conn = server.connect() => conn.context("accept elevated helper connection")?,
+        _ = exited => anyhow::bail!("elevated helper exited before connecting"),
+    }
+    let mut client_pid = 0u32;
+    let pipe = HANDLE(std::os::windows::io::AsRawHandle::as_raw_handle(server));
+    unsafe { GetNamedPipeClientProcessId(pipe, &mut client_pid) }
+        .context("query elevation pipe client")?;
+    let helper_pid = unsafe { GetProcessId(helper_handle()) };
+    if client_pid != helper_pid {
+        anyhow::bail!("elevation pipe client {client_pid} is not the helper {helper_pid}");
     }
     tracing::info!("Client connected to pipe");
-    true
+    Ok(())
 }
 /// 读写各一个任务：`read_frame` 不可取消，不能放进与写端共用的 `select!`。
 /// 任一端结束（对端关闭、帧错位、读写错误、`ManagedElevate` 被丢弃）就停掉另一端，
@@ -455,24 +513,39 @@ pub async fn uac_ipc_main(args: crate::cli::arg::UacArgs) {
         }
     };
 
-    if let Err(err) = client {
-        let detail = format!("{err:?}");
-        crate::utils::taskdialog::show_error(
-            crate::utils::taskdialog::ErrorDialog {
-                detail: Some(&detail),
-                ..crate::utils::taskdialog::ErrorDialog::code(crate::utils::code::ELEVATE_FAILED)
-            },
-            windows::Win32::Foundation::HWND::default(),
+    let client = match client {
+        Ok(client) => client,
+        Err(err) => {
+            tracing::error!("elevated helper cannot open the pipe: {err:?}");
+            // the launcher sees this process exit and fails the session itself
+            if !args.silent {
+                let detail = format!("{err:?}");
+                crate::utils::taskdialog::show_error(
+                    crate::utils::taskdialog::ErrorDialog {
+                        detail: Some(&detail),
+                        ..crate::utils::taskdialog::ErrorDialog::code(ELEVATE_FAILED)
+                    },
+                    windows::Win32::Foundation::HWND::default(),
+                );
+            }
+            return;
+        }
+    };
+    // the pipe's server must be the process that started this helper
+    let mut server_pid = 0u32;
+    let handle = HANDLE(std::os::windows::io::AsRawHandle::as_raw_handle(&client));
+    if let Err(err) = unsafe { GetNamedPipeServerProcessId(handle, &mut server_pid) } {
+        tracing::error!("elevation pipe server unknown: {err}");
+        return;
+    }
+    if server_pid != args.launcher_pid {
+        tracing::error!(
+            "elevation pipe server {server_pid} is not the launcher {}",
+            args.launcher_pid
         );
         return;
     }
-    let client = client.unwrap();
-    let mut launcher = 0u32;
-    let handle = HANDLE(std::os::windows::io::AsRawHandle::as_raw_handle(&client));
-    match unsafe { GetNamedPipeServerProcessId(handle, &mut launcher) } {
-        Ok(()) => crate::fs::staging::set_lock_owner(launcher),
-        Err(err) => tracing::warn!("launcher pid unavailable: {err}"),
-    }
+    crate::fs::staging::set_lock_owner(server_pid);
     let (clientrx, mut clienttx) = tokio::io::split(client);
     let mut clientrx = tokio::io::BufReader::with_capacity(PIPE_BUFFER_SIZE, clientrx);
 
@@ -600,9 +673,20 @@ pub async fn uac_ipc_main(args: crate::cli::arg::UacArgs) {
                             break;
                         }
                     }
-                    v = sentry_rx.recv() => {
-                        if let Some(msg) = v {
-                            let _ = tx.send(msg).await;
+                    // written here directly: this task is the only reader of
+                    // `rx`, so waiting for room in it could never finish
+                    Some(msg) = sentry_rx.recv() => {
+                        match encode_frame(&msg) {
+                            Ok(frame) => {
+                                if let Err(err) = clienttx.write_all(&frame).await {
+                                    tracing::warn!("Client: Failed to write to pipe: {:?}", err);
+                                    let _ = cancel_tx.send(());
+                                    break;
+                                }
+                            }
+                            Err(err) => {
+                                tracing::warn!("Client: Failed to serialize message: {:?}", err);
+                            }
                         }
                     }
                 }
@@ -640,11 +724,17 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn pipe_roundtrip_and_disconnect() {
         let pipe_id = uuid::Uuid::new_v4().to_string();
-        let server =
-            ManagedElevate::create_pipe(&format!(r"\\.\pipe\Kachina-Elevate-{pipe_id}")).unwrap();
+        // default security: the test process is not elevated, and the real
+        // pipe admits elevated clients only
+        let server = ServerOptions::new()
+            .first_pipe_instance(true)
+            .create(format!(r"\\.\pipe\Kachina-Elevate-{pipe_id}"))
+            .unwrap();
         let client = tokio::spawn(uac_ipc_main(UacArgs {
             pipe_id,
-            log_path: None,
+            log_path: std::env::temp_dir().join("kachina-test.log"),
+            launcher_pid: std::process::id(),
+            silent: true,
         }));
         server.connect().await.unwrap();
 
@@ -719,6 +809,54 @@ mod tests {
             .await
             .expect("client did not exit after server closed")
             .unwrap();
+    }
+
+    fn test_pipe() -> (String, NamedPipeServer) {
+        let name = format!(r"\\.\pipe\Kachina-Elevate-{}", uuid::Uuid::new_v4());
+        let server = ServerOptions::new()
+            .first_pipe_instance(true)
+            .create(&name)
+            .unwrap();
+        (name, server)
+    }
+
+    fn raw(child: &std::process::Child) -> isize {
+        std::os::windows::io::AsRawHandle::as_raw_handle(child) as isize
+    }
+
+    /// 子进程没连上就退出时，启动进程报错结束等待，而不是一直等连接。
+    #[tokio::test]
+    async fn helper_exit_before_connecting_fails_the_wait() {
+        let (_name, mut server) = test_pipe();
+        let mut helper = std::process::Command::new("cmd.exe")
+            .args(["/c", "exit", "0"])
+            .spawn()
+            .unwrap();
+        let err = time::timeout(
+            Duration::from_secs(5),
+            accept_helper(&mut server, raw(&helper)),
+        )
+        .await
+        .expect("accept_helper kept waiting after the helper exited")
+        .unwrap_err();
+        assert!(err.to_string().contains("exited"), "{err:#}");
+        let _ = helper.wait();
+    }
+
+    /// 连上管道的不是本次拉起的子进程时拒绝。
+    #[tokio::test]
+    async fn connection_from_another_process_is_refused() {
+        let (name, mut server) = test_pipe();
+        let mut helper = std::process::Command::new("cmd.exe")
+            .args(["/c", "ping", "-n", "10", "127.0.0.1"])
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let _intruder = ClientOptions::new().open(&name).unwrap();
+        let err = accept_helper(&mut server, raw(&helper)).await.unwrap_err();
+        assert!(err.to_string().contains("is not the helper"), "{err:#}");
+        let _ = helper.kill();
+        let _ = helper.wait();
     }
 
     /// 1000 条进度先于结果到达、超出广播容量：`run` 仍拿到 `Ok`，只丢进度。

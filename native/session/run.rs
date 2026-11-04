@@ -1284,7 +1284,8 @@ async fn run_dfs_install(
     }
 
     if settings.elevate {
-        let _ = run_op(mgr, true, IpcOperation::Ping, progress_noop()).await;
+        // starts the helper; a declined UAC prompt ends the session here
+        run_op(mgr, true, IpcOperation::Ping, progress_noop()).await?;
     }
     emit_insight(
         project,
@@ -3680,7 +3681,8 @@ async fn run_uninstall_inner(
         extra.extend(user_shortcuts.iter().cloned());
     }
     if settings.elevate {
-        let _ = run_op(mgr, true, IpcOperation::Ping, progress_noop()).await;
+        // starts the helper; a declined UAC prompt ends the session here
+        run_op(mgr, true, IpcOperation::Ping, progress_noop()).await?;
     }
     progress(
         ui,

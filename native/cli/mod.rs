@@ -132,14 +132,23 @@ fn parse_from(argv: &[OsString], d_tail: Option<PathBuf>) -> Command {
     }
 }
 
+/// `headless-uac <pipe_id> <log_path> <launcher_pid> [--silent]`
 fn parse_uac(argv: &[OsString]) -> UacArgs {
     // 仅由自身以正确参数拉起；缺参属内部误用，静默退出。
-    let Some(pipe_id) = argv.first().and_then(|s| s.to_str()) else {
+    let (Some(pipe_id), Some(log_path), Some(launcher_pid)) = (
+        argv.first().and_then(|s| s.to_str()),
+        argv.get(1),
+        argv.get(2)
+            .and_then(|s| s.to_str())
+            .and_then(|s| s.parse::<u32>().ok()),
+    ) else {
         std::process::exit(2);
     };
     UacArgs {
         pipe_id: pipe_id.to_string(),
-        log_path: argv.get(1).map(PathBuf::from),
+        log_path: PathBuf::from(log_path),
+        launcher_pid,
+        silent: argv[3..].iter().any(|a| a == "--silent"),
     }
 }
 
@@ -477,20 +486,28 @@ mod tests {
             parse_from(&os(&["native-ui", "-S"]), None),
             Command::NativeUi(a) if a.silent
         ));
-        match parse_from(&os(&["headless-uac", "pipe-123"]), None) {
+        match parse_from(
+            &os(&[
+                "headless-uac",
+                "pipe-123",
+                r"C:\Users\A B\Temp\k.log",
+                "4242",
+            ]),
+            None,
+        ) {
             Command::HeadlessUac(u) => {
                 assert_eq!(u.pipe_id, "pipe-123");
-                assert_eq!(u.log_path, None);
+                assert_eq!(u.log_path, PathBuf::from(r"C:\Users\A B\Temp\k.log"));
+                assert_eq!(u.launcher_pid, 4242);
+                assert!(!u.silent);
             }
             other => panic!("expected HeadlessUac, got {other:?}"),
         }
         match parse_from(
-            &os(&["headless-uac", "pipe-123", r"C:\Users\A B\Temp\k.log"]),
+            &os(&["headless-uac", "pipe-123", r"C:\k.log", "4242", "--silent"]),
             None,
         ) {
-            Command::HeadlessUac(u) => {
-                assert_eq!(u.log_path, Some(PathBuf::from(r"C:\Users\A B\Temp\k.log")))
-            }
+            Command::HeadlessUac(u) => assert!(u.silent),
             other => panic!("expected HeadlessUac, got {other:?}"),
         }
         match parse_from(&os(&["crash-dialog", "abc123"]), None) {

@@ -115,19 +115,22 @@ fn main() {
     }
     utils::sentry::init(matches!(command, Command::HeadlessUac(_)));
     utils::sentry::set_app_info();
-    let show_crash_dialog = match &command {
-        Command::Install(a) => !a.silent,
-        _ => true,
+    // 静默安装及其提权子进程都不弹框（含崩溃提示）
+    let silent = match &command {
+        Command::Install(a) => a.silent,
+        Command::HeadlessUac(uac) => uac.silent,
+        _ => false,
     };
-    utils::sentry::install_panic_hook(show_crash_dialog);
+    ipc::manager::SILENT_SESSION.store(silent, std::sync::atomic::Ordering::SeqCst);
+    utils::sentry::install_panic_hook(!silent);
 
     // 日志：控制台 + %TEMP%\KachinaInstaller.log + Sentry 面包屑，INFO 级全局过滤；
     // 提权子进程写启动进程传来的文件。
     let log_path = match &command {
         Command::HeadlessUac(uac) => uac.log_path.clone(),
-        _ => None,
+        _ => utils::log::path(),
     };
-    utils::log::init(&log_path.unwrap_or_else(utils::log::path));
+    utils::log::init(&log_path);
 
     // Initialize H3/QUIC probe early — before any client is created
     capabilities::init();
