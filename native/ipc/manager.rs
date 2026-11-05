@@ -51,6 +51,7 @@ fn retired_error() -> IpcError {
         cancelled: false,
         insight: None,
         network: None,
+        local_io: None,
     }
 }
 
@@ -63,6 +64,7 @@ pub fn disconnect_error() -> IpcError {
         cancelled: false,
         insight: None,
         network: None,
+        local_io: None,
     }
 }
 

@@ -100,12 +100,14 @@ pub struct IpcError {
     /// 未挂码错误链上的网络失败（标签、下载码）。错误类型不过管道，父进程据此
     /// 还原一个可识别的链节点，挂码时与未提权路径得到同一个码。
     pub network: Option<(String, String)>,
+    /// 没有网络失败时，链上本地 io 错误的码，用途同 `network`。
+    pub local_io: Option<String>,
 }
 
 impl IpcError {
     pub fn from_ta(err: &TACommandError) -> Self {
-        use crate::utils::code::{extract, Extracted};
-        let mut network = None;
+        use crate::utils::code::{extract, local_io_code, Extracted};
+        let (mut network, mut local_io) = (None, None);
         let (message, code, subject, sid, cancelled) = match extract(&err.error) {
             Extracted::Coded(c) => (
                 c.detail.clone().unwrap_or_default(),
@@ -118,6 +120,9 @@ impl IpcError {
             Extracted::Uncoded { detail } => {
                 network = crate::utils::net_failure::find(err.error.as_ref())
                     .map(|f| (f.tag, f.code.to_string()));
+                if network.is_none() {
+                    local_io = local_io_code(&err.error).map(str::to_string);
+                }
                 (detail, None, None, None, false)
             }
         };
@@ -129,18 +134,22 @@ impl IpcError {
             cancelled,
             insight: err.insight.clone(),
             network,
+            local_io,
         }
     }
 
     pub fn into_ta(self) -> TACommandError {
-        use crate::utils::code::{code_from_str, Cancelled, Coded};
-        use crate::utils::net_failure::{CarriedFailure, NetFailure};
-        let failure = self.network.and_then(|(tag, code)| {
-            Some(NetFailure {
+        use crate::utils::code::{code_from_str, Cancelled, Carried, CarriedCause, Coded};
+        use crate::utils::net_failure::NetFailure;
+        let network = self.network.and_then(|(tag, code)| {
+            Some(CarriedCause::Network(NetFailure {
                 tag,
                 code: code_from_str(&code)?,
-            })
+            }))
         });
+        let local_io = self
+            .local_io
+            .and_then(|code| Some(CarriedCause::LocalIo(code_from_str(&code)?)));
         let error = if self.cancelled {
             anyhow::Error::new(Cancelled)
         } else if let Some(code) = self.code.as_deref().and_then(code_from_str) {
@@ -149,10 +158,10 @@ impl IpcError {
             coded.subject = self.subject;
             coded.sid = self.sid;
             anyhow::Error::new(coded)
-        } else if let Some(failure) = failure {
-            anyhow::Error::new(CarriedFailure {
-                failure,
+        } else if let Some(cause) = network.or(local_io) {
+            anyhow::Error::new(Carried {
                 text: self.message,
+                cause,
             })
         } else {
             anyhow::anyhow!(self.message)
@@ -260,6 +269,7 @@ mod tests {
                         cancelled: false,
                         insight: Some(insight(Some("HASH_MISMATCH_ERR"))),
                         network: Some(("NET_RESET".into(), "DOWNLOAD_FAILED".into())),
+                        local_io: None,
                     }),
                 ],
                 insight: insight(None),

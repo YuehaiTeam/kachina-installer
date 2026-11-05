@@ -118,7 +118,7 @@ impl<S: AsyncRead + Unpin> AsyncRead for NetworkInsightStream<S> {
 impl<S> NetworkInsightStream<S> {
     pub fn new(
         stream: S,
-        url: String,
+        url: &str,
         range: Vec<(u32, u32)>,
         request_start_time: Instant,
         response_received_time: Instant,
@@ -126,9 +126,10 @@ impl<S> NetworkInsightStream<S> {
     ) -> Self {
         let ttfb = request_start_time.elapsed().as_millis() as u32;
         let now = Instant::now();
+        let url = crate::utils::url::sanitize_url_for_logging(url);
 
         let insight = Arc::new(Mutex::new(InsightItem {
-            url: crate::utils::url::sanitize_url_for_logging(&url),
+            url: url.clone(),
             ttfb,
             time: 0,
             size: 0,
@@ -142,7 +143,7 @@ impl<S> NetworkInsightStream<S> {
             insight,
             network_bytes: Arc::new(AtomicU64::new(0)),
             response_received_time,
-            url: crate::utils::url::sanitize_url_for_logging(&url),
+            url,
             content_length,
             last_stall_check: now,
             last_stall_check_bytes: 0,
@@ -717,7 +718,7 @@ async fn open_http_stream(
     // 创建NetworkInsightStream包装
     let insight_stream = NetworkInsightStream::new(
         reader,
-        crate::utils::url::sanitize_url_for_logging(url),
+        url,
         insight_range,
         request_start_time,
         response_received_time,

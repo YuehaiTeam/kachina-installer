@@ -493,54 +493,53 @@ pub fn coded_from_error(err: &anyhow::Error) -> Option<Coded> {
     }
 }
 
+/// Removes every `scheme://…` URL (http, https, http3, sftp, ssh+http, …).
 fn strip_urls(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
     let mut rest = input;
-    while !rest.is_empty() {
-        let next_http = rest.find("http://");
-        let next_https = rest.find("https://");
-        let start = match (next_http, next_https) {
-            (Some(a), Some(b)) => Some(a.min(b)),
-            (Some(a), None) => Some(a),
-            (None, Some(b)) => Some(b),
-            (None, None) => None,
+    while let Some(sep) = rest.find("://") {
+        // Scheme characters are ASCII, so walking bytes back stops on a char
+        // boundary.
+        let bytes = rest.as_bytes();
+        let mut start = sep;
+        while start > 0
+            && (bytes[start - 1].is_ascii_alphanumeric()
+                || matches!(bytes[start - 1], b'+' | b'-' | b'.'))
+        {
+            start -= 1;
+        }
+        if start == sep || !bytes[start].is_ascii_alphabetic() {
+            out.push_str(&rest[..sep + 3]);
+            rest = &rest[sep + 3..];
+            continue;
+        }
+        out.push_str(&rest[..start]);
+        let body = &rest[sep + 3..];
+        let end = body
+            .find(|c: char| {
+                c.is_whitespace() || matches!(c, ')' | ',' | '"' | '\'' | '>' | ']' | ';')
+            })
+            .unwrap_or(body.len());
+        rest = &body[end..];
+        // Drop what only framed the URL, so "for url (…): x" reads
+        // "for url: x", "TAG […]: x" reads "TAG: x" and "ctx: … x"
+        // keeps a single space.
+        let close = match out.chars().last() {
+            Some('(') => Some(')'),
+            Some('[') => Some(']'),
+            _ => None,
         };
-        match start {
-            None => {
-                out.push_str(rest);
-                break;
+        if close.is_some_and(|c| rest.starts_with(c)) {
+            out.pop();
+            if out.ends_with(' ') {
+                out.pop();
             }
-            Some(i) => {
-                out.push_str(&rest[..i]);
-                let after = &rest[i..];
-                let scheme_len = if after.starts_with("https://") { 8 } else { 7 };
-                let url_body = &after[scheme_len..];
-                let end_rel = url_body
-                    .find(|c: char| {
-                        c.is_whitespace() || matches!(c, ')' | ',' | '"' | '\'' | '>' | ']' | ';')
-                    })
-                    .unwrap_or(url_body.len());
-                rest = &url_body[end_rel..];
-                // Drop what only framed the URL, so "for url (…): x" reads
-                // "for url: x", "TAG […]: x" reads "TAG: x" and "ctx: … x"
-                // keeps a single space.
-                let close = match out.chars().last() {
-                    Some('(') => Some(')'),
-                    Some('[') => Some(']'),
-                    _ => None,
-                };
-                if close.is_some_and(|c| rest.starts_with(c)) {
-                    out.pop();
-                    if out.ends_with(' ') {
-                        out.pop();
-                    }
-                    rest = &rest[1..];
-                } else if (out.is_empty() || out.ends_with(' ')) && rest.starts_with(' ') {
-                    rest = &rest[1..];
-                }
-            }
+            rest = &rest[1..];
+        } else if (out.is_empty() || out.ends_with(' ')) && rest.starts_with(' ') {
+            rest = &rest[1..];
         }
     }
+    out.push_str(rest);
     out
 }
 
@@ -597,36 +596,54 @@ fn reqwest_ref<'a>(err: &'a (dyn std::error::Error + 'static)) -> Option<&'a req
     None
 }
 
-fn code_for_io_kind(kind: std::io::ErrorKind) -> &'static str {
-    use std::io::ErrorKind as K;
-    match kind {
-        K::PermissionDenied => PERMISSION_DENIED,
-        K::StorageFull => DISK_FULL,
-        K::TimedOut => DOWNLOAD_TIMEOUT,
-        K::ConnectionRefused | K::AddrNotAvailable => DOWNLOAD_REFUSED,
-        K::ConnectionReset
-        | K::ConnectionAborted
-        | K::NotConnected
-        | K::UnexpectedEof
-        | K::BrokenPipe => DOWNLOAD_FAILED,
+/// Code for a local file-system failure (rename, copy, delete inside the
+/// install directory). Sharing / lock violations are `FILE_IN_USE`. Network
+/// io errors are classified by `net_failure`, never here.
+pub fn code_for_local_io(io: &std::io::Error) -> &'static str {
+    match (io.raw_os_error(), io.kind()) {
+        (Some(32 | 33), _) => FILE_IN_USE,
+        (_, std::io::ErrorKind::PermissionDenied) => PERMISSION_DENIED,
+        (_, std::io::ErrorKind::StorageFull) => DISK_FULL,
         _ => FILE_IO_FAILED,
     }
 }
 
-/// Code for a local file-system failure (rename, copy, delete inside the
-/// install directory). Sharing / lock violations are `FILE_IN_USE`.
-pub fn code_for_local_io(io: &std::io::Error) -> &'static str {
-    match io.raw_os_error() {
-        Some(32) | Some(33) => FILE_IN_USE,
-        _ => code_for_io_kind(io.kind()),
+/// An error of the elevated helper, rebuilt by the launcher from the pipe
+/// (`IpcError::into_ta`) with what the helper read from its typed causes. Only
+/// the text of the original chain crosses, so it displays that text and has
+/// no source.
+#[derive(Debug)]
+pub struct Carried {
+    pub text: String,
+    pub cause: CarriedCause,
+}
+
+#[derive(Debug)]
+pub enum CarriedCause {
+    Network(net_failure::NetFailure),
+    /// The `code_for_local_io` code of a local io error.
+    LocalIo(&'static str),
+}
+
+impl fmt::Display for Carried {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.text)
     }
 }
 
-/// Code of the first io error in a chain without a network cause.
-fn local_io_code(err: &anyhow::Error) -> Option<&'static str> {
-    err.chain()
-        .find_map(|cause| cause.downcast_ref::<std::io::Error>())
-        .map(|io| code_for_io_kind(io.kind()))
+impl std::error::Error for Carried {}
+
+/// Code of the first local io error in a chain without a network cause.
+pub fn local_io_code(err: &anyhow::Error) -> Option<&'static str> {
+    err.chain().find_map(|cause| {
+        if let Some(io) = cause.downcast_ref::<std::io::Error>() {
+            return Some(code_for_local_io(io));
+        }
+        match cause.downcast_ref::<Carried>()?.cause {
+            CarriedCause::LocalIo(code) => Some(code),
+            CarriedCause::Network(_) => None,
+        }
+    })
 }
 
 /// The chain text led by the network failure tag. A failed body read already
@@ -858,6 +875,14 @@ mod tests {
                 "in create_http_stream: refused",
             ),
             ("http://a.example/f failed", "failed"),
+            // every scheme, not only http(s)
+            (
+                "in create_http_stream: ssh+http://h:22/f: 404",
+                "in create_http_stream: 404",
+            ),
+            ("SFTP sftp://h/f#user=u&pass=p: x", "SFTP x"),
+            ("下载sftp://h/f失败", "下载"),
+            ("not a url: ://x", "not a url: ://x"),
         ] {
             assert_eq!(strip_urls(text), stripped);
         }
@@ -881,13 +906,13 @@ mod tests {
 
     #[test]
     fn download_or_uses_fallback_only_without_network_cause() {
-        let typed = attach_download_or(
-            anyhow::Error::new(std::io::Error::from(std::io::ErrorKind::TimedOut)),
+        let local = attach_download_or(
+            anyhow::Error::new(std::io::Error::from(std::io::ErrorKind::StorageFull)),
             NO_DOWNLOAD_NODE,
             None,
             None,
         );
-        assert!(matches!(extract(&typed), Extracted::Coded(c) if c.code == DOWNLOAD_TIMEOUT));
+        assert!(matches!(extract(&local), Extracted::Coded(c) if c.code == DISK_FULL));
 
         let status = attach_download_or(
             anyhow::Error::new(crate::dfs::HttpStatus::new(503, "busy")),

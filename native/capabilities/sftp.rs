@@ -177,7 +177,7 @@ fn put_str(out: &mut Vec<u8>, s: &[u8]) {
 }
 
 /// 解析 STATUS 报文。payload 含 request id。
-fn status_to_err(payload: &[u8]) -> SftpStatus {
+fn parse_status(payload: &[u8]) -> SftpStatus {
     let mut pos = 4; // skip request id
     let code = get_u32(payload, &mut pos).unwrap_or(u32::MAX);
     let message = get_bytes(payload, &mut pos)
@@ -260,7 +260,7 @@ impl<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send> SftpClient<
                 );
                 Ok(get_u64(&payload, &mut pos)?)
             }
-            FXP_STATUS => Err(status_to_err(&payload).into()),
+            FXP_STATUS => Err(parse_status(&payload).into()),
             other => Err(invalid_data(format!("SFTP: expected ATTRS, got {other}")).into()),
         }
     }
@@ -279,7 +279,7 @@ impl<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send> SftpClient<
                 let mut pos = 4; // skip request id
                 Ok(get_bytes(&payload, &mut pos)?.to_vec())
             }
-            FXP_STATUS => Err(status_to_err(&payload).into()),
+            FXP_STATUS => Err(parse_status(&payload).into()),
             other => Err(invalid_data(format!("SFTP: expected HANDLE, got {other}")).into()),
         }
     }
@@ -458,7 +458,7 @@ impl SftpMiddleware {
                     }
                     FXP_STATUS => {
                         // 读取范围由 stat 限定，EOF 意味着文件在传输中变短
-                        let status = status_to_err(&payload);
+                        let status = parse_status(&payload);
                         if status.code == FX_EOF {
                             Err(std::io::Error::new(
                                 std::io::ErrorKind::UnexpectedEof,

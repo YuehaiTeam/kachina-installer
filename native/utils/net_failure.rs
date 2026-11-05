@@ -16,7 +16,8 @@ use h3_msquic_async::msquic_async::{ConnectionError as QuicConnection, Connectio
 
 use crate::capabilities::{sftp::SftpStatus, ssh::SshAuthRejected};
 use crate::utils::code::{
-    DOWNLOAD_FAILED, DOWNLOAD_REFUSED, DOWNLOAD_STALLED, DOWNLOAD_TIMEOUT, SERVER_HTTP_ERROR,
+    Carried, CarriedCause, DOWNLOAD_FAILED, DOWNLOAD_REFUSED, DOWNLOAD_STALLED, DOWNLOAD_TIMEOUT,
+    SERVER_HTTP_ERROR,
 };
 
 /// Where in the request a failure happened.
@@ -72,23 +73,6 @@ impl NetFailure {
         Self::new("NET_TOO_SLOW", Class::Slow, Phase::Body)
     }
 }
-
-/// A failure the elevated helper classified, rebuilt by the launcher from the
-/// pipe (`IpcError::into_ta`). Only the text of the original chain crosses, so
-/// it displays that text and has no source.
-#[derive(Debug)]
-pub struct CarriedFailure {
-    pub failure: NetFailure,
-    pub text: String,
-}
-
-impl std::fmt::Display for CarriedFailure {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.text)
-    }
-}
-
-impl Error for CarriedFailure {}
 
 /// Classifies an error known to come off the network, such as a failed read
 /// of a download body. `NET_OTHER` when no cause is recognized.
@@ -176,8 +160,11 @@ impl Walk {
         if let Some(c) = e.downcast_ref::<crate::fs::ClassifiedNetworkError>() {
             return Step::Done(c.failure.clone());
         }
-        if let Some(c) = e.downcast_ref::<CarriedFailure>() {
-            return Step::Done(c.failure.clone());
+        if let Some(c) = e.downcast_ref::<Carried>() {
+            return match &c.cause {
+                CarriedCause::Network(failure) => Step::Done(failure.clone()),
+                CarriedCause::LocalIo(_) => Step::End,
+            };
         }
         if let Some(s) = e.downcast_ref::<crate::dfs::HttpStatus>() {
             return Step::Done(self.status(s.status));
@@ -485,30 +472,41 @@ mod tests {
         }
     }
 
-    /// A send failure's detail starts with its tag. The elevated helper's
-    /// uncoded failure crosses the pipe as text, and the launcher hangs the
-    /// code and detail it would have hung for the same failure itself.
-    #[tokio::test]
-    async fn code_and_detail_survive_the_elevation_pipe() {
+    /// The launcher's view of an error the elevated helper returned uncoded.
+    fn across_pipe(err: crate::utils::error::TACommandError) -> anyhow::Error {
         use crate::ipc::{decode_frame, encode_frame, IpcError, PipeMsg};
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let closed = format!("http://{}/f", listener.local_addr().unwrap());
-        drop(listener);
-
-        let local = coded(refused(&closed).await.error);
-        assert_eq!(local.0, DOWNLOAD_REFUSED);
-        assert!(local.1.starts_with("NET_CONNECT_REFUSED: "), "{}", local.1);
-
-        let msg = PipeMsg::Err(
-            "id".into(),
-            IpcError::from_ta(&refused(&closed).await),
-            Default::default(),
-        );
+        let msg = PipeMsg::Err("id".into(), IpcError::from_ta(&err), Default::default());
         let frame = encode_frame(&msg).unwrap();
         let PipeMsg::Err(_, piped, _) = decode_frame(&frame[4..]).unwrap() else {
             panic!("variant lost");
         };
-        assert_eq!(coded(piped.into_ta().error), local);
+        piped.into_ta().error
+    }
+
+    /// A send failure's detail starts with its tag. An error the elevated
+    /// helper returns uncoded crosses the pipe as text, and the launcher hangs
+    /// the code and detail it would have hung for the same error itself, for a
+    /// network failure and a local io error alike.
+    #[tokio::test]
+    async fn code_and_detail_survive_the_elevation_pipe() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let closed = format!("http://{}/f", listener.local_addr().unwrap());
+        drop(listener);
+        let direct = coded(refused(&closed).await.error);
+        assert_eq!(direct.0, DOWNLOAD_REFUSED);
+        assert!(
+            direct.1.starts_with("NET_CONNECT_REFUSED: "),
+            "{}",
+            direct.1
+        );
+        assert_eq!(coded(across_pipe(refused(&closed).await)), direct);
+
+        // ERROR_DISK_FULL while writing a staged file
+        let disk_full =
+            || anyhow::Error::new(io::Error::from_raw_os_error(112)).context("WRITE_TARGET_ERR");
+        let direct = coded(disk_full());
+        assert_eq!(direct.0, crate::utils::code::DISK_FULL);
+        assert_eq!(coded(across_pipe(disk_full().into())), direct);
     }
 
     #[tokio::test]
@@ -569,6 +567,5 @@ mod tests {
     fn local_io_is_not_a_network_failure() {
         let disk = anyhow::Error::new(io::Error::from(io::ErrorKind::StorageFull)).context("write");
         assert_eq!(find(disk.as_ref()), None);
-        assert_eq!(code_of(disk), crate::utils::code::DISK_FULL);
     }
 }
