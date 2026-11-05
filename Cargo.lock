@@ -1540,6 +1540,7 @@ dependencies = [
  "lazy_static",
  "log",
  "mslnk",
+ "native-tls",
  "nt_version",
  "num_cpus",
  "pin-project",

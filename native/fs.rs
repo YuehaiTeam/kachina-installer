@@ -1,10 +1,7 @@
 pub mod commit;
 pub mod staging;
 
-use crate::utils::code::code_for_network_type;
-use bytes::Bytes;
 use fmmap::tokio::AsyncMmapFileExt;
-use futures::Stream;
 use futures::TryStreamExt;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -21,115 +18,27 @@ use std::{
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 
 use crate::{
-    dfs::{apply_insight_io_error, InsightItem},
+    dfs::InsightItem,
     ipc::{Progress, ProgressNotify},
     local::mmap,
     utils::{
-        error::{TACommandError, TAResult, DOWNLOAD_STALLED, DOWNLOAD_TOO_SLOW},
+        error::{TACommandError, TAResult},
         hash::{hash_file_with, HASH_BUFFER_SIZE},
+        net_failure::{self, NetFailure, Phase},
         url::HttpContextExt,
     },
     DOWNLOAD_CLIENT,
 };
 use anyhow::{Context, Result};
 
-#[derive(Debug, Clone, Serialize)]
-pub enum NetworkErrorType {
-    ConnectionReset,
-    ConnectionTimeout,
-    StreamError,
-    DnsResolutionFailed,
-    TlsHandshakeError,
-    HttpProtocolError,
-    NetworkUnreachable,
-    RequestTimeout,
-    ResponseBodyError,
-    DownloadStalled,
-    DownloadTooSlow,
-    Other(String),
-}
-
+/// A failed read of a download body, classified where it happened. Marks the
+/// io error as a network failure, so it is never taken for a local one.
 #[derive(Debug)]
 pub struct ClassifiedNetworkError {
-    pub error_type: NetworkErrorType,
+    pub failure: NetFailure,
     pub original_error: Box<dyn std::error::Error + Send + Sync>,
-    pub context: String,
+    /// Already sanitized for logging.
     pub url: String,
-    pub range: Vec<(u32, u32)>,
-}
-
-impl ClassifiedNetworkError {
-    pub fn new(
-        error_type: NetworkErrorType,
-        original_error: Box<dyn std::error::Error + Send + Sync>,
-        url: String,
-        range: Vec<(u32, u32)>,
-    ) -> Self {
-        let context = match &error_type {
-            NetworkErrorType::ConnectionReset => "ERR_CONNECTION_RESET",
-            NetworkErrorType::ConnectionTimeout => "ERR_CONNECTION_TIMEOUT",
-            NetworkErrorType::StreamError => "ERR_STREAM_ERROR",
-            NetworkErrorType::DnsResolutionFailed => "ERR_DNS_RESOLUTION_FAILED",
-            NetworkErrorType::TlsHandshakeError => "ERR_TLS_HANDSHAKE_ERROR",
-            NetworkErrorType::HttpProtocolError => "ERR_HTTP_PROTOCOL_ERROR",
-            NetworkErrorType::NetworkUnreachable => "ERR_NETWORK_UNREACHABLE",
-            NetworkErrorType::RequestTimeout => "ERR_REQUEST_TIMEOUT",
-            NetworkErrorType::ResponseBodyError => "ERR_RESPONSE_BODY_ERROR",
-            NetworkErrorType::DownloadStalled => "ERR_DOWNLOAD_STALLED",
-            NetworkErrorType::DownloadTooSlow => "ERR_DOWNLOAD_TOO_SLOW",
-            NetworkErrorType::Other(_) => "ERR_NETWORK_OTHER",
-        };
-
-        Self {
-            error_type,
-            original_error,
-            context: context.to_string(),
-            url,
-            range,
-        }
-    }
-
-    /// 分析错误并分类
-    pub fn classify_error(error: &dyn std::error::Error) -> NetworkErrorType {
-        let error_str = error.to_string().to_lowercase();
-
-        if error_str.contains("connection reset") || error_str.contains("connection was reset") {
-            NetworkErrorType::ConnectionReset
-        } else if error_str.contains("download_stalled") {
-            NetworkErrorType::DownloadStalled
-        } else if error_str.contains("download_too_slow") {
-            NetworkErrorType::DownloadTooSlow
-        } else if error_str.contains("timed out") || error_str.contains("timeout") {
-            if error_str.contains("connect") || error_str.contains("connection") {
-                NetworkErrorType::ConnectionTimeout
-            } else {
-                NetworkErrorType::RequestTimeout
-            }
-        } else if error_str.contains("stream error")
-            || error_str.contains("unexpected internal error")
-        {
-            NetworkErrorType::StreamError
-        } else if error_str.contains("dns") || error_str.contains("name resolution") {
-            NetworkErrorType::DnsResolutionFailed
-        } else if error_str.contains("tls")
-            || error_str.contains("ssl")
-            || error_str.contains("handshake")
-        {
-            NetworkErrorType::TlsHandshakeError
-        } else if error_str.contains("http")
-            && (error_str.contains("protocol") || error_str.contains("invalid"))
-        {
-            NetworkErrorType::HttpProtocolError
-        } else if error_str.contains("network unreachable") || error_str.contains("no route") {
-            NetworkErrorType::NetworkUnreachable
-        } else if error_str.contains("error decoding response body")
-            || error_str.contains("response body error")
-        {
-            NetworkErrorType::ResponseBodyError
-        } else {
-            NetworkErrorType::Other(error.to_string())
-        }
-    }
 }
 
 impl std::fmt::Display for ClassifiedNetworkError {
@@ -137,9 +46,7 @@ impl std::fmt::Display for ClassifiedNetworkError {
         write!(
             f,
             "{} [{}]: {}",
-            self.context,
-            crate::utils::url::sanitize_url_for_logging(&self.url),
-            self.original_error
+            self.failure.tag, self.url, self.original_error
         )
     }
 }
@@ -150,30 +57,13 @@ impl std::error::Error for ClassifiedNetworkError {
     }
 }
 
-// 为了与现有的anyhow错误系统兼容，实现到io::Error的转换
-impl From<ClassifiedNetworkError> for std::io::Error {
-    fn from(err: ClassifiedNetworkError) -> Self {
-        let error_kind = match err.error_type {
-            NetworkErrorType::ConnectionReset => std::io::ErrorKind::ConnectionReset,
-            NetworkErrorType::ConnectionTimeout => std::io::ErrorKind::TimedOut,
-            NetworkErrorType::RequestTimeout => std::io::ErrorKind::TimedOut,
-            NetworkErrorType::DownloadStalled => std::io::ErrorKind::TimedOut,
-            NetworkErrorType::DownloadTooSlow => std::io::ErrorKind::TimedOut,
-            NetworkErrorType::NetworkUnreachable => std::io::ErrorKind::NetworkUnreachable,
-            _ => std::io::ErrorKind::Other,
-        };
-
-        std::io::Error::new(error_kind, err)
-    }
-}
-
 pub struct NetworkInsightStream<S> {
     inner: S,
     insight: Arc<Mutex<InsightItem>>,
     network_bytes: Arc<AtomicU64>,
     response_received_time: Instant,
-    url: String,            // 新增：保存URL用于错误处理
-    range: Vec<(u32, u32)>, // 新增：保存Range用于错误处理
+    /// Sanitized, for [`ClassifiedNetworkError`].
+    url: String,
 
     // Download stall detection fields
     content_length: Option<u64>,           // Total file size
@@ -209,139 +99,24 @@ impl<S: AsyncRead + Unpin> AsyncRead for NetworkInsightStream<S> {
                         insight.time = self.response_received_time.elapsed().as_millis() as u32;
                     }
 
-                    // Check download health
-                    if let Err(classified_error) = self.check_download_health() {
-                        // Update insight with classified error
-                        if let Ok(mut insight) = self.insight.try_lock() {
-                            insight.error = Some(
-                                code_for_network_type(&classified_error.error_type).to_string(),
-                            );
-                            insight.time = self.response_received_time.elapsed().as_millis() as u32;
-                            insight.size = self.network_bytes.load(Ordering::Relaxed) as u32;
-                        }
-                        return Poll::Ready(Err(classified_error.into()));
+                    if let Some((failure, cause)) = self.check_download_health() {
+                        return Poll::Ready(Err(self.fail(failure, cause.into())));
                     }
                 }
                 Poll::Ready(Ok(()))
             }
+            // Everything under this stream is the response body.
             Poll::Ready(Err(e)) => {
-                // 检查是否为网络错误并创建分类错误
-                let error_type = ClassifiedNetworkError::classify_error(&e);
-                let is_network_error = !matches!(error_type, NetworkErrorType::Other(_));
-
-                if is_network_error {
-                    // 创建分类后的网络错误，保留原始错误链
-                    let classified_error = ClassifiedNetworkError::new(
-                        error_type,
-                        Box::new(e), // 保存完整的原始错误
-                        self.url.clone(),
-                        self.range.clone(),
-                    );
-
-                    // 更新insight
-                    if let Ok(mut insight) = self.insight.try_lock() {
-                        insight.error =
-                            Some(code_for_network_type(&classified_error.error_type).to_string());
-                        insight.time = self.response_received_time.elapsed().as_millis() as u32;
-                        insight.size = self.network_bytes.load(Ordering::Relaxed) as u32;
-                    }
-
-                    // 返回分类后的网络错误
-                    Poll::Ready(Err(classified_error.into()))
-                } else {
-                    // 非网络错误：更新insight，然后保持原始错误传播
-                    if let Ok(mut insight) = self.insight.try_lock() {
-                        apply_insight_io_error(&mut insight, &e);
-                        insight.time = self.response_received_time.elapsed().as_millis() as u32;
-                        insight.size = self.network_bytes.load(Ordering::Relaxed) as u32;
-                    }
-                    Poll::Ready(Err(e))
-                }
+                let failure = net_failure::classify(&e, Phase::Body);
+                Poll::Ready(Err(self.fail(failure, Box::new(e))))
             }
             Poll::Pending => Poll::Pending,
         }
     }
 }
 
-// 为Stream实现
-impl<S, E> Stream for NetworkInsightStream<S>
-where
-    S: Stream<Item = Result<Bytes, E>> + Unpin,
-    E: std::fmt::Display,
-{
-    type Item = Result<Bytes, E>;
-
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<Option<Self::Item>> {
-        let result = Pin::new(&mut self.inner).poll_next(cx);
-
-        match &result {
-            Poll::Ready(Some(Ok(bytes))) => {
-                // 原子更新网络字节数
-                let total_bytes = self
-                    .network_bytes
-                    .fetch_add(bytes.len() as u64, Ordering::Relaxed)
-                    + bytes.len() as u64;
-
-                // 更新insight
-                if let Ok(mut insight) = self.insight.try_lock() {
-                    insight.size = total_bytes as u32;
-                    insight.time = self.response_received_time.elapsed().as_millis() as u32;
-                }
-
-                // Note: Download health check is mainly handled in AsyncRead implementation
-                // For streams, the check will happen when data is actually read
-            }
-            Poll::Ready(Some(Err(e))) => {
-                // Stream 实现中只更新 insight，因为泛型 E 的限制
-                // 实际的错误处理会在转换为 AsyncRead 时进行
-                let io_error = std::io::Error::other(e.to_string());
-                let error_type = ClassifiedNetworkError::classify_error(&io_error);
-                let is_network_error = !matches!(error_type, NetworkErrorType::Other(_));
-
-                // 更新insight
-                if let Ok(mut insight) = self.insight.try_lock() {
-                    if is_network_error {
-                        insight.error = Some(code_for_network_type(&error_type).to_string());
-                    } else {
-                        apply_insight_io_error(&mut insight, &io_error);
-                    }
-                    insight.time = self.response_received_time.elapsed().as_millis() as u32;
-                    insight.size = self.network_bytes.load(Ordering::Relaxed) as u32;
-                }
-                // 错误继续向上传播，在被转换为 AsyncRead 时会得到正确处理
-            }
-            Poll::Ready(None) => {
-                // 流结束，最终更新时间
-                if let Ok(mut insight) = self.insight.try_lock() {
-                    insight.time = self.response_received_time.elapsed().as_millis() as u32;
-                    insight.size = self.network_bytes.load(Ordering::Relaxed) as u32;
-                }
-            }
-            _ => {}
-        }
-        result
-    }
-}
-
 impl<S> NetworkInsightStream<S> {
     pub fn new(
-        stream: S,
-        url: String,
-        range: Vec<(u32, u32)>,
-        request_start_time: Instant,
-        response_received_time: Instant,
-    ) -> Self {
-        Self::new_with_detection(
-            stream,
-            url,
-            range,
-            request_start_time,
-            response_received_time,
-            None,
-        )
-    }
-
-    pub fn new_with_detection(
         stream: S,
         url: String,
         range: Vec<(u32, u32)>,
@@ -358,7 +133,7 @@ impl<S> NetworkInsightStream<S> {
             time: 0,
             size: 0,
             error: None,
-            range: range.clone(),
+            range,
             mode: None,
         }));
 
@@ -367,8 +142,7 @@ impl<S> NetworkInsightStream<S> {
             insight,
             network_bytes: Arc::new(AtomicU64::new(0)),
             response_received_time,
-            url: crate::utils::url::sanitize_url_for_logging(&url), // 保存URL
-            range,                                                  // 保存Range
+            url: crate::utils::url::sanitize_url_for_logging(&url),
             content_length,
             last_stall_check: now,
             last_stall_check_bytes: 0,
@@ -377,9 +151,26 @@ impl<S> NetworkInsightStream<S> {
         }
     }
 
-    /// Check for download health issues
-    /// Returns ClassifiedNetworkError if download is stalled or too slow
-    fn check_download_health(&mut self) -> Result<(), ClassifiedNetworkError> {
+    /// Records the failure in the insight and wraps it for the reader.
+    fn fail(
+        &self,
+        failure: NetFailure,
+        cause: Box<dyn std::error::Error + Send + Sync>,
+    ) -> std::io::Error {
+        if let Ok(mut insight) = self.insight.try_lock() {
+            insight.error = Some(failure.tag.clone());
+            insight.time = self.response_received_time.elapsed().as_millis() as u32;
+            insight.size = self.network_bytes.load(Ordering::Relaxed) as u32;
+        }
+        std::io::Error::other(ClassifiedNetworkError {
+            failure,
+            original_error: cause,
+            url: self.url.clone(),
+        })
+    }
+
+    /// The failure and its description when the download is stalled or too slow.
+    fn check_download_health(&mut self) -> Option<(NetFailure, &'static str)> {
         let current_bytes = self.network_bytes.load(Ordering::Relaxed);
         let now = Instant::now();
 
@@ -387,15 +178,7 @@ impl<S> NetworkInsightStream<S> {
         if now.duration_since(self.last_stall_check) >= Duration::from_secs(5) {
             let progress = current_bytes - self.last_stall_check_bytes;
             if progress < 5 * 1024 {
-                // <5KB in 5 seconds
-                let base_error =
-                    std::io::Error::new(std::io::ErrorKind::TimedOut, DOWNLOAD_STALLED);
-                return Err(ClassifiedNetworkError::new(
-                    NetworkErrorType::DownloadStalled,
-                    Box::new(base_error),
-                    self.url.clone(),
-                    self.range.clone(),
-                ));
+                return Some((NetFailure::stalled(), "less than 5 KiB in 5 s"));
             }
             self.last_stall_check = now;
             self.last_stall_check_bytes = current_bytes;
@@ -419,13 +202,9 @@ impl<S> NetworkInsightStream<S> {
                             let avg_speed = window_progress / 30; // bytes per second
 
                             if avg_speed < 100 * 1024 {
-                                // <100KB/s
-                                let base_error = std::io::Error::other(DOWNLOAD_TOO_SLOW);
-                                return Err(ClassifiedNetworkError::new(
-                                    NetworkErrorType::DownloadTooSlow,
-                                    Box::new(base_error),
-                                    self.url.clone(),
-                                    self.range.clone(),
+                                return Some((
+                                    NetFailure::too_slow(),
+                                    "under 100 KiB/s for 30 s before half done",
                                 ));
                             }
 
@@ -441,31 +220,13 @@ impl<S> NetworkInsightStream<S> {
             }
         }
 
-        Ok(())
+        None
     }
 
     /// 获取insight的共享引用，外部可以通过这个引用访问最新数据
     /// 🔑 关键方法：解决解压缩包装问题
     pub fn get_insight_handle(&self) -> Arc<Mutex<InsightItem>> {
         self.insight.clone()
-    }
-
-    /// 获取当前insight的快照
-    pub fn get_insight_snapshot(&self) -> InsightItem {
-        if let Ok(insight) = self.insight.lock() {
-            insight.clone()
-        } else {
-            // fallback
-            InsightItem {
-                url: "unknown".to_string(),
-                ttfb: 0,
-                time: 0,
-                size: self.network_bytes.load(Ordering::Relaxed) as u32,
-                error: Some("Failed to lock insight".to_string()),
-                range: vec![],
-                mode: None,
-            }
-        }
     }
 }
 
@@ -919,7 +680,7 @@ async fn open_http_stream(
                 ttfb: request_start_time.elapsed().as_millis() as u32,
                 time: 0,
                 size: 0,
-                error: Some(crate::utils::code::insight_code(&e).to_string()),
+                error: Some(crate::utils::code::insight_code(&e)),
                 range: insight_range.clone(),
                 mode: None,
             }));
@@ -930,18 +691,18 @@ async fn open_http_stream(
     // HTTP状态码检查
     let code = res.status();
     if (!has_range && code != 200) || (has_range && code != 206) {
+        let error = anyhow::Error::new(crate::dfs::HttpStatus::new(code.as_u16(), "")).context(
+            crate::utils::url::create_reqwest_context("create_http_stream", url, "HTTP_STATUS_ERR"),
+        );
         let insight = Arc::new(Mutex::new(InsightItem {
             url: crate::utils::url::sanitize_url_for_logging(url),
             ttfb: request_start_time.elapsed().as_millis() as u32,
             time: 0,
             size: 0,
-            error: Some(crate::utils::code::SERVER_HTTP_ERROR.to_string()),
+            error: Some(crate::utils::code::insight_code(&error)),
             range: insight_range.clone(),
             mode: None,
         }));
-        let error = anyhow::Error::new(crate::dfs::HttpStatus::new(code.as_u16(), "")).context(
-            crate::utils::url::create_reqwest_context("create_http_stream", url, "HTTP_STATUS_ERR"),
-        );
         return Err(TACommandError::with_insight_handle(error, insight));
     }
 
@@ -954,7 +715,7 @@ async fn open_http_stream(
     let reader = tokio_util::io::StreamReader::new(stream.map_err(std::io::Error::other));
 
     // 创建NetworkInsightStream包装
-    let insight_stream = NetworkInsightStream::new_with_detection(
+    let insight_stream = NetworkInsightStream::new(
         reader,
         crate::utils::url::sanitize_url_for_logging(url),
         insight_range,
@@ -1076,23 +837,14 @@ pub async fn sync_staged_file(path: &Path) -> Result<(), anyhow::Error> {
     Ok(())
 }
 
-/// 读源数据时的错误：带网络错误标记的原样传播，其余视为解压失败。
+/// 读源数据时的错误：网络失败原样传播，其余视为解压失败。
 pub fn read_failure(e: std::io::Error) -> anyhow::Error {
-    let anyhow_err = anyhow::Error::new(e);
-    // 使用 Debug 格式获取完整错误链信息
-    let full_error_debug = format!("{:?}", anyhow_err);
-    if full_error_debug.contains("ERR_CONNECTION_")
-        || full_error_debug.contains("ERR_STREAM_")
-        || full_error_debug.contains("ERR_NETWORK_")
-        || full_error_debug.contains("ERR_RESPONSE_BODY_")
-        || full_error_debug.contains("ERR_DNS_")
-        || full_error_debug.contains("ERR_TLS_")
-        || full_error_debug.contains("ERR_REQUEST_")
-        || full_error_debug.contains("ERR_DOWNLOAD_")
-    {
-        anyhow_err
+    let network = net_failure::find(&e).is_some();
+    let err = anyhow::Error::new(e);
+    if network {
+        err
     } else {
-        anyhow_err.context("DECOMPRESS_ERR")
+        err.context("DECOMPRESS_ERR")
     }
 }
 

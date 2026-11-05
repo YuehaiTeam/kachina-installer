@@ -5,6 +5,8 @@ use std::fmt;
 
 use serde::Serialize;
 
+use crate::utils::net_failure;
+
 // --- N: download itself, do not report ---
 pub const DOWNLOAD_TIMEOUT: &str = "DOWNLOAD_TIMEOUT";
 pub const DOWNLOAD_REFUSED: &str = "DOWNLOAD_REFUSED";
@@ -578,18 +580,6 @@ fn reqwest_ref<'a>(err: &'a (dyn std::error::Error + 'static)) -> Option<&'a req
     None
 }
 
-fn code_for_reqwest(e: &reqwest::Error) -> &'static str {
-    if e.is_timeout() {
-        DOWNLOAD_TIMEOUT
-    } else if e.is_connect() {
-        DOWNLOAD_REFUSED
-    } else if e.status().is_some() {
-        SERVER_HTTP_ERROR
-    } else {
-        DOWNLOAD_FAILED
-    }
-}
-
 fn code_for_io_kind(kind: std::io::ErrorKind) -> &'static str {
     use std::io::ErrorKind as K;
     match kind {
@@ -615,65 +605,37 @@ pub fn code_for_local_io(io: &std::io::Error) -> &'static str {
     }
 }
 
-pub fn code_for_network_type(kind: &crate::fs::NetworkErrorType) -> &'static str {
-    use crate::fs::NetworkErrorType as N;
-    match kind {
-        N::DownloadStalled | N::DownloadTooSlow => DOWNLOAD_STALLED,
-        N::ConnectionTimeout | N::RequestTimeout => DOWNLOAD_TIMEOUT,
-        N::DnsResolutionFailed | N::NetworkUnreachable => DOWNLOAD_REFUSED,
-        _ => DOWNLOAD_FAILED,
-    }
-}
-
-/// `io::Error::source()` skips the custom payload itself, so the stream layer's
-/// `ClassifiedNetworkError` has to be read through `get_ref()`.
-fn classified_ref(io: &std::io::Error) -> Option<&crate::fs::ClassifiedNetworkError> {
-    io.get_ref()
-        .and_then(|e| e.downcast_ref::<crate::fs::ClassifiedNetworkError>())
+/// Code of the first io error in a chain without a network cause.
+fn local_io_code(err: &anyhow::Error) -> Option<&'static str> {
+    err.chain()
+        .find_map(|cause| cause.downcast_ref::<std::io::Error>())
+        .map(|io| code_for_io_kind(io.kind()))
 }
 
 /// Download-family code inferred from typed causes only. `None` when the chain
 /// has no network / io / HTTP-status cause (e.g. a malformed API response).
 fn download_code(err: &anyhow::Error) -> Option<&'static str> {
-    download_code_in(err.chain())
-}
-
-fn download_code_in<'a>(
-    chain: impl IntoIterator<Item = &'a (dyn std::error::Error + 'static)>,
-) -> Option<&'static str> {
-    for cause in chain {
-        if let Some(c) = cause.downcast_ref::<crate::fs::ClassifiedNetworkError>() {
-            return Some(code_for_network_type(&c.error_type));
-        }
-        if let Some(io) = cause.downcast_ref::<std::io::Error>() {
-            if let Some(c) = classified_ref(io) {
-                return Some(code_for_network_type(&c.error_type));
-            }
-            return Some(code_for_io_kind(io.kind()));
-        }
-        if let Some(e) = reqwest_ref(cause) {
-            return Some(code_for_reqwest(e));
-        }
-        if cause.downcast_ref::<crate::dfs::HttpStatus>().is_some() {
-            return Some(SERVER_HTTP_ERROR);
-        }
-    }
-    None
-}
-
-/// Code to record in `InsightItem.error`: the hung code if any, otherwise the
-/// download-family inference, otherwise `INTERNAL_ERROR`.
-pub fn insight_code(err: &anyhow::Error) -> &'static str {
-    match extract(err) {
-        Extracted::Cancelled => "cancelled",
-        Extracted::Coded(c) => c.code,
-        Extracted::Uncoded { .. } => download_code(err).unwrap_or(INTERNAL_ERROR),
+    match net_failure::find(err.as_ref()) {
+        Some(failure) => Some(failure.code),
+        None => local_io_code(err),
     }
 }
 
-pub fn insight_code_for_io(io: &std::io::Error) -> &'static str {
-    let dyn_err: &(dyn std::error::Error + 'static) = io;
-    download_code_in(std::iter::once(dyn_err)).unwrap_or(FILE_IO_FAILED)
+/// Value for `InsightItem.error`: the network failure tag if the chain has a
+/// network cause, otherwise the hung code, otherwise the code of a local io
+/// cause, otherwise `INTERNAL_ERROR`.
+pub fn insight_code(err: &anyhow::Error) -> String {
+    let extracted = extract(err);
+    if matches!(extracted, Extracted::Cancelled) {
+        return "cancelled".into();
+    }
+    if let Some(failure) = net_failure::find(err.as_ref()) {
+        return failure.tag;
+    }
+    match extracted {
+        Extracted::Coded(c) => c.code.into(),
+        _ => local_io_code(err).unwrap_or(INTERNAL_ERROR).into(),
+    }
 }
 
 fn metadata_code(err: &anyhow::Error) -> &'static str {
@@ -900,14 +862,11 @@ mod tests {
         assert!(matches!(extract(&garbage), Extracted::Coded(c) if c.code == NO_DOWNLOAD_NODE));
 
         let stalled = attach_download(
-            anyhow::Error::new(std::io::Error::from(
-                crate::fs::ClassifiedNetworkError::new(
-                    crate::fs::NetworkErrorType::DownloadStalled,
-                    Box::new(std::io::Error::other("stalled")),
-                    "https://x".into(),
-                    vec![],
-                ),
-            )),
+            anyhow::Error::new(std::io::Error::other(crate::fs::ClassifiedNetworkError {
+                failure: net_failure::NetFailure::stalled(),
+                original_error: "stalled".into(),
+                url: "https://x".into(),
+            })),
             None,
             None,
         );

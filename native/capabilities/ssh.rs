@@ -209,7 +209,7 @@ pub(crate) fn percent_decode(input: &str) -> anyhow::Result<String> {
         i += 1;
     }
     String::from_utf8(bytes)
-        .map_err(|e| anyhow::anyhow!("URL percent-decoded value is not valid UTF-8: {e}"))
+        .map_err(|e| anyhow::Error::new(e).context("URL percent-decoded value is not valid UTF-8"))
 }
 
 // ====================================================================
@@ -243,6 +243,25 @@ impl Drop for AbortOnDrop {
     }
 }
 
+/// The SSH server rejected our credentials.
+#[derive(Debug)]
+pub(crate) struct SshAuthRejected;
+
+impl std::fmt::Display for SshAuthRejected {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ssh authentication rejected")
+    }
+}
+
+impl std::error::Error for SshAuthRejected {}
+
+/// 自建超时的错误值：根因为 io `TimedOut`，消息作为上下文叠在其上。
+#[cold]
+#[inline(never)]
+pub(crate) fn timed_out(args: std::fmt::Arguments<'_>) -> anyhow::Error {
+    anyhow::Error::new(std::io::Error::from(std::io::ErrorKind::TimedOut)).context(args.to_string())
+}
+
 pub(crate) async fn ssh_connect(
     host: &str,
     port: u16,
@@ -261,36 +280,35 @@ pub(crate) async fn ssh_connect(
         russh::client::connect(config, (host, port), handler),
     )
     .await
-    .map_err(|_| anyhow::anyhow!("SSH connect timeout to {user}@{host}:{port}"))??;
+    .map_err(|_| timed_out(format_args!("SSH connect timeout to {user}@{host}:{port}")))??;
 
     let auth_fut = async {
         if pass.is_empty() {
-            anyhow::ensure!(
-                session.authenticate_none(user).await?.success(),
-                "SSH none-auth failed for {user}@{host}:{port}"
-            );
-        } else {
-            anyhow::ensure!(
-                session.authenticate_password(user, pass).await?.success(),
-                "SSH password-auth failed for {user}@{host}:{port}"
-            );
+            if !session.authenticate_none(user).await?.success() {
+                return Err(anyhow::Error::new(SshAuthRejected)
+                    .context(format!("SSH none-auth failed for {user}@{host}:{port}")));
+            }
+        } else if !session.authenticate_password(user, pass).await?.success() {
+            return Err(anyhow::Error::new(SshAuthRejected)
+                .context(format!("SSH password-auth failed for {user}@{host}:{port}")));
         }
         Ok::<_, anyhow::Error>(())
     };
     tokio::time::timeout(SSH_AUTH_TIMEOUT, auth_fut)
         .await
-        .map_err(|_| anyhow::anyhow!("SSH auth timeout for {user}@{host}:{port}"))??;
+        .map_err(|_| timed_out(format_args!("SSH auth timeout for {user}@{host}:{port}")))??;
 
     debug!(host, port, user, "SSH authenticated");
     Ok(session)
 }
 
-/// 冷路径错误构造：格式化在函数体内完成，调用点只生成 `format_args!`，
+/// 冷路径错误构造：`err` 保留为根因，消息作为上下文叠在其上。
+/// 格式化在函数体内完成，调用点只生成 `format_args!`，
 /// 避免每个错误分支在巨型 async 状态机里各自展开一套 fmt 机器。
 #[cold]
 #[inline(never)]
-pub(crate) fn mw_err_fmt(args: std::fmt::Arguments<'_>) -> reqwest_middleware::Error {
-    reqwest_middleware::Error::Middleware(anyhow::anyhow!("{args}"))
+fn mw_err(err: anyhow::Error, args: std::fmt::Arguments<'_>) -> reqwest_middleware::Error {
+    reqwest_middleware::Error::Middleware(err.context(args.to_string()))
 }
 
 // ====================================================================
@@ -313,7 +331,7 @@ impl SshMiddleware {
             Some(b) => match b.as_bytes() {
                 Some(slice) => Bytes::copy_from_slice(slice),
                 None => {
-                    return Err(mw_err_fmt(format_args!(
+                    return Err(reqwest_middleware::Error::Middleware(anyhow::anyhow!(
                         "SSH tunnel to {} does not support streaming request bodies",
                         parts.ssh_target()
                     )));
@@ -331,10 +349,10 @@ impl SshMiddleware {
         )
         .await
         .map_err(|e| {
-            mw_err_fmt(format_args!(
-                "SSH connect to {} failed: {e}",
-                parts.ssh_target()
-            ))
+            mw_err(
+                e,
+                format_args!("SSH connect to {} failed", parts.ssh_target()),
+            )
         })?;
 
         let channel = tokio::time::timeout(
@@ -348,20 +366,23 @@ impl SshMiddleware {
         )
         .await
         .map_err(|_| {
-            mw_err_fmt(format_args!(
+            reqwest_middleware::Error::Middleware(timed_out(format_args!(
                 "SSH channel to {}:{} via {} timed out",
                 parts.internal_host,
                 parts.internal_port,
                 parts.ssh_target()
-            ))
+            )))
         })?
         .map_err(|e| {
-            mw_err_fmt(format_args!(
-                "SSH channel to {}:{} via {} failed: {e}",
-                parts.internal_host,
-                parts.internal_port,
-                parts.ssh_target()
-            ))
+            mw_err(
+                e.into(),
+                format_args!(
+                    "SSH channel to {}:{} via {} failed",
+                    parts.internal_host,
+                    parts.internal_port,
+                    parts.ssh_target()
+                ),
+            )
         })?;
         let io = TokioIo::new(channel.into_stream());
 
@@ -372,16 +393,19 @@ impl SshMiddleware {
         )
         .await
         .map_err(|_| {
-            mw_err_fmt(format_args!(
+            reqwest_middleware::Error::Middleware(timed_out(format_args!(
                 "HTTP/1.1 handshake timeout over SSH to {}",
                 parts.ssh_target()
-            ))
+            )))
         })?
         .map_err(|e| {
-            mw_err_fmt(format_args!(
-                "HTTP/1.1 handshake over SSH to {} failed: {e}",
-                parts.ssh_target()
-            ))
+            mw_err(
+                e.into(),
+                format_args!(
+                    "HTTP/1.1 handshake over SSH to {} failed",
+                    parts.ssh_target()
+                ),
+            )
         })?;
 
         let conn_task = tokio::spawn(async move {
@@ -408,24 +432,27 @@ impl SshMiddleware {
 
         let hyper_req = builder
             .body(http_body_util::Full::new(body_bytes))
-            .map_err(|e| mw_err_fmt(format_args!("failed to build HTTP request: {e}")))?;
+            .map_err(|e| mw_err(e.into(), format_args!("failed to build HTTP request")))?;
 
         // 4. Send request
         let hyper_resp = tokio::time::timeout(HTTP_SEND_TIMEOUT, sender.send_request(hyper_req))
             .await
             .map_err(|_| {
-                mw_err_fmt(format_args!(
+                reqwest_middleware::Error::Middleware(timed_out(format_args!(
                     "HTTP send timeout over SSH to {}{}",
                     parts.ssh_target(),
                     parts.http_path_and_query
-                ))
+                )))
             })?
             .map_err(|e| {
-                mw_err_fmt(format_args!(
-                    "HTTP send over SSH to {}{} failed: {e}",
-                    parts.ssh_target(),
-                    parts.http_path_and_query
-                ))
+                mw_err(
+                    e.into(),
+                    format_args!(
+                        "HTTP send over SSH to {}{} failed",
+                        parts.ssh_target(),
+                        parts.http_path_and_query
+                    ),
+                )
             })?;
 
         let (resp_parts, body) = hyper_resp.into_parts();
@@ -440,9 +467,8 @@ impl SshMiddleware {
 
                 let mut body = body;
                 while let Some(frame_result) = body.frame().await {
-                    let frame = frame_result.map_err(|e| {
-                        std::io::Error::new(std::io::ErrorKind::BrokenPipe, e.to_string())
-                    })?;
+                    let frame = frame_result
+                        .map_err(|e| std::io::Error::new(std::io::ErrorKind::BrokenPipe, e))?;
                     if let Ok(data) = frame.into_data() {
                         if !data.is_empty() {
                             yield data;
@@ -458,7 +484,7 @@ impl SshMiddleware {
         }
         let http_resp = resp_builder
             .body(reqwest::Body::wrap_stream(byte_stream))
-            .map_err(|e| mw_err_fmt(format_args!("failed to build response: {e}")))?;
+            .map_err(|e| mw_err(e.into(), format_args!("failed to build response")))?;
 
         Ok(http_resp.into())
     }

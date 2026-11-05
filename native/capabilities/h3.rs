@@ -607,7 +607,7 @@ impl H3Middleware {
         let h3_conn = h3_msquic_async::Connection::new(conn);
         let (mut driver, send_request) = h3::client::new(h3_conn).await.map_err(|e| {
             warn!(host = %norm_host, port, error = %e, "[H3] h3 handshake failed");
-            reqwest_middleware::Error::Middleware(anyhow::anyhow!("h3 handshake: {}", e))
+            reqwest_middleware::Error::Middleware(anyhow::Error::new(e).context("h3 handshake"))
         })?;
 
         let cancel_token = CancellationToken::new();
@@ -717,7 +717,7 @@ impl H3Middleware {
             if let Ok(mut pool) = self.inner.pool.lock() {
                 pool.remove(&pool_key);
             }
-            reqwest_middleware::Error::Middleware(anyhow::anyhow!("h3 send: {}", e))
+            reqwest_middleware::Error::Middleware(anyhow::Error::new(e).context("h3 send"))
         })?;
 
         // P1-4: Also evict on finish/recv_response errors
@@ -726,7 +726,7 @@ impl H3Middleware {
             if let Ok(mut pool) = self.inner.pool.lock() {
                 pool.remove(&pool_key);
             }
-            reqwest_middleware::Error::Middleware(anyhow::anyhow!("h3 finish: {}", e))
+            reqwest_middleware::Error::Middleware(anyhow::Error::new(e).context("h3 finish"))
         })?;
 
         let h3_resp = stream.recv_response().await.map_err(|e| {
@@ -734,7 +734,7 @@ impl H3Middleware {
             if let Ok(mut pool) = self.inner.pool.lock() {
                 pool.remove(&pool_key);
             }
-            reqwest_middleware::Error::Middleware(anyhow::anyhow!("h3 recv_response: {}", e))
+            reqwest_middleware::Error::Middleware(anyhow::Error::new(e).context("h3 recv_response"))
         })?;
 
         debug!(status = %h3_resp.status(), "[H3] Got response");
@@ -754,9 +754,7 @@ impl H3Middleware {
                     }
                     Ok(None) => break,
                     Err(e) => {
-                        Err(std::io::Error::other(
-                            format!("h3 recv_data error: {e}"),
-                        ))?;
+                        Err(std::io::Error::other(e))?;
                     }
                 }
             }
@@ -824,7 +822,7 @@ impl H3Middleware {
         // Do a minimal H3 handshake to ensure cert callback fires
         let h3_conn = h3_msquic_async::Connection::new(conn);
         let (_driver, _send_request) = h3::client::new(h3_conn).await.map_err(|e| {
-            reqwest_middleware::Error::Middleware(anyhow::anyhow!("h3 discover: {}", e))
+            reqwest_middleware::Error::Middleware(anyhow::Error::new(e).context("h3 discover"))
         })?;
 
         let result = hashes

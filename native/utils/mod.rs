@@ -9,6 +9,7 @@ pub mod i18n;
 pub mod icon;
 pub mod log;
 pub mod metadata;
+pub mod net_failure;
 pub mod process;
 pub mod sentry;
 pub mod taskdialog;

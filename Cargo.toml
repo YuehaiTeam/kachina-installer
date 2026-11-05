@@ -35,6 +35,8 @@ reqwest = { version = "0.12", default-features = false, features = [
     "stream",
     "system-proxy"
 ] }
+# reqwest 的 TLS 后端；直接依赖只为按类型识别握手失败（utils/net_failure.rs）。
+native-tls = "0.2"
 futures = "0.3"
 tokio-util = { version = "0.7", features = ["io-util"] }
 async-walkdir = "2.0"

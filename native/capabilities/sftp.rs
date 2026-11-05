@@ -21,7 +21,7 @@ use reqwest_middleware::{Middleware, Next};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::{debug, warn};
 
-use super::ssh::{mw_err_fmt, normalize_hex, percent_decode, ssh_connect, SSH_CHANNEL_TIMEOUT};
+use super::ssh::{normalize_hex, percent_decode, ssh_connect, timed_out, SSH_CHANNEL_TIMEOUT};
 
 // ====================================================================
 // URL parsing
@@ -119,27 +119,53 @@ struct SftpClient<S> {
     next_id: u32,
 }
 
+/// A STATUS reply other than OK from the SFTP server.
+#[derive(Debug)]
+pub(crate) struct SftpStatus {
+    pub code: u32,
+    pub message: String,
+}
+
+impl std::fmt::Display for SftpStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "SFTP: server status {}: {}", self.code, self.message)
+    }
+}
+
+impl std::error::Error for SftpStatus {}
+
+/// 畸形、截断或类型不符的报文。
+fn invalid_data(msg: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::InvalidData, msg)
+}
+
 /// 解析游标：`(payload, pos)` 上的读取原语。
-fn get_u32(buf: &[u8], pos: &mut usize) -> anyhow::Result<u32> {
+fn get_u32(buf: &[u8], pos: &mut usize) -> std::io::Result<u32> {
     let end = *pos + 4;
-    anyhow::ensure!(buf.len() >= end, "SFTP packet truncated (u32)");
+    if buf.len() < end {
+        return Err(invalid_data("SFTP packet truncated (u32)"));
+    }
     let v = u32::from_be_bytes(buf[*pos..end].try_into().unwrap());
     *pos = end;
     Ok(v)
 }
 
-fn get_u64(buf: &[u8], pos: &mut usize) -> anyhow::Result<u64> {
+fn get_u64(buf: &[u8], pos: &mut usize) -> std::io::Result<u64> {
     let end = *pos + 8;
-    anyhow::ensure!(buf.len() >= end, "SFTP packet truncated (u64)");
+    if buf.len() < end {
+        return Err(invalid_data("SFTP packet truncated (u64)"));
+    }
     let v = u64::from_be_bytes(buf[*pos..end].try_into().unwrap());
     *pos = end;
     Ok(v)
 }
 
-fn get_bytes<'a>(buf: &'a [u8], pos: &mut usize) -> anyhow::Result<&'a [u8]> {
+fn get_bytes<'a>(buf: &'a [u8], pos: &mut usize) -> std::io::Result<&'a [u8]> {
     let len = get_u32(buf, pos)? as usize;
     let end = *pos + len;
-    anyhow::ensure!(buf.len() >= end, "SFTP packet truncated (string)");
+    if buf.len() < end {
+        return Err(invalid_data("SFTP packet truncated (string)"));
+    }
     let s = &buf[*pos..end];
     *pos = end;
     Ok(s)
@@ -150,14 +176,14 @@ fn put_str(out: &mut Vec<u8>, s: &[u8]) {
     out.extend_from_slice(s);
 }
 
-/// STATUS 报文转错误。payload 含 request id。
-fn status_to_err(payload: &[u8]) -> anyhow::Error {
+/// 解析 STATUS 报文。payload 含 request id。
+fn status_to_err(payload: &[u8]) -> SftpStatus {
     let mut pos = 4; // skip request id
     let code = get_u32(payload, &mut pos).unwrap_or(u32::MAX);
-    let msg = get_bytes(payload, &mut pos)
+    let message = get_bytes(payload, &mut pos)
         .map(|b| String::from_utf8_lossy(b).into_owned())
         .unwrap_or_default();
-    anyhow::anyhow!("SFTP: server status {code}: {msg}")
+    SftpStatus { code, message }
 }
 
 impl<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send> SftpClient<S> {
@@ -165,24 +191,24 @@ impl<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send> SftpClient<
         Self { stream, next_id: 0 }
     }
 
-    async fn send_packet(&mut self, body: &[u8]) -> anyhow::Result<()> {
+    async fn send_packet(&mut self, body: &[u8]) -> std::io::Result<()> {
         let mut framed = Vec::with_capacity(4 + body.len());
         framed.extend_from_slice(&(body.len() as u32).to_be_bytes());
         framed.extend_from_slice(body);
-        self.stream.write_all(&framed).await?;
-        Ok(())
+        self.stream.write_all(&framed).await
     }
 
     /// 读一个完整报文，返回 (type, payload)。payload 不含 type 字节。
-    async fn recv_packet(&mut self) -> anyhow::Result<(u8, Vec<u8>)> {
+    async fn recv_packet(&mut self) -> std::io::Result<(u8, Vec<u8>)> {
         let fut = async {
             let mut len_buf = [0u8; 4];
             self.stream.read_exact(&mut len_buf).await?;
             let len = u32::from_be_bytes(len_buf) as usize;
-            anyhow::ensure!(
-                (1..=16 * 1024 * 1024).contains(&len),
-                "SFTP packet length {len} out of range"
-            );
+            if !(1..=16 * 1024 * 1024).contains(&len) {
+                return Err(invalid_data(format!(
+                    "SFTP packet length {len} out of range"
+                )));
+            }
             let mut body = vec![0u8; len];
             self.stream.read_exact(&mut body).await?;
             let ptype = body[0];
@@ -191,7 +217,9 @@ impl<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send> SftpClient<
         };
         tokio::time::timeout(SFTP_OP_TIMEOUT, fut)
             .await
-            .map_err(|_| anyhow::anyhow!("SFTP: response timeout"))?
+            .map_err(|_| {
+                std::io::Error::new(std::io::ErrorKind::TimedOut, "SFTP: response timeout")
+            })?
     }
 
     fn take_id(&mut self) -> u32 {
@@ -204,10 +232,14 @@ impl<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send> SftpClient<
         body.extend_from_slice(&3u32.to_be_bytes());
         self.send_packet(&body).await?;
         let (ptype, payload) = self.recv_packet().await?;
-        anyhow::ensure!(ptype == FXP_VERSION, "SFTP: expected VERSION, got {ptype}");
+        if ptype != FXP_VERSION {
+            return Err(invalid_data(format!("SFTP: expected VERSION, got {ptype}")).into());
+        }
         let mut pos = 0;
         let version = get_u32(&payload, &mut pos)?;
-        anyhow::ensure!(version >= 3, "SFTP: server version {version} < 3");
+        if version < 3 {
+            return Err(invalid_data(format!("SFTP: server version {version} < 3")).into());
+        }
         Ok(())
     }
 
@@ -226,10 +258,10 @@ impl<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send> SftpClient<
                     flags & ATTR_SIZE != 0,
                     "SFTP: server did not return file size"
                 );
-                get_u64(&payload, &mut pos)
+                Ok(get_u64(&payload, &mut pos)?)
             }
-            FXP_STATUS => Err(status_to_err(&payload)),
-            other => Err(anyhow::anyhow!("SFTP: expected ATTRS, got {other}")),
+            FXP_STATUS => Err(status_to_err(&payload).into()),
+            other => Err(invalid_data(format!("SFTP: expected ATTRS, got {other}")).into()),
         }
     }
 
@@ -247,12 +279,12 @@ impl<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send> SftpClient<
                 let mut pos = 4; // skip request id
                 Ok(get_bytes(&payload, &mut pos)?.to_vec())
             }
-            FXP_STATUS => Err(status_to_err(&payload)),
-            other => Err(anyhow::anyhow!("SFTP: expected HANDLE, got {other}")),
+            FXP_STATUS => Err(status_to_err(&payload).into()),
+            other => Err(invalid_data(format!("SFTP: expected HANDLE, got {other}")).into()),
         }
     }
 
-    async fn send_read(&mut self, handle: &[u8], offset: u64, len: u32) -> anyhow::Result<u32> {
+    async fn send_read(&mut self, handle: &[u8], offset: u64, len: u32) -> std::io::Result<u32> {
         let id = self.take_id();
         let mut body = vec![FXP_READ];
         body.extend_from_slice(&id.to_be_bytes());
@@ -304,7 +336,7 @@ impl SftpMiddleware {
             .header(CONTENT_RANGE, format!("bytes */{total_size}"))
             .header(CONTENT_LENGTH, 0)
             .body(reqwest::Body::from(vec![]))
-            .map_err(|e| anyhow::anyhow!("SFTP: failed to build 416 response: {e}"))?;
+            .map_err(|e| anyhow::Error::new(e).context("SFTP: failed to build 416 response"))?;
         Ok(reqwest::Response::from(http_resp))
     }
 
@@ -330,10 +362,10 @@ impl SftpMiddleware {
         let channel =
             tokio::time::timeout(SSH_CHANNEL_TIMEOUT, session_handle.channel_open_session())
                 .await
-                .map_err(|_| anyhow::anyhow!("SFTP: session channel timeout"))??;
+                .map_err(|_| timed_out(format_args!("SFTP: session channel timeout")))??;
         tokio::time::timeout(SSH_CHANNEL_TIMEOUT, channel.request_subsystem(true, "sftp"))
             .await
-            .map_err(|_| anyhow::anyhow!("SFTP: subsystem request timeout"))??;
+            .map_err(|_| timed_out(format_args!("SFTP: subsystem request timeout")))??;
 
         let mut sftp = SftpClient::new(channel.into_stream());
         sftp.init().await?;
@@ -383,22 +415,21 @@ impl SftpMiddleware {
             while emit_offset < end {
                 while pending.len() < PIPELINE && next_req_offset < end {
                     let len = (end - next_req_offset).min(READ_CHUNK as u64) as u32;
-                    let id = sftp.send_read(&handle, next_req_offset, len).await
-                        .map_err(std::io::Error::other)?;
+                    let id = sftp.send_read(&handle, next_req_offset, len).await?;
                     pending.insert(id, (next_req_offset, len));
                     next_req_offset += len as u64;
                 }
 
-                let (ptype, payload) = sftp.recv_packet().await.map_err(std::io::Error::other)?;
+                let (ptype, payload) = sftp.recv_packet().await?;
                 let mut pos = 0;
-                let id = get_u32(&payload, &mut pos).map_err(std::io::Error::other)?;
+                let id = get_u32(&payload, &mut pos)?;
                 let Some((req_off, req_len)) = pending.remove(&id) else {
-                    Err(std::io::Error::other(format!("SFTP: response for unknown id {id}")))?;
+                    Err(invalid_data(format!("SFTP: response for unknown id {id}")))?;
                     unreachable!();
                 };
                 match ptype {
                     FXP_DATA => {
-                        let data = get_bytes(&payload, &mut pos).map_err(std::io::Error::other)?;
+                        let data = get_bytes(&payload, &mut pos)?;
                         if data.is_empty() {
                             Err(std::io::Error::new(
                                 std::io::ErrorKind::UnexpectedEof,
@@ -420,28 +451,25 @@ impl SftpMiddleware {
                         if (data.len() as u32) < req_len {
                             let gap_off = req_off + data.len() as u64;
                             let gap_len = req_len - data.len() as u32;
-                            let id = sftp.send_read(&handle, gap_off, gap_len).await
-                                .map_err(std::io::Error::other)?;
+                            let id = sftp.send_read(&handle, gap_off, gap_len).await?;
                             pending.insert(id, (gap_off, gap_len));
                         }
                         ready.insert(req_off, Bytes::copy_from_slice(data));
                     }
                     FXP_STATUS => {
                         // 读取范围由 stat 限定，EOF 意味着文件在传输中变短
-                        let err = status_to_err(&payload);
-                        let mut pos2 = 4;
-                        let code = get_u32(&payload, &mut pos2).unwrap_or(u32::MAX);
-                        if code == FX_EOF {
+                        let status = status_to_err(&payload);
+                        if status.code == FX_EOF {
                             Err(std::io::Error::new(
                                 std::io::ErrorKind::UnexpectedEof,
                                 format!("SFTP: unexpected EOF at offset {req_off} (file shrank?)"),
                             ))?;
                         } else {
-                            Err(std::io::Error::other(err.to_string()))?;
+                            Err(std::io::Error::other(status))?;
                         }
                     }
                     other => {
-                        Err(std::io::Error::other(format!("SFTP: unexpected packet type {other}")))?;
+                        Err(invalid_data(format!("SFTP: unexpected packet type {other}")))?;
                     }
                 }
 
@@ -467,7 +495,7 @@ impl SftpMiddleware {
             .body(reqwest::Body::wrap_stream(
                 body_stream.map_err(|e: std::io::Error| e),
             ))
-            .map_err(|e| anyhow::anyhow!("SFTP: failed to build response: {e}"))?;
+            .map_err(|e| anyhow::Error::new(e).context("SFTP: failed to build response"))?;
 
         Ok(reqwest::Response::from(http_resp))
     }
@@ -486,7 +514,7 @@ impl Middleware for SftpMiddleware {
         }
         self.sftp_request(req)
             .await
-            .map_err(|e| mw_err_fmt(format_args!("SFTP: {e:#}")))
+            .map_err(|e| reqwest_middleware::Error::Middleware(e.context("SFTP")))
     }
 }
 

@@ -165,14 +165,7 @@ pub fn apply_insight_error(insight: &mut InsightItem, err: &anyhow::Error) {
     if insight.error.is_some() {
         return;
     }
-    insight.error = Some(crate::utils::code::insight_code(err).to_string());
-}
-
-pub fn apply_insight_io_error(insight: &mut InsightItem, err: &std::io::Error) {
-    if insight.error.is_some() {
-        return;
-    }
-    insight.error = Some(crate::utils::code::insight_code_for_io(err).to_string());
+    insight.error = Some(crate::utils::code::insight_code(err));
 }
 
 pub fn is_remote_insight_url(url: &str) -> bool {
@@ -609,16 +602,6 @@ mod tests {
         item.error = None;
         apply_insight_error(&mut item, &anyhow::anyhow!("Failed to skip bytes"));
         assert_eq!(item.error.as_deref(), Some(INTERNAL_ERROR));
-
-        item.error = None;
-        apply_insight_io_error(
-            &mut item,
-            &std::io::Error::from(std::io::ErrorKind::TimedOut),
-        );
-        assert_eq!(
-            item.error.as_deref(),
-            Some(crate::utils::code::DOWNLOAD_TIMEOUT)
-        );
 
         let status = HttpStatus::new(503, "a".repeat(1000));
         assert_eq!(status.body.len(), 512);
