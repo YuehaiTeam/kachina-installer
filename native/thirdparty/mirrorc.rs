@@ -8,12 +8,13 @@ use crate::{
     fs::{create_http_stream, create_staged_file, progressed_copy},
     ipc::{Progress, ProgressNotify},
     utils::{
-        code::{Attach, Coded, MIRRORC_FAILED},
+        code::{Attach, Cancelled, Coded, MIRRORC_FAILED},
         error::{return_ta_result, IntoTAResult, TAResult},
         metadata::RepoMetadata,
         url::HttpContextExt,
     },
 };
+use tokio_util::sync::CancellationToken;
 
 pub static MIRRORC_CRED_PREFIX: &str = "KachinaInstaller_MirrorChyanCDK_";
 
@@ -35,28 +36,39 @@ pub struct MirrorcExtract {
 }
 
 /// Verify the archive digest, then extract into the staging `new\` directory.
-/// The install directory is never touched here.
+/// The install directory is never touched here. Once `stop` is cancelled it
+/// returns `Cancelled` at the next 1 MiB of the digest or 256 KiB of output,
+/// leaving what it wrote for the staging cleanup.
 pub async fn run_mirrorc_install(
     zip_path: &str,
     new_dir: &str,
     sha256: &str,
     notify: ProgressNotify,
+    stop: CancellationToken,
 ) -> TAResult<MirrorcExtract> {
     let zip_path = zip_path.to_string();
     let new_dir = new_dir.to_string();
     let sha256 = sha256.to_string();
     tokio::task::spawn_blocking(move || {
-        run_mirrorc_install_sync(&zip_path, &new_dir, &sha256, notify)
+        run_mirrorc_install_sync(&zip_path, &new_dir, &sha256, notify, &stop)
     })
     .await
     .into_ta_result()?
 }
 
-pub fn sha256_file(path: &Path) -> anyhow::Result<String> {
+fn check_stop(stop: &CancellationToken) -> anyhow::Result<()> {
+    if stop.is_cancelled() {
+        return Err(Cancelled.into());
+    }
+    Ok(())
+}
+
+pub fn sha256_file(path: &Path, stop: &CancellationToken) -> anyhow::Result<String> {
     let mut file = std::fs::File::open(path).context("OPEN_TARGET_ERR")?;
     let mut hasher = sha2::Sha256::new();
     let mut buf = vec![0u8; 1024 * 1024];
     loop {
+        check_stop(stop)?;
         let n = file.read(&mut buf).context("READ_FILE_ERR")?;
         if n == 0 {
             break;
@@ -71,9 +83,10 @@ pub fn run_mirrorc_install_sync(
     new_dir: &str,
     sha256: &str,
     notify: ProgressNotify,
+    stop: &CancellationToken,
 ) -> TAResult<MirrorcExtract> {
     if !sha256.is_empty() {
-        let got = sha256_file(Path::new(zip_path))?;
+        let got = sha256_file(Path::new(zip_path), stop)?;
         if !got.eq_ignore_ascii_case(sha256) {
             let _ = std::fs::remove_file(zip_path);
             return Err(
@@ -127,6 +140,7 @@ pub fn run_mirrorc_install_sync(
 
     let mut files = Vec::new();
     for i in 0..total_len {
+        check_stop(stop)?;
         let mut file = archive.by_index(i).into_ta_result()?;
         let file_name = file
             .name()
@@ -159,6 +173,7 @@ pub fn run_mirrorc_install_sync(
         let mut hasher = chksum_md5::MD5::new();
         let mut buf = vec![0u8; 256 * 1024];
         loop {
+            check_stop(stop)?;
             let n = file
                 .read(&mut buf)
                 .into_ta_result()
@@ -380,7 +395,7 @@ mod tests {
                 (exe_entry.as_str(), b"self"),
             ],
         );
-        let sha = sha256_file(&zip_path).unwrap();
+        let sha = sha256_file(&zip_path, &CancellationToken::new()).unwrap();
         let new_dir = dir.join("new");
         let install = dir.join("install");
         std::fs::create_dir_all(&install).unwrap();
@@ -390,6 +405,7 @@ mod tests {
             &new_dir.to_string_lossy(),
             &sha,
             progress_notify(|_| {}),
+            &CancellationToken::new(),
         )
         .unwrap();
         assert_eq!(std::fs::read(new_dir.join("app.exe")).unwrap(), b"app");
@@ -422,13 +438,14 @@ mod tests {
                 ("a.txt", b"a"),
             ],
         );
-        let sha = sha256_file(&zip_path).unwrap();
+        let sha = sha256_file(&zip_path, &CancellationToken::new()).unwrap();
         let new_dir = dir.join("new");
         let out = run_mirrorc_install_sync(
             &zip_path.to_string_lossy(),
             &new_dir.to_string_lossy(),
             &sha,
             progress_notify(|_| {}),
+            &CancellationToken::new(),
         )
         .unwrap();
         assert_eq!(out.deletes, vec!["x.dll".to_string()]);
@@ -442,6 +459,7 @@ mod tests {
             &new2.to_string_lossy(),
             "00",
             progress_notify(|_| {}),
+            &CancellationToken::new(),
         )
         .unwrap_err();
         assert!(err.to_string().contains("sha256"));
@@ -449,14 +467,68 @@ mod tests {
 
         // neither changes.json nor .metadata.json
         make_zip(&zip_path, &[("a.txt", b"a")]);
-        let sha = sha256_file(&zip_path).unwrap();
+        let sha = sha256_file(&zip_path, &CancellationToken::new()).unwrap();
         assert!(run_mirrorc_install_sync(
             &zip_path.to_string_lossy(),
             &new2.to_string_lossy(),
             &sha,
             progress_notify(|_| {}),
+            &CancellationToken::new(),
         )
         .is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cancel_stops_the_digest_and_the_extraction() {
+        let cancelled = |err: &crate::utils::error::TACommandError| {
+            matches!(
+                crate::utils::code::extract(&err.error),
+                crate::utils::code::Extracted::Cancelled
+            )
+        };
+        let dir = tmp();
+        let zip_path = dir.join("pkg.zip");
+        make_zip(
+            &zip_path,
+            &[
+                ("changes.json", br#"{"deleted":[]}"#),
+                ("a.txt", b"a"),
+                ("b.txt", b"b"),
+                ("c.txt", b"c"),
+            ],
+        );
+        let sha = sha256_file(&zip_path, &CancellationToken::new()).unwrap();
+
+        let stop = CancellationToken::new();
+        stop.cancel();
+        let new_dir = dir.join("new");
+        let err = run_mirrorc_install_sync(
+            &zip_path.to_string_lossy(),
+            &new_dir.to_string_lossy(),
+            &sha,
+            progress_notify(|_| {}),
+            &stop,
+        )
+        .unwrap_err();
+        assert!(cancelled(&err), "{:#}", err.error);
+        assert!(!new_dir.exists(), "nothing extracted");
+        assert!(zip_path.exists(), "a cancel keeps the archive");
+
+        // cancelled once the first file is out: no further file is created
+        let stop = CancellationToken::new();
+        let on_first = stop.clone();
+        let err = run_mirrorc_install_sync(
+            &zip_path.to_string_lossy(),
+            &new_dir.to_string_lossy(),
+            &sha,
+            progress_notify(move |_| on_first.cancel()),
+            &stop,
+        )
+        .unwrap_err();
+        assert!(cancelled(&err), "{:#}", err.error);
+        assert!(new_dir.join("a.txt").exists());
+        assert!(!new_dir.join("b.txt").exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -516,13 +588,14 @@ mod tests {
                 ("Assets/b.txt", b"b"),
             ],
         );
-        let sha = sha256_file(&zip_path).unwrap();
+        let sha = sha256_file(&zip_path, &CancellationToken::new()).unwrap();
         let new_dir = dir.join("new");
         let out = run_mirrorc_install_sync(
             &zip_path.to_string_lossy(),
             &new_dir.to_string_lossy(),
             &sha,
             progress_notify(|_| {}),
+            &CancellationToken::new(),
         )
         .unwrap();
         assert_eq!(

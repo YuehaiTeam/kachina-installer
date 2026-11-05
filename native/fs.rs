@@ -22,6 +22,7 @@ use crate::{
     ipc::{Progress, ProgressNotify},
     local::mmap,
     utils::{
+        code::Cancelled,
         error::{TACommandError, TAResult},
         hash::{hash_file_with, HASH_BUFFER_SIZE},
         net_failure::{self, NetFailure, Phase},
@@ -30,6 +31,7 @@ use crate::{
     DOWNLOAD_CLIENT,
 };
 use anyhow::{Context, Result};
+use tokio_util::sync::CancellationToken;
 
 /// A failed read of a download body, classified where it happened. Marks the
 /// io error as a network failure, so it is never taken for a local one.
@@ -291,6 +293,7 @@ struct ScanWalk<'a> {
     stat: Vec<(String, u64)>,
     dirty: Vec<String>,
     reparse: Vec<String>,
+    stop: &'a CancellationToken,
 }
 
 fn join_lower(dir: &str, name: &str) -> String {
@@ -326,6 +329,9 @@ impl ScanWalk<'_> {
     fn walk(&mut self, path: &Path, rel: &str) -> std::io::Result<bool> {
         let mut clean = true;
         for entry in std::fs::read_dir(path)? {
+            if self.stop.is_cancelled() {
+                return Err(std::io::ErrorKind::Interrupted.into());
+            }
             let entry = entry?;
             let name = entry.file_name().to_string_lossy().to_string();
             let sub_rel = join_lower(rel, &name);
@@ -382,6 +388,7 @@ fn enumerate(
     source: &Path,
     managed: &HashMap<String, String>,
     skip_hash: &HashSet<String>,
+    stop: &CancellationToken,
 ) -> Result<Enumerated> {
     let mut managed_dirs: HashSet<String> = HashSet::new();
     let mut dir_files: HashMap<String, (usize, usize)> = HashMap::new();
@@ -408,6 +415,7 @@ fn enumerate(
         stat: Vec::new(),
         dirty: Vec::new(),
         reparse: Vec::new(),
+        stop,
     };
     walk.walk(source, "").context("GET_METADATA_ERR")?;
     Ok((walk.stat, walk.dirty, walk.reparse))
@@ -420,6 +428,9 @@ fn enumerate(
 /// hashed too, so the journal records the hash a delete expects to remove;
 /// they stay unmanaged for the directory check, because a directory swapped
 /// as one unit must contain only the files the journal lists.
+///
+/// Once `stop` is cancelled the scan returns `Cancelled`: the directory walk
+/// stops at its next entry, each hash thread at its next 1 MiB block.
 pub async fn check_local_files(
     source: String,
     hash_algorithm: String,
@@ -427,6 +438,7 @@ pub async fn check_local_files(
     skip_hash: Vec<String>,
     delete_list: Vec<String>,
     notify: ProgressNotify,
+    stop: CancellationToken,
 ) -> Result<LocalScan> {
     let source_path = PathBuf::from(&source);
     if !source_path.exists() {
@@ -448,9 +460,17 @@ pub async fn check_local_files(
         let source_path = source_path.clone();
         let managed = managed.clone();
         let skip_hash = skip_hash.clone();
-        tokio::task::spawn_blocking(move || enumerate(&source_path, &managed, &skip_hash))
-            .await
-            .context("SCAN_THREAD_ERR")??
+        let walk_stop = stop.clone();
+        let enumerated = tokio::task::spawn_blocking(move || {
+            enumerate(&source_path, &managed, &skip_hash, &walk_stop)
+        })
+        .await
+        .context("SCAN_THREAD_ERR")?;
+        // the walk stops with an io error once `stop` is cancelled
+        if stop.is_cancelled() {
+            return Err(Cancelled.into());
+        }
+        enumerated?
     };
 
     let mut files = Vec::new();
@@ -536,18 +556,21 @@ pub async fn check_local_files(
     for _ in 0..workers {
         let (files, next, tx) = (files.clone(), next.clone(), tx.clone());
         let hash_algorithm = hash_algorithm.clone();
+        let stop = stop.clone();
         tokio::task::spawn_blocking(move || {
             let mut buffer = vec![0u8; HASH_BUFFER_SIZE];
+            let stopped = || stop.is_cancelled();
             loop {
+                if stopped() {
+                    break;
+                }
                 let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 let Some(file) = files.get(i) else { break };
-                let res =
-                    hash_file_with(&hash_algorithm, &file.file_name, &mut buffer).map(|hash| {
-                        Metadata {
-                            hash,
-                            unwritable: false,
-                            ..file.clone()
-                        }
+                let res = hash_file_with(&hash_algorithm, &file.file_name, &mut buffer, &stopped)
+                    .map(|hash| Metadata {
+                        hash,
+                        unwritable: false,
+                        ..file.clone()
                     });
                 let failed = res.is_err();
                 // 接收端已因错误返回时停止
@@ -565,7 +588,14 @@ pub async fn check_local_files(
     let mut last_notify = Instant::now();
     const PROGRESS_FRAME: Duration = Duration::from_millis(50);
 
-    while let Some(res) = rx.recv().await {
+    loop {
+        // a thread that saw `stop` sends an error or nothing; `stop` wins
+        let res = tokio::select! {
+            biased;
+            _ = stop.cancelled() => return Err(Cancelled.into()),
+            res = rx.recv() => res,
+        };
+        let Some(res) = res else { break };
         let res = res.context("HASH_COMPLETE_ERR")?;
         finished += 1;
         finished_hashes.push(res);
@@ -946,6 +976,7 @@ mod tests {
             vec![],
             vec![],
             progress_notify(move |v| reports_cb.lock().unwrap().push(v)),
+            CancellationToken::new(),
         )
         .await
         .unwrap();
@@ -985,6 +1016,7 @@ mod tests {
             vec!["User/settings.json".to_string()],
             vec![],
             progress_notify(|_| {}),
+            CancellationToken::new(),
         )
         .await
         .unwrap();
@@ -1017,6 +1049,7 @@ mod tests {
             skip.iter().map(|s| s.to_string()).collect(),
             vec![],
             progress_notify(|_| {}),
+            CancellationToken::new(),
         )
         .await
         .unwrap()
@@ -1136,6 +1169,39 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// A cancel that lands before the hash threads take a file ends the scan
+    /// with `Cancelled`, not with the thread error a short count would give.
+    #[tokio::test]
+    async fn cancelled_scan_returns_cancelled() {
+        let dir = temp_dir();
+        let names: Vec<String> = (0..20).map(|i| format!("f{i}.bin")).collect();
+        for name in &names {
+            write_file(&dir, name, name.as_bytes());
+        }
+        let stop = CancellationToken::new();
+        let on_first = stop.clone();
+        let err = check_local_files(
+            dir.to_string_lossy().to_string(),
+            "md5".to_string(),
+            names,
+            vec![],
+            vec![],
+            // the first report comes before any file is hashed
+            progress_notify(move |_| on_first.cancel()),
+            stop,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(
+                crate::utils::code::extract(&err),
+                crate::utils::code::Extracted::Cancelled
+            ),
+            "{err:#}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[tokio::test]
     async fn check_local_files_hashes_every_file_once() {
         let dir = temp_dir();
@@ -1154,6 +1220,7 @@ mod tests {
             vec![],
             vec![],
             progress_notify(|_| {}),
+            CancellationToken::new(),
         )
         .await
         .unwrap()
@@ -1188,6 +1255,7 @@ mod tests {
                 "app.exe".into(),
             ],
             progress_notify(|_| {}),
+            CancellationToken::new(),
         )
         .await
         .unwrap();

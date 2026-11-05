@@ -68,6 +68,20 @@ pub async fn run_op(
     mgr.run(op, elevate, on_progress).await.into_anyhow()
 }
 
+/// [`run_op`] for the operations that stop on the user's cancel (the hash
+/// scan, the Mirror酱 extraction); others ignore `cancel`.
+async fn run_op_cancellable(
+    mgr: &ManagedElevate,
+    elevate: bool,
+    op: IpcOperation,
+    on_progress: ProgressNotify,
+    cancel: &CancellationToken,
+) -> anyhow::Result<IpcResult> {
+    mgr.run_cancellable(op, elevate, on_progress, cancel)
+        .await
+        .into_anyhow()
+}
+
 struct OperationProgress {
     network_pending: bool,
     network_bytes: u64,
@@ -186,13 +200,14 @@ async fn run_op_with_ui(
         None
     };
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Progress>();
-    let mut op_fut = Box::pin(run_op(
+    let mut op_fut = Box::pin(run_op_cancellable(
         mgr,
         elevate,
         op,
         progress_notify(move |p| {
             let _ = tx.send(p);
         }),
+        &ui.cancel,
     ));
     let mut cancelled = false;
     let mut interval = tokio::time::interval(std::time::Duration::from_millis(100));
@@ -1883,7 +1898,7 @@ async fn scan_local(
         ignore_nonempty,
     );
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Progress>();
-    let mut op_fut = Box::pin(run_op(
+    let mut op_fut = Box::pin(run_op_cancellable(
         mgr,
         settings.elevate,
         IpcOperation::CheckLocalFiles {
@@ -1896,6 +1911,7 @@ async fn scan_local(
         progress_notify(move |p| {
             let _ = tx.send(p);
         }),
+        &ui.cancel,
     ));
     let raw = loop {
         tokio::select! {

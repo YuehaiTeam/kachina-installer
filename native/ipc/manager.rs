@@ -22,6 +22,7 @@ use tokio::net::windows::named_pipe::NamedPipeServer;
 use tokio::net::windows::named_pipe::ServerOptions;
 use tokio::sync::oneshot;
 use tokio::time;
+use tokio_util::sync::CancellationToken;
 use windows::Win32::Foundation::{ERROR_PIPE_BUSY, HANDLE, WAIT_OBJECT_0};
 use windows::Win32::System::Pipes::{GetNamedPipeClientProcessId, GetNamedPipeServerProcessId};
 use windows::Win32::System::Threading::{GetProcessId, WaitForSingleObject};
@@ -233,11 +234,28 @@ impl ManagedElevate {
         elevate: bool,
         on_progress: ProgressNotify,
     ) -> TAResult<IpcResult> {
+        self.run_cancellable(ipc, elevate, on_progress, &CancellationToken::new())
+            .await
+    }
+
+    /// [`run`](Self::run), with `cancel` reaching the operation as its stop
+    /// token. The caller still waits for the result: a stopped operation
+    /// returns `Cancelled` once it has let go of what it was writing.
+    pub async fn run_cancellable(
+        &self,
+        ipc: IpcOperation,
+        elevate: bool,
+        on_progress: ProgressNotify,
+        cancel: &CancellationToken,
+    ) -> TAResult<IpcResult> {
         if !self.uses_helper(elevate) {
+            let stop = cancel.clone();
             let (result, snapshot) = super::download::RESOLVER
                 .scope(
                     self.resolve_tx.clone(),
-                    super::network::measure(on_progress.clone(), |notify| run_opr(ipc, notify)),
+                    super::network::measure(on_progress.clone(), |notify| {
+                        run_opr(ipc, notify, stop)
+                    }),
                 )
                 .await;
             snapshot.publish(&on_progress);
@@ -275,7 +293,26 @@ impl ManagedElevate {
                 .context("IPC_ERR")
                 .into());
         }
-        match result_rx.await {
+        tokio::pin!(result_rx);
+        let mut cancel_sent = false;
+        let result = loop {
+            tokio::select! {
+                result = &mut result_rx => break result,
+                _ = cancel.cancelled(), if !cancel_sent => {
+                    cancel_sent = true;
+                    // like a resolve reply, the helper's read loop handles it
+                    // and sends nothing back
+                    let _ = self
+                        .mpsc_tx
+                        .send(IpcInner {
+                            op: IpcOperation::Cancel(id.clone()),
+                            id: String::new(),
+                        })
+                        .await;
+                }
+            }
+        };
+        match result {
             Ok(Ok(data)) => Ok(data),
             Ok(Err(error)) => Err(error.into_ta()),
             Err(_) => Err(
@@ -537,6 +574,8 @@ pub async fn uac_ipc_main(args: crate::cli::arg::UacArgs) {
         let mut cancel_rx = cancel_rx.resubscribe();
         tokio::spawn(async move {
             let mut retired = false;
+            // stop token of each request still running, by request id
+            let running: Arc<Mutex<HashMap<String, CancellationToken>>> = Default::default();
             loop {
                 let frame = tokio::select! {
                     _ = cancel_rx.recv() => {
@@ -585,10 +624,19 @@ pub async fn uac_ipc_main(args: crate::cli::arg::UacArgs) {
                             .await;
                         continue;
                     }
+                    IpcOperation::Cancel(id) => {
+                        if let Some(stop) = running.lock().unwrap().get(&id) {
+                            stop.cancel();
+                        }
+                        continue;
+                    }
                     _ => {}
                 }
                 let tx = tx.clone();
                 let id = res.id.clone();
+                let stop = CancellationToken::new();
+                running.lock().unwrap().insert(id.clone(), stop.clone());
+                let running = running.clone();
                 tokio::spawn(async move {
                     let (resolve_tx, mut resolve_rx) = tokio::sync::mpsc::unbounded_channel();
                     let progress_tx = tx.clone();
@@ -599,7 +647,9 @@ pub async fn uac_ipc_main(args: crate::cli::arg::UacArgs) {
                     });
                     let mut operation = Box::pin(super::download::RESOLVER.scope(
                         resolve_tx,
-                        super::network::measure(notify.clone(), |notify| run_opr(res.op, notify)),
+                        super::network::measure(notify.clone(), |notify| {
+                            run_opr(res.op, notify, stop)
+                        }),
                     ));
                     let (result, snapshot) = loop {
                         tokio::select! {
@@ -607,6 +657,7 @@ pub async fn uac_ipc_main(args: crate::cli::arg::UacArgs) {
                             Some((query, _)) = resolve_rx.recv() => { let _ = tx.send(PipeMsg::Resolve(query)).await; }
                         }
                     };
+                    running.lock().unwrap().remove(&id);
                     let msg = match result {
                         Ok(data) => PipeMsg::Ok(id, data, snapshot),
                         Err(err) => PipeMsg::Err(id, IpcError::from_ta(&err), snapshot),
@@ -782,6 +833,155 @@ mod tests {
             .await
             .expect("client did not exit after server closed")
             .unwrap();
+    }
+
+    fn is_cancelled(err: &crate::utils::error::TACommandError) -> bool {
+        matches!(
+            crate::utils::code::extract(&err.error),
+            crate::utils::code::Extracted::Cancelled
+        )
+    }
+
+    /// In helper mode a cancel sends `Cancel` with the request's id, and the
+    /// caller still waits for the helper's result.
+    #[tokio::test]
+    async fn cancel_is_forwarded_and_the_result_awaited() {
+        let (mgr, mut requests, pending) = ManagedElevate::detached();
+        let cancel = CancellationToken::new();
+        let run = {
+            let cancel = cancel.clone();
+            tokio::spawn(async move {
+                mgr.run_cancellable(
+                    IpcOperation::Ping,
+                    true,
+                    super::super::progress_noop(),
+                    &cancel,
+                )
+                .await
+            })
+        };
+        let sent = requests.recv().await.unwrap();
+        cancel.cancel();
+        let forwarded = time::timeout(Duration::from_secs(5), requests.recv())
+            .await
+            .expect("no Cancel was sent")
+            .unwrap();
+        assert!(
+            matches!(&forwarded.op, IpcOperation::Cancel(id) if *id == sent.id),
+            "{forwarded:?}"
+        );
+        assert!(!run.is_finished());
+        let (tx, _) = pending.lock().unwrap().remove(&sent.id).unwrap();
+        let cancelled = crate::utils::error::TACommandError {
+            error: anyhow::Error::new(crate::utils::code::Cancelled),
+            insight: None,
+        };
+        let _ = tx.send(Err(IpcError::from_ta(&cancelled)));
+        let err = time::timeout(Duration::from_secs(5), run)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap_err();
+        assert!(is_cancelled(&err), "{:#}", err.error);
+    }
+
+    /// The helper gives each request a stop token and `Cancel` stops it: a
+    /// scan of a 128 MiB file that is cancelled at its first report ends with
+    /// a cancelled error.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn helper_cancel_stops_a_running_scan() {
+        let pipe_id = uuid::Uuid::new_v4().to_string();
+        let server = ServerOptions::new()
+            .first_pipe_instance(true)
+            .create(format!(r"\\.\pipe\Kachina-Elevate-{pipe_id}"))
+            .unwrap();
+        let client = tokio::spawn(uac_ipc_main(UacArgs {
+            pipe_id,
+            log_path: std::env::temp_dir().join("kachina-test.log"),
+            launcher_pid: std::process::id(),
+            silent: true,
+        }));
+        server.connect().await.unwrap();
+        let pending: Pending = Arc::new(Mutex::new(HashMap::new()));
+        let (mpsc_tx, mpsc_rx) = tokio::sync::mpsc::channel(16);
+        handle_pipe(
+            server,
+            pending.clone(),
+            mpsc_rx,
+            tokio::sync::mpsc::unbounded_channel().0,
+        )
+        .await;
+
+        let dir = crate::fs::staging::scratch_file(&format!(
+            "kachina-scan-cancel-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        // zeros past the valid data length: read without disk io, hashed for
+        // far longer than a cancel takes to cross the pipe
+        std::fs::File::create(dir.join("big.bin"))
+            .unwrap()
+            .set_len(128 * 1024 * 1024)
+            .unwrap();
+        let (first_tx, first_rx) = oneshot::channel();
+        let first_tx = Mutex::new(Some(first_tx));
+        let (tx, reply) = oneshot::channel();
+        pending.lock().unwrap().insert(
+            "scan".into(),
+            (
+                tx,
+                progress_notify(move |_| {
+                    if let Some(tx) = first_tx.lock().unwrap().take() {
+                        let _ = tx.send(());
+                    }
+                }),
+            ),
+        );
+        mpsc_tx
+            .send(IpcInner {
+                op: IpcOperation::CheckLocalFiles {
+                    source: dir.to_string_lossy().to_string(),
+                    hash_algorithm: "md5".into(),
+                    file_list: vec!["big.bin".into()],
+                    skip_hash: vec![],
+                    delete_list: vec![],
+                },
+                id: "scan".into(),
+            })
+            .await
+            .unwrap();
+        time::timeout(Duration::from_secs(5), first_rx)
+            .await
+            .expect("no scan progress")
+            .unwrap();
+        mpsc_tx
+            .send(IpcInner {
+                op: IpcOperation::Cancel("scan".into()),
+                id: String::new(),
+            })
+            .await
+            .unwrap();
+        let got = time::timeout(Duration::from_secs(5), reply)
+            .await
+            .expect("pipe reply timeout")
+            .unwrap();
+        let Err(err) = got else {
+            panic!("the scan finished before the cancel reached it");
+        };
+        assert!(err.cancelled, "{}", err.message);
+
+        drop(mpsc_tx);
+        time::timeout(Duration::from_secs(5), client)
+            .await
+            .expect("client did not exit after server closed")
+            .unwrap();
+        // the hash thread lets go of the file at its next block
+        for _ in 0..50 {
+            if std::fs::remove_dir_all(&dir).is_ok() {
+                break;
+            }
+            time::sleep(Duration::from_millis(20)).await;
+        }
     }
 
     fn test_pipe() -> (String, NamedPipeServer) {

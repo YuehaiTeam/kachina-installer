@@ -6,11 +6,17 @@ const FILE_FLAG_SEQUENTIAL_SCAN: u32 = 0x0800_0000;
 
 pub fn hash_file(hash_algorithm: &str, path: &str) -> Result<String> {
     let mut buffer = vec![0u8; HASH_BUFFER_SIZE];
-    hash_file_with(hash_algorithm, path, &mut buffer)
+    hash_file_with(hash_algorithm, path, &mut buffer, &|| false)
 }
 
 /// 与 [`hash_file`] 相同，读缓冲由调用方提供，连续计算多个文件时复用同一块。
-pub fn hash_file_with(hash_algorithm: &str, path: &str, buffer: &mut [u8]) -> Result<String> {
+/// 每读一块前检查 `stopped`，为真时以错误结束。
+pub fn hash_file_with(
+    hash_algorithm: &str,
+    path: &str,
+    buffer: &mut [u8],
+    stopped: &dyn Fn() -> bool,
+) -> Result<String> {
     let mut file = std::fs::OpenOptions::new()
         .read(true)
         .write(false)
@@ -21,6 +27,9 @@ pub fn hash_file_with(hash_algorithm: &str, path: &str, buffer: &mut [u8]) -> Re
     if hash_algorithm == "md5" {
         let mut hasher = chksum_md5::MD5::new();
         loop {
+            if stopped() {
+                anyhow::bail!("hash stopped");
+            }
             let read = file.read(buffer).context("READ_FILE_ERR")?;
             if read == 0 {
                 break;
@@ -32,6 +41,9 @@ pub fn hash_file_with(hash_algorithm: &str, path: &str, buffer: &mut [u8]) -> Re
         use twox_hash::XxHash3_128;
         let mut hasher = XxHash3_128::new();
         loop {
+            if stopped() {
+                anyhow::bail!("hash stopped");
+            }
             let read = file.read(buffer).context("READ_FILE_ERR")?;
             if read == 0 {
                 break;

@@ -132,7 +132,7 @@ zip 下载到 `<staging>\dl\<sha256>.zip`（`RunMirrorcDownload`）。`run_mirro
 
 ### 提权管道：按请求投递
 
-`ManagedElevate::run` 为每个请求在 `Pending: HashMap<id, (Sender, ProgressNotify)>` 中登记结果 `oneshot` 与该请求的进度回调，然后只等结果。管道读任务按 id 投递：`PipeMsg::Progress` 交给该请求的回调，取出回调后先释放锁再调用，未知 id 的进度丢弃；`PipeMsg::Ok` / `Err` 投递结果并摘除。管道任一端结束时把所有未完成的 `oneshot` 以断连错误唤醒。回调在读任务上运行，必须不阻塞（现有回调只做无界通道发送或短暂加锁），否则会拖慢之后的所有帧，包括结果。提权侧以 `try_send` 写进度，写端积压时丢进度、不丢结果。
+`ManagedElevate::run` 为每个请求在 `Pending: HashMap<id, (Sender, ProgressNotify)>` 中登记结果 `oneshot` 与该请求的进度回调，然后只等结果；带取消 token 调用时，token 触发后另发一条带该请求 id 的 `Cancel`，仍等结果。管道读任务按 id 投递：`PipeMsg::Progress` 交给该请求的回调，取出回调后先释放锁再调用，未知 id 的进度丢弃；`PipeMsg::Ok` / `Err` 投递结果并摘除。管道任一端结束时把所有未完成的 `oneshot` 以断连错误唤醒。回调在读任务上运行，必须不阻塞（现有回调只做无界通道发送或短暂加锁），否则会拖慢之后的所有帧，包括结果。提权侧以 `try_send` 写进度，写端积压时丢进度、不丢结果。
 
 ### 端到端验证
 
