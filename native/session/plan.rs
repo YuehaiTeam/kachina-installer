@@ -159,7 +159,7 @@ fn hash_of(info: &FileMeta, key: HashKey) -> Option<&str> {
     }
 }
 
-fn side_hash(side: &PatchSide, key: HashKey) -> Option<&str> {
+pub fn side_hash(side: &PatchSide, key: HashKey) -> Option<&str> {
     match key {
         HashKey::Md5 => side.md5.as_deref(),
         HashKey::Xxh => side.xxh.as_deref(),
