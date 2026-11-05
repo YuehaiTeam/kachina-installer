@@ -381,6 +381,9 @@ pub async fn get_dfs2_batch_chunk_urls(
     parse_json(&body_text)
 }
 
+/// Ending the session is on the way to the commit, so the user waits for it.
+pub const END_SESSION_TIMEOUT: Duration = Duration::from_secs(10);
+
 pub async fn end_dfs2_session(
     session_api_url: String,
     insights: Option<Dfs2SessionInsights>,
@@ -390,6 +393,7 @@ pub async fn end_dfs2_session(
     let res = API_CLIENT
         .delete(&session_api_url)
         .json(&request_body)
+        .timeout(END_SESSION_TIMEOUT)
         .send()
         .await
         .with_http_context("end_dfs2_session", &session_api_url)?;

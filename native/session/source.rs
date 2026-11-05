@@ -791,7 +791,7 @@ pub async fn cleanup_dfs2(ctx: &mut SourceCtx) {
             } else {
                 Some(serde_json::json!({ "servers": insights }))
             };
-            match plugin_call(
+            let end = plugin_call(
                 ctx,
                 PluginArgs {
                     method: "endSession".to_string(),
@@ -801,11 +801,14 @@ pub async fn cleanup_dfs2(ctx: &mut SourceCtx) {
                     diffchunks: None,
                     insights,
                 },
-            )
-            .await
-            {
-                Ok(PluginResult::Unimplemented) | Ok(PluginResult::Value(_)) => {}
-                Err(err) => tracing::warn!("plugin endSession failed: {err}"),
+            );
+            match tokio::time::timeout(crate::dfs::END_SESSION_TIMEOUT, end).await {
+                Ok(Ok(PluginResult::Unimplemented)) | Ok(Ok(PluginResult::Value(_))) => {}
+                Ok(Err(err)) => tracing::warn!("plugin endSession failed: {err}"),
+                Err(_) => tracing::warn!(
+                    "plugin endSession gave no answer within {:?}",
+                    crate::dfs::END_SESSION_TIMEOUT
+                ),
             }
         }
     }
