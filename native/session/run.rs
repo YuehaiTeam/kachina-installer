@@ -1520,6 +1520,11 @@ async fn dfs_staged(
         )
         .await?;
         let self_replaced = if units.is_empty() {
+            // finishing writes the registry and shortcuts; a cancel accepted
+            // before this point stops it, a later one is refused
+            if !ui.inner.begin_commit() {
+                return Err(Cancelled.into());
+            }
             false
         } else {
             commit_staged(
@@ -3256,6 +3261,9 @@ async fn run_mirrorc(
     if version_name == current_version {
         tracing::info!("already latest, tag={version_name}");
         finish_staging(&staged, recovered_self, mgr).await;
+        if !ui.inner.begin_commit() {
+            return Err(Cancelled.into());
+        }
         finish_install(
             settings,
             config,

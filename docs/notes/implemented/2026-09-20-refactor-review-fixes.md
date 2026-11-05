@@ -51,7 +51,7 @@ Status: implemented
 
 `GuiUi::begin_commit` 持同一把锁判定：token 已取消则返回 false，会话不提交；否则把状态置为 `Unavailable`，之后的取消请求只记日志。原生进度框的 `NativeCancel` 用同样的锁让取消与 `begin_commit` 互斥。
 
-`begin_commit` 由 `commit_staged` 与 `recover_or_discard` 调用。DFS、Mirror酱 和"已最新但需刷新自身映像"三条路径都在 `self_image_units` 准备完自身映像之后才进入提交，所以准备期间收到的取消同样阻止提交。接受取消后不再启动新的下载任务，并向执行进程发送 `CancelDownload`；执行进程中的下载在等待请求名额、解析 URL 与读取响应期间响应取消。
+`begin_commit` 由 `commit_staged` 与 `recover_or_discard` 调用；不提交文件的已最新路径（DFS 没有要提交的单元、Mirror酱 版本相同）在写注册表与快捷方式之前也调用它。DFS、Mirror酱 和"已最新但需刷新自身映像"三条路径都在 `self_image_units` 准备完自身映像之后才进入提交，所以准备期间收到的取消同样阻止提交。接受取消后不再启动新的下载任务，并向执行进程发送 `CancelDownload`；执行进程中的下载在等待请求名额、解析 URL 与读取响应期间响应取消。
 
 丢弃暂存目录前先调用 `wait_idle`，等提权侧的在途操作结束，日志记录在途数量与等待耗时；`cleanup_dfs2` 记录结束 DFS 会话的耗时。两条日志区分本地在途操作与远端收尾。
 
@@ -122,9 +122,8 @@ Status: implemented
 
 ## Consequences
 
-- 合并回退收到的失败序号全部无效时返回 `Cancelled`，会话以取消结束，不弹窗、不上报，也没有单独的诊断。连带中止与用户取消共用 `Cancelled` 类型，两者只靠 `collect_ops` 优先真实错误来区分。
+- 连带中止与用户取消共用 `Cancelled` 类型，两者只靠 `collect_ops` 优先真实错误来区分。
 - 结束 DFS 会话的请求没有整体超时，只受客户端连接 5 秒、每次读取 30 秒的限制；插件来源的 `endSession` 受插件调用 60 秒上限约束。
-- "已最新"路径在没有自身映像单元时不调用 `begin_commit`。此期间接受的取消不阻止注册表与快捷方式收尾，但不会提交任何文件。
 - 提权侧的扫描和解压不接收会话取消信号，只有下载响应取消；取消后的等待时间取决于这些步骤剩余的工作量。
 - 退出清理依赖 cmd 轮询。父进程退出后仍有进程占用暂存目录中的文件超过约 20 秒时，目录留在原处，由下一次运行打开暂存时清理。
 - `append` 遇到不合法的名称以 panic 退出。
