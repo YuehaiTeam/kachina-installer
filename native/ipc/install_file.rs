@@ -22,7 +22,6 @@ use crate::{
 };
 
 use super::file_progress::Reporter;
-use crate::session::state::FileAction;
 use anyhow::{Context, Result};
 use fmmap::tokio::AsyncMmapFileExt;
 use serde::{Deserialize, Serialize};
@@ -581,10 +580,8 @@ fn staged_writer<'a>(
 /// Check the written content, flush it to disk on the same handle and close
 /// it: rename is atomic only for metadata, so an unflushed file swapped in
 /// right before power loss would come back truncated.
-fn commit_output(writer: StagedWriter<'_>, target: &Path, reporter: &Reporter) -> Result<u64> {
-    reporter.action(FileAction::Verify, None);
+fn commit_output(writer: StagedWriter<'_>, target: &Path) -> Result<u64> {
     let (buffered, written) = writer.finish().map_err(|f| write_failure(f, target))?;
-    reporter.action(FileAction::Flush, None);
     let file = buffered
         .into_inner()
         .map_err(|e| anyhow::Error::new(e.into_error()).context("WRITE_TARGET_ERR"))?;
@@ -604,7 +601,7 @@ fn write_direct(
     let mut writer = staged_writer(args, target, cancelled)?
         .with_progress(|written| reporter.bytes(written as usize));
     copy_into(input, &mut writer).map_err(|f| write_failure(f, target))?;
-    Ok(commit_output(writer, target, reporter)? as usize)
+    Ok(commit_output(writer, target)? as usize)
 }
 
 /// Apply `diff` to `old`, writing the result to `target`. Progress follows
@@ -633,7 +630,7 @@ fn write_patched(
                 source_failure(e).context("PATCH_FAILED_ERR")
             }
         })?;
-    commit_output(writer, target, reporter)?;
+    commit_output(writer, target)?;
     Ok(())
 }
 
@@ -651,14 +648,6 @@ fn work_total(args: &InstallFileArgs) -> u64 {
     args.mode.transfer_total(args.output_size)
 }
 
-fn source_action(source: &InstallFileSource) -> FileAction {
-    if matches!(source, InstallFileSource::Local { .. }) {
-        FileAction::Extract
-    } else {
-        FileAction::Download
-    }
-}
-
 pub async fn ipc_install_file(
     args: InstallFileArgs,
     notify: ProgressNotify,
@@ -667,7 +656,7 @@ pub async fn ipc_install_file(
     let reporter = Reporter::new(work_total(&args), notify);
     let (bytes_transferred, insight) = match args.mode.clone() {
         InstallFileMode::Direct(source) => {
-            reporter.action(source_action(&source), Some(args.output_size));
+            reporter.segment();
             let (mut input, insight) = open_input(&source).await?;
             let (job_args, job_target, job_reporter) =
                 (args.clone(), target.clone(), reporter.clone());
@@ -685,7 +674,7 @@ pub async fn ipc_install_file(
             (written, insight)
         }
         InstallFileMode::Patch { source, diff_size } => {
-            reporter.action(FileAction::Patch, Some(diff_size as u64));
+            reporter.segment();
             let (diff, insight) = open_input(&source).await?;
             let (job_args, job_target, job_reporter) =
                 (args.clone(), target.clone(), reporter.clone());
@@ -710,9 +699,9 @@ pub async fn ipc_install_file(
             diff,
             source,
             diff_size,
-            base_size,
+            ..
         } => {
-            reporter.action(FileAction::Extract, Some(base_size));
+            reporter.segment();
             // the packed base is extracted next to the output; the patch then
             // reads it back through the same handle as its old file
             let mut base = target.as_os_str().to_owned();
@@ -750,7 +739,7 @@ pub async fn ipc_install_file(
             .map_err(|e| base_insight.fail(e))?;
 
             // the diff request starts only once the base is ready
-            reporter.action(FileAction::Patch, Some(diff_size as u64));
+            reporter.segment();
             let (diff, insight) = open_input(&diff).await?;
             let (job_args, job_target, job_reporter) =
                 (args.clone(), target.clone(), reporter.clone());
@@ -792,13 +781,13 @@ fn install_chunk(
     let target = PathBuf::from(&args.target);
     match &args.mode {
         InstallFileMode::Direct(..) => {
-            reporter.action(FileAction::Download, Some(args.output_size));
+            reporter.segment();
             let written = write_direct(&mut *input, args, &target, reporter, cancelled)?;
             reporter.finish();
             Ok(written)
         }
         InstallFileMode::Patch { diff_size, .. } => {
-            reporter.action(FileAction::Patch, Some(*diff_size as u64));
+            reporter.segment();
             let (mut old, old_size) = open_old(args)?;
             write_patched(
                 &mut old, old_size, input, *diff_size, args, &target, reporter, cancelled,
@@ -1059,7 +1048,7 @@ mod tests {
         .unwrap();
         assert!(std::fs::read(&target).unwrap() == new);
         let last_done = log.lock().unwrap().iter().rev().find_map(|p| match p {
-            Progress::File(f) => f.done,
+            Progress::File(f) => Some(f.completed),
             _ => None,
         });
         assert_eq!(last_done, Some(diff.len() as u64));

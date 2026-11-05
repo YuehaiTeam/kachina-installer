@@ -10,6 +10,21 @@ function counter(value: { done: number; total: number | null }, bytes: boolean):
   return value.total === null ? fmt(value.done) : `${fmt(value.done)} / ${fmt(value.total)}`;
 }
 
+// The step label already says what these stages do; their counter takes the
+// status line.
+const COUNTED_STAGES = new Set(['scan_files', 'process_files', 'download_archive']);
+
+// The lines under the step list. Fetching metadata shows none: the step
+// label is the same text. A byte counter of any other stage follows its
+// status, as for a runtime download.
+function statusLines(progress: Progress, stat: string | null): string[] {
+  if (progress.cancel === 'requested') return [t('running.cancelling')];
+  if (stat !== null && COUNTED_STAGES.has(progress.stage)) return [stat];
+  if (progress.stage === 'fetch_metadata') return [];
+  const status = t('progress.' + progress.stage, { subject: progress.subject ?? '' });
+  return stat !== null && progress.summary?.unit === 'bytes' ? [status, stat] : [status];
+}
+
 function CancelConfirm({ onYes, onNo }: { onYes: () => void; onNo: () => void }) {
   return (
     <Dialog
@@ -36,11 +51,11 @@ export function Running({ ui, progress }: { ui: UiState; progress: Progress }) {
   const prefix = mirrorc ? 'step.mirrorc.' : 'step.default.';
   // The step titles describe the install pipeline; uninstall only has a status line.
   const steps = progress.step === null ? [] : [0, 1, 2, 3].map((i) => t(prefix + i));
-  const status = progress.cancel === 'requested' ? t('running.cancelling')
-    : t('progress.' + progress.stage, { subject: progress.subject ?? '' });
-  const stat = progress.summary && counter(progress.summary, progress.summary.unit === 'bytes');
+  const summary = progress.summary;
   const speed = progress.network_pending ? progress.network_bps : progress.processing_bps;
-  const speedLabel = progress.network_pending ? t('running.network_speed') : t('running.processing_speed');
+  const stat = summary && counter(summary, summary.unit === 'bytes')
+    + (speed !== null ? ` (${formatSize(speed)}/s)` : '');
+  const lines = statusLines(progress, stat);
   const canCancel = progress.cancel === 'available' && !sending;
 
   // The swap may start while the confirmation is open; there is nothing left to cancel.
@@ -75,19 +90,20 @@ export function Running({ ui, progress }: { ui: UiState; progress: Progress }) {
           ) : null,
         )}
       </div>
-      <div class="current-status">{status}</div>
-      <div class="progress-summary">
-        {stat !== null ? <span>{stat}</span> : null}
-        {speed !== null ? <span title={speedLabel}>{formatSize(speed)}/s</span> : null}
-      </div>
-      <div class="active-files">
-        {progress.files.map((file) => (
-          <div class="active-file" key={file.id}>
-            <span class="active-file-name" title={file.name}>{file.name}</span>
-            <span>{t('file_action.' + file.action)}</span>
-            {file.bytes !== null ? <span class="active-file-counter">{counter(file.bytes, true)}</span> : null}
-          </div>
+      <div class="current-status">
+        {lines.map((line, i) => (
+          <div class="status-line" key={i}>{line}</div>
         ))}
+        {progress.files.length > 0 ? (
+          <div class="active-files">
+            {progress.files.map((file) => (
+              <div class="active-file" key={file.id} title={file.name}>
+                <span class="active-file-name">{file.name.split(/[\\/]/).pop()}</span>
+                <span>{`${formatSize(file.done)}/${formatSize(file.total)}`}</span>
+              </div>
+            ))}
+          </div>
+        ) : null}
       </div>
       <div class={`progress-bar ${progress.percent === null ? 'indeterminate' : ''}`}
         role="progressbar" aria-valuenow={progress.percent ?? undefined}

@@ -823,26 +823,13 @@ fn progress_current(p: &Progress, cancelling: bool) -> String {
         if let Some(total) = counter.total {
             text.push_str(&format!(" / {}", fmt(total)));
         }
-    }
-    let speed = if p.network_pending {
-        p.network_bps
-    } else {
-        p.processing_bps
-    };
-    if let Some(speed) = speed {
-        text.push_str(&format!("  {}/s", i18n::format_size(speed)));
-    }
-    for file in &p.files {
-        text.push_str(&format!(
-            "\n{}  {}",
-            file.name,
-            i18n::t(&format!("file_action.{}", file.action.as_str()), &[])
-        ));
-        if let Some(bytes) = &file.bytes {
-            text.push_str(&format!("  {}", i18n::format_size(bytes.done)));
-            if let Some(total) = bytes.total {
-                text.push_str(&format!(" / {}", i18n::format_size(total)));
-            }
+        let speed = if p.network_pending {
+            p.network_bps
+        } else {
+            p.processing_bps
+        };
+        if let Some(speed) = speed {
+            text.push_str(&format!(" ({}/s)", i18n::format_size(speed)));
         }
     }
     text
@@ -872,37 +859,79 @@ fn prompt_copy(prompt: &Prompt) -> (String, String) {
     )
 }
 
+/// The progress dialog, first content line and line count the content was
+/// last laid out for.
+static CONTENT_LAYOUT: std::sync::Mutex<Option<(isize, String, usize)>> =
+    std::sync::Mutex::new(None);
+
+/// `TDM_UPDATE_ELEMENT_TEXT` keeps the dialog's layout, so content that needs
+/// more room than the dialog was laid out for is drawn over the progress bar
+/// and the buttons. A new first line or line count goes through
+/// `TDM_SET_ELEMENT_TEXT`, which lays the dialog out again; counter updates
+/// keep the layout.
 fn set_content_hwnd(hwnd: HWND, text: &str) {
     use windows::Win32::Foundation::{LPARAM, WPARAM};
-    use windows::Win32::UI::Controls::{TDE_CONTENT, TDM_UPDATE_ELEMENT_TEXT};
+    use windows::Win32::UI::Controls::{
+        TDE_CONTENT, TDM_SET_ELEMENT_TEXT, TDM_UPDATE_ELEMENT_TEXT,
+    };
+    let layout = (
+        hwnd.0 as isize,
+        text.lines().next().unwrap_or_default().to_string(),
+        text.lines().count(),
+    );
+    let relayout = {
+        let mut last = CONTENT_LAYOUT.lock().unwrap_or_else(|e| e.into_inner());
+        let changed = last.as_ref() != Some(&layout);
+        *last = Some(layout);
+        changed
+    };
+    let message = if relayout {
+        TDM_SET_ELEMENT_TEXT
+    } else {
+        TDM_UPDATE_ELEMENT_TEXT
+    };
     let wide: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
     unsafe {
         windows::Win32::UI::WindowsAndMessaging::SendMessageW(
             hwnd,
-            TDM_UPDATE_ELEMENT_TEXT.0 as u32,
+            message.0 as u32,
             Some(WPARAM(TDE_CONTENT.0 as usize)),
             Some(LPARAM(wide.as_ptr() as isize)),
         );
     }
 }
 
+/// The progress dialog and whether its bar was last set to marquee.
+static BAR_MARQUEE: std::sync::Mutex<Option<(isize, bool)>> = std::sync::Mutex::new(None);
+
+/// The marquee messages go out only when the mode changes: each one resets
+/// the bar to empty, and the bar then animates back up to its position.
 fn set_progress_hwnd(hwnd: HWND, percent: Option<f64>, text: &str) {
     use windows::Win32::Foundation::{LPARAM, WPARAM};
     use windows::Win32::UI::Controls::TDM_SET_PROGRESS_BAR_POS;
     let pos = percent.unwrap_or(0.0).round().clamp(0.0, 100.0) as usize;
-    unsafe {
-        windows::Win32::UI::WindowsAndMessaging::SendMessageW(
-            hwnd,
-            windows::Win32::UI::Controls::TDM_SET_MARQUEE_PROGRESS_BAR.0 as u32,
-            Some(WPARAM(percent.is_none() as usize)),
-            Some(LPARAM(0)),
-        );
-        windows::Win32::UI::WindowsAndMessaging::SendMessageW(
-            hwnd,
-            windows::Win32::UI::Controls::TDM_SET_PROGRESS_BAR_MARQUEE.0 as u32,
-            Some(WPARAM(percent.is_none() as usize)),
-            Some(LPARAM(30)),
-        );
+    let marquee = (hwnd.0 as isize, percent.is_none());
+    let switch = {
+        let mut last = BAR_MARQUEE.lock().unwrap_or_else(|e| e.into_inner());
+        let changed = *last != Some(marquee);
+        *last = Some(marquee);
+        changed
+    };
+    if switch {
+        unsafe {
+            windows::Win32::UI::WindowsAndMessaging::SendMessageW(
+                hwnd,
+                windows::Win32::UI::Controls::TDM_SET_MARQUEE_PROGRESS_BAR.0 as u32,
+                Some(WPARAM(marquee.1 as usize)),
+                Some(LPARAM(0)),
+            );
+            windows::Win32::UI::WindowsAndMessaging::SendMessageW(
+                hwnd,
+                windows::Win32::UI::Controls::TDM_SET_PROGRESS_BAR_MARQUEE.0 as u32,
+                Some(WPARAM(marquee.1 as usize)),
+                Some(LPARAM(30)),
+            );
+        }
     }
     set_content_hwnd(hwnd, text);
     unsafe {

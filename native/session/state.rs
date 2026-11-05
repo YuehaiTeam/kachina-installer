@@ -215,25 +215,8 @@ pub enum ProgressUnit {
 pub struct FileProgress {
     pub id: u32,
     pub name: String,
-    pub action: FileAction,
-    pub bytes: Option<ByteProgress>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum FileAction {
-    Download,
-    Extract,
-    Patch,
-    Verify,
-    Flush,
-    Retry,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct ByteProgress {
     pub done: u64,
-    pub total: Option<u64>,
+    pub total: u64,
 }
 
 impl ProgressStage {
@@ -257,18 +240,6 @@ impl ProgressStage {
             }
             Self::Commit => ProgressUnit::Operations,
             _ => ProgressUnit::Files,
-        }
-    }
-}
-impl FileAction {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Download => "download",
-            Self::Extract => "extract",
-            Self::Patch => "patch",
-            Self::Verify => "verify",
-            Self::Flush => "flush",
-            Self::Retry => "retry",
         }
     }
 }

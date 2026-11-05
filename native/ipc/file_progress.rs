@@ -1,6 +1,5 @@
-//! 文件动作快照同时携带有效完成量和实际处理量，丢失中间事件不改变计数含义。
+//! 文件进度快照同时携带有效完成量和实际处理量，丢失中间事件不改变计数含义。
 use super::{Progress, ProgressNotify};
-use crate::session::state::FileAction;
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
 
@@ -8,73 +7,72 @@ use std::sync::{Arc, Mutex};
 pub struct Snapshot {
     pub index: u32,
     pub sequence: u64,
-    pub action: FileAction,
-    pub done: Option<u64>,
-    pub total: Option<u64>,
     pub completed: u64,
     pub work_total: u64,
     pub processed: u64,
     pub finished: bool,
 }
 
+struct State {
+    snapshot: Snapshot,
+    /// `completed` when the current segment began
+    base: u64,
+    /// bytes the current segment has reported
+    done: u64,
+}
+
 #[derive(Clone)]
 pub struct Reporter {
-    state: Arc<Mutex<(Snapshot, u64)>>,
+    state: Arc<Mutex<State>>,
     notify: ProgressNotify,
 }
 impl Reporter {
     pub fn new(total: u64, notify: ProgressNotify) -> Self {
         Self {
-            state: Arc::new(Mutex::new((
-                Snapshot {
+            state: Arc::new(Mutex::new(State {
+                snapshot: Snapshot {
                     index: 0,
                     sequence: 0,
-                    action: FileAction::Download,
-                    done: None,
-                    total: None,
                     completed: 0,
                     work_total: total,
                     processed: 0,
                     finished: false,
                 },
-                0,
-            ))),
+                base: 0,
+                done: 0,
+            })),
             notify,
         }
     }
-    pub fn action(&self, action: FileAction, total: Option<u64>) {
+    fn update(&self, change: impl FnOnce(&mut State)) {
         let snapshot = {
             let mut state = self.state.lock().unwrap();
-            state.1 = state.0.completed;
-            state.0.action = action;
-            state.0.done = total.map(|_| 0);
-            state.0.total = total;
-            state.0.sequence += 1;
-            state.0.clone()
+            change(&mut state);
+            state.snapshot.sequence += 1;
+            state.snapshot.clone()
         };
         (self.notify)(Progress::File(snapshot));
     }
+    /// Starts a part of the file's work whose byte counts restart at zero
+    /// (the base of a hybrid patch, then its diff); they add to what earlier
+    /// parts completed.
+    pub fn segment(&self) {
+        self.update(|state| {
+            state.base = state.snapshot.completed;
+            state.done = 0;
+        });
+    }
+    /// Bytes of the current segment so far; a repeated count adds nothing.
     pub fn bytes(&self, done: usize) {
-        let snapshot = {
-            let mut state = self.state.lock().unwrap();
+        self.update(|state| {
             let done = done as u64;
-            state.0.processed += done.saturating_sub(state.0.done.unwrap_or(0));
-            state.0.done = Some(done);
-            state.0.total = state.0.total.map(|total| total.max(done));
-            state.0.completed = state.1 + done;
-            state.0.work_total = state.0.work_total.max(state.0.completed);
-            state.0.sequence += 1;
-            state.0.clone()
-        };
-        (self.notify)(Progress::File(snapshot));
+            state.snapshot.processed += done.saturating_sub(state.done);
+            state.done = done;
+            state.snapshot.completed = state.base + done;
+            state.snapshot.work_total = state.snapshot.work_total.max(state.snapshot.completed);
+        });
     }
     pub fn finish(&self) {
-        let snapshot = {
-            let mut state = self.state.lock().unwrap();
-            state.0.finished = true;
-            state.0.sequence += 1;
-            state.0.clone()
-        };
-        (self.notify)(Progress::File(snapshot));
+        self.update(|state| state.snapshot.finished = true);
     }
 }

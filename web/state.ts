@@ -33,7 +33,6 @@ export type ProgressStage =
 
 export type CancelState = 'available' | 'requested' | 'unavailable';
 export type ProgressUnit = 'bytes' | 'files' | 'operations';
-export type FileAction = 'download' | 'extract' | 'patch' | 'verify' | 'flush' | 'retry';
 
 export type ProgressCounter = {
   unit: ProgressUnit;
@@ -41,16 +40,11 @@ export type ProgressCounter = {
   total: number | null;
 };
 
-export type ByteProgress = {
-  done: number;
-  total: number | null;
-};
-
 export type FileProgress = {
   id: number;
   name: string;
-  action: FileAction;
-  bytes: ByteProgress | null;
+  done: number;
+  total: number;
 };
 
 export type Progress = {

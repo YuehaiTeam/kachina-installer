@@ -217,7 +217,7 @@ mod tests {
             let reading = Reading::begin();
             reading.add(31);
             let reporter = super::super::file_progress::Reporter::new(20, notify);
-            reporter.action(crate::session::state::FileAction::Patch, Some(20));
+            reporter.segment();
             reporter.bytes(12);
             Err::<(), _>(anyhow::anyhow!("failed attempt"))
         })

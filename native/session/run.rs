@@ -38,8 +38,8 @@ use crate::session::source::{
     resolve_file_location, resolve_range_urls, FileLocation, ParsedSource, SourceCtx,
 };
 use crate::session::state::{
-    ByteProgress, CancelState, FileAction, FileProgress, Phase, Progress as UiProgress,
-    ProgressCounter, ProgressStage, ProgressUnit, Prompt, UiState,
+    CancelState, FileProgress, Phase, Progress as UiProgress, ProgressCounter, ProgressStage,
+    ProgressUnit, Prompt, UiState,
 };
 use crate::session::types::{version_gt, ProjectConfig, SessionResult, Settings, SourceField};
 use crate::session::ui::{send_ev_insight, SessionUi, SilentPluginUi};
@@ -1956,8 +1956,6 @@ struct FileProg {
     downloaded: u64,
     running: bool,
     network_pending: bool,
-    action: FileAction,
-    bytes: Option<ByteProgress>,
 }
 
 struct DownloadProg {
@@ -1985,8 +1983,6 @@ impl DownloadProg {
                     downloaded: 0,
                     running: false,
                     network_pending: network,
-                    action: FileAction::Download,
-                    bytes: None,
                 })
             };
             match task {
@@ -2044,8 +2040,8 @@ impl DownloadProg {
             .map(|(id, f)| FileProgress {
                 id: id as u32,
                 name: f.name.clone(),
-                action: f.action,
-                bytes: f.bytes.clone(),
+                done: f.downloaded,
+                total: f.size,
             })
             .collect();
         progress
@@ -2076,8 +2072,6 @@ impl ProgressHandle {
                 file.size = total;
                 file.downloaded = 0;
                 file.network_pending = !source.is_local();
-                file.bytes = None;
-                file.action = FileAction::Retry;
             }
         }
     }
@@ -2125,14 +2119,7 @@ impl ProgressHandle {
                     target.running = !file.finished;
                     target.size = file.work_total;
                     target.downloaded = file.completed;
-                    target.action = file.action;
-                    target.bytes = file.done.map(|done| ByteProgress {
-                        done,
-                        total: file.total,
-                    });
-                    if file.finished
-                        || matches!(file.action, FileAction::Verify | FileAction::Flush)
-                    {
+                    if file.finished {
                         target.network_pending = false;
                     }
                 }
@@ -4284,7 +4271,7 @@ mod tests {
         };
         let first = handle.callback();
         let reporter = crate::ipc::file_progress::Reporter::new(20, first.clone());
-        reporter.action(FileAction::Patch, Some(20));
+        reporter.segment();
         reporter.bytes(10);
         first(Progress::Network(crate::ipc::network::Snapshot {
             bytes: u32::MAX as u64 + 5,
@@ -4301,21 +4288,20 @@ mod tests {
         }));
         let second = handle.callback();
         let reporter = crate::ipc::file_progress::Reporter::new(100, second.clone());
-        reporter.action(FileAction::Extract, Some(80));
+        reporter.segment();
         reporter.bytes(80);
-        reporter.action(FileAction::Patch, Some(20));
+        reporter.segment();
         reporter.bytes(20);
-        reporter.action(FileAction::Verify, None);
+        // the writer reports its final count once more when it finishes
+        reporter.bytes(20);
         {
             let mut prog = prog.lock().unwrap();
             assert_eq!(prog.processed, 110);
             assert_eq!(prog.network_bytes, u32::MAX as u64 + 8);
             let view = prog.render();
-            assert_eq!(view.files[0].action, FileAction::Verify);
-            assert!(view.files[0].bytes.is_none());
+            assert_eq!((view.files[0].done, view.files[0].total), (100, 100));
             assert_eq!(view.summary.unwrap().done, 100);
         }
-        reporter.action(FileAction::Flush, None);
         reporter.finish();
         assert!(prog.lock().unwrap().render().files.is_empty());
         assert_eq!(prog.lock().unwrap().processed, 110);
