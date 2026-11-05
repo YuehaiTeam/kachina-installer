@@ -61,8 +61,8 @@ pub async fn read_frame<R: AsyncRead + Unpin>(reader: &mut R) -> std::io::Result
     Ok(Some(body))
 }
 
-// `Chunk` 用元组：u32/u64 不同型，位置写反编译不过；`BytesOf`/`CountOf`/`Extract`
-// 的同型字段保留具名，写反不会被编译器发现。
+// `BytesOf`/`CountOf`/`Extract` 的字段同型，写成元组时位置写反编译器发现不了，
+// 所以保留具名。
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub enum Progress {
     Insight(crate::dfs::InsightItem),

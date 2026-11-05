@@ -251,7 +251,6 @@ async fn ready_runtime(
         state,
         Renderer::WebView,
         project.exe_name.clone(),
-        project.app_name.clone(),
         project.uac_strategy.clone(),
         config.install_path.clone(),
         project.reg_name.clone(),

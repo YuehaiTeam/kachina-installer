@@ -385,16 +385,14 @@ impl Intent {
     }
 }
 
-/// Holds `UiState` and applies user intents. `apply` is sync this step:
-/// option / path / source / cdk-gate / answer / dismiss. `Start` only gates
-/// mirrorc CDK; it does not call `run_install`.
+/// Holds `UiState` and applies user intents synchronously: options, path,
+/// source, the Mirror酱 CDK gate, prompt answers and dismissal. `Start` only
+/// applies the CDK gate; the host runs the session.
 pub struct UiSession {
     pub state: UiState,
     all_sources: Vec<SourceItem>,
     renderer: Renderer,
     exe_name: String,
-    #[allow(dead_code)] // native ReadyState (step 4); GUI pick_path uses ProjectConfig.app_name
-    app_name: String,
     uac_strategy: String,
     discovered_path: String,
     reg_name: String,
@@ -449,7 +447,6 @@ impl UiSession {
             String::new(),
             String::new(),
             String::new(),
-            String::new(),
         )
     }
 
@@ -457,7 +454,6 @@ impl UiSession {
         state: UiState,
         renderer: Renderer,
         exe_name: String,
-        app_name: String,
         uac_strategy: String,
         discovered_path: String,
         reg_name: String,
@@ -468,7 +464,6 @@ impl UiSession {
             all_sources,
             renderer,
             exe_name,
-            app_name,
             uac_strategy,
             discovered_path,
             reg_name,
@@ -513,7 +508,6 @@ impl UiSession {
                 {
                     self.state.phase = Phase::Failed(Coded::bare(MIRRORC_CDK_MISSING));
                 }
-                // run_install / run_uninstall are step 2.
             }
             // The answer itself goes to `PromptHub`; the running session decides what
             // follows (cancelled → `Ready`), so only the modal is cleared here.
@@ -527,7 +521,7 @@ impl UiSession {
                     self.state.phase = Phase::Ready;
                 }
             }
-            // Cancel / Launch / Advanced / Close: host-owned this step.
+            // The host handles these.
             Intent::Cancel | Intent::Launch | Intent::Advanced | Intent::Close => {}
         }
     }
@@ -689,7 +683,6 @@ mod tests {
             UiState::default(),
             Renderer::Native,
             "app.exe".into(),
-            "App".into(),
             "prefer-user".into(),
             String::new(),
             String::new(),
@@ -757,7 +750,6 @@ mod tests {
             UiState::default(),
             Renderer::Native,
             "app.exe".into(),
-            "App".into(),
             "prefer-user".into(),
             path.clone(),
             "App".into(),

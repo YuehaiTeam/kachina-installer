@@ -135,7 +135,6 @@ fn main() {
     // Initialize H3/QUIC probe early — before any client is created
     capabilities::init();
 
-    // command is not  Command::Install, can be anything
     match command {
         Command::HeadlessUac(args) => {
             utils::sentry::add_breadcrumb(

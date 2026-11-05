@@ -6,8 +6,7 @@
 //! files, `dl\` scratch downloads (runtimes, WebView2 bootstrapper, Mirror酱
 //! archive), `journal` the commit manifest, `lock` the owning pid.
 //!
-//! This module owns the process cwd and staging under `%TEMP%`. The log file
-//! path in `main.rs` is the other `%TEMP%` write.
+//! This module also owns the process cwd and the scratch files under `%TEMP%`.
 
 use std::io::Write;
 use std::os::windows::ffi::OsStrExt;

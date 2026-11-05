@@ -182,7 +182,6 @@ async fn ui_session_from(
         state,
         Renderer::Native,
         project.exe_name.clone(),
-        project.app_name.clone(),
         project.uac_strategy.clone(),
         config.install_path.clone(),
         project.reg_name.clone(),

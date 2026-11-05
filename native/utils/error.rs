@@ -1,4 +1,6 @@
-// This file is part of the `anyhow-tauri` library.
+//! Error type of bridge commands and IPC operations: an `anyhow::Error` plus
+//! the DFS insight of a failed download. Adapted from the `anyhow-tauri`
+//! crate, which the `TA` prefix comes from.
 
 use crate::dfs::InsightItem;
 use std::sync::{Arc, Mutex};
@@ -30,19 +32,10 @@ impl From<anyhow::Error> for TACommandError {
     }
 }
 
-/// Use this as your command's return type.
-///
-/// Example usage:
-/// ```
-/// #[tauri::command]
-/// fn test() -> anyhow_tauri::TAResult<String> {
-///     Ok("No error thrown.".into())
-/// }
-/// ```
-///
-/// You can find more examples inside the library's repo at `/demo/src-tauri/src/main.rs`
 pub type TAResult<T> = std::result::Result<T, TACommandError>;
 
+/// Wrap an error convertible to `anyhow::Error` as a `TACommandError` without
+/// insight.
 pub trait IntoTAResult<T> {
     fn into_ta_result(self) -> TAResult<T>;
 }
@@ -51,18 +44,6 @@ impl<T, E> IntoTAResult<T> for std::result::Result<T, E>
 where
     E: Into<anyhow::Error>,
 {
-    /// Maps errors, which can be converted into `anyhow`'s error type, into `TACommandError` which can be returned from command call.
-    /// This is a "quality of life" improvement.
-    ///
-    /// Example usage:
-    /// ```
-    /// #[tauri::command]
-    /// fn test_into_ta_result() -> anyhow_tauri::TAResult<String> {
-    ///     function_that_succeeds().into_ta_result()
-    ///     // could also be written as:
-    ///     // Ok(function_that_succeeds()?)
-    /// }
-    /// ```
     fn into_ta_result(self) -> TAResult<T> {
         self.map_err(|e| TACommandError {
             error: e.into(),
@@ -71,40 +52,7 @@ where
     }
 }
 impl<T> IntoTAResult<T> for anyhow::Error {
-    /// Maps `anyhow`'s error type into `TACommandError` which can be returned from a command call.
-    /// This is a "quality of life" improvement.
-    ///
-    /// Example usage:
-    /// ```
-    /// #[tauri::command]
-    /// fn test_into_ta_result() -> anyhow_tauri::TAResult<String> {
-    ///     function_that_succeeds().into_ta_result()
-    ///     // could also be written as:
-    ///     // Ok(function_that_succeeds()?)
-    /// }
-    /// ```
     fn into_ta_result(self) -> TAResult<T> {
-        Err(TACommandError {
-            error: self,
-            insight: None,
-        })
-    }
-}
-
-pub trait IntoEmptyTAResult<T> {
-    /// Usefull whenever you want to create `Result<(), TACommandError>` (or `TAResult<()>`)
-    ///
-    /// Example usage:
-    /// ```
-    /// #[tauri::command]
-    /// fn test_into_ta_empty_result() -> anyhow_tauri::TAResult<()> {
-    ///     anyhow::anyhow!("Showcase of the .into_ta_empty_result()").into_ta_empty_result()
-    /// }
-    /// ```
-    fn into_ta_empty_result(self) -> TAResult<T>;
-}
-impl IntoEmptyTAResult<()> for anyhow::Error {
-    fn into_ta_empty_result(self) -> TAResult<()> {
         Err(TACommandError {
             error: self,
             insight: None,
