@@ -30,7 +30,7 @@ WebView 前端（`src/`，Vue 3 + rsbuild，产物为单个内联脚本与样式
 
 - Preact + TSX，`@preact/signals` 持有唯一的 `state = signal<UiState>()`。没有 SFC、路由、状态库。
 - rsbuild 用 `@rsbuild/plugin-preact`；`inlineScripts` / `inlineStyles` / `all-in-one` 分块 / purgecss / `dataUriLimit` 配置保持。
-- `package.json` 的 `dependencies` 只有 `preact` 与 `@preact/signals`；`@sentry/cli`、`@testing-library/preact`、`jsdom`、`vitest` 在 `devDependencies`。仓库与产物中没有 `vue`、`dompurify`、`left.webp`、`.vue` 文件。
+- `package.json` 的 `dependencies` 只有 `preact` 与 `@preact/signals`；`@sentry/cli` 在 `devDependencies`。仓库与产物中没有 `vue`、`dompurify`、`left.webp`、`.vue` 文件。
 
 ### 目录
 
@@ -48,7 +48,6 @@ web/
   ui/                Checkbox.tsx  Input.tsx  Dialog.tsx  Spinner.tsx  icons.tsx
   plugin-host.ts     监听 session-plugin，转 plugins/bridge，answer_session_plugin
   plugins/           index.ts、registry.ts、bridge.ts、types.ts、github/、stub/
-  __tests__/         fixtures.ts  setup.ts  raw.d.ts  render.test.tsx  i18n-keys.test.ts  plugin-host.test.ts
 ```
 
 ### 渲染规则
@@ -56,10 +55,10 @@ web/
 - 屏幕由 `state.phase` 决定：`Ready` → `Ready.tsx`；`Running` → `Running.tsx`；`Done` → `Done.tsx`（按 `SessionResult` 的 `is_uninstall` / `already_latest` / `is_update` 选文案键 `done.uninstall` / `done.latest` / `done.update` / `done.install`）；`Failed` → `Failed.tsx`。订阅 `ui-state` 之后立刻 `get_ui_state` 拉一次；首次状态到达前显示 spinner。
 - `Running.tsx` 用 `t("progress." + stage, { subject, done, total })` 组当前状态行，`done` / `total` 对字节阶段（与 Rust 侧 `BYTE_STAGES` 同一列表）经 `formatSize` 格式化、其余按计数；步骤列表按当前源是否为 `mirrorc://` 选 `step.default.*` / `step.mirrorc.*`；卸载模式不显示安装四步。
 - `Failed.tsx` 调用 `invoke("error_dialog", errorDialogArgs(coded))`，透传 `code` / `detail` / `subject` / `sid` / `event_id`，对话框关闭后发 `Intent::Dismiss`；`MIRRORC_CDK_*` 码在 `Dismiss` 之后打开 `CdkPanel`。`ui-notice` 事件同样调 `error_dialog`，不改 `phase`。
-- `state.pending` 非空时渲染确认模态：文案键 `prompt.<kind>.title` / `prompt.<kind>.message`，`items` 以列表展示，按钮发 `Intent::Answer`。
+- `state.pending` 非空时渲染确认模态：文案键 `prompt.<kind>.title` / `prompt.<kind>.message`；文案不含 `{items}` 时 `items` 以列表列在文案下方，含 `{items}` 时由文案自身列出；按钮发 `Intent::Answer`。
 - `Ready.tsx` 的每个控件对应一个 `Intent`：路径链接 → `invoke("pick_path")` 后发 `SetPath`；源列表 → `SetSource`；两个复选框 → `SetCreateLnk` / `SetDeleteUserData`；主按钮 → `Start`；`needs_elevate` 决定盾牌图标。EULA 勾选是视图状态，默认勾选。`CdkPanel` 的输入框失焦或确定时发 `SetCdk`，按 `state.cdk` 显示校验中 / 无效（无效时 `state.cdk` 里的 `Coded` 走 `error_dialog`）。
 - 源图标：`sources[i].icon` 为 SVG 文本时以 `dangerouslySetInnerHTML` 直接内联，不消毒；来源是打包方的嵌入配置，与替换整个 HTML 处于同一信任边界。
-- 主题：`state.theme` 为 `Image` 时 `<img src="/theme.webp">`，为 `Css` 时插入 `<link rel="stylesheet" href="/theme.css">`，为 `None` 时不渲染图片区域、右侧内容占满宽度。bundle 不携带任何默认图片。
+- 主题：左侧 `.image` 列始终渲染。`state.theme` 为 `Image` 时列内是 `<img src="/theme.webp">`；为 `Css` 时插入 `<link rel="stylesheet" href="/theme.css">`，列内留空，由主题样式绘制；为 `None` 时列内是内联 SVG 默认插图（`ui/icons.tsx` 的 `WizardArt`）。bundle 不携带位图默认图片。
 - 窗口控制（无边框时的最小化 / 关闭）用 `window_minimize` / `window_close` 命令。
 
 ### 文案
@@ -88,7 +87,7 @@ if (location.search.includes('pluginHost=1')) wv.postMessage({ id: 1, kind: 'inv
 
 ### 测试
 
-Vitest + jsdom + `@testing-library/preact`。`__tests__/fixtures.ts` 提供各相位 / 各 `Prompt.kind` 的 `UiState`；`setup.ts` 是内存版 `chrome.webview` 替身，记录 `postMessage` 以断言 `invoke("intent", …)` 的参数。`render.test.tsx` 覆盖屏幕渲染与意图发送；`i18n-keys.test.ts` 经 `?raw` 直接读取真实的 `locales/zh-CN.tsv`（`raw.d.ts` 声明 `*?raw` 与 `import.meta.glob`），断言 `screens/` 与 `panels/` 中出现的全部 `t("…")` 键都有文案；`plugin-host.test.ts` 覆盖 `?pluginHost=1` 路径。
+渲染器没有组件测试。`utils/i18n.rs` 的 `web_renderer_keys_exist` 扫描 `web/` 下全部 `.ts` / `.tsx` 中字面量形式的 `t('…')` 键，要求文案表中都有。运行期拼出的键里，进度阶段与确认框类型由同一文件的 `locale_covers_codes_stages_prompts` 覆盖，`step.*` 与 `file_action.*` 没有测试。`?pluginHost=1` 路径由 e2e `test:plugin-stub` 覆盖。
 
 ## Alternatives considered
 

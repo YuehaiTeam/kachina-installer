@@ -15,7 +15,7 @@ Status: proposed
 | 映射盘与 `subst` 盘在提权令牌中不可见 | 启动进程按用户会话中的盘符判断目录；`EnableLinkedConnections` 为默认值时，提权令牌看不到该用户映射的网络盘和 `subst` 盘，子进程写入失败。跨账号时访问 UNC 共享使用的也是管理员凭据。同账号提权同样触发。 | [目录检查](../../../native/installer/mod.rs) |
 | 卸载按本次是否提权选择快捷方式位置 | 卸载用 `get_dirs(settings.elevate)` 只清理一侧。按用户安装后改为按机器更新时，更新不重建应用快捷方式，用户目录中的快捷方式在卸载后残留。 | [卸载](../../../native/session/run.rs)、[快捷方式目录](../../../native/installer/lnk.rs) |
 
-本提案取代[重构审阅修复](./2026-09-20-refactor-review-fixes.md)中暂存 ACL 一项，并修改[根据安装记录决定注册行为](../implemented/2026-09-20-install-identity-registry.md)中提权时保留 HKCU 归属的部分；其余登记规则不变。
+本提案取代[重构审阅修复](../implemented/2026-09-20-refactor-review-fixes.md)中暂存 ACL 一项，并修改[根据安装记录决定注册行为](../implemented/2026-09-20-install-identity-registry.md)中提权时保留 HKCU 归属的部分；其余登记规则不变。
 
 ## Proposal
 

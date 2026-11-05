@@ -18,7 +18,7 @@ sentry SDK 栈是发布 stub 中最大的可移除体积：符号名含 `sentry_
 - 性能事务为会话级 `Transaction`：`run_install` 记 `install`/`update`，`run_uninstall` 记 `uninstall`，trace context 带 `status`（ok/cancelled/internal_error），供后端把失败与取消会话从时长分布中过滤。安装流水的阶段 span（`metadata`、`hash-scan`、`download`、`runtimes`、`finalize`）经 `Transaction::timed` 以 await 墙钟计时，扁平一层、parent 一律指向根；`metadata` span 只包 `fetch_metadata` 网络部分，版本选择弹窗的用户等待不计入。吞吐数值挂 transaction 级 measurements：`hash_scan_files`/`hash_scan_bytes`、`download_files`/`download_bytes`。卸载与 mirrorc 会话只有 transaction 无阶段 span。
 - panic hook（`install_panic_hook`）在 abort 前先拉起独立崩溃提示进程（`crash-dialog <event_id>` 隐藏子命令，用户立即看到反馈并获得可反馈的事件编号），再拼 fatal 事件同步发送——独立线程 + 独立 runtime（不依赖可能已损坏的主 runtime）、5 秒上限（客户端 read_timeout 30 秒，黑洞后端会让崩溃中的进程僵住半分钟）。崩溃信息与事件编号同时写 stderr（静默/脚本场景的消费口，无控制台时为无害空操作）；静默安装等无人值守场景不弹框；崩溃提示进程自身不再装弹框 hook，防递归。实现 [崩溃捕获](../proposed/2026-08-28-crash-capture.md) 的第一级。同步路径不走提权管道：`panic = "abort"` 下排队消息来不及被写循环消费，提权进程的 panic 事件在本进程直发 HTTP。
 - 发送为异步 fire-and-forget，`INFLIGHT` 计数 + `flush(timeout)` 供 silent 退出路径在 `std::process::exit` 前等待在途事件。
-- 上报过滤沿用 [遥测通道职责收敛](./2026-08-28-telemetry-channels.md) 的 `classify` 判断，调用方负责，客户端本身无条件发送。
+- 是否上报由调用方按 [UI 契约](./2026-09-02-ui-contract.md) 的错误码类判断，客户端本身无条件发送。
 
 ## Alternatives considered
 

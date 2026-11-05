@@ -8,6 +8,8 @@ Status: implemented
 
 ## Decision
 
+下表的三通道分工是现行规则。错误是否上报、`fail` 的 `kind` 维度由错误码的类决定，规则与上报咽喉见 [UI 契约](./2026-09-02-ui-contract.md)；它取代表后各条以 `Expected` 标记、`classify` 与 `TACommandError::serialize` 实现的过滤和分类，这三者在代码中不存在。
+
 三通道各归其位：
 
 | 通道 | 职责 | 禁止内容 |

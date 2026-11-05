@@ -14,7 +14,7 @@
   - 只需要提供一个离线安装包链接即可完成以上所有操作，无需额外部署
 - 运行库安装
   - 支持自动安装 .Net Runtime/Desktop 和 VCRedist
-  - 自动安装Webview2以保证`Tauri`的正常运行
+  - 需要 WebView 界面而系统缺少 WebView2 时自动安装 WebView2
 - 混合安装
   - 通过旧版安装包和在线更新直接安装最新版
 - 卸载
@@ -80,7 +80,7 @@ kachina-builder.exe pack -c kachina.config.json -o Kachina.update.exe
 可选：为输出的 exe 设置图标和自定义css/左侧图片：
 
 ```bat
-kachina-builder.exe pack -c kachina.config.json -o Kachina.update.exe --icon icon.ico -m [custom.css | custom.webp]
+kachina-builder.exe pack -c kachina.config.json -o Kachina.update.exe --icon icon.ico -t [custom.css | custom.webp]
 ```
 
 3. 构建Metadata、压缩应用文件
