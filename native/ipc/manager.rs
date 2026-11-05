@@ -446,7 +446,6 @@ pub async fn handle_pipe(
                 Ok(PipeMsg::Resolve(query)) => {
                     let _ = resolve_tx.send((query, true));
                 }
-                Ok(PipeMsg::Disconnect(_)) => {}
                 Err(err) => {
                     tracing::error!("Failed to read from pipe: {:?}", err);
                     break;

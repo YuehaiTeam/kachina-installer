@@ -194,7 +194,6 @@ pub enum PipeMsg {
     Ok(String, IpcResult, network::Stats),
     Err(String, IpcError, network::Stats),
     Breadcrumb(String),
-    Disconnect(String),
     Resolve(download::Resolve),
 }
 
@@ -395,14 +394,14 @@ mod tests {
 
     #[tokio::test]
     async fn read_frame_splits_stream_and_reports_eof() {
-        let mut stream = encode_frame(&PipeMsg::Disconnect("a".into())).unwrap();
+        let mut stream = encode_frame(&PipeMsg::Breadcrumb("a".into())).unwrap();
         stream.extend(encode_frame(&PipeMsg::Breadcrumb("b".into())).unwrap());
         let mut reader = &stream[..];
         let first: PipeMsg =
             decode_frame(&read_frame(&mut reader).await.unwrap().unwrap()).unwrap();
         let second: PipeMsg =
             decode_frame(&read_frame(&mut reader).await.unwrap().unwrap()).unwrap();
-        assert!(matches!(first, PipeMsg::Disconnect(s) if s == "a"));
+        assert!(matches!(first, PipeMsg::Breadcrumb(s) if s == "a"));
         assert!(matches!(second, PipeMsg::Breadcrumb(s) if s == "b"));
         assert!(read_frame(&mut reader).await.unwrap().is_none());
 
