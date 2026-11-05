@@ -1162,8 +1162,7 @@ dependencies = [
 [[package]]
 name = "h3-msquic-async"
 version = "0.3.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "89fc961d3bd9e6899d2334e997846d023042d81d86ea92d45ff663b0aaaa77c3"
+source = "git+https://github.com/xytoki/msquic-async-rs.git?branch=main#b8e70186685ec3d7ec5157f14313a8d4438a3647"
 dependencies = [
  "bytes",
  "futures",
@@ -1671,7 +1670,7 @@ dependencies = [
 [[package]]
 name = "msquic-async"
 version = "0.4.0"
-source = "git+https://github.com/xytoki/msquic-async-rs.git?branch=main#69a19a34bb9fec5bcd6f6af3cc1c76bb66e163f7"
+source = "git+https://github.com/xytoki/msquic-async-rs.git?branch=main#b8e70186685ec3d7ec5157f14313a8d4438a3647"
 dependencies = [
  "bytes",
  "futures-io",

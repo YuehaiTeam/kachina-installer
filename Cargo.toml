@@ -156,5 +156,6 @@ opt-level = 3
 
 [patch.crates-io]
 msquic-async = { git = "https://github.com/xytoki/msquic-async-rs.git", branch = "main" }
+h3-msquic-async = { git = "https://github.com/xytoki/msquic-async-rs.git", branch = "main" }
 ctor = { git = "https://github.com/xytoki/rust-ctor.git", branch = "master" }
 seera-msquic = { git = "https://github.com/xytoki/seera-msquic.git", branch = "seera-main" }
