@@ -47,7 +47,7 @@ web/
   panels/            SourcePanel.tsx  CdkPanel.tsx
   ui/                Checkbox.tsx  Input.tsx  Dialog.tsx  Spinner.tsx  icons.tsx
   plugin-host.ts     监听 session-plugin，转 plugins/bridge，answer_session_plugin
-  plugins/           index.ts、registry.ts、bridge.ts、types.ts、github/、stub/
+  plugins/           index.ts、registry.ts、bridge.ts、types.ts、stub/
 ```
 
 ### 渲染规则
@@ -87,7 +87,7 @@ if (location.search.includes('pluginHost=1')) wv.postMessage({ id: 1, kind: 'inv
 
 ### 测试
 
-渲染器没有组件测试。`utils/i18n.rs` 的 `web_renderer_keys_exist` 扫描 `web/` 下全部 `.ts` / `.tsx` 中字面量形式的 `t('…')` 键，要求文案表中都有。运行期拼出的键里，进度阶段与确认框类型由同一文件的 `locale_covers_codes_stages_prompts` 覆盖，`step.*` 与 `file_action.*` 没有测试。`?pluginHost=1` 路径由 e2e `test:plugin-stub` 覆盖。
+渲染器没有组件测试，也没有 vitest、jsdom 依赖：断言从文案表抄来的文本与组件内写死的 intent 测不到界面展示，理由见[重构后审阅发现的缺陷、行为变更与冗余](./2026-10-31-refactor-review-findings.md)。`utils/i18n.rs` 的 `web_renderer_keys_exist` 扫描 `web/` 下全部 `.ts` / `.tsx` 中字面量形式的 `t('…')` 键，要求文案表中都有。运行期拼出的键里，进度阶段与确认框类型由同一文件的 `locale_covers_codes_stages_prompts` 覆盖，`step.*` 与 `file_action.*` 没有测试。`?pluginHost=1` 路径由 e2e `test:plugin-stub` 覆盖。
 
 ## Alternatives considered
 

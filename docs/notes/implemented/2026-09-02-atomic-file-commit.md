@@ -93,7 +93,9 @@ reparse point 子树内的受管文件成为**复制单元**：阶段一仍写�
 
 阶段二只有本地 rename，是唯一存在混合状态的窗口，长度为单元数次 rename。目录单元把全新安装的窗口缩为一次操作，把整目录替换（node_modules 类）从 3N 次缩为两次。
 
-**阶段二内的失败**：某个 rename 在重试后仍失败，把已换过的单元按逆序复原（`rename(目标 → new\…)`、`rename(old\… → 目标)`，根目录为空被 `rmdir` 的重建空目录），删除 journal 与整个暂存目录，挂 `FILE_IN_USE`（其它 io 错误按 `code_for_local_io` 映射）、subject 为相对路径；安装目录回到完整旧版。`ProbeWritable` 与占用提示在阶段一之前已经排除了已知占用，此路径应当罕见。
+**阶段二内的失败**：某个 rename 在重试后仍失败，把已换过的单元按逆序复原（`rename(目标 → new\…)`、`rename(old\… → 目标)`，根目录为空被 `rmdir` 的重建空目录）。全部复原后删除 journal 与整个暂存目录，挂 `FILE_IN_USE`（其它 io 错误按 `code_for_local_io` 映射）、subject 为相对路径；安装目录回到完整旧版。`ProbeWritable` 与占用提示在阶段一之前已经排除了已知占用，此路径应当罕见。
+
+**复原失败**：复原时文件单元的新文件挪不回 `new\`，仍尝试用 `old\` 的旧文件覆盖回目标，只有目标最终不是旧文件才算未复原；目录单元的新目录挪不回时直接算未复原。有任一单元未复原时保留 journal、`new\` 与 `old\`，挂 `ROLLBACK_INCOMPLETE`（E 类、不上报，subject 为第一个未复原的相对路径，文案提示关闭占用安装目录的程序后重新运行安装程序）。会话遇到该码不调用 `finish_staging`，暂存目录留给下次会话：`OpenStaging` 带回 journal，按下文的恢复流程核对后前滚。提交失败、恢复前滚失败、恢复时 `new\` 缺失三条回滚路径共用这一规则（`fs/commit.rs::end_rollback`）。
 
 **会话收尾**：`Commit` 成功后运行库安装（`dl\`）、快捷方式、注册表照旧（卸载器与更新器已在提交内换入，`finish_install` 不写它们）；随后 `finish_staging`：`self_replaced` 为假 → `DiscardStaging` 同步删除暂存目录；为真 → `installer/uninstall.rs::schedule_delete_on_exit(暂存根)`，旧 exe 停在 `old\` 里运行中不可删，`delete_self_on_exit` 在退出后 `rmdir /s /q` 整个暂存目录。`schedule_delete_on_exit` 是 `DELETE_SELF_ON_EXIT_PATH` 全库唯一的写入点，会话在提交（或恢复）成功之后与自卸载完成之后各调用一次。
 
@@ -105,7 +107,7 @@ reparse point 子树内的受管文件成为**复制单元**：阶段一仍写�
 
 用途有三个：同一进程内阶段二失败时按逆序复原；恢复前滚途中再次失败时把上次与本次已换的单元一起复原（见下）；停放运行中的 exe（更新器、卸载器）——运行中的镜像只能改名不能删除。核对不通过时整个暂存目录连同 `old\` 一起删除，核对通过且前滚成功时也不需要它。
 
-寿命上限是一次进程：会话结束时随暂存目录同步删除；`old\` 里停着本进程的 exe 时延到退出，由 `delete_self_on_exit` 的 `rmdir /s /q` 一起带走。每个单元为此多付一次同卷 rename，没有数据复制。
+寿命一般是一次进程：会话结束时随暂存目录同步删除；`old\` 里停着本进程的 exe 时延到退出，由 `delete_self_on_exit` 的 `rmdir /s /q` 一起带走。复原失败（`ROLLBACK_INCOMPLETE`）时 `old\` 随 journal 留到下次会话的恢复。每个单元为此多付一次同卷 rename，没有数据复制。
 
 ### 恢复
 
@@ -116,7 +118,7 @@ reparse point 子树内的受管文件成为**复制单元**：阶段一仍写�
 - **任一单元有变**：用户在两次运行之间改动了目录（覆盖安装了便携版、手动替换了文件），上次那次更新的前提不再成立，不做任何 rename，删除整个暂存目录，返回 `RecoverOutcome::Discarded`，会话重新 `OpenStaging` 继续正常流程，混合状态由本次哈希扫描修复。
 - **任一单元不可完成**（`new\` 被删）：把已换的单元复原（`old\` 里还有它们的旧文件），删除暂存目录，返回 `Discarded`。
 - **全部已换或待换**：把上次用户要求的更新做完——对待换单元完成两次 rename，删除单元移入 `old\`；随后删除 journal，返回 `Completed { self_replaced }`，暂存目录留给本次会话继续用，此时哈希扫描应得出无需再装任何文件。更新器本身若在中断前已换成新版，接手的就是新更新器，行为相同。
-- **前滚途中失败**（某个 rename 重试后仍失败）：与阶段二内失败同一规则——把已换的单元全部复原，包括上次中断前换过的，删除 journal 与暂存目录，报 `FILE_IN_USE`。进程活着就不留下半安装；半安装只在进程意外退出这一种情形下存在。
+- **前滚途中失败**（某个 rename 重试后仍失败）：与阶段二内失败同一规则——把已换的单元全部复原，包括上次中断前换过的，删除 journal 与暂存目录，报 `FILE_IN_USE`；复原也失败时保留暂存目录、报 `ROLLBACK_INCOMPLETE`。半安装只在两种情形下存在：进程意外退出，或复原失败；两者都留下 journal，由下次会话恢复。
 
 核对需要读取 journal 内单元的当前目标文件，成本与一次只覆盖变更文件的哈希扫描相当。Mirror酱 路径的 journal 没有旧哈希，中断后除已全部换完的情形外一律丢弃、重下 zip。恢复若换掉了运行中的 exe，`self_replaced` 一路传到 `finish_staging`，本次会话无论成败都在退出时删除暂存目录。
 
@@ -128,9 +130,9 @@ zip 下载到 `<staging>\dl\<sha256>.zip`（`RunMirrorcDownload`）。`run_mirro
 
 `IpcOperation` 含 `OpenStaging(install_dir)`、`Commit(CommitArgs)`、`Recover(CommitArgs)`、`DiscardStaging(root)`、`StageSelfImage(..)`；`InstallRuntime` 带 `dl_dir`；`RunMirrorcInstall` 为 `{ zip_path, new_dir, sha256 }`；没有 `RmList`、`CreateUninstaller`。`IpcResult` 对应 `OpenStaging(StagingOpened)`、`Commit(CommitOutcome)`、`Recover(RecoverOutcome)`、`DiscardStaging`，`CheckLocalFiles(LocalScan)`、`RunUninstall(UninstallOutcome)`、`RunMirrorcInstall(MirrorcExtract)`。写入阶段的 `InstallFile` / `InstallMultichunkStream` / `RunMirrorcDownload` / `RunMirrorcInstall` 输出路径都在暂存目录下。
 
-### 提权管道：进度与结果分离
+### 提权管道：按请求投递
 
-`ManagedElevate::run` 为每个请求登记一个 `oneshot`（`Pending: HashMap<id, Sender>`），管道读任务收到 `PipeMsg::Ok` / `Err` 时按 id 投递并摘除，管道任一端结束时把所有未完成的 `oneshot` 以断连错误唤醒；`PipeMsg::Progress` 走容量 256 的 `broadcast`，`recv()` 返回 `Lagged` 时跳过继续，`Closed` 时只等结果。进度丢失只影响进度条，结果不会丢。
+`ManagedElevate::run` 为每个请求在 `Pending: HashMap<id, (Sender, ProgressNotify)>` 中登记结果 `oneshot` 与该请求的进度回调，然后只等结果。管道读任务按 id 投递：`PipeMsg::Progress` 交给该请求的回调，取出回调后先释放锁再调用，未知 id 的进度丢弃；`PipeMsg::Ok` / `Err` 投递结果并摘除。管道任一端结束时把所有未完成的 `oneshot` 以断连错误唤醒。回调在读任务上运行，必须不阻塞（现有回调只做无界通道发送或短暂加锁），否则会拖慢之后的所有帧，包括结果。提权侧以 `try_send` 写进度，写端积压时丢进度、不丢结果。
 
 ### 端到端验证
 
@@ -179,6 +181,7 @@ zip 下载到 `<staging>\dl\<sha256>.zip`（`RunMirrorcDownload`）。`run_mirro
 | `CheckLocalFiles` 的 stat 来自目录枚举：对受管文件不再调用 `metadata()`（`skip_hash` 子树除外），返回的大小与修改时间与逐个 stat 一致 | PASS（代码结构）：`fs.rs::ScanWalk::walk` 只在 reparse 子树与全 `skip_hash` 子树下逐文件 `metadata()`；无计数器断言。`check_local_files_is_read_only_and_unwritable_false`、`check_local_files_skip_hash_only_stats` 的大小与哈希结果不变 |
 | 目录单元探测单测：候选目录根下有一个不受管文件而某子目录完全受管待写时输出仅含该子目录；含 `userDataPath` 的候选不干净；含空目录的候选不干净；含未变更受管文件的候选不在输入中；删除清单中的文件不使候选变脏；每个目录只被枚举一次 | PASS：`fs::tests::dirty_dirs_follow_unmanaged_content`（根脏 / lib 脏 / 空子目录 / 用户数据子树 / 全干净 / 目录不存在）、`session::run::tests::units_subdir_when_root_is_dirty_or_partly_unchanged`（root 脏、`app.exe` 未变 → 只有 `lib` 成单元，`lib/gone.dll` 的删除被目录单元吸收）、`units_root_dir_on_fresh_install`。"每个目录只枚举一次"由递归结构保证，无计数器断言 |
 | 提交单测：阶段一第二个文件写入失败时三个目标不变且无 journal；阶段一取消时目标不变、暂存目录删除、返回 `cancelled`；阶段二第二个单元 rename 失败时三个目标等于旧文件、暂存目录已删除；阶段二在第二个单元之后中断时 journal 存在，恢复后三个目标均为新文件、暂存目录已删除；恢复前滚在第三个单元失败时三个目标均等于旧文件、暂存目录已删除；`new\` 被删除后恢复时已换过的单元被复原；目录单元内文件被锁定时退化为逐文件；根目录不存在与为空各一例；空间不足时在写入前返回 `DISK_FULL` | 部分 PASS：`commit_swaps_three_files_and_removes_journal`、`commit_rolls_back_when_second_unit_is_locked`（`FILE_IN_USE`、subject `b.txt`、三目标旧字节、暂存目录不存在）、`interrupted_commit_recovers_forward`（`commit_sync` 的 `stop_after` 钩子）、`recovery_failure_rolls_back_previously_swapped_units`、`recovery_with_new_dir_deleted_rolls_back_swapped_units`、`dir_unit_degrades_when_a_file_is_locked`、`root_unit_missing_and_empty_install_dir`。阶段一写入失败不触碰目标由结构保证（写入只发生在 `new\`），无单独用例；阶段一取消由 `install_files` 的 `select!` 与 `run_install` 的 `Cancelled → SessionResult::cancelled` 实现，未做会话级单测；`DISK_FULL` 由 `ensure_space` 实现，无法在测试中制造满盘，无用例 |
+| 复原失败单测：已换上的新文件被占用、复原不了时保留 journal、`new\`、`old\` 并以 `ROLLBACK_INCOMPLETE` 失败；解除占用后再恢复完成更新 | PASS：`incomplete_rollback_keeps_staging_for_the_next_recovery`（`a.txt` 已换上新文件且被占用、`c.txt` 被占用使前滚失败 → `ROLLBACK_INCOMPLETE`、subject `a.txt`，journal 与 `old\a.txt` 仍在；解除占用后恢复返回 `Completed`，三个文件为新内容，journal 删除）；全部可复原时删除暂存目录由 `commit_rolls_back_when_second_unit_is_locked` 覆盖 |
 | 自更新单测：模拟运行中的 exe，第二个 rename 失败时原名文件字节等于原文件、`DELETE_SELF_ON_EXIT_PATH` 为 `None`；成功时 `DELETE_SELF_ON_EXIT_PATH == Some(暂存目录)` 且 `old\` 下的旧 exe 字节等于原文件 | 部分 PASS：`self_replaced` 的判定依赖 `std::env::current_exe()`，测试进程无法把任意文件伪装成自身；运行中镜像的 rename 由 `park_self_moves_running_image_into_staging_old` 覆盖，rename 失败后原文件字节不变由 `commit_rolls_back_when_second_unit_is_locked` 覆盖，`schedule_delete_on_exit` 的写入由同一自卸载测试覆盖 |
 | Mirror酱 单测：合成 zip（含 `changes.json` 的 `deleted` 项、一个与当前 exe 同名的文件、一个子目录）解压后全部产物位于 `new\` 下、安装目录字节不变、返回的删除清单与 `changes.json` 一致；`.metadata.json` 变体同理；zip 摘要不匹配时返回错误且 `new\` 为空；二者皆无时报归档无效 | PASS：`thirdparty::mirrorc::tests::extracts_into_new_dir_and_reports_deletes`、`metadata_variant_and_invalid_archives` |
 | 探测单测补充：候选目录下的 junction 子目录使候选变脏且其内受管文件成为复制单元；提交前重新探测时向已判干净的目录写入一个文件，该目录单元降级为逐文件提交且该文件保留在原位 | PASS：`fs::tests::junction_subdir_is_reparse_and_dirty`、`session::run::tests::units_copy_under_reparse_point`、`fs::commit::tests::dir_unit_degrades_when_no_longer_clean` |
@@ -211,7 +214,7 @@ zip 下载到 `<staging>\dl\<sha256>.zip`（`RunMirrorcDownload`）。`run_mirro
 - 恢复核对以哈希相等判定"未变"，用户把某个文件替换成恰好同哈希的内容不会被识别为改动：这等价于没有改动，无害。
 - 同一安装目录被两个安装器并发处理：`lock` 以 `create_new` 占用，后来者看到存活 pid 以 `STAGING_IN_USE` 退出；pid 复用导致误判的概率可忽略。
 - 目录 rename 在目标目录内有打开句柄时失败：退化为逐文件提交，只损失优化不引入新失败模式。
-- 安全软件持有新文件超过重试窗口（合计约 1.5 秒）时以 `FILE_IN_USE` 报错：用户重试即可，原文件完好。
+- 安全软件持有新文件超过重试窗口（合计约 1.5 秒）时以 `FILE_IN_USE` 报错：用户重试即可，原文件完好。旧文件也被持续占用、复原失败时以 `ROLLBACK_INCOMPLETE` 报错，安装目录在下次运行恢复之前缺文件或混有新文件。
 - 自更新的两次 rename 之间仍有一个原名缺失的瞬间：毫秒级本地操作，第二次失败有复原；进程恰在此刻被强制结束时新旧两份都在暂存目录与 `old\` 中，下次会话前滚。
 - Mirror酱 路径无 e2e：API 域名写死在 `get_mirrorc_status`，无法以本地 stub 替代；解压、删除清单与摘要校验由合成 zip 的单测覆盖，提交与恢复与 DFS 路径共用同一实现与测试。
 - Mirror酱 增量包装进非空目录时全部是文件单元，散落变更仍是逐文件 rename：与 DFS 路径一致。
@@ -219,7 +222,7 @@ zip 下载到 `<staging>\dl\<sha256>.zip`（`RunMirrorcDownload`）。`run_mirro
 - 恢复放在 metadata 已知之后：就绪页显示时目录可能仍是上次中断的半提交状态，模式判定（是否升级）按当前目录内容得出；用户在就绪页停留期间应用不可用的时长不变，只是恢复晚了一个点击。
 - 目标内容不等即丢弃暂存目录：上次中断后服务端又发了新内容，哪怕只有一个文件变了，整个暂存目录都白费；正确性优先于流量，部分复用 `new\` 里仍然有效的文件需要把暂存目录当本地源，见 Alternatives。
 - 阶段一取消后暂存目录删除、已下载内容丢弃：取消后再点开始要重下；不保留是为了让"取消"语义干净，与失败一致。
-- native 进度对话框没有关闭框：取消只能经 Cancel 按钮，按钮按下后置灰等待会话收尾；结束进程仍是用户可用的最后手段，阶段一被结束只留暂存残留。
+- native 进度对话框没有关闭框：取消经 Cancel 按钮并确认；取消已受理或当前步骤不可取消时再点给出强制退出确认（见[重构后审阅发现的缺陷、行为变更与冗余](./2026-10-31-refactor-review-findings.md)），强制退出与结束进程一样，阶段一只留暂存残留，阶段二留下的 journal 由下次运行恢复。
 - 更新时不再补回被用户删掉的卸载器，其快捷方式也只在卸载器存在时创建；此前每次 REG 来源的更新都会重写卸载器与更新器。运行为 updater 本身且清单无 updater 时，卸载器由运行中的 updater 镜像刷新——它是这份安装能拿到的最新镜像。
 - 盘根成为硬限制后，历史上装在盘根的安装既不能升级也不能卸载，只能手工处理。
 - 提权管道改 `oneshot` 后，`ManagedElevate` 被丢弃时向所有未完成的 `oneshot` 发送断连错误；`pipe_roundtrip_and_disconnect` 的孤儿等待者一条覆盖此路径。
