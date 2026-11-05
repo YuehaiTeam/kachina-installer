@@ -1,7 +1,6 @@
 use std::sync::OnceLock;
 
 use anyhow::Context;
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use fmmap::tokio::{AsyncMmapFile, AsyncMmapFileExt, AsyncMmapFileReader};
 use serde_json::Value;
 use tokio::sync::OnceCell;
@@ -19,7 +18,7 @@ struct ParsedPack {
     config: Option<Value>,
     metadata: Option<RepoMetadata>,
     index: Option<Vec<Embedded>>,
-    image: Option<String>,
+    image: Option<Vec<u8>>,
 }
 
 pub async fn mmap() -> &'static AsyncMmapFile {
@@ -55,7 +54,7 @@ pub async fn get_config_from_embedded(
     Option<Value>,
     Option<RepoMetadata>,
     Option<Vec<Embedded>>,
-    Option<String>,
+    Option<Vec<u8>>,
 )> {
     let parsed = PARSED_PACK
         .get_or_try_init(|| {
@@ -95,7 +94,7 @@ async fn parse_embedded(embedded: &[Embedded]) -> anyhow::Result<ParsedPack> {
     let image = embedded
         .iter()
         .find(|e| e.name == "\0IMAGE")
-        .map(|e| BASE64.encode(&bytes[e.offset..e.offset + e.size]));
+        .map(|e| bytes[e.offset..e.offset + e.size].to_vec());
     Ok(ParsedPack {
         config,
         metadata,

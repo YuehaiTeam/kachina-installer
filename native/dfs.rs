@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use crate::{
     utils::{error::TAResult, url::HttpContextExt},
-    REQUEST_CLIENT,
+    API_CLIENT,
 };
 
 #[derive(Deserialize, Serialize, Debug)]
@@ -211,7 +211,7 @@ pub async fn get_dfs(
     } else {
         "".to_string()
     };
-    let res = REQUEST_CLIENT
+    let res = API_CLIENT
         .post(&url_with_range_in_query)
         .body(extras.clone())
         .send()
@@ -255,7 +255,7 @@ pub async fn get_dfs(
         return Err(anyhow!("Failed to solve challenge"));
     }
     let url = format!("{url_with_range_in_query}&sid={solve}");
-    let res = REQUEST_CLIENT
+    let res = API_CLIENT
         .post(&url)
         .body(extras)
         .send()
@@ -287,7 +287,7 @@ pub async fn get_dfs2_metadata(
         format!("{}?with_metadata=1", api_url)
     };
 
-    let res = REQUEST_CLIENT
+    let res = API_CLIENT
         .get(&url_with_metadata)
         .send()
         .await
@@ -335,7 +335,7 @@ pub async fn create_dfs2_session(
         extras,
     };
 
-    let res = REQUEST_CLIENT
+    let res = API_CLIENT
         .post(&api_url)
         .json(&request_body)
         .send()
@@ -368,7 +368,7 @@ pub async fn get_dfs2_batch_chunk_urls(
 ) -> anyhow::Result<Dfs2BatchChunkResponse> {
     let request_body = Dfs2BatchChunkRequest { chunks };
 
-    let res = REQUEST_CLIENT
+    let res = API_CLIENT
         .post(&session_api_url)
         .json(&request_body)
         .send()
@@ -394,7 +394,7 @@ pub async fn end_dfs2_session(
 ) -> anyhow::Result<()> {
     let request_body = Dfs2DeleteRequest { insights };
 
-    let res = REQUEST_CLIENT
+    let res = API_CLIENT
         .delete(&session_api_url)
         .json(&request_body)
         .send()
@@ -479,7 +479,7 @@ pub async fn solve_dfs2_challenge(challenge_type: String, data: String) -> Resul
 }
 
 pub async fn get_http_with_range(url: String, offset: u64, size: u64) -> TAResult<(u16, Vec<u8>)> {
-    let mut res = REQUEST_CLIENT.get(&url);
+    let mut res = API_CLIENT.get(&url);
     if offset != 0 || size != 0 {
         res = res.header("Range", format!("bytes={}-{}", offset, offset + size - 1));
     }
@@ -524,7 +524,7 @@ pub async fn http_get_request(
             .await
             .with_http_context("http_get_request", &url)?
     } else {
-        let mut rb = REQUEST_CLIENT.get(&url);
+        let mut rb = API_CLIENT.get(&url);
         if let Some(timeout) = timeout_ms {
             rb = rb.timeout(Duration::from_millis(timeout));
         }

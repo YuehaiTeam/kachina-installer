@@ -93,9 +93,6 @@ lazy_static::lazy_static! {
 
         builder.build()
     };
-
-    /// Legacy alias - will be removed after migration
-    pub static ref REQUEST_CLIENT: &'static reqwest_middleware::ClientWithMiddleware = &*API_CLIENT;
 }
 
 fn main() {

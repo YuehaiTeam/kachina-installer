@@ -2,14 +2,13 @@ use crate::{
     cli::arg::InstallArgs,
     local::{get_config_from_embedded, get_embedded, mmap},
     pack_format::Embedded,
-    utils::{error::TAResult, uac::check_elevated},
+    utils::uac::check_elevated,
 };
 use anyhow::Context;
-use serde::Serialize;
 use serde_json::Value;
 use std::path::Path;
 
-#[derive(Serialize, Debug, Clone)]
+#[derive(Debug, Clone)]
 pub struct InstallerConfig {
     pub install_path: String,
     pub install_path_exists: bool,
@@ -19,11 +18,10 @@ pub struct InstallerConfig {
     pub embedded_index: Option<Vec<Embedded>>,
     pub embedded_config: Option<Value>,
     pub enbedded_metadata: Option<crate::utils::metadata::RepoMetadata>,
-    pub embedded_image: Option<String>,
+    pub embedded_image: Option<Vec<u8>>,
     pub exe_path: String,
     pub args: crate::cli::arg::InstallArgs,
     pub elevated: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub preset: Option<crate::session::types::SessionInput>,
 }
 
@@ -74,10 +72,7 @@ pub async fn get_config_pre(
                     let image_bin = exe_dir.join(".image.bin");
                     if image_bin.exists() {
                         if let Ok(image_content) = tokio::fs::read(&image_bin).await {
-                            use base64::Engine;
-                            embedded_image = Some(
-                                base64::engine::general_purpose::STANDARD.encode(&image_content),
-                            );
+                            embedded_image = Some(image_content);
                         }
                     }
                 }
@@ -208,10 +203,4 @@ pub async fn resolve_installer_config(
         program_files_exe_path.exists(),
         "DEFAULT",
     ))
-}
-
-pub async fn get_installer_config(args: &InstallArgs, scan_exe: bool) -> TAResult<InstallerConfig> {
-    resolve_installer_config(args.clone(), scan_exe)
-        .await
-        .map_err(crate::utils::error::TACommandError::new)
 }

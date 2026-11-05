@@ -273,7 +273,7 @@ pub async fn get_mirrorc_status(
     let url = status_url(resource_id, current_version, cdk, channel, arch, os);
     // the query carries the CDK: request errors drop the URL before they join
     // an error chain that may be reported
-    let resp = crate::REQUEST_CLIENT
+    let resp = crate::API_CLIENT
         .get(url.as_str())
         .send()
         .await

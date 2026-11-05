@@ -2,7 +2,6 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use base64::Engine;
 use serde_json::Value;
 
 use crate::cli::arg::InstallArgs;
@@ -357,14 +356,11 @@ pub(crate) fn visible_sources(project: &ProjectConfig, _current_uri: &str) -> Ve
     }
 }
 
-fn apply_theme(image_b64: Option<&str>) -> Theme {
-    let Some(b64) = image_b64.filter(|s| !s.is_empty()) else {
-        return Theme::None;
-    };
-    let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(b64) else {
-        return Theme::None;
-    };
-    identify_and_install_theme(&bytes)
+fn apply_theme(image: Option<&[u8]>) -> Theme {
+    match image {
+        Some(bytes) if !bytes.is_empty() => identify_and_install_theme(bytes),
+        _ => Theme::None,
+    }
 }
 
 fn identify_and_install_theme(bytes: &[u8]) -> Theme {

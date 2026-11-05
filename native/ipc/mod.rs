@@ -186,14 +186,13 @@ impl IpcResult {
     }
 }
 
-// `Envelope` 与 `Breadcrumb` 都是 JSON 文本：前者主进程不解析直接转发，后者是
-// `serde_json::Value`，而 postcard 不支持 `deserialize_any`。
+// `Breadcrumb` 是 JSON 文本：面包屑是 `serde_json::Value`，而 postcard 不支持
+// `deserialize_any`。
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub enum PipeMsg {
     Progress(String, Progress),
     Ok(String, IpcResult, network::Stats),
     Err(String, IpcError, network::Stats),
-    Envelope(String),
     Breadcrumb(String),
     Disconnect(String),
     Resolve(download::Resolve),
@@ -397,14 +396,14 @@ mod tests {
     #[tokio::test]
     async fn read_frame_splits_stream_and_reports_eof() {
         let mut stream = encode_frame(&PipeMsg::Disconnect("a".into())).unwrap();
-        stream.extend(encode_frame(&PipeMsg::Envelope("b".into())).unwrap());
+        stream.extend(encode_frame(&PipeMsg::Breadcrumb("b".into())).unwrap());
         let mut reader = &stream[..];
         let first: PipeMsg =
             decode_frame(&read_frame(&mut reader).await.unwrap().unwrap()).unwrap();
         let second: PipeMsg =
             decode_frame(&read_frame(&mut reader).await.unwrap().unwrap()).unwrap();
         assert!(matches!(first, PipeMsg::Disconnect(s) if s == "a"));
-        assert!(matches!(second, PipeMsg::Envelope(s) if s == "b"));
+        assert!(matches!(second, PipeMsg::Breadcrumb(s) if s == "b"));
         assert!(read_frame(&mut reader).await.unwrap().is_none());
 
         let mut truncated = &stream[..6];

@@ -22,7 +22,7 @@ use crate::utils::code::{
 };
 use crate::utils::error::IntoAnyhow;
 use crate::utils::metadata::{FileMeta, RepoMetadata};
-use crate::REQUEST_CLIENT;
+use crate::API_CLIENT;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RemoteKind {
@@ -286,7 +286,7 @@ pub fn needs_js_plugin(source: &str) -> bool {
 }
 
 async fn fetch_hashed_metadata(url: &str) -> anyhow::Result<RepoMetadata> {
-    let res = REQUEST_CLIENT
+    let res = API_CLIENT
         .get(url)
         .send()
         .await

@@ -174,7 +174,7 @@ pub async fn send_ev_insight(url: &str, event: &str, data: Option<Value>) {
             "data": data,
         }
     });
-    if let Err(err) = crate::REQUEST_CLIENT
+    if let Err(err) = crate::API_CLIENT
         .post("https://77.cocogoat.cn/ev")
         .header("content-type", "application/json")
         .json(&body)

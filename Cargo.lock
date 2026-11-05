@@ -1517,7 +1517,6 @@ dependencies = [
  "async-stream",
  "async-trait",
  "async-walkdir",
- "base64",
  "bytes",
  "cc",
  "chksum-md5",

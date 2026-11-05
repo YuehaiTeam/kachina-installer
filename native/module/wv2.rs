@@ -4,7 +4,7 @@ use crate::utils::code::{coded_from_error, Attach, WEBVIEW2_FAILED};
 use crate::utils::i18n;
 use crate::utils::taskdialog::{show_error_coded, ProgressDialog};
 use crate::utils::url::HttpContextExt;
-use crate::REQUEST_CLIENT;
+use crate::API_CLIENT;
 
 fn parent_hwnd(dialog: &ProgressDialog) -> HWND {
     dialog.hwnd().unwrap_or_default()
@@ -52,7 +52,7 @@ pub async fn install_webview2() -> anyhow::Result<()> {
     };
 
     let wv2_url = "https://go.microsoft.com/fwlink/p/?LinkId=2124703";
-    let res = REQUEST_CLIENT
+    let res = API_CLIENT
         .get(wv2_url)
         .send()
         .await

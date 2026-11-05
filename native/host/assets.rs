@@ -20,8 +20,9 @@ pub fn set_theme_css(bytes: Vec<u8>) {
     let _ = THEME_CSS.set(bytes);
 }
 
-/// Default UI is the bundled zstd `index.html`.
-/// Custom packaged HTML later replaces this same entry (`\0IMAGE`).
+/// `/` and `/index.html` serve the bundled zstd `index.html`, or the HTML set by
+/// `set_html_override` when the package's `\0IMAGE` entry is zstd-compressed HTML.
+/// `/theme.webp` and `/theme.css` exist only when `\0IMAGE` holds that kind of theme.
 pub fn lookup(path: &str) -> Option<(&'static [u8], &'static str)> {
     let path = path.trim_start_matches('/');
     if path.is_empty() || path == "index.html" {

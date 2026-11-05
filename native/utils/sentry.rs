@@ -2,7 +2,7 @@
 //!
 //! - 错误事件：`capture_anyhow` 按 anyhow 链拼 exception.values，附面包屑快照与 contexts。
 //! - 面包屑：由 `utils::log::LogSubscriber` 从 tracing 事件调用 [`add_breadcrumb`] 写入环形缓冲。
-//! - 提权进程：面包屑与 envelope 经管道交主进程，主进程不解析。
+//! - 提权进程：面包屑经管道交主进程合并时间线；envelope 在本进程直接 POST。
 //! - 性能：会话级 [`Transaction`] + 一层阶段 span + measurements。
 
 use std::collections::VecDeque;
@@ -47,7 +47,7 @@ lazy_static::lazy_static! {
         user: Mutex::new(Value::Null),
         use_pipe: AtomicBool::new(false),
     };
-    /// 提权进程的出站队列（`PipeMsg::Envelope` / `PipeMsg::Breadcrumb`），
+    /// 提权进程的面包屑出站队列（`PipeMsg::Breadcrumb`），
     /// 由 `uac_ipc_main` 消费后原样写入管道。
     pub static ref PIPE_OUTBOX: PipeOutbox = {
         let (tx, rx) = tokio::sync::mpsc::channel(256);
@@ -72,7 +72,7 @@ fn new_span_id() -> String {
     new_uuid()[..16].to_string()
 }
 
-/// `use_pipe`：提权进程置 true，面包屑与 envelope 经管道交主进程。
+/// `use_pipe`：提权进程置 true，面包屑经管道交主进程。
 pub fn init(use_pipe: bool) {
     STATE.use_pipe.store(use_pipe, Ordering::SeqCst);
 }
@@ -231,11 +231,6 @@ pub(crate) fn rfc3339(secs: u64) -> String {
     format!("{y:04}-{mth:02}-{d:02}T{h:02}:{m:02}:{s:02}Z")
 }
 
-/// 主进程收到提权进程转发的 envelope 原文，不解析直接 POST。
-pub fn forward_raw_envelope(body: String) {
-    dispatch(body, false);
-}
-
 async fn post_envelope(body: String) {
     let res = crate::RAW_CLIENT
         .post(ENVELOPE_URL)
@@ -253,10 +248,8 @@ async fn post_envelope(body: String) {
 }
 
 fn dispatch(body: String, blocking: bool) {
-    // 同步路径（panic hook）不走管道：panic = "abort" 下进程随即终止，
-    // 排队进管道的消息来不及被写循环消费，必须在本进程直发 HTTP。
     if blocking {
-        // 独立线程 + 独立 runtime，避免依赖（可能已损坏的）主 runtime。
+        // panic hook 的同步路径：独立线程 + 独立 runtime，避免依赖（可能已损坏的）主 runtime。
         // The panic hook waits through `flush`, with a bounded timeout.
         INFLIGHT.fetch_add(1, Ordering::SeqCst);
         std::thread::spawn(move || {
@@ -271,10 +264,6 @@ fn dispatch(body: String, blocking: bool) {
             }));
             INFLIGHT.fetch_sub(1, Ordering::SeqCst);
         });
-        return;
-    }
-    if is_pipe_mode() {
-        pipe_send(PipeMsg::Envelope(body), "envelope");
         return;
     }
     INFLIGHT.fetch_add(1, Ordering::SeqCst);
