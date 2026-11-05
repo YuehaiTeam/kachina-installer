@@ -72,6 +72,21 @@ impl NetFailure {
     pub fn too_slow() -> Self {
         Self::new("NET_TOO_SLOW", Class::Slow, Phase::Body)
     }
+
+    /// The body ended before the length the request or the response declares.
+    pub fn short_body() -> Self {
+        Self::new("NET_SHORT_BODY", Class::Other, Phase::Body)
+    }
+
+    /// The body ran past the length the request or the response declares.
+    pub fn long_body() -> Self {
+        Self::new("NET_LONG_BODY", Class::Other, Phase::Body)
+    }
+
+    /// A range response that is not the requested range.
+    pub fn bad_range() -> Self {
+        Self::new("NET_BAD_RANGE", Class::Other, Phase::Send)
+    }
 }
 
 /// Classifies an error known to come off the network, such as a failed read
@@ -425,20 +440,25 @@ mod tests {
         }
     }
 
-    /// Downloads `url` the way an install does; returns the phase that failed,
-    /// the insight tag and the user-facing code.
-    async fn download(url: &str) -> (Phase, String, &'static str) {
-        match crate::fs::create_http_stream(url, 0, 0, None).await {
+    /// Downloads `url` (its first `size` bytes as a range when `size > 0`) the
+    /// way an install does; returns the phase that failed, the insight tag and
+    /// the user-facing code.
+    async fn download_range(url: &str, size: usize) -> (Phase, String, &'static str) {
+        match crate::fs::create_http_stream(url, 0, size, None).await {
             Ok((mut reader, _, insight)) => {
                 let err = reader.read_to_end(&mut Vec::new()).await.unwrap_err();
                 let tag = insight.lock().unwrap().error.clone().unwrap();
-                (Phase::Body, tag, code_of(crate::fs::read_failure(err)))
+                (Phase::Body, tag, code_of(anyhow::Error::new(err)))
             }
             Err(err) => {
                 let tag = err.insight.unwrap().error.unwrap();
                 (Phase::Send, tag, code_of(err.error))
             }
         }
+    }
+
+    async fn download(url: &str) -> (Phase, String, &'static str) {
+        download_range(url, 0).await
     }
 
     #[tokio::test]
@@ -529,6 +549,43 @@ mod tests {
         assert_eq!(
             download(&chunk).await,
             (Phase::Body, "NET_PROTOCOL".into(), DOWNLOAD_FAILED)
+        );
+    }
+
+    /// A range body that HTTP framing lets end early or run on (chunked, or
+    /// ended by closing the connection) still has to be the requested length,
+    /// and a range response has to be the requested range.
+    #[tokio::test]
+    async fn bodies_off_the_declared_length() {
+        let short = serve(
+            b"HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 0-9/100\r\n\
+              Transfer-Encoding: chunked\r\n\r\n3\r\nabc\r\n0\r\n\r\n",
+            false,
+        )
+        .await;
+        let long = serve(
+            b"HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 0-9/100\r\n\
+              Connection: close\r\n\r\n0123456789ab",
+            false,
+        )
+        .await;
+        let other = serve(
+            b"HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 5-14/100\r\n\
+              Content-Length: 10\r\n\r\n0123456789",
+            false,
+        )
+        .await;
+        assert_eq!(
+            download_range(&short, 10).await,
+            (Phase::Body, "NET_SHORT_BODY".into(), DOWNLOAD_FAILED)
+        );
+        assert_eq!(
+            download_range(&long, 10).await,
+            (Phase::Body, "NET_LONG_BODY".into(), DOWNLOAD_FAILED)
+        );
+        assert_eq!(
+            download_range(&other, 10).await,
+            (Phase::Send, "NET_BAD_RANGE".into(), DOWNLOAD_FAILED)
         );
     }
 

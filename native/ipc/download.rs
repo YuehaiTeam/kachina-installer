@@ -246,15 +246,26 @@ impl std::error::Error for SharedError {
         Some(self.0.as_ref().as_ref())
     }
 }
+/// Insight of the request that delivered each part of a sliced read, by part
+/// index; a part read again after a failure keeps the later request's.
+pub(super) type PartInsights = Arc<Mutex<Vec<Option<Arc<Mutex<crate::dfs::InsightItem>>>>>>;
+
+type PartReader = Box<dyn tokio::io::AsyncRead + Unpin + Send>;
+
+/// Opens one part and records its request in `insights`. The stream fails a
+/// body that is not `len` bytes, so a read that ends cleanly has all of them.
 async fn open_part(
     offset: u64,
     len: u64,
-) -> anyhow::Result<Box<dyn tokio::io::AsyncRead + Unpin + Send>> {
+    insights: &PartInsights,
+    index: usize,
+) -> anyhow::Result<PartReader> {
     match crate::fs::create_resolved_stream(usize::try_from(offset)?, usize::try_from(len)?, None)
         .await
     {
         Ok((reader, _, insight)) => {
-            CURRENT.with(|ctx| ctx.insights.lock().unwrap().push(insight));
+            CURRENT.with(|ctx| ctx.insights.lock().unwrap().push(insight.clone()));
+            insights.lock().unwrap()[index] = Some(insight);
             Ok(reader)
         }
         Err(err) => {
@@ -277,7 +288,12 @@ fn local_error(error: std::io::Error) -> anyhow::Error {
     anyhow::Error::new(error).attach(code)
 }
 
-async fn prefetch(offset: u64, len: u64, space: OwnedSemaphorePermit) -> anyhow::Result<PartFile> {
+async fn prefetch(
+    (offset, len): (u64, u64),
+    space: OwnedSemaphorePermit,
+    insights: PartInsights,
+    index: usize,
+) -> anyhow::Result<PartFile> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let dir = CURRENT.with(|c| c.session.dl_dir.clone());
     let part = PartFile {
@@ -290,7 +306,7 @@ async fn prefetch(offset: u64, len: u64, space: OwnedSemaphorePermit) -> anyhow:
         let mut file = tokio::fs::File::create(part.file.path())
             .await
             .map_err(local_error)?;
-        let input = open_part(offset, len).await;
+        let input = open_part(offset, len, &insights, index).await;
         let mut reader = match input {
             Ok(reader) => reader,
             Err(err) if attempt == 0 && !CURRENT.with(|c| c.stop.is_cancelled()) => {
@@ -299,23 +315,12 @@ async fn prefetch(offset: u64, len: u64, space: OwnedSemaphorePermit) -> anyhow:
             }
             Err(err) => return Err(err),
         };
-        let mut received = 0;
         let mut buffer = vec![0; 64 * 1024];
         let outcome = loop {
             match reader.read(&mut buffer).await {
-                Ok(0) => {
-                    break if received == len {
-                        Ok(())
-                    } else {
-                        Err(anyhow::anyhow!("incomplete range body"))
-                    }
-                }
-                Ok(n) => {
-                    received += n as u64;
-                    anyhow::ensure!(received <= len, "range body exceeds declared length");
-                    file.write_all(&buffer[..n]).await.map_err(local_error)?;
-                }
-                Err(err) => break Err(err.into()),
+                Ok(0) => break Ok(()),
+                Ok(n) => file.write_all(&buffer[..n]).await.map_err(local_error)?,
+                Err(err) => break Err(anyhow::Error::from(err)),
             }
         };
         drop(file);
@@ -330,9 +335,12 @@ async fn prefetch(offset: u64, len: u64, space: OwnedSemaphorePermit) -> anyhow:
     unreachable!()
 }
 
-pub fn sliced(parts: Vec<(u64, u64)>) -> Box<dyn tokio::io::AsyncRead + Unpin + Send> {
+pub fn sliced(parts: Vec<(u64, u64)>) -> (PartReader, PartInsights) {
     let (tx, rx) = mpsc::channel::<std::io::Result<bytes::Bytes>>(2);
+    let insights: PartInsights = Arc::new(Mutex::new(vec![None; parts.len()]));
+    let recorded = insights.clone();
     let worker = spawn(async move {
+        let insights = recorded;
         use tokio::io::AsyncReadExt;
         let ctx = CURRENT.with(Clone::clone);
         // 未开始和正在重试的切片也属于网络等待，磁盘回读不计入网络活动。
@@ -348,22 +356,23 @@ pub fn sliced(parts: Vec<(u64, u64)>) -> Box<dyn tokio::io::AsyncRead + Unpin + 
                 let part = match pending.remove(&index) { Some(task) => Some(task.await??), None => None };
                 let network_pending = queued[index].take();
                 let mut retried = false;
-                let mut reader: Box<dyn tokio::io::AsyncRead + Unpin + Send> = if let Some(part) = &part {
+                let mut reader: PartReader = if let Some(part) = &part {
                     Box::new(tokio::fs::File::open(part.file.path()).await?)
                 } else {
-                    match open_part(offset, len).await {
+                    match open_part(offset, len, &insights, index).await {
                         Ok(reader) => reader,
-                        Err(_) if !ctx.stop.is_cancelled() => { retried = true; open_part(offset, len).await? },
+                        Err(_) if !ctx.stop.is_cancelled() => { retried = true; open_part(offset, len, &insights, index).await? },
                         Err(err) => return Err(err),
                     }
                 };
                 for ahead in index + 1..parts.len().min(index + 3) {
                     if pending.contains_key(&ahead) { continue; }
-                    let (offset, len) = parts[ahead];
+                    let (_, len) = parts[ahead];
                     if let Ok(space) = ctx.session.disk.clone().try_acquire_many_owned(len.try_into()?) {
                         let waiting = queued[ahead].take();
+                        let (part, insights) = (parts[ahead], insights.clone());
                         pending.insert(ahead, spawn(async move {
-                            let result = prefetch(offset, len, space).await;
+                            let result = prefetch(part, space, insights, ahead).await;
                             drop(waiting);
                             result
                         }));
@@ -376,23 +385,21 @@ pub fn sliced(parts: Vec<(u64, u64)>) -> Box<dyn tokio::io::AsyncRead + Unpin + 
                 loop {
                     buffer.reserve(64 * 1024);
                     let read = reader.read_buf(&mut buffer).await;
-                    if (read.is_err() || matches!(read, Ok(0))) && received == 0 && part.is_none() && !retried && !ctx.stop.is_cancelled() {
+                    if read.is_err() && received == 0 && part.is_none() && !retried && !ctx.stop.is_cancelled() {
                         drop(reader);
                         retried = true;
-                        reader = open_part(offset, len).await?;
+                        reader = open_part(offset, len, &insights, index).await?;
                         continue;
                     }
                     let n = read?;
                     if n == 0 { break; }
                     received += n as u64;
-                    anyhow::ensure!(received <= len, "range body exceeds declared length");
                     let chunk = buffer.split().freeze();
                     tokio::select! {
                         _ = ctx.stop.cancelled() => return Err(crate::utils::code::Cancelled.into()),
                         sent = tx.send(Ok(chunk)) => { sent?; }
                     }
                 }
-                anyhow::ensure!(received == len, "incomplete range body");
                 drop(reader);
                 drop(network_pending);
                 drop(part);
@@ -418,44 +425,38 @@ pub fn sliced(parts: Vec<(u64, u64)>) -> Box<dyn tokio::io::AsyncRead + Unpin + 
     let stream = futures::stream::unfold(rx, |mut rx| async {
         rx.recv().await.map(|item| (item, rx))
     });
-    Box::new(tokio_util::io::StreamReader::new(Box::pin(stream)))
+    (
+        Box::new(tokio_util::io::StreamReader::new(Box::pin(stream))),
+        insights,
+    )
 }
 
 #[cfg(test)]
 mod tests {
+    use super::super::install_file::{
+        ipc_install_file, InstallFileArgs, InstallFileMode, InstallFileSource, InstallResult,
+    };
     use super::*;
+    use crate::utils::error::TAResult;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    // 合成不可压缩数据使分片跨越 Zstd 帧内部；中间片断流一次，覆盖落盘重试。
-    #[tokio::test]
-    async fn sliced_zstd_retries_range_and_cleans_prefetch() {
-        let mut seed = 13u64;
-        let data: Vec<u8> = (0..300_000)
-            .map(|_| {
-                seed ^= seed << 13;
-                seed ^= seed >> 7;
-                seed ^= seed << 17;
-                seed as u8
-            })
-            .collect();
-        let packed = Arc::new(zstd::encode_all(data.as_slice(), 1).unwrap());
-        let len = packed.len() as u64;
-        let parts = crate::session::download_plan::Policy {
-            upper: len / 4,
-            maximum: len / 3,
-            ..Default::default()
-        }
-        .split(crate::session::download_plan::Range { start: 0, len });
-        let retry_offset = parts[1].start;
-        let calls = Arc::new(Mutex::new(HashMap::<u64, usize>::new()));
+    type Requests = Arc<Mutex<HashMap<u64, usize>>>;
+
+    /// Serves `data` by range on 127.0.0.1 and counts the requests per range
+    /// start. `last(start, end, nth)` is the last byte sent for the `nth`
+    /// request (from 1) of a range; the headers always announce the whole range.
+    async fn range_server(
+        data: Arc<Vec<u8>>,
+        last: impl Fn(usize, usize, usize) -> usize + Send + Sync + 'static,
+    ) -> (String, Requests, tokio::task::JoinHandle<()>) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}/package", listener.local_addr().unwrap());
-        let server_calls = calls.clone();
+        let requests = Requests::default();
+        let (counts, last) = (requests.clone(), Arc::new(last));
         let server = tokio::spawn(async move {
             loop {
                 let (mut socket, _) = listener.accept().await.unwrap();
-                let data = packed.clone();
-                let calls = server_calls.clone();
+                let (data, counts, last) = (data.clone(), counts.clone(), last.clone());
                 tokio::spawn(async move {
                     let mut header = Vec::new();
                     while !header.ends_with(b"\r\n\r\n") {
@@ -469,22 +470,49 @@ mod tests {
                     let (start, end) = range.split_once('-').unwrap();
                     let start: usize = start.parse().unwrap();
                     let end: usize = end.parse().unwrap();
-                    let fail = {
-                        let mut counts = calls.lock().unwrap();
+                    let nth = {
+                        let mut counts = counts.lock().unwrap();
                         let count = counts.entry(start as u64).or_default();
                         *count += 1;
-                        start as u64 == retry_offset && *count == 1
+                        *count
                     };
                     let header = format!("HTTP/1.1 206 Partial Content\r\nContent-Range: bytes {start}-{end}/{}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", data.len(), end - start + 1);
-                    socket.write_all(header.as_bytes()).await.unwrap();
-                    let end_sent = if fail { start + 31 } else { end };
-                    socket.write_all(&data[start..=end_sent]).await.unwrap();
+                    // the client hangs up early once a download failed
+                    let _ = socket.write_all(header.as_bytes()).await;
+                    let _ = socket.write_all(&data[start..=last(start, end, nth)]).await;
                 });
             }
         });
+        (url, requests, server)
+    }
+
+    fn sliced_args(parts: &[(u64, u64)], target: &std::path::Path, size: usize) -> InstallFileArgs {
+        InstallFileArgs {
+            mode: InstallFileMode::Direct(InstallFileSource::Sliced {
+                parts: parts.to_vec(),
+                skip_decompress: false,
+            }),
+            target: target.to_string_lossy().into_owned(),
+            output_size: size as u64,
+            old: None,
+            md5: None,
+            xxh: None,
+            clear_installer_index_mark: None,
+        }
+    }
+
+    struct JobRun {
+        result: TAResult<InstallResult>,
+        stats: super::super::network::Stats,
+        finished: anyhow::Result<()>,
+        /// Every request the job made.
+        insights: Vec<crate::dfs::InsightItem>,
+    }
+
+    /// Runs `args` as the only job of a fresh download session whose URLs all
+    /// resolve to `url`.
+    async fn in_job(url: String, dir: &std::path::Path, args: InstallFileArgs) -> JobRun {
         let id = uuid::Uuid::new_v4().to_string();
-        let dir = std::env::temp_dir().join(format!("kachina-slices-{id}"));
-        tokio::fs::create_dir_all(&dir).await.unwrap();
         begin(Config {
             id: id.clone(),
             concurrency: 16,
@@ -508,49 +536,178 @@ mod tests {
                 });
             }
         });
-        let target = dir.join("output");
-        let args = super::super::install_file::InstallFileArgs {
-            mode: super::super::install_file::InstallFileMode::Direct(
-                super::super::install_file::InstallFileSource::Sliced {
-                    parts: parts.iter().map(|p| (p.start, p.len)).collect(),
-                    skip_decompress: false,
-                },
-            ),
-            target: target.to_string_lossy().into_owned(),
-            output_size: data.len() as u64,
-            old: None,
-            md5: None,
-            xxh: None,
-            clear_installer_index_mark: None,
-        };
-        let result = tokio::time::timeout(
-            std::time::Duration::from_secs(10),
+        let run = tokio::time::timeout(
+            std::time::Duration::from_secs(20),
             RESOLVER.scope(
                 tx,
                 CURRENT.scope(
                     ctx.clone(),
                     super::super::network::measure(super::super::progress_noop(), |notify| {
-                        super::super::install_file::ipc_install_file(args, notify)
+                        ipc_install_file(args, notify)
                     }),
                 ),
             ),
         )
         .await;
-        finish(&ctx, result.as_ref().is_ok_and(|r| r.0.is_ok()))
-            .await
-            .unwrap();
+        let finished = finish(&ctx, run.as_ref().is_ok_and(|r| r.0.is_ok())).await;
         end(&id);
-        server.abort();
         resolver.abort();
-        let (result, stats) = result.unwrap();
-        result.unwrap();
+        let (result, stats) = run.expect("job timed out");
+        let insights = ctx
+            .insights
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|i| i.lock().unwrap().clone())
+            .collect();
+        JobRun {
+            result,
+            stats,
+            finished,
+            insights,
+        }
+    }
+
+    // 合成不可压缩数据使分片跨越 Zstd 帧内部；中间片断流一次，覆盖落盘重试。
+    #[tokio::test]
+    async fn sliced_zstd_retries_range_and_cleans_prefetch() {
+        let mut seed = 13u64;
+        let data: Vec<u8> = (0..300_000)
+            .map(|_| {
+                seed ^= seed << 13;
+                seed ^= seed >> 7;
+                seed ^= seed << 17;
+                seed as u8
+            })
+            .collect();
+        let packed = Arc::new(zstd::encode_all(data.as_slice(), 1).unwrap());
+        let len = packed.len() as u64;
+        let parts = crate::session::download_plan::Policy {
+            upper: len / 4,
+            maximum: len / 3,
+            ..Default::default()
+        }
+        .split(crate::session::download_plan::Range { start: 0, len });
+        let retry_offset = parts[1].start as usize;
+        let parts: Vec<_> = parts.iter().map(|p| (p.start, p.len)).collect();
+        let (url, requests, server) = range_server(packed, move |start, end, nth| {
+            if start == retry_offset && nth == 1 {
+                start + 31
+            } else {
+                end
+            }
+        })
+        .await;
+        let dir = std::env::temp_dir().join(format!("kachina-slices-{}", uuid::Uuid::new_v4()));
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let target = dir.join("output");
+        let run = in_job(url, &dir, sliced_args(&parts, &target, data.len())).await;
+        server.abort();
+        run.finished.unwrap();
+        run.result.unwrap();
         assert_eq!(tokio::fs::read(&target).await.unwrap(), data);
-        assert_eq!(calls.lock().unwrap().get(&retry_offset), Some(&2));
-        assert_eq!(stats.network.bytes, len + 32);
-        assert_eq!(stats.network.active, 0);
+        assert_eq!(
+            requests.lock().unwrap().get(&(retry_offset as u64)),
+            Some(&2)
+        );
+        assert_eq!(run.stats.network.bytes, len + 32);
+        assert_eq!(run.stats.network.active, 0);
         assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
         tokio::fs::remove_file(target).await.unwrap();
         tokio::fs::remove_dir(dir).await.unwrap();
+    }
+
+    /// Offsets of the block headers in a zstd frame without a dictionary.
+    fn block_headers(frame: &[u8]) -> Vec<usize> {
+        let descriptor = frame[4];
+        let single_segment = descriptor & 0x20 != 0;
+        let content_size = match descriptor >> 6 {
+            0 => usize::from(single_segment),
+            1 => 2,
+            2 => 4,
+            _ => 8,
+        };
+        let mut at = 5 + usize::from(!single_segment) + content_size;
+        let mut headers = Vec::new();
+        loop {
+            let header = u32::from_le_bytes([frame[at], frame[at + 1], frame[at + 2], 0]);
+            headers.push(at);
+            let rle = (header >> 1) & 3 == 1;
+            at += 3 + if rle { 1 } else { (header >> 3) as usize };
+            if header & 1 == 1 {
+                return headers;
+            }
+        }
+    }
+
+    /// Data the decoder rejects is recorded on the part that delivered it; a
+    /// hash that does not match, on every part.
+    #[tokio::test]
+    async fn bad_sliced_data_is_recorded_on_the_part_that_sent_it() {
+        use crate::utils::code::{extract, Extracted, HASH_MISMATCH};
+        let mut seed = 29u64;
+        let data: Vec<u8> = (0..6 << 20)
+            .map(|_| {
+                seed ^= seed << 13;
+                seed ^= seed >> 7;
+                seed ^= seed << 17;
+                (seed & 15) as u8
+            })
+            .collect();
+        let packed = zstd::encode_all(data.as_slice(), 1).unwrap();
+        let len = packed.len() as u64;
+        let third = len / 3;
+        let parts = [(0, third), (third, third), (2 * third, len - third * 2)];
+        let reach = super::super::install_file::UNDECODABLE_REACH;
+        // a block header in the middle part, far enough from both of its ends
+        let header = block_headers(&packed)
+            .into_iter()
+            .find(|&at| at as u64 > third + reach && (at as u64) < 2 * third - reach)
+            .unwrap();
+        let mut broken = packed.clone();
+        broken[header] |= 0b110; // reserved block type
+        let dir = std::env::temp_dir().join(format!("kachina-blame-{}", uuid::Uuid::new_v4()));
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let target = dir.join("output");
+        let errors = |run: &JobRun| -> Vec<Option<String>> {
+            parts
+                .iter()
+                .map(|&(start, _)| {
+                    run.insights
+                        .iter()
+                        .find(|i| i.range.first().is_some_and(|r| u64::from(r.0) == start))
+                        .and_then(|i| i.error.clone())
+                })
+                .collect()
+        };
+        let hash_mismatch = |run: &JobRun| {
+            matches!(
+                extract(&run.result.as_ref().unwrap_err().error),
+                Extracted::Coded(c) if c.code == HASH_MISMATCH
+            )
+        };
+
+        let (url, _, server) = range_server(Arc::new(broken), |_, end, _| end).await;
+        let run = in_job(url, &dir, sliced_args(&parts, &target, data.len())).await;
+        server.abort();
+        assert!(hash_mismatch(&run));
+        let blamed = errors(&run);
+        assert_eq!(blamed[0], None);
+        assert_eq!(blamed[1].as_deref(), Some(HASH_MISMATCH));
+        assert_ne!(blamed[2].as_deref(), Some(HASH_MISMATCH));
+
+        let (url, _, server) = range_server(Arc::new(packed), |_, end, _| end).await;
+        let args = InstallFileArgs {
+            xxh: Some("0".into()),
+            ..sliced_args(&parts, &target, data.len())
+        };
+        let run = in_job(url, &dir, args).await;
+        server.abort();
+        assert!(hash_mismatch(&run));
+        assert!(errors(&run)
+            .iter()
+            .all(|e| e.as_deref() == Some(HASH_MISMATCH)));
+        let _ = tokio::fs::remove_dir_all(dir).await;
     }
 
     #[tokio::test]

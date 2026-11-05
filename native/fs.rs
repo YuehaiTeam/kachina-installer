@@ -64,9 +64,14 @@ pub struct NetworkInsightStream<S> {
     response_received_time: Instant,
     /// Sanitized, for [`ClassifiedNetworkError`].
     url: String,
+    /// Body length the request (a range) or the response (`Content-Length`)
+    /// declares. A body that ends before it or runs past it fails here: HTTP
+    /// framing does not catch a chunked or close-delimited body that ends
+    /// early, and the H3 middleware's body ends at the stream's FIN without
+    /// checking any length.
+    expected: Option<u64>,
 
     // Download stall detection fields
-    content_length: Option<u64>,           // Total file size
     last_stall_check: Instant,             // Last 5-second stall check time
     last_stall_check_bytes: u64,           // Bytes at last 5-second check
     slow_detection_start: Option<Instant>, // Start time for 30-second slow detection
@@ -81,6 +86,7 @@ impl<S: AsyncRead + Unpin> AsyncRead for NetworkInsightStream<S> {
         buf: &mut ReadBuf<'_>,
     ) -> Poll<std::io::Result<()>> {
         let before_len = buf.filled().len();
+        let capacity = buf.remaining();
         let result = Pin::new(&mut self.inner).poll_read(cx, buf);
 
         match result {
@@ -99,8 +105,23 @@ impl<S: AsyncRead + Unpin> AsyncRead for NetworkInsightStream<S> {
                         insight.time = self.response_received_time.elapsed().as_millis() as u32;
                     }
 
-                    if let Some((failure, cause)) = self.check_download_health() {
-                        return Poll::Ready(Err(self.fail(failure, cause.into())));
+                    let failure = if let Some(n) = self.expected.filter(|&n| total_bytes > n) {
+                        let cause = format!("body runs past {n} bytes");
+                        Some((NetFailure::long_body(), cause.into()))
+                    } else {
+                        self.check_download_health()
+                            .map(|(failure, cause)| (failure, cause.into()))
+                    };
+                    if let Some((failure, cause)) = failure {
+                        // a read that fails hands out no bytes
+                        buf.set_filled(before_len);
+                        return Poll::Ready(Err(self.fail(failure, cause)));
+                    }
+                } else if capacity > 0 {
+                    let received = self.network_bytes.load(Ordering::Relaxed);
+                    if let Some(expected) = self.expected.filter(|&n| received < n) {
+                        let cause = format!("body ended at {received} of {expected} bytes");
+                        return Poll::Ready(Err(self.fail(NetFailure::short_body(), cause.into())));
                     }
                 }
                 Poll::Ready(Ok(()))
@@ -122,7 +143,7 @@ impl<S> NetworkInsightStream<S> {
         range: Vec<(u32, u32)>,
         request_start_time: Instant,
         response_received_time: Instant,
-        content_length: Option<u64>,
+        expected: Option<u64>,
     ) -> Self {
         let ttfb = request_start_time.elapsed().as_millis() as u32;
         let now = Instant::now();
@@ -144,7 +165,7 @@ impl<S> NetworkInsightStream<S> {
             network_bytes: Arc::new(AtomicU64::new(0)),
             response_received_time,
             url,
-            content_length,
+            expected,
             last_stall_check: now,
             last_stall_check_bytes: 0,
             slow_detection_start: None,
@@ -186,7 +207,7 @@ impl<S> NetworkInsightStream<S> {
         }
 
         // 2. DOWNLOAD_TOO_SLOW detection (large file slow download)
-        if let Some(total_size) = self.content_length {
+        if let Some(total_size) = self.expected {
             if total_size > 10 * 1024 * 1024 {
                 // >10MB
                 let progress_ratio = current_bytes as f64 / total_size as f64;
@@ -672,29 +693,8 @@ async fn open_http_stream(
         .with_http_context("create_http_stream", url);
     let response_received_time = Instant::now();
 
-    let res = match res {
-        Ok(r) => r,
-        Err(e) => {
-            // 创建错误insight并立即返回
-            let insight = Arc::new(Mutex::new(InsightItem {
-                url: crate::utils::url::sanitize_url_for_logging(url),
-                ttfb: request_start_time.elapsed().as_millis() as u32,
-                time: 0,
-                size: 0,
-                error: Some(crate::utils::code::insight_code(&e)),
-                range: insight_range.clone(),
-                mode: None,
-            }));
-            return Err(TACommandError::with_insight_handle(e, insight));
-        }
-    };
-
-    // HTTP状态码检查
-    let code = res.status();
-    if (!has_range && code != 200) || (has_range && code != 206) {
-        let error = anyhow::Error::new(crate::dfs::HttpStatus::new(code.as_u16(), "")).context(
-            crate::utils::url::create_reqwest_context("create_http_stream", url, "HTTP_STATUS_ERR"),
-        );
+    // A request that fails before the body records its insight here.
+    let failed = |error: anyhow::Error| {
         let insight = Arc::new(Mutex::new(InsightItem {
             url: crate::utils::url::sanitize_url_for_logging(url),
             ttfb: request_start_time.elapsed().as_millis() as u32,
@@ -704,14 +704,41 @@ async fn open_http_stream(
             range: insight_range.clone(),
             mode: None,
         }));
-        return Err(TACommandError::with_insight_handle(error, insight));
+        TACommandError::with_insight_handle(error, insight)
+    };
+
+    let res = res.map_err(&failed)?;
+
+    // HTTP状态码检查
+    let code = res.status();
+    if (!has_range && code != 200) || (has_range && code != 206) {
+        let error = anyhow::Error::new(crate::dfs::HttpStatus::new(code.as_u16(), "")).context(
+            crate::utils::url::create_reqwest_context("create_http_stream", url, "HTTP_STATUS_ERR"),
+        );
+        return Err(failed(error));
     }
 
-    let content_length = res.content_length().unwrap_or(0);
+    // The header, not `content_length()`: that is the body's size hint, unknown
+    // for a middleware's wrapped stream even when the header is there.
+    let declared = res
+        .headers()
+        .get(reqwest::header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok()?.parse::<u64>().ok());
     if has_range {
-        validate_range_response(&res, offset as u64, size as u64)?;
+        if let Err(cause) = validate_range_response(&res, offset as u64, size as u64, declared) {
+            let error = anyhow::Error::new(ClassifiedNetworkError {
+                failure: NetFailure::bad_range(),
+                original_error: cause.into(),
+                url: crate::utils::url::sanitize_url_for_logging(url),
+            });
+            return Err(failed(error));
+        }
     }
-    let exact_length = res.content_length();
+    let expected = if has_range {
+        Some(size as u64)
+    } else {
+        declared
+    };
     let stream = res.bytes_stream();
     let reader = tokio_util::io::StreamReader::new(stream.map_err(std::io::Error::other));
 
@@ -722,13 +749,17 @@ async fn open_http_stream(
         insight_range,
         request_start_time,
         response_received_time,
-        Some(content_length),
+        expected,
     );
 
     let insight_handle = insight_stream.get_insight_handle();
     let insight_stream =
-        crate::ipc::network::Reader::new(insight_stream, reading, permit, exact_length);
-    Ok((Box::new(insight_stream), content_length, insight_handle))
+        crate::ipc::network::Reader::new(insight_stream, reading, permit, expected);
+    Ok((
+        Box::new(insight_stream),
+        expected.unwrap_or(0),
+        insight_handle,
+    ))
 }
 
 /// 包内范围必须保持原始字节位置；拒绝服务器返回其他范围或额外内容编码。
@@ -736,6 +767,7 @@ fn validate_range_response(
     response: &reqwest::Response,
     start: u64,
     len: u64,
+    declared: Option<u64>,
 ) -> anyhow::Result<()> {
     let range = response
         .headers()
@@ -746,10 +778,9 @@ fn validate_range_response(
         range.is_some_and(|v| v.starts_with(&expected)),
         "unexpected Content-Range: {range:?}"
     );
-    anyhow::ensure!(
-        response.content_length().is_none_or(|n| n == len),
-        "unexpected range length"
-    );
+    if let Some(n) = declared {
+        anyhow::ensure!(n == len, "range of {n} bytes, requested {len}");
+    }
     anyhow::ensure!(
         response
             .headers()
@@ -838,17 +869,6 @@ pub async fn sync_staged_file(path: &Path) -> Result<(), anyhow::Error> {
     Ok(())
 }
 
-/// 读源数据时的错误：网络失败原样传播，其余视为解压失败。
-pub fn read_failure(e: std::io::Error) -> anyhow::Error {
-    let network = net_failure::find(&e).is_some();
-    let err = anyhow::Error::new(e);
-    if network {
-        err
-    } else {
-        err.context("DECOMPRESS_ERR")
-    }
-}
-
 pub async fn progressed_copy(
     source: &mut (dyn AsyncRead + Unpin + Send),
     target: &mut (dyn AsyncWrite + Unpin + Send),
@@ -860,7 +880,7 @@ pub async fn progressed_copy(
     let mut now = std::time::Instant::now();
 
     loop {
-        let read = source.read(buffer).await.map_err(read_failure)?;
+        let read = source.read(buffer).await?;
         if read == 0 {
             break;
         }

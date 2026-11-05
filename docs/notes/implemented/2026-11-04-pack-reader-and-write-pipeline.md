@@ -48,7 +48,7 @@ hpatch 的集成层三路缓冲各 4 KiB；输出流容量写死为 1 GiB，产�
 - HybridPatch：`.hybrid-base` 以读写方式打开一次，解压写入后 `rewind`，作为补丁的旧文件；diff 请求在 base 写完之后才发起，不占着请求名额等 base 解压。
 - 取消：下载任务的取消令牌是 task-local，不跨 `spawn_blocking` 与 `tokio::spawn`，由 `spawn_job` 在异步侧取出后交给阻塞任务；写入端每次 `write` 检查，网络读端沿用 `network::Reader` 的取消。
 - 合并请求：每个成员从共享响应里切出 `Vec<u8>` 交给阻塞任务，至多 4 个同时在写，网络侧继续读下一个成员；按成员顺序等待最早的任务，结果保持成员顺序。会话侧（[session/run.rs](../../../native/session/run.rs) 的 `failed_chunks`）遇到因取消失败的成员时整体按取消返回，不重试合并请求，也不退回逐文件请求。
-- 错误码：读错带网络标记的原样传播，否则为 `DECOMPRESS_ERR`；写错为 `WRITE_TARGET_ERR`；大小或 hash 不符挂 `HASH_MISMATCH`；`sync_all` 失败挂 `FILE_IO_FAILED`；补丁失败为 `PATCH_FAILED_ERR`，由取消引起的按取消处理。
+- 错误码：读源的错误原样传播，由调用方按类型推断码；zstd 解不开的数据为 `DECOMPRESS_ERR` 并挂 `HASH_MISMATCH`（解码器包着源，源自己的读错不算解不开）；写错为 `WRITE_TARGET_ERR`；大小或 hash 不符挂 `HASH_MISMATCH`；`sync_all` 失败挂 `FILE_IO_FAILED`；补丁失败为 `PATCH_FAILED_ERR`，diff 解不开时同样挂 `HASH_MISMATCH`，由取消引起的按取消处理。
 
 [native/fs.rs](../../../native/fs.rs) 的 HTTP、已解析来源与本地流辅助函数只返回原始字节。运行库安装器与 Mirror酱 归档的下载走异步写出（`create_staged_file` 与 `progressed_copy`）。卸载器、更新器镜像抹布局头用 `clear_layout`：读文件开头 512 字节，找到完整布局头才写回。
 

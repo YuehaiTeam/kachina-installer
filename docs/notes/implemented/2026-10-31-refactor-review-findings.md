@@ -134,7 +134,9 @@ B1～B13 与 B15～B22 在修复前逐条对照代码核对，均属实（B20 �
 
 ### 网络失败分类
 
-下载失败从错误链上的类型分类，同时给出用户码与 DFS insight 的网络失败标签，规则与标签形式见 [UI 契约](./2026-09-02-ui-contract.md)的错误码一节。为此 H3、SSH、SFTP 中间件把原错误作为原因保留，自己的说明作为 context：h3、msquic、russh、hyper 错误保持类型；自建超时为 io `TimedOut`，畸形或截断的 SFTP 报文为 io `InvalidData`；SSH 认证被拒为 `SshAuthRejected`，SFTP 的非 OK STATUS 为 `SftpStatus`。native-tls 为直接依赖，以便按类型识别 TLS 错误。`fs.rs::read_failure` 以同一套类型判断决定是否加 `DECOMPRESS_ERR` context。
+下载失败从错误链上的类型分类，同时给出用户码与 DFS insight 的网络失败标签，规则与标签形式见 [UI 契约](./2026-09-02-ui-contract.md)的错误码一节。为此 H3、SSH、SFTP 中间件把原错误作为原因保留，自己的说明作为 context：h3、msquic、russh、hyper 错误保持类型；自建超时为 io `TimedOut`，畸形或截断的 SFTP 报文为 io `InvalidData`；SSH 认证被拒为 `SshAuthRejected`，SFTP 的非 OK STATUS 为 `SftpStatus`。native-tls 为直接依赖，以便按类型识别 TLS 错误。
+
+网络层没有报错、交付的字节却少了或不对时也按类型给码，不落到解压失败或本地文件错误：响应体长度与请求或响应声明的长度不符、范围响应不是所请求的范围，在网络流里就成为带标签的网络失败；zstd 解不开的数据挂 `HASH_MISMATCH`；切片下载时码记在送来坏数据的那一片的 insight 上。规则见 UI 契约同一节，切片的记法见[下载规划器](./2026-09-21-download-planner.md)的切片读取一节。网络失败照常经 DFS insight 交给下载调度器，N 类的码不进错误上报后端。
 
 下载码的 detail 带网络失败标签，对话框正文里能看到它与系统错误文本。提权子进程的未挂码错误经 `IpcError` 带上分类结果（网络失败，或本地 io 错误的码）过管道，主进程挂码时得到与未提权路径相同的码与 detail，两种路径的主文案查同一条文案。detail 去掉任何 `scheme://` 地址。
 
@@ -164,6 +166,9 @@ B1～B13 与 B15～B22 在修复前逐条对照代码核对，均属实（B20 �
 - 在现有文本匹配上补模式：响应体错误的 Display 恒为同一句，原因只能从类型取得。
 - 在错误对话框脚注另起一行显示网络失败标签：正文的 detail 已经显示整条错误链文本，让 detail 带上标签即可；另设字段要同时改 `Coded`、`IpcError`、bridge 错误载荷与前端类型。
 - 删除 e2e 的暂存残留断言而不是改读日志：断言是发现暂存目录泄漏的唯一检查，日志行让它跟随 Rust 侧的路径推导。
+- zstd 解不开的数据挂 `FILE_IO_FAILED`：用户会以为是本机磁盘读写出错。
+- 内嵌数据解不开或 hash 不符时挂 `PKG_BROKEN`（"安装包损坏，请重新下载"）：它属打包方配置一类、会上报，而安装包在用户处损坏不是打包方的错。
+- 切片下载的数据错误在每一片上都记，或一片都不记：前者把没出错的节点也记上一次，后者让下载调度器永远看不到切片下载的数据错误。
 
 ## Verification
 
@@ -199,8 +204,10 @@ B1～B13 与 B15～B22 在修复前逐条对照代码核对，均属实（B20 �
 | 网络失败按类型分类 | PASS：`utils::net_failure::tests` 经 `create_http_stream` 对本机 TCP 服务器：拒绝端口 → 发送阶段 `NET_CONNECT_REFUSED` / `DOWNLOAD_REFUSED`；503 → `NET_HTTP_503` / `SERVER_HTTP_ERROR`；声明 100 字节只发 3 字节后关闭 → 响应体阶段 `NET_EOF` / `DOWNLOAD_FAILED`；同样后 RST → `NET_RESET`；非法 chunk → `NET_PROTOCOL`；reqwest 包装的响应体中的 `SftpStatus` → `SFTP_STATUS:4`；中间件错误无 context 时的 `SshAuthRejected` → `SSH_AUTH` / `DOWNLOAD_REFUSED`；本地 `StorageFull` 不算网络失败、得 `DISK_FULL`。对 `tests/sshd` 服务端：错误指纹 → `SSH_HOST_KEY`，错误密码 → `SSH_AUTH`，SFTP 文件不存在 → `SFTP_STATUS:2`，SSH 端口拒绝 → `NET_CONNECT_REFUSED`，ssh+http 404 → `NET_HTTP_404`。DNS、证书与 H3 / QUIC 的真实失败未测：本机没有对应服务端 |
 | 提权路径与未提权路径的码、detail 一致 | PASS：`code_and_detail_survive_the_elevation_pipe`：未挂码错误经 `IpcError` 编码成真实管道帧、解码后在主进程挂码。拒绝端口得到 `DOWNLOAD_REFUSED`，写暂存文件时的 `ERROR_DISK_FULL` 得到 `DISK_FULL`，两者 detail 都与未提权路径逐字相同，前者以 `NET_CONNECT_REFUSED: ` 开头。分别去掉网络失败与本地 io 码的还原时该测试失败，都得到 `DOWNLOAD_FAILED`。真实提权安装未跑：本机会话未提权 |
 | detail 中去掉 URL 后不留空括号 | PASS：`detail_strips_urls`（`for url (…): x` → `for url: x`，`TAG […]: x` → `TAG: x`，去掉 URL 后不留双空格；`ssh+http://`、`sftp://`（含 fragment）同样去掉，前面紧接中文时不越过字符边界）。只认 http 前缀时该测试失败 |
+| 交付的字节少了或不对时，码与 insight 不是解压失败或本地错误 | PASS：`bodies_off_the_declared_length`、`decoder_tells_source_failures_from_bad_data`（解码器下的网络失败保持原标签、不挂码；解不开的数据 `HASH_MISMATCH`）、`whole_file_cut_off_without_a_length_is_a_short_body`（本机服务器以 chunked 发半个帧后正常结束，`ipc_install_file` 的码与 insight 都是 `NET_SHORT_BODY`）、`local_io_code_looks_through_carrying_io_errors`（`io::Error::other` 包着的生产者错误下是 os 32 时得 `FILE_IN_USE`）、`bad_sliced_data_is_recorded_on_the_part_that_sent_it`；分别关掉提前结束的核对、不认没有声明长度的响应、改成每片都记、不区分源的读错、不跳过包装的 io 错误时，对应测试失败。临时探针经 `ipc_install_file` / `ipc_install_multichunk_stream` 对本机 TCP 服务器跑 Url 整体请求、单段 Range、多段切片、合并请求四条路径：chunked 正常结束或靠关连接结束、只发一半时都是 `NET_SHORT_BODY` / `DOWNLOAD_FAILED`，insight 记同一标签；`Content-Length` 比范围少 1 时单段与切片为 `NET_BAD_RANGE`；长度对、字节全错时为 `HASH_MISMATCH`；RST 与有 `Content-Length` 时的提前断开仍是 `NET_RESET` / `NET_EOF`；提权管道带的值与未提权一致。不核对长度、非网络读错一律加 `DECOMPRESS_ERR` 的构建在同一探针下，前三种情况都是 `FILE_IO_FAILED`，切片的那一片 insight 记成功或没有记录 |
+| H3 下载在长度核对下照常完成 | PASS：本地 quic-go HTTP/3 反向代理（不入库）挂在 e2e 服务器前，`KACHINA_E2E_H3=1` 下 `test:online-install-dfs2` 两次通过，日志中的两次下载为 http3:// |
 | 无效测试删除后 `cargo test` 与 e2e 通过 | PASS：改坏 `Done.tsx` 的一个键时 `web_renderer_keys_exist` 失败并报出缺失键；在已结束的 plugin-stub 暂存根位置建目录时 `assertStagingRemoved` 报残留，对没有日志行的路径报 "names no staging root" |
-| 全部改动后 | PASS：`cargo fmt`、`cargo clippy --all-targets` 无告警；单测 builder 37、installer 217（1 ignored）、sfx 40；`pnpm exec tsc --noEmit` 0 错误；release e2e 14 项通过 |
+| 全部改动后 | PASS：`cargo fmt`、`cargo clippy --all-targets` 无告警；单测 builder 37、installer 221（1 ignored）、sfx 40；`pnpm exec tsc --noEmit` 0 错误；release e2e 14 项通过 |
 
 ## Consequences
 
@@ -211,5 +218,7 @@ B1～B13 与 B15～B22 在修复前逐条对照代码核对，均属实（B20 �
 - 强制退出与结束进程同样处理：阶段一只留暂存残留，阶段二留下的 journal 由下次运行恢复。原生取消确认框开在进度框线程的回调里，会话恰在确认框打开时结束时，进度框关闭会连带销毁确认框，按"否"处理（由代码推断，未实测）。
 - 已安装但残留删除项的目录（删除项指向的文件仍在）会进入一次更新路径，之后判定为已是最新。
 - TLS 标签里的 OS 码从 native-tls 错误的文本里取（native-tls 不公开 schannel 的 `io::Error`），文本格式变化时只丢 OS 码，标签退为 `NET_TLS`。
+- 切片下载按解码器停下的位置推定坏数据所在的片，依据的是 zstd 的块结构：解码器拿到一个块的全部数据才解码，块头损坏几乎总在下一个块内暴露。少数情况下块头损坏后接连几个块仍能解析，停下处落在损坏处 264KiB 之后，码就可能记到后一片上。
+- 过慢检测（声明长度大于 10MiB、未过半时 30 秒内平均低于 100KiB/s 即失败）与长度核对用同一个声明长度：范围请求的长度，或响应头的 `Content-Length`。H3、SFTP 中间件的响应体因此同样受检，规则与 HTTP 下载相同。
 - 前端界面没有自动化覆盖，界面改动靠真实窗口检查；文案键的完整性由 Rust 测试守住。
 - `docs/design/` 在大版本稳定之前为空，读者从 implemented note 了解现行行为。

@@ -49,7 +49,7 @@ DFS2 metadata 请求（[`get_dfs2_metadata`](../../../native/dfs.rs)）在读取
 
 [`dfs2_ranges`](../../../native/session/merge.rs) 申报合并范围、每个文件的完整范围及其切片、匹配的补丁范围和安装器前缀，排序去重后用于创建 DFS2 会话。
 
-计划不保存 URL。每个数据请求先取得请求名额，再通过 `ipc::download::resolve` 请求范围 URL：直接模式经进程内通道，提权模式经管道发给会话。会话的 `resolve_in_windows` 把 50ms 内到达的请求合为一批，每来一个新请求重新计时，窗口结束时经批量接口一次取回；批量响应中单个范围失败只使该请求失败，整个批量请求失败则窗口内的请求全部失败。重试时重新解析 URL。范围响应核对状态码 206、`Content-Range` 与长度，最终文件仍执行哈希校验。
+计划不保存 URL。每个数据请求先取得请求名额，再通过 `ipc::download::resolve` 请求范围 URL：直接模式经进程内通道，提权模式经管道发给会话。会话的 `resolve_in_windows` 把 50ms 内到达的请求合为一批，每来一个新请求重新计时，窗口结束时经批量接口一次取回；批量响应中单个范围失败只使该请求失败，整个批量请求失败则窗口内的请求全部失败。重试时重新解析 URL。范围响应核对状态码 206、`Content-Range` 与长度，响应体的长度由网络流核对（规则见 [UI 契约](./2026-09-02-ui-contract.md)的错误码一节），最终文件仍执行哈希校验。
 
 ### 调度
 
@@ -60,6 +60,8 @@ DFS2 metadata 请求（[`get_dfs2_metadata`](../../../native/dfs.rs)）在读取
 ### 切片读取
 
 [`sliced`](../../../native/ipc/download.rs) 按片序经一个容量为两块的通道向 Zstd 或补丁流供给数据，第一片直接从网络读取。读取每一片时，若磁盘预算能整块预留，就把其后最多两片预取到 `<staging>/dl/<uuid>.part`；没有预取的片在轮到时直接从网络读取。预取片收满声明长度后才可读，读完即删除并归还预算，不逐片 `sync_all`，不进入提交 journal。
+
+每一片记下送来它的那次请求的 DFS insight，重新读取时以后一次为准。解码器拒绝数据时（`HASH_MISMATCH`），[`install_file.rs`](../../../native/ipc/install_file.rs) 按解码器停下的位置把码记在可能送来这段数据的片上：停下处之前 `UNDECODABLE_REACH`（两个 zstd 块加读缓冲，约 264KiB）以内的片。解码器读到数据末尾帧还没完，或文件的 hash 不符时，坏数据的位置无从推定，码记在每一片上。
 
 磁盘预算在 `BeginDownload` 时确定：暂存所在卷的可用空间减去全部任务的原文件大小，上限 256MiB；查不到可用空间时取 256MiB。会话开始前的空间检查 `ensure_space` 只计入原文件大小。取消或失败时，执行器取消该文件的停止 token，唤醒等待中的读取方，等全部预取任务结束后再返回错误。
 
@@ -106,7 +108,7 @@ UI 的文件总数和完成量按目标文件统计，切片不增加文件条�
 | 等待网络名额时取消的请求不取 URL；取消唤醒读取方 | PASS：`cancel_while_waiting_for_slot_requests_no_url`、`network.rs` 的 `failed_operation_keeps_final_counts_and_cancellation_wakes_reader`、`cancelled_chunk_cancels_the_merged_request`。提权模式下的取消控制消息没有测试 |
 | DFS2 安装与更新中，实际下载的每个范围都由批量接口取得 URL，批量取过的每个范围都被下载 | PASS：e2e `test:dfs2`（`online-install-dfs2`、`online-update-dfs2`）经 `assertDfs2BatchCoverage` 双向核对，且没有单个 URL 接口调用 |
 | 网络量等于各请求尝试的实际接收量；临时文件读取不重复计数；文件数不随切片增加 | PASS：切片测试断言网络字节等于压缩长度加断流前的 32 字节、结束后无活动请求；`network.rs` 的两项测试；`file_progress_keeps_attempt_work_and_ignores_late_snapshots` |
-| 错误 `Content-Range`、短响应、不同版本数据哈希不匹配 | 部分：短响应由切片测试覆盖；错误 `Content-Range` 与哈希不匹配没有测试 |
+| 错误 `Content-Range`、短响应、不同版本数据哈希不匹配 | PASS：`net_failure.rs` 的 `bodies_off_the_declared_length`（错误 `Content-Range` → `NET_BAD_RANGE`，chunked 短响应 → `NET_SHORT_BODY`，多出的响应体 → `NET_LONG_BODY`）；`bad_sliced_data_is_recorded_on_the_part_that_sent_it`（6MiB 数据压成一帧后切三片，中间片一个块头改成保留类型时只有中间片的 insight 为 `HASH_MISMATCH`；数据正确而期望 hash 不符时三片都是）。不同版本数据由 hash 核对拦下，没有单独测试 |
 | DFS2 聚合场景：任意 range 申报、跨节点切片、片级重试、整文件回退 | 未实施：e2e 夹具文件不超过 30 KiB，测试服务器不发 `Dfs-*` 头，默认 25MiB 切片目标下 e2e 不触发切片 |
 | 三类输入对照规划器之前的实现：完成时间、收尾耗时、请求数、实际字节、内存、临时磁盘峰值、release 二进制体积 | 未进行 |
 | builder 产物等效、旧版读取同一包 | 规划器不改 builder，本 note 没有单独验证 |

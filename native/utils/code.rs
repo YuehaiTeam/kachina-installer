@@ -633,17 +633,31 @@ impl fmt::Display for Carried {
 
 impl std::error::Error for Carried {}
 
-/// Code of the first local io error in a chain without a network cause.
+/// Code of the first local io error in a chain without a network cause. An io
+/// error that only carries another error (`io::Error::other`, as a stream
+/// reports a failure of its producer) gives way to an io error further down,
+/// which says what actually failed.
 pub fn local_io_code(err: &anyhow::Error) -> Option<&'static str> {
-    err.chain().find_map(|cause| {
+    let mut carrier = None;
+    for cause in err.chain() {
         if let Some(io) = cause.downcast_ref::<std::io::Error>() {
-            return Some(code_for_local_io(io));
+            let carries = io.kind() == std::io::ErrorKind::Other
+                && io.raw_os_error().is_none()
+                && io.get_ref().is_some();
+            if !carries {
+                return Some(code_for_local_io(io));
+            }
+            carrier.get_or_insert(io);
+            continue;
         }
-        match cause.downcast_ref::<Carried>()?.cause {
-            CarriedCause::LocalIo(code) => Some(code),
-            CarriedCause::Network(_) => None,
+        if let Some(carried) = cause.downcast_ref::<Carried>() {
+            return match carried.cause {
+                CarriedCause::LocalIo(code) => Some(code),
+                CarriedCause::Network(_) => None,
+            };
         }
-    })
+    }
+    carrier.map(code_for_local_io)
 }
 
 /// The chain text led by the network failure tag. A failed body read already
@@ -940,6 +954,30 @@ mod tests {
             None,
         );
         assert!(matches!(extract(&stalled), Extracted::Coded(c) if c.code == DOWNLOAD_STALLED));
+    }
+
+    /// An io error that only carries another error, as a stream reports a
+    /// failure of its producer, takes the code of the io error under it.
+    #[test]
+    fn local_io_code_looks_through_carrying_io_errors() {
+        #[derive(Debug)]
+        struct Producer(std::io::Error);
+        impl fmt::Display for Producer {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("producer failed")
+            }
+        }
+        impl std::error::Error for Producer {
+            fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+                Some(&self.0)
+            }
+        }
+        let in_use = || std::io::Error::from_raw_os_error(32);
+        let carried = |payload: Box<dyn std::error::Error + Send + Sync>| {
+            local_io_code(&anyhow::Error::new(std::io::Error::other(payload)).context("read"))
+        };
+        assert_eq!(carried(Box::new(Producer(in_use()))), Some(FILE_IN_USE));
+        assert_eq!(carried("no io below".into()), Some(FILE_IO_FAILED));
     }
 
     #[test]
