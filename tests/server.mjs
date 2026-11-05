@@ -142,6 +142,7 @@ function createState() {
     httpRequests: [],
     faults: {
       httpAbortInjected: false,
+      signedAbortInjected: false,
     },
     getResource(version) {
       if (!this.resources.has(version)) {
@@ -172,7 +173,10 @@ function signedUrl(req, version, sid, range) {
   return `${protocol}://${req.get('host')}/signed/${version}/${encodeURIComponent(sid)}?range=${encodeURIComponent(range)}`;
 }
 
-function createServer() {
+// options.partBytes: send it as all three DFS2 part size hints.
+// options.abortSigned(range, resource): the first signed download it matches
+// gets half its bytes, then the connection closes.
+function createServer(options = {}) {
   const app = express();
   const state = createState();
 
@@ -192,6 +196,11 @@ function createServer() {
       const loaded = state.getResource(version);
       if (req.query.with_metadata !== '1') {
         return res.status(404).json({ error: 'metadata query is required' });
+      }
+      if (options.partBytes) {
+        res.set('Dfs-Max-Part-Bytes', String(options.partBytes));
+        res.set('Dfs-Preferred-Part-Upper-Bytes', String(options.partBytes));
+        res.set('Dfs-Preferred-Part-Lower-Bytes', String(options.partBytes));
       }
       return res.json({
         resource_version: version,
@@ -242,7 +251,11 @@ function createServer() {
           return res.status(402).json({ error: 'invalid challenge response' });
         }
       }
-      state.sessions.set(sid, { version, challenged: needsChallenge });
+      state.sessions.set(sid, {
+        version,
+        challenged: needsChallenge,
+        declared: req.body?.chunks ?? [],
+      });
       return res.json({ sid });
     } catch (error) {
       return res.status(500).json({ error: error.message });
@@ -279,11 +292,15 @@ function createServer() {
       const loaded = state.getResource(version);
       const range = parseRange(req.query.range, loaded.bytes.length);
       const bytes = loaded.bytes.subarray(range.start, range.end + 1);
+      const abort =
+        !state.faults.signedAbortInjected &&
+        options.abortSigned?.(range, loaded) === true;
       state.downloadRequests.push({
         sid: req.params.sid,
         version,
         range: `${range.start}-${range.end}`,
         path: req.path,
+        aborted: abort,
       });
       res.status(206);
       res.set(
@@ -291,6 +308,15 @@ function createServer() {
         `bytes ${range.start}-${range.end}/${loaded.bytes.length}`,
       );
       res.set('Accept-Ranges', 'bytes');
+      if (abort) {
+        state.faults.signedAbortInjected = true;
+        res.set('Content-Length', String(bytes.length));
+        // close only after the half has gone out, so the client has read bytes
+        res.write(bytes.subarray(0, Math.floor(bytes.length / 2)), () =>
+          setTimeout(() => res.destroy(), 100),
+        );
+        return undefined;
+      }
       return res.send(bytes);
     } catch (error) {
       return res.status(416).json({ error: error.message });
@@ -358,8 +384,8 @@ function createServer() {
   return { app, state };
 }
 
-async function startServer() {
-  const { app, state } = createServer();
+async function startServer(options = {}) {
+  const { app, state } = createServer(options);
 
   return new Promise((resolve, reject) => {
     const server = app.listen(PORT, () => {

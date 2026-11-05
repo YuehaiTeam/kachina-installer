@@ -103,13 +103,13 @@ UI 的文件总数和完成量按目标文件统计，切片不增加文件条�
 | 纯内嵌安装不产生网络操作；混合处理计入网络预算；长度未知的来源使用单流；相同 payload 的多个目标都完成校验 | 部分：`skip_ranges_for_embedded_files`、`patch_declares_delta_and_full_file`、`installer_declares_prefix`、`install_file.rs` 的 `local_reads_do_not_take_a_request_slot`，相同内容的目标见上一行。长度未知的来源没有测试 |
 | 大小预算和总预算成立；不同活动文件先获得名额；无空间等待死锁 | 未覆盖：没有调度器或 `limits` 的单测 |
 | 第一片直接读取、后续片落盘、按原字节顺序解码、读完释放 | 部分：`sliced_zstd_retries_range_and_cleans_prefetch`（30 万字节不可压缩数据经 Zstd 压缩后切成多片，本地 HTTP 服务器提供范围；输出与原数据一致，`dl\` 目录在结束后为空）。乱序完成与预算不足改为直供没有测试 |
-| 片级重试次数正确；失败只回退所属文件；单流回退不再进入分片 | 部分：同一测试中第二片在 32 字节后断流，该片被请求两次后成功。第二次失败、已供给后失败与整文件回退没有 Rust 测试 |
+| 片级重试次数正确；失败只回退所属文件；单流回退不再进入分片 | 部分：同一测试中第二片在 32 字节后断流，该片被请求两次后成功；首片已供给后的整文件回退见 e2e `test:online-install-dfs2-sliced`。预取片第二次失败没有测试 |
 | 合并请求部分成员成功后失败 | 未覆盖：没有 Rust 测试 |
 | 等待网络名额时取消的请求不取 URL；取消唤醒读取方 | PASS：`cancel_while_waiting_for_slot_requests_no_url`、`network.rs` 的 `failed_operation_keeps_final_counts_and_cancellation_wakes_reader`、`cancelled_chunk_cancels_the_merged_request`。提权模式下的取消控制消息没有测试 |
-| DFS2 安装与更新中，实际下载的每个范围都由批量接口取得 URL，批量取过的每个范围都被下载 | PASS：e2e `test:dfs2`（`online-install-dfs2`、`online-update-dfs2`）经 `assertDfs2BatchCoverage` 双向核对，且没有单个 URL 接口调用 |
+| DFS2 安装与更新中，实际下载的每个范围都由批量接口取得 URL，批量取过的每个范围都被下载，批量取的每个范围都在创建会话时申报过 | PASS：e2e `test:dfs2`（`online-install-dfs2`、`online-update-dfs2`、`online-install-dfs2-sliced`）经 `assertDfs2BatchCoverage` 核对这三条，且没有单个 URL 接口调用 |
 | 网络量等于各请求尝试的实际接收量；临时文件读取不重复计数；文件数不随切片增加 | PASS：切片测试断言网络字节等于压缩长度加断流前的 32 字节、结束后无活动请求；`network.rs` 的两项测试；`file_progress_keeps_attempt_work_and_ignores_late_snapshots` |
 | 错误 `Content-Range`、短响应、不同版本数据哈希不匹配 | PASS：`net_failure.rs` 的 `bodies_off_the_declared_length`（错误 `Content-Range` → `NET_BAD_RANGE`，chunked 短响应 → `NET_SHORT_BODY`，多出的响应体 → `NET_LONG_BODY`）；`bad_sliced_data_is_recorded_on_the_part_that_sent_it`（6MiB 数据压成一帧后切三片，中间片一个块头改成保留类型时只有中间片的 insight 为 `HASH_MISMATCH`；数据正确而期望 hash 不符时三片都是）。不同版本数据由 hash 核对拦下，没有单独测试 |
-| DFS2 聚合场景：任意 range 申报、跨节点切片、片级重试、整文件回退 | 未实施：e2e 夹具文件不超过 30 KiB，测试服务器不发 `Dfs-*` 头，默认 25MiB 切片目标下 e2e 不触发切片 |
+| DFS2 聚合场景：任意 range 申报、跨节点切片、片级重试、整文件回退 | 部分：e2e `test:online-install-dfs2-sliced`（测试 server 发 1MiB 大小建议）：约 3.0MiB 的 app.exe 按不超过 1MiB 的片请求，首片断开后整段取回。跨节点切片没有测试 |
 | 三类输入对照规划器之前的实现：完成时间、收尾耗时、请求数、实际字节、内存、临时磁盘峰值、release 二进制体积 | 未进行 |
 | builder 产物等效、旧版读取同一包 | 规划器不改 builder，本 note 没有单独验证 |
 
@@ -247,4 +247,4 @@ UI 的文件总数和完成量按目标文件统计，切片不增加文件条�
 - 空间检查只计入原文件大小，预取预算取剩余空间且不超过 256MiB；256MiB 是否足够没有测量。
 - 长度不超过 `lower` 的补丁都参与补丁再组包，包括原文件大于 1MiB 的补丁，再组包不做边界调整。
 - 诊断日志没有切片数量、合并额外字节和预计压缩字节，也没有记录实际请求数、回退次数和预取峰值的执行摘要。
-- e2e 不覆盖切片、片级重试与整文件回退，这些路径只有上表列出的单测；与规划器之前实现的性能对照和 release 体积影响没有测量。
+- e2e 只有一个测试服务端；跨节点切片、乱序完成与预算不足时的直供没有测试；与规划器之前实现的性能对照和 release 体积影响没有测量。

@@ -111,7 +111,9 @@ export async function loggedStagingRoots(installDir) {
 export async function assertStagingRemoved(installDir) {
   const roots = await loggedStagingRoots(installDir);
   if (roots.length === 0) {
-    throw new Error(`The installer log names no staging root for ${installDir}`);
+    throw new Error(
+      `The installer log names no staging root for ${installDir}`,
+    );
   }
   const leftovers = [];
   for (const root of roots) {
@@ -298,6 +300,15 @@ export function assertDfs2BatchCoverage(state, label) {
   if (state.singleRequests.length !== 0) {
     throw new Error(
       `${label}: fell back to ${state.singleRequests.length} single DFS2 URL requests`,
+    );
+  }
+  const undeclared = state.batchRequests.flatMap((request) => {
+    const declared = new Set(state.sessions.get(request.sid)?.declared ?? []);
+    return request.ranges.filter((range) => !declared.has(range));
+  });
+  if (undeclared.length > 0) {
+    throw new Error(
+      `${label}: batch URLs were requested for ranges the session did not declare: ${undeclared.join(', ')}`,
     );
   }
   const batchRanges = new Set(
