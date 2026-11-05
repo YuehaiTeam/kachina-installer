@@ -255,7 +255,7 @@ native 与前端尚未正式发布，将共同替换 `Progress` 定义及其使�
 
 WebView 使用列表呈现，native 按对话框能力使用文本行或摘要；两者展示的总体量、速度、当前动作及取消状态应表达相同含义。错误对话框保留现有详细信息和复制能力。
 
-继续使用 Preact、现有文案表及原生样式。字节变化按约 100 ms 汇总发布，阶段及取消状态变化立即发布。活动列表使用稳定 `id` 更新，不引入虚拟列表库或全局状态库。若需要优化汇总，采用[可选性能优化](./2026-09-21-optional-performance-optimizations.md)中的会话内增量计算。
+继续使用 Preact、现有文案表及原生样式。字节变化按约 100 ms 汇总发布，阶段及取消状态变化立即发布。活动列表使用稳定 `id` 更新，不引入虚拟列表库或全局状态库。汇总每次全量计算，增量汇总经测量不采用，见[共享包读取、边写边校验的写出管线与计划查询索引](../implemented/2026-11-04-pack-reader-and-write-pipeline.md)的 Alternatives considered。
 
 ## Alternatives considered
 

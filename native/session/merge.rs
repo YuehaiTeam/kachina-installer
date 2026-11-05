@@ -1,5 +1,5 @@
 use crate::pack_format::Embedded;
-use crate::session::plan::{find_local, HashKey, LocalFile};
+use crate::session::plan::{DiskFiles, HashKey};
 use crate::session::source::{hash_of_item, SourceCtx};
 use crate::utils::metadata::{FileMeta, PatchInfo, PatchSide};
 
@@ -78,7 +78,7 @@ pub fn plan_tasks(
     local: &[Embedded],
     patches: &[PatchInfo],
     ctx: &SourceCtx,
-    disk: &[LocalFile],
+    disk: &DiskFiles,
 ) -> Vec<InstallTask> {
     let mut inputs = Vec::new();
     let mut tasks = Vec::new();
@@ -99,7 +99,7 @@ pub fn plan_tasks(
             tasks.push(InstallTask::Single(item.clone()));
             continue;
         }
-        let disk_hash = find_local(disk, &item.file_name).map(|f| f.hash.as_str());
+        let disk_hash = disk.find(&item.file_name).map(|f| f.hash.as_str());
         let patch = patches.iter().find(|p| {
             side_hash(&p.to, hash_key) == Some(full.name.as_str())
                 && disk_hash.is_some()
@@ -168,7 +168,7 @@ pub fn dfs2_ranges(
     hash_key: HashKey,
     embedded: &[Embedded],
     patches: &[PatchInfo],
-    disk: &[LocalFile],
+    disk: &DiskFiles,
 ) -> Vec<String> {
     let mut ranges = Vec::new();
     for task in tasks {
@@ -204,7 +204,7 @@ fn add_file_ranges(
     hash_key: HashKey,
     embedded: &[Embedded],
     patches: &[PatchInfo],
-    disk: &[LocalFile],
+    disk: &DiskFiles,
 ) {
     let Some(hash) = hash_of_item(item, hash_key) else {
         add_installer_range(ranges, item, ctx);
@@ -225,7 +225,7 @@ fn add_file_ranges(
         }
         add_index_range(ranges, ctx, &hash);
     } else {
-        let disk_hash = find_local(disk, &item.file_name).map(|file| file.hash.as_str());
+        let disk_hash = disk.find(&item.file_name).map(|file| file.hash.as_str());
         let patch = patches.iter().find(|patch| {
             side_hash(&patch.to, hash_key) == Some(hash.as_str())
                 && side_hash(&patch.from, hash_key) == disk_hash
@@ -310,7 +310,14 @@ mod tests {
         let ctx = SourceCtx::from_embedded(&[]);
         let embedded = vec![emb("bbb", 0, 10)];
         let tasks = vec![InstallTask::Single(item("app.exe", "bbb", false))];
-        let ranges = dfs2_ranges(&tasks, &ctx, HashKey::Md5, &embedded, &[], &[]);
+        let ranges = dfs2_ranges(
+            &tasks,
+            &ctx,
+            HashKey::Md5,
+            &embedded,
+            &[],
+            &DiskFiles::new(vec![]),
+        );
         assert!(ranges.is_empty());
     }
 
@@ -319,12 +326,12 @@ mod tests {
         let mut ctx = SourceCtx::from_embedded(&[]);
         ctx.restore_local_package(Some(&[emb("bbb", 100, 50), emb("aaa_bbb", 200, 21)]), None);
         let tasks = vec![InstallTask::Single(item("app.exe", "bbb", false))];
-        let disk = vec![LocalFile {
+        let disk = DiskFiles::new(vec![LocalFile {
             file_name: "app.exe".to_string(),
             hash: "aaa".to_string(),
             size: 1,
             unwritable: false,
-        }];
+        }]);
         let ranges = dfs2_ranges(
             &tasks,
             &ctx,
@@ -342,7 +349,14 @@ mod tests {
         ctx.restore_local_package(Some(&[emb("upd", 80, 10)]), None);
         ctx.installer_end = 80;
         let tasks = vec![InstallTask::Single(item("updater.exe", "upd", true))];
-        let ranges = dfs2_ranges(&tasks, &ctx, HashKey::Md5, &[], &[], &[]);
+        let ranges = dfs2_ranges(
+            &tasks,
+            &ctx,
+            HashKey::Md5,
+            &[],
+            &[],
+            &DiskFiles::new(vec![]),
+        );
         assert_eq!(ranges, vec!["0-79".to_string(), "80-89".to_string()]);
     }
 }

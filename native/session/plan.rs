@@ -1,3 +1,5 @@
+use std::collections::{HashMap, HashSet};
+
 use serde::{Deserialize, Serialize};
 
 use crate::utils::metadata::{FileMeta, PatchInfo, PatchSide};
@@ -18,6 +20,39 @@ pub struct LocalFile {
     pub unwritable: bool,
 }
 
+/// The install directory's scanned files, with a lookup by relative path that
+/// compares paths as `normalize_rel` writes them. When several scanned paths
+/// normalize alike, `find` returns the first of them.
+#[derive(Debug, Clone)]
+pub struct DiskFiles {
+    files: Vec<LocalFile>,
+    by_rel: HashMap<String, usize>,
+}
+
+impl DiskFiles {
+    pub fn new(files: Vec<LocalFile>) -> Self {
+        let mut by_rel = HashMap::with_capacity(files.len());
+        for (i, file) in files.iter().enumerate() {
+            by_rel.entry(normalize_rel(&file.file_name)).or_insert(i);
+        }
+        Self { files, by_rel }
+    }
+
+    pub fn find(&self, file_name: &str) -> Option<&LocalFile> {
+        self.by_rel
+            .get(&normalize_rel(file_name))
+            .map(|&i| &self.files[i])
+    }
+}
+
+impl std::ops::Deref for DiskFiles {
+    type Target = [LocalFile];
+
+    fn deref(&self) -> &[LocalFile] {
+        &self.files
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct PlanInput {
     pub install_path: String,
@@ -26,7 +61,7 @@ pub struct PlanInput {
     pub hashed: Vec<FileMeta>,
     pub patches: Vec<PatchInfo>,
     pub deletes: Vec<String>,
-    pub local: Vec<LocalFile>,
+    pub local: DiskFiles,
     pub embedded_names: Vec<String>,
     pub user_data_path: Vec<String>,
     pub ignore_nonempty: Vec<String>,
@@ -131,13 +166,6 @@ fn side_hash(side: &PatchSide, key: HashKey) -> Option<&str> {
     }
 }
 
-pub fn find_local<'a>(locals: &'a [LocalFile], file_name: &str) -> Option<&'a LocalFile> {
-    let want = normalize_rel(file_name);
-    locals
-        .iter()
-        .find(|local| normalize_rel(&local.file_name) == want)
-}
-
 pub fn build_plan(input: &PlanInput) -> InstallPlan {
     let user_data_dirs: Vec<String> = input
         .user_data_path
@@ -149,10 +177,24 @@ pub fn build_plan(input: &PlanInput) -> InstallPlan {
         .iter()
         .map(|p| normalize_full(p))
         .collect();
+    // a patch side without a hash for the key compares as `None`
+    let key = input.hash_key;
+    let patch_pairs: HashSet<(Option<&str>, Option<&str>)> = input
+        .patches
+        .iter()
+        .map(|patch| (side_hash(&patch.from, key), side_hash(&patch.to, key)))
+        .collect();
+    let embedded: HashSet<&str> = input.embedded_names.iter().map(String::as_str).collect();
+    let lpatch_targets: HashSet<Option<&str>> = input
+        .patches
+        .iter()
+        .filter(|patch| side_hash(&patch.from, key).is_some_and(|from| embedded.contains(from)))
+        .map(|patch| side_hash(&patch.to, key))
+        .collect();
 
     let mut files = Vec::with_capacity(input.hashed.len());
     for item in &input.hashed {
-        let local = find_local(&input.local, &item.file_name);
+        let local = input.local.find(&item.file_name);
         let full = join_install(&input.install_path, &item.file_name);
 
         if let Some(local) = local {
@@ -200,15 +242,8 @@ pub fn build_plan(input: &PlanInput) -> InstallPlan {
             }
         }
 
-        let has_patch = input.patches.iter().any(|patch| {
-            side_hash(&patch.from, input.hash_key) == local.map(|l| l.hash.as_str())
-                && side_hash(&patch.to, input.hash_key) == item_hash
-        });
-        let has_lpatch = input.patches.iter().any(|patch| {
-            side_hash(&patch.to, input.hash_key) == item_hash
-                && side_hash(&patch.from, input.hash_key)
-                    .is_some_and(|from| input.embedded_names.iter().any(|name| name == from))
-        });
+        let has_patch = patch_pairs.contains(&(local.map(|l| l.hash.as_str()), item_hash));
+        let has_lpatch = lpatch_targets.contains(&item_hash);
 
         files.push(PlanFile {
             file_name: item.file_name.clone(),
@@ -226,7 +261,7 @@ pub fn build_plan(input: &PlanInput) -> InstallPlan {
     let deletes = input
         .deletes
         .iter()
-        .filter(|delete_file| find_local(&input.local, delete_file).is_some())
+        .filter(|delete_file| input.local.find(delete_file).is_some())
         .filter(|delete_file| {
             if !input.is_update || ignore_dirs.is_empty() {
                 return true;
@@ -263,11 +298,11 @@ pub fn collect_skip_hash(
         .collect()
 }
 
-pub fn files_to_probe_writable(plan: &InstallPlan, local: &[LocalFile]) -> Vec<String> {
+pub fn files_to_probe_writable(plan: &InstallPlan, local: &DiskFiles) -> Vec<String> {
     plan.files
         .iter()
         .filter(|file| file.action == PlanAction::Install)
-        .filter(|file| find_local(local, &file.file_name).is_some())
+        .filter(|file| local.find(&file.file_name).is_some())
         .map(|file| file.file_name.clone())
         .collect()
 }
@@ -314,7 +349,7 @@ mod tests {
             hashed: vec![],
             patches: vec![],
             deletes: vec![],
-            local: vec![],
+            local: DiskFiles::new(vec![]),
             embedded_names: vec![],
             user_data_path: vec!["${INSTALL_PATH}/User".to_string()],
             ignore_nonempty: vec![],
@@ -326,7 +361,7 @@ mod tests {
     fn skip_unchanged() {
         let mut input = base_input();
         input.hashed = vec![hash_info("app.exe", "aaa")];
-        input.local = vec![local("app.exe", "aaa")];
+        input.local = DiskFiles::new(vec![local("app.exe", "aaa")]);
         let plan = build_plan(&input);
         assert_eq!(plan.files[0].action, PlanAction::Skip);
         assert_eq!(plan.files[0].skip_reason, Some(SkipReason::Unchanged));
@@ -336,7 +371,7 @@ mod tests {
     fn install_when_hash_differs() {
         let mut input = base_input();
         input.hashed = vec![hash_info("app.exe", "bbb")];
-        input.local = vec![local("app.exe", "aaa")];
+        input.local = DiskFiles::new(vec![local("app.exe", "aaa")]);
         input.patches = vec![PatchInfo {
             file_name: "app.exe".to_string(),
             size: 10,
@@ -364,10 +399,10 @@ mod tests {
             hash_info("app.exe", "bbb"),
             hash_info("User/settings.json", "v2"),
         ];
-        input.local = vec![
+        input.local = DiskFiles::new(vec![
             local("app.exe", "aaa"),
             local(r"\User\settings.json", "user-modified"),
-        ];
+        ]);
         let plan = build_plan(&input);
         let user = plan
             .files
@@ -392,7 +427,7 @@ mod tests {
             hash_info("cache/keep.dat", "v2"),
             hash_info("cache/new.dat", "new"),
         ];
-        input.local = vec![local("cache/keep.dat", "modified")];
+        input.local = DiskFiles::new(vec![local("cache/keep.dat", "modified")]);
         let plan = build_plan(&input);
         assert!(plan.files.iter().all(
             |f| f.action == PlanAction::Skip && f.skip_reason == Some(SkipReason::IgnoreFolder)
@@ -403,7 +438,7 @@ mod tests {
     fn lpatch_only_when_to_matches_item() {
         let mut input = base_input();
         input.hashed = vec![hash_info("app.exe", "bbb"), hash_info("other.dll", "ddd")];
-        input.local = vec![local("app.exe", "aaa")];
+        input.local = DiskFiles::new(vec![local("app.exe", "aaa")]);
         input.embedded_names = vec!["emb".to_string()];
         input.patches = vec![PatchInfo {
             file_name: "other.dll".to_string(),
@@ -442,7 +477,7 @@ mod tests {
             "cache/old.dat".to_string(),
             "gone.txt".to_string(),
         ];
-        input.local = vec![local("readme.txt", "r"), local("cache/old.dat", "c")];
+        input.local = DiskFiles::new(vec![local("readme.txt", "r"), local("cache/old.dat", "c")]);
         input.ignore_nonempty = vec![r"C:\app\cache".to_string()];
         let plan = build_plan(&input);
         assert_eq!(plan.deletes, vec!["readme.txt".to_string()]);
@@ -472,7 +507,7 @@ mod tests {
             hash_info("new.dll", "ccc"),
             hash_info("same.bin", "aaa"),
         ];
-        input.local = vec![local("app.exe", "aaa"), local("same.bin", "aaa")];
+        input.local = DiskFiles::new(vec![local("app.exe", "aaa"), local("same.bin", "aaa")]);
         let plan = build_plan(&input);
         assert_eq!(plan.files[2].action, PlanAction::Skip);
         assert_eq!(
@@ -485,7 +520,7 @@ mod tests {
     fn mark_unwritable_only_sets_probed_paths() {
         let mut input = base_input();
         input.hashed = vec![hash_info("app.exe", "bbb"), hash_info("data.dll", "ccc")];
-        input.local = vec![local("app.exe", "aaa"), local("data.dll", "old")];
+        input.local = DiskFiles::new(vec![local("app.exe", "aaa"), local("data.dll", "old")]);
         let mut plan = build_plan(&input);
         mark_unwritable(&mut plan.files, r"C:\app", &[r"C:\app\app.exe".to_string()]);
         let app = plan

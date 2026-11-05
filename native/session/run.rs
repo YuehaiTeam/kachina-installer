@@ -29,9 +29,9 @@ use crate::session::commands::SessionState;
 use crate::session::dump::session_dump;
 use crate::session::merge::{dfs2_ranges, file_mode, plan_tasks, FileMode, FilePos, InstallTask};
 use crate::session::plan::{
-    build_plan, collect_skip_hash, files_to_probe_writable, find_local, is_under, join_install,
-    mark_unwritable, normalize_rel, strip_install_prefix, HashKey, InstallPlan, LocalFile,
-    PlanAction, PlanInput, SkipReason,
+    build_plan, collect_skip_hash, files_to_probe_writable, is_under, join_install,
+    mark_unwritable, normalize_rel, strip_install_prefix, DiskFiles, HashKey, InstallPlan,
+    LocalFile, PlanAction, PlanInput, SkipReason,
 };
 use crate::session::source::{
     cleanup_dfs2, ensure_dfs2_session, fetch_metadata, hash_of_item, needs_js_plugin, parse_source,
@@ -555,22 +555,26 @@ fn build_units(
     plan: &InstallPlan,
     hashed: &[crate::utils::metadata::FileMeta],
     hash_key: HashKey,
-    local: &[LocalFile],
+    local: &DiskFiles,
     scan: &LocalScan,
 ) -> Vec<Unit> {
-    let dirty: std::collections::HashSet<&str> =
-        scan.dirty_dirs.iter().map(String::as_str).collect();
-    let installing: std::collections::HashMap<String, FileEntry> = plan
+    use std::collections::{BTreeMap, HashMap, HashSet};
+    let dirty: HashSet<&str> = scan.dirty_dirs.iter().map(String::as_str).collect();
+    // managed files by normalized path; of entries with the same path, the first
+    let mut managed: HashMap<String, &crate::utils::metadata::FileMeta> =
+        HashMap::with_capacity(hashed.len());
+    for h in hashed {
+        managed.entry(normalize_rel(&h.file_name)).or_insert(h);
+    }
+    let installing: HashMap<String, FileEntry> = plan
         .files
         .iter()
         .filter(|f| f.action == PlanAction::Install)
         .filter_map(|f| {
-            let meta = hashed
-                .iter()
-                .find(|h| normalize_rel(&h.file_name) == normalize_rel(&f.file_name))?;
-            let new = hash_of_item(meta, hash_key)?;
+            let rel = normalize_rel(&f.file_name);
+            let new = hash_of_item(managed.get(&rel)?, hash_key)?;
             Some((
-                normalize_rel(&f.file_name),
+                rel,
                 FileEntry {
                     rel: rel_of(&f.file_name),
                     old: f.old_hash.clone(),
@@ -585,36 +589,24 @@ fn build_units(
             .any(|d| rel_lower.starts_with(&format!("{d}/")))
     };
 
-    // candidate directories: every managed file under them is being written
-    let mut all_dirs: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-    for h in hashed {
-        let rel = normalize_rel(&h.file_name);
-        let mut d = dir_of(&rel);
+    // every directory holding a managed file, and whether every managed file
+    // under it is being written outside a reparse point
+    let mut all_written: BTreeMap<String, bool> = BTreeMap::new();
+    for rel in managed.keys() {
+        let written = installing.contains_key(rel) && !is_copy(rel);
+        let mut d = dir_of(rel);
         loop {
-            all_dirs.insert(d.clone());
+            *all_written.entry(d.clone()).or_insert(true) &= written;
             if d.is_empty() {
                 break;
             }
             d = dir_of(&d);
         }
     }
-    let mut candidates: Vec<String> = all_dirs
+    let mut candidates: Vec<String> = all_written
         .into_iter()
-        .filter(|d| !dirty.contains(d.as_str()))
-        .filter(|d| {
-            let mut any = false;
-            for h in hashed {
-                let rel = normalize_rel(&h.file_name);
-                if !under_dir(&rel, d) {
-                    continue;
-                }
-                any = true;
-                if !installing.contains_key(&rel) || is_copy(&rel) {
-                    return false;
-                }
-            }
-            any
-        })
+        .filter(|(d, written)| *written && !dirty.contains(d.as_str()))
+        .map(|(d, _)| d)
         .collect();
     // topmost wins
     candidates.sort_by_key(|d| d.matches('/').count() + usize::from(!d.is_empty()));
@@ -624,28 +616,41 @@ fn build_units(
             chosen.push(d);
         }
     }
+    // no chosen directory lies under another, so a path has at most one
+    let chosen_index: HashMap<&str, usize> = chosen
+        .iter()
+        .enumerate()
+        .map(|(i, d)| (d.as_str(), i))
+        .collect();
+    let chosen_dir_of = |rel: &str| {
+        let mut d = dir_of(rel);
+        loop {
+            if let Some(&i) = chosen_index.get(d.as_str()) {
+                return Some(i);
+            }
+            if d.is_empty() {
+                return None;
+            }
+            d = dir_of(&d);
+        }
+    };
 
+    let mut dir_files: Vec<Vec<FileEntry>> = vec![Vec::new(); chosen.len()];
+    let mut rest: Vec<(&String, &FileEntry)> = Vec::new();
+    for (rel, entry) in &installing {
+        match chosen_dir_of(rel) {
+            Some(i) => dir_files[i].push(entry.clone()),
+            None => rest.push((rel, entry)),
+        }
+    }
     let mut units = Vec::new();
-    let mut covered: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for dir in &chosen {
-        let mut files: Vec<FileEntry> = installing
-            .iter()
-            .filter(|(rel, _)| under_dir(rel, dir))
-            .map(|(rel, e)| {
-                covered.insert(rel.clone());
-                e.clone()
-            })
-            .collect();
+    for (dir, mut files) in chosen.iter().zip(dir_files) {
         files.sort_by(|a, b| a.rel.cmp(&b.rel));
         units.push(Unit::Dir {
             rel: dir.clone(),
             files,
         });
     }
-    let mut rest: Vec<(&String, &FileEntry)> = installing
-        .iter()
-        .filter(|(rel, _)| !covered.contains(*rel))
-        .collect();
     rest.sort_by(|a, b| a.0.cmp(b.0));
     for (rel, entry) in rest {
         if is_copy(rel) {
@@ -655,13 +660,12 @@ fn build_units(
         }
     }
     for del in &plan.deletes {
-        let rel = normalize_rel(del);
-        if chosen.iter().any(|c| under_dir(&rel, c)) {
+        if chosen_dir_of(&normalize_rel(del)).is_some() {
             continue;
         }
         units.push(Unit::Del {
             rel: rel_of(del),
-            old: find_local(local, del).map(|l| l.hash.clone()),
+            old: local.find(del).map(|l| l.hash.clone()),
         });
     }
     units
@@ -1470,7 +1474,7 @@ async fn dfs_staged(
             "hashed": latest.hashed,
             "patches": latest.patches,
             "deletes": latest.deletes,
-            "local": local,
+            "local": &local[..],
             "embedded_names": config.embedded_files.as_ref().map(|f| f.iter().map(|e| e.name.clone()).collect::<Vec<_>>()).unwrap_or_default(),
             "ignore_nonempty": ignore_nonempty,
         })
@@ -1586,14 +1590,15 @@ async fn dfs_staged(
         }
         ui.check_cancel()?;
 
+        let mut by_name: std::collections::HashMap<&str, &FileMeta> =
+            std::collections::HashMap::with_capacity(latest.hashed.len());
+        for h in &latest.hashed {
+            by_name.entry(h.file_name.as_str()).or_insert(h);
+        }
         let install_items: Vec<InstallItem> = to_install
             .iter()
             .filter_map(|file| {
-                let item = latest
-                    .hashed
-                    .iter()
-                    .find(|h| h.file_name == file.file_name)?
-                    .clone();
+                let item = (*by_name.get(file.file_name.as_str())?).clone();
                 Some(InstallItem { item })
             })
             .collect();
@@ -1877,7 +1882,7 @@ async fn scan_local(
     ignore_nonempty: &[String],
     ui: &LiveUi<'_>,
     mgr: &ManagedElevate,
-) -> anyhow::Result<(Vec<LocalFile>, LocalScan)> {
+) -> anyhow::Result<(DiskFiles, LocalScan)> {
     let algo = match hash_key {
         HashKey::Md5 => "md5",
         HashKey::Xxh => "xxh",
@@ -1937,7 +1942,7 @@ async fn scan_local(
         })
         .collect();
     Ok((
-        files,
+        DiskFiles::new(files),
         LocalScan {
             files: Vec::new(),
             ..scan
@@ -2262,17 +2267,16 @@ async fn install_files(
     latest: &RepoMetadata,
     hash_key: HashKey,
     tasks: &[InstallTask],
-    disk_files: &[LocalFile],
+    disk_files: &DiskFiles,
     source_ctx: &SourceCtx,
     staging: &Staging,
     ui: &LiveUi<'_>,
     mgr: &ManagedElevate,
 ) -> anyhow::Result<Vec<IpcOperation>> {
-    let local_files = Arc::new(config.embedded_files.clone().unwrap_or_default());
-    let disk_files = Arc::new(disk_files.to_vec());
+    let local_files: &[Embedded] = config.embedded_files.as_deref().unwrap_or(&[]);
     let prog = Arc::new(Mutex::new(DownloadProg::from_tasks(
         tasks,
-        local_files.as_slice(),
+        local_files,
         &latest.patches,
         hash_key,
     )));
@@ -2338,7 +2342,7 @@ async fn install_files(
             },
             ids,
         };
-        let sem = if is_local_task(task, local_files.as_ref(), &latest.patches, hash_key) {
+        let sem = if is_local_task(task, local_files, &latest.patches, hash_key) {
             local_sem.clone()
         } else if task_bytes(task) >= threshold {
             large_sem.clone()
@@ -2346,22 +2350,18 @@ async fn install_files(
             small_sem.clone()
         };
         let has_error = has_error.clone();
-        let local_files = local_files.clone();
-        let disk_files = disk_files.clone();
         let cancel = cancel.clone();
         futs.push(async move {
             let _permit = sem.acquire().await;
             if has_error.load(Ordering::Relaxed) || cancel.is_cancelled() {
                 return None;
             }
-            let local_ref = local_files.as_slice();
-            let disk_ref = disk_files.as_slice();
             let res = match task {
                 InstallTask::Single(item) => {
                     install_one(
                         settings,
-                        local_ref,
-                        disk_ref,
+                        local_files,
+                        disk_files,
                         latest,
                         hash_key,
                         item,
@@ -2381,7 +2381,7 @@ async fn install_files(
                 } => {
                     match install_merged(
                         settings,
-                        local_ref,
+                        local_files,
                         latest,
                         hash_key,
                         files,
@@ -2402,8 +2402,8 @@ async fn install_files(
                             );
                             fallback_merged_files(
                                 settings,
-                                local_ref,
-                                disk_ref,
+                                local_files,
+                                disk_files,
                                 latest,
                                 hash_key,
                                 files,
@@ -2422,7 +2422,7 @@ async fn install_files(
                             tracing::warn!("merged download failed, retry: {err:#}");
                             match install_merged(
                                 settings,
-                                local_ref,
+                                local_files,
                                 latest,
                                 hash_key,
                                 files,
@@ -2439,8 +2439,8 @@ async fn install_files(
                                 Ok(merged) => {
                                     fallback_merged_files(
                                         settings,
-                                        local_ref,
-                                        disk_ref,
+                                        local_files,
+                                        disk_files,
                                         latest,
                                         hash_key,
                                         files,
@@ -2458,8 +2458,18 @@ async fn install_files(
                                     tracing::warn!("merged download failed, fallback: {err:#}");
                                     let all: Vec<usize> = (0..files.len()).collect();
                                     fallback_merged_files(
-                                        settings, local_ref, disk_ref, latest, hash_key, files,
-                                        &all, source_ctx, staging, mgr, &handle, &has_error,
+                                        settings,
+                                        local_files,
+                                        disk_files,
+                                        latest,
+                                        hash_key,
+                                        files,
+                                        &all,
+                                        source_ctx,
+                                        staging,
+                                        mgr,
+                                        &handle,
+                                        &has_error,
                                     )
                                     .await
                                 }
@@ -2533,7 +2543,7 @@ fn collect_ops<T>(results: impl IntoIterator<Item = anyhow::Result<T>>) -> anyho
 async fn fallback_merged_files(
     settings: &Settings,
     local_files: &[Embedded],
-    disk_files: &[LocalFile],
+    disk_files: &DiskFiles,
     latest: &RepoMetadata,
     hash_key: HashKey,
     files: &[FilePos],
@@ -2576,7 +2586,7 @@ async fn fallback_merged_files(
 async fn install_one(
     settings: &Settings,
     local_files: &[Embedded],
-    disk_files: &[LocalFile],
+    disk_files: &DiskFiles,
     latest: &RepoMetadata,
     hash_key: HashKey,
     item: &FileMeta,
@@ -2786,7 +2796,7 @@ fn failed_chunks(results: &[Result<usize, crate::ipc::IpcError>]) -> anyhow::Res
 async fn build_install_op(
     settings: &Settings,
     local_files: &[Embedded],
-    disk_files: &[LocalFile],
+    disk_files: &DiskFiles,
     latest: &RepoMetadata,
     hash_key: HashKey,
     item: &FileMeta,
@@ -2796,8 +2806,8 @@ async fn build_install_op(
 ) -> anyhow::Result<IpcOperation> {
     let target = staged_target(staging, &item.file_name);
     // the file currently on disk, if any: the base for a patch
-    let old = find_local(disk_files, &item.file_name)
-        .map(|_| join_install(&settings.install_path, &item.file_name));
+    let on_disk = disk_files.find(&item.file_name);
+    let old = on_disk.map(|_| join_install(&settings.install_path, &item.file_name));
     let hash = hash_of_item(item, hash_key)
         .ok_or_else(|| anyhow::Error::from(Coded::bare(HASH_ALGORITHM_UNSUPPORTED)))?;
     // the packed installer image carries an index mark that must be cleared
@@ -2852,7 +2862,7 @@ async fn build_install_op(
             }
         }
 
-        let disk_hash = find_local(disk_files, &item.file_name).map(|l| l.hash.as_str());
+        let disk_hash = on_disk.map(|l| l.hash.as_str());
         let patch = latest.patches.iter().find(|p| {
             side_hash(&p.to, hash_key) == Some(hash.as_str())
                 && side_hash(&p.from, hash_key) == disk_hash
@@ -3898,9 +3908,53 @@ mod tests {
             ],
             deletes: vec!["old.txt".into()],
         };
-        let units = build_units(&plan, &hashed, HashKey::Md5, &[], &LocalScan::default());
+        let units = build_units(
+            &plan,
+            &hashed,
+            HashKey::Md5,
+            &DiskFiles::new(vec![]),
+            &LocalScan::default(),
+        );
         // the whole install is one root unit; a delete under it is moot
         assert_eq!(rels(&units), vec!["dir:[2]".to_string()]);
+    }
+
+    #[test]
+    fn units_sibling_dirs_each_get_their_own_files() {
+        let hashed = vec![
+            meta("keep.txt", "k"),
+            meta("a/x.dll", "x"),
+            meta("a/y.dll", "y"),
+            meta("b/z.dll", "z"),
+        ];
+        let plan = InstallPlan {
+            files: vec![
+                plan_file("keep.txt", PlanAction::Skip, Some("k")),
+                plan_file("a/x.dll", PlanAction::Install, None),
+                plan_file("a/y.dll", PlanAction::Install, None),
+                plan_file("b/z.dll", PlanAction::Install, None),
+            ],
+            deletes: vec!["b/old.dll".into(), "c/old.dll".into()],
+        };
+        let units = build_units(
+            &plan,
+            &hashed,
+            HashKey::Md5,
+            &DiskFiles::new(vec![]),
+            &LocalScan::default(),
+        );
+        assert_eq!(
+            rels(&units),
+            vec![
+                "dir:a[2]".to_string(),
+                "dir:b[1]".to_string(),
+                "del:c/old.dll".to_string(),
+            ]
+        );
+        let Unit::Dir { files, .. } = &units[1] else {
+            panic!()
+        };
+        assert_eq!(files[0].rel, "b/z.dll");
     }
 
     #[test]
@@ -3910,7 +3964,13 @@ mod tests {
             files: vec![plan_file("app.exe", PlanAction::Skip, Some("a"))],
             deletes: vec!["old.txt".into()],
         };
-        let units = build_units(&plan, &hashed, HashKey::Md5, &[], &LocalScan::default());
+        let units = build_units(
+            &plan,
+            &hashed,
+            HashKey::Md5,
+            &DiskFiles::new(vec![]),
+            &LocalScan::default(),
+        );
         assert_eq!(rels(&units), vec!["del:old.txt".to_string()]);
     }
 
@@ -3985,12 +4045,12 @@ mod tests {
             meta("lib/y.dll", "y"),
             meta("plugins/p.dll", "p"),
         ];
-        let local = vec![LocalFile {
+        let local = DiskFiles::new(vec![LocalFile {
             file_name: "app.exe".into(),
             hash: "a".into(),
             size: 1,
             unwritable: false,
-        }];
+        }]);
         let plan = InstallPlan {
             files: vec![
                 plan_file("app.exe", PlanAction::Skip, Some("a")),
@@ -4199,7 +4259,7 @@ mod tests {
             dirty_dirs: vec![String::new()],
             reparse_dirs: vec!["link".into()],
         };
-        let units = build_units(&plan, &hashed, HashKey::Md5, &[], &scan);
+        let units = build_units(&plan, &hashed, HashKey::Md5, &DiskFiles::new(vec![]), &scan);
         assert_eq!(
             rels(&units),
             vec!["file:app.exe".to_string(), "copy:link/f.dll".to_string()]

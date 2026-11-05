@@ -1,4 +1,4 @@
-# 共享包读取与边写边校验的写出管线
+# 共享包读取、边写边校验的写出管线与计划查询索引
 
 Status: implemented
 
@@ -17,6 +17,8 @@ hpatch 的集成层三路缓冲各 4 KiB；输出流容量写死为 1 GiB，产�
 本地扫描为每个待 hash 文件建一个异步任务、调一次 `spawn_blocking`、新分配一块 1 MiB 缓冲，并把全部文件按大小降序重排，打乱目录内的读取顺序。计划删除的文件不在扫描清单里，journal 的 `del` 行旧 hash 恒为 `-`；提交在删除单元执行之前中断时，恢复把仍在原处的待删文件判为"有变"，整次恢复放弃。
 
 合并请求中某个成员因取消而失败时，会话把它当普通失败处理，重试合并请求或退回逐文件请求。分片读取（`download::sliced`）每读一次都新分配并清零 64 KiB 缓冲。
+
+更新安装的会话按文件逐个线性查找本地扫描结果，每比较一个候选都把两边的路径重新规范化（替换斜杠、转小写，各分配新字符串）；计划、写入探测、合并请求规划、DFS2 范围声明与每个下载操作的构造都这样查。`build_units` 为每个要写的文件在 metadata 里同样查找，并对每个候选目录遍历全部受管文件；`build_plan` 对每个文件遍历补丁表。耗时随文件数平方增长：1800 个文件的在线更新，这些查找在 5% 文件改动时共 300 ms，全部改动时 1.8 s；10000 个文件时分别为 9.1 s 与 56.5 s（条件见 Verification）。本机一个 476 MiB 的生产包有 1787 个文件。
 
 ## Decision
 
@@ -62,6 +64,14 @@ hpatch 的集成层三路缓冲各 4 KiB；输出流容量写死为 1 GiB，产�
 
 [download::sliced](../../../native/ipc/download.rs) 用一块 `BytesMut` 读取：每次 `reserve(64 KiB)` 后 `read_buf` 读进空闲容量，`split().freeze()` 切走发送；小读共享一块分配，接收方释放先前的块后 `reserve` 可以回收原分配。
 
+### 计划查询
+
+[DiskFiles](../../../native/session/plan.rs) 包装本地扫描结果，构造时按 `normalize_rel` 后的相对路径建一次索引；规范化后同路径有多个扫描结果时，`find` 返回第一个。`scan_local` 返回它，计划、写入探测、合并请求规划（`plan_tasks`）、DFS2 范围声明（`dfs2_ranges`）、下载操作构造与提交单元共用这一份索引，它只活在本次会话里。并发的下载任务直接借用这份索引与配置里的内嵌块列表，不复制。
+
+- `build_plan` 先把补丁表收成 (from, to) hash 对的集合，以及 from 是内嵌块的补丁的 to hash 集合；一侧没有当前算法的 hash 时以缺失参与比较。
+- [build_units](../../../native/session/run.rs) 把 metadata 按规范化路径建表，同路径取第一项。遍历受管文件时沿父目录累计"其下受管文件是否都在写出、且不在 reparse point 下"，得到候选目录；被选中的目录互不包含，每个要写的文件和每个删除项沿父目录查到所属的目录单元。
+- `dfs_staged` 按文件名建表，取待装文件的 metadata。
+
 ## Alternatives considered
 
 - 抽单一 `[lib]` 供三个 bin 链接：单 package 下编译任一 bin 都要先编译整个 lib，包括只有安装器用到的 webview2、reqwest、h3、russh 相关模块，且要改全仓的 `crate::` 路径。切断读取器对网络模块的依赖后，`#[path]` 已能共享。
@@ -75,6 +85,10 @@ hpatch 的集成层三路缓冲各 4 KiB；输出流容量写死为 1 GiB，产�
 - 写出沿用异步解码与 `tokio::fs::File`：每次写入要跨线程调度，CPU 解码占用异步工作线程。
 - 写完重读校验：重读拿到的是刚写入页缓存的同一份数据，发现不了介质错误；边写边算的 hash 覆盖解码、补丁与写出，加上字节数核对，能发现的问题与重读相同。
 - 写出前由一个线程预建全部目标文件句柄：同一组 1787 个空文件（取自一个 476 MiB 生产包的目录结构，93 个目录已预建），单线程逐个创建并关闭 1094 ms，16 线程并发 318 ms（C# `Parallel.ForEach` 经 PowerShell `Add-Type`，`%TEMP%` 在 C 盘，32 逻辑处理器，Windows 11 Insider 26H1 build 28020）。本地写出已是 16 路并发，各任务在自己的阻塞线程里建文件，单个预建线程赶不到写出任务前面；联网安装时写出任务在等网络，建文件不在关键路径上。预建还要按路径登记写者，避免与重试、回退时的 `File::create` 互相截断。
+- 再按 hash 为补丁表与内嵌块建索引：`file_mode`、`plan_tasks`、`add_file_ranges` 与 `build_install_op` 按 hash 在这两张表里线性查找，不分配内存。Verification 表的改动后数据里，在线全部改动时 `plan_tasks`、`dfs2_ranges` 与逐个 `build_install_op` 在 1800 个文件下共 70 ms，10000 个文件（5000 个补丁）下共 2.5 s；离线全部改动时整组查找为 38 ms 与 0.76 s。`file_mode` 与 `build_install_op` 逐个文件调用，这个索引要从会话一路传进它们的调用方，在生产包规模下省下的不到 0.1 s。
+- Mirror酱 解压时复用 256 KiB 缓冲：分配并清零这块缓冲一次 111 µs（1000 次平均），建文件、写 16 KiB 再 `sync_all` 一个文件 3162 µs（200 个平均，`%TEMP%` 在 C 盘），缓冲只占小文件单文件耗时的 3.5%，文件越大占比越小。
+- 下载进度按变化增量汇总：`DownloadProg::render` 每 100 ms 遍历一次全部条目，1800 条 0.005 ms，10000 条 0.034 ms（100 次平均）。
+- builder 预建名称到打包优先级的映射、用集合查重：按 `get_file_pack_priority` 排序 1800 个名称 182 ms，10000 个 6.9 s；收集条目时的线性查重分别为 8.3 ms 与 199 ms（5 个分类平分全部名称，名称为 32 位十六进制串）。builder 不在用户的安装路径上，生产包规模下这点耗时不值得改。
 
 ## Verification
 
@@ -96,6 +110,21 @@ hpatch 的集成层三路缓冲各 4 KiB；输出流容量写死为 1 GiB，产�
 | 单测、格式与 lint | PASS：`cargo test --bins` builder 39、installer 208（1 ignored）、sfx 40，改动前为 25 / 179 / 21；`cargo fmt --all -- --check` 无差异；`cargo clippy --all-targets` 0 warning |
 | e2e | PASS（release，`pnpm build`，运行 e2e 的 shell 没有 `DEV` 环境变量）：prepare、offline-install、online-install、offline-update、online-update、dfs2、updater-survival、already-latest、uninstall、userdata-ignore、occupied-process、builder-extract-replace、plugin-stub、sfx-run。v2 fixture 含 2 个补丁（app.exe、updater.exe）与 1 个删除（readme.txt），online-update 的日志含 4 个文件的合并请求、两个补丁与 `local_scanned=7`（含待删文件）。machine-acl、registry 未运行：需要提权会话 |
 | 扫描、补丁与写出耗时；二进制体积 | 未测量。写出耗时要用生产包做离线安装，会在本机写入第三方应用的注册信息与运行库 |
+| 计划查询索引不改变会话的计划与操作 | PASS：`session::plan` 与 `session::merge` 的单测、提交单元的 `units_*` 单测通过（覆盖以反斜杠开头的本地路径、补丁与内嵌补丁的判定、删除项、单个与并列的目录单元、reparse point）。临时探针对下表 6 组数据，把计划、写入探测清单、待装 metadata、任务、DFS2 范围、进度条目、下载操作与提交单元的 Debug 输出整体取 hash，改动前后一致 |
+| 计划查询耗时 | 见下表 |
+| 计划查询索引的体积 | installer 3,167,744 → 3,174,912 字节（+7,168），builder 2,854,400 字节不变（x86_64-win7-windows-msvc release，`pnpm build`，同一工具链前后各构建一次） |
+| 计划查询索引的单测与 e2e | PASS：`cargo test` builder 37、installer 223（1 ignored）、sfx 40；`cargo clippy --all-targets` 0 warning；release e2e 的上述 14 项通过 |
+
+查询耗时为 `build_plan`、`files_to_probe_writable`、待装 metadata 查找、`plan_tasks`、`dfs2_ranges`、`DownloadProg::from_tasks`、逐个 `build_install_op` 与 `build_units` 的合计，单线程依次调用，每个函数计时一次。条件：`cargo test --release`（profile.release：opt-level "z"、LTO、codegen-units 1），x86_64-pc-windows-msvc，32 逻辑处理器，Windows 11 Insider 26H1 build 28020。合成数据的路径为 `DataNN/StreamingAssets/Bundle_NNNNN.ab`（90 个顶层目录），另有一个始终不变的 `readme.txt`；本地扫描结果与 metadata 同序，改动的文件一半带补丁，离线时每个新文件与补丁都有内嵌块，20 个删除项不在磁盘上。Problem 中计划查询的耗时、Alternatives considered 末尾四项的耗时取自同一构建配置与机器。
+
+| 文件数 | 场景 | 改动前 | 改动后 |
+|---|---|---|---|
+| 1800 | 在线，5% 改动 | 300 ms | 6.0 ms |
+| 1800 | 在线，全部改动 | 1825 ms | 80.5 ms |
+| 1800 | 离线，5% 改动 | 239 ms | 6.5 ms |
+| 10000 | 在线，5% 改动 | 9122 ms | 49 ms |
+| 10000 | 在线，全部改动 | 56491 ms | 2534 ms |
+| 10000 | 离线，5% 改动 | 8310 ms | 87 ms |
 
 ## Consequences
 
@@ -106,3 +135,5 @@ hpatch 的集成层三路缓冲各 4 KiB；输出流容量写死为 1 GiB，产�
 - 每个补丁的工作区为 `stepMemSize` 加 192 KiB。
 - pack 与 replace-bin 只改写 `FileDescription`、`ProductName`；产物的 `CompanyName`、`LegalCopyright` 与版本号是 base 自带的值，不随应用变化。
 - `pack_format.rs` 只依赖外部 crate，`verified_write.rs` 另外只依赖 `pack_format`；两者引用其他 `crate::` 路径时，builder 或 sfx 就无法经 `#[path]` 引入它们。
+- `DiskFiles` 为每个本地文件多存一个规范化路径与一个下标。
+- 按 hash 在补丁表与内嵌块里的查找是线性的，耗时随文件数与补丁数、内嵌块数之积增长，数字见 Alternatives considered。
