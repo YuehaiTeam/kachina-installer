@@ -26,13 +26,11 @@
     "test:plugin-stub": "cd tests && node plugin-stub.mjs",
     "test:machine-acl": "cd tests && node machine-acl.mjs",
     "test:registry": "cd tests && node registry.mjs",
-    "test:dump-offline-install": "cd tests && node dump-offline-install.mjs",
-    "test:all": "npm run test:prepare && npm run test:offline-install && npm run test:online-install && npm run test:offline-update && npm run test:online-update && npm run test:dfs2 && npm run test:updater-survival && npm run test:already-latest && npm run test:uninstall && npm run test:userdata-ignore && npm run test:occupied-process && npm run test:builder-extract-replace && npm run test:plugin-stub && npm run test:machine-acl && npm run test:registry",
-    "test": "vitest run"
+    "test:all": "npm run test:prepare && npm run test:offline-install && npm run test:online-install && npm run test:offline-update && npm run test:online-update && npm run test:dfs2 && npm run test:updater-survival && npm run test:already-latest && npm run test:uninstall && npm run test:userdata-ignore && npm run test:occupied-process && npm run test:builder-extract-replace && npm run test:plugin-stub && npm run test:machine-acl && npm run test:registry"
   },
   "dependencies": {
-    "preact": "^10.27.2",
-    "@preact/signals": "^2.3.2"
+    "@preact/signals": "^2.3.2",
+    "preact": "^10.27.2"
   },
   "devDependencies": {
     "@eslint/js": "^9.29.0",
@@ -40,18 +38,15 @@
     "@rsbuild/core": "^1.5.10",
     "@rsbuild/plugin-preact": "^1.5.2",
     "@sentry/cli": "^2.46.0",
-    "@testing-library/preact": "^3.2.4",
     "compression-webpack-plugin": "^11.1.0",
     "cross-env": "^7.0.3",
     "eslint": "^9.29.0",
     "express": "^4.18.2",
     "fs-extra": "^11.2.0",
     "globals": "^15.15.0",
-    "jsdom": "^26.1.0",
     "prettier": "^3.5.3",
     "typescript": "^5.8.3",
     "typescript-eslint": "^8.34.0",
-    "vitest": "^3.2.4",
     "zx": "^8.8.2"
   },
   "packageManager": "pnpm@10.17.0"

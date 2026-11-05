@@ -414,6 +414,13 @@ async fn open_staging(
     let IpcResult::OpenStaging(opened) = raw else {
         bail!("IPC_SHAPE_ERR");
     };
+    // The e2e tests find the staging root by this line and parse both quoted
+    // paths.
+    tracing::info!(
+        "staging opened for {:?} at {:?}",
+        settings.install_path,
+        opened.root
+    );
     Ok((
         SessionStaging {
             staging: Staging::at(opened.root),

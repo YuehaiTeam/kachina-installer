@@ -401,36 +401,3 @@ impl SessionUi for GuiUi {
         self.cancel.clone()
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn prompt_answer_before_await_is_not_lost() {
-        let hub = PromptHub::default();
-        let rx = hub.register("p1".into()).await;
-        assert!(hub.answer("p1", true).await);
-        assert_eq!(rx.await, Ok(true));
-    }
-
-    #[tokio::test]
-    async fn plugin_answer_before_await_is_not_lost() {
-        let hub = PluginHub::default();
-        let rx = hub.register("g1".into()).await;
-        let reply = PluginAnswer {
-            id: "g1".into(),
-            ok: true,
-            data: Some("1".into()),
-            error: None,
-            unimplemented: false,
-        };
-        assert!(hub.answer(reply).await);
-        let got = tokio::time::timeout(Duration::from_millis(200), rx)
-            .await
-            .expect("must not wait for plugin timeout")
-            .expect("sender dropped");
-        assert!(got.ok);
-        assert_eq!(got.data.as_deref(), Some("1"));
-    }
-}

@@ -5,7 +5,7 @@ import {
   clearLogFile,
   getFileHash,
   printLogFileIfExists,
-  stagingCandidates,
+  loggedStagingRoots,
   waitForServer,
   readUninstallRecord,
   writeUninstallRecord,
@@ -367,8 +367,10 @@ async function cleanup() {
     await removeUninstallRecord(hive, REG_NAME);
   }
   await removeUserShortcuts(APP_NAME);
+  // Each run clears the log, so only the last run's staging is listed; the
+  // earlier runs exited 0, and a run that exits 0 removes its staging.
   for (const dir of dirs) {
-    for (const target of [dir, ...stagingCandidates(dir)]) {
+    for (const target of [dir, ...(await loggedStagingRoots(dir))]) {
       await fs.remove(target).catch((error) => {
         console.warn(
           chalk.yellow(`Failed to remove ${target}: ${error.message}`),

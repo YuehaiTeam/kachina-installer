@@ -208,6 +208,65 @@ mod tests {
         }
     }
 
+    /// String-literal keys passed to `t(...)` in `web/`. Keys built at runtime
+    /// (template literals with `${`, a literal prefix followed by `+`) are not
+    /// collected.
+    fn web_literal_keys() -> Vec<String> {
+        fn sources(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+            for entry in std::fs::read_dir(dir).unwrap().flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    sources(&path, out);
+                } else if matches!(
+                    path.extension().and_then(|e| e.to_str()),
+                    Some("ts" | "tsx")
+                ) {
+                    out.push(path);
+                }
+            }
+        }
+        let mut files = Vec::new();
+        sources(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("web"),
+            &mut files,
+        );
+        let call =
+            regex_lite::Regex::new(r#"\bt\(\s*(?:'([^']*)'|"([^"]*)"|`([^`$]*)`)\s*[,)]"#).unwrap();
+        let mut keys = Vec::new();
+        for file in files {
+            let text = std::fs::read_to_string(&file).unwrap();
+            for caps in call.captures_iter(&text) {
+                // `obj.t(` and `$t(` are other functions
+                if text[..caps.get(0).unwrap().start()].ends_with(['.', '$']) {
+                    continue;
+                }
+                let key = (1..=3).find_map(|i| caps.get(i)).unwrap();
+                keys.push(key.as_str().to_string());
+            }
+        }
+        keys.sort();
+        keys.dedup();
+        keys
+    }
+
+    /// Every locale has the same keys (below), so the reference table stands
+    /// for all of them.
+    #[test]
+    fn web_renderer_keys_exist() {
+        let files = locale_files();
+        let reference = &files.iter().find(|(l, _)| l == "zh-CN").unwrap().1;
+        let keys = web_literal_keys();
+        assert!(
+            keys.iter().any(|k| k == "dialog.ok"),
+            "scanner found {keys:?}"
+        );
+        let missing: Vec<&String> = keys.iter().filter(|k| !reference.has_key(k)).collect();
+        assert!(
+            missing.is_empty(),
+            "web/ uses keys missing from locales: {missing:?}"
+        );
+    }
+
     #[test]
     fn every_locale_has_the_same_keys_as_zh_cn() {
         let files = locale_files();

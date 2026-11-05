@@ -4,7 +4,7 @@ import {
   runInstaller,
   assertExitOk,
   assertStagingRemoved,
-  stagingCandidates,
+  loggedStagingRoots,
 } from './utils.mjs';
 import 'zx/globals';
 import { usePwsh } from 'zx';
@@ -77,8 +77,8 @@ async function test() {
   } finally {
     await cleanupTestDir(testDir);
     await cleanupTestDir(controlDir);
-    for (const candidate of stagingCandidates(testDir)) {
-      await cleanupTestDir(candidate);
+    for (const root of await loggedStagingRoots(testDir)) {
+      await cleanupTestDir(root);
     }
   }
 }

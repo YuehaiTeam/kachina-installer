@@ -101,7 +101,7 @@ const OPTS: &[OptSpec] = &[
         takes_value: true,
         hidden: true,
         value_name: "DIR",
-        help: "Write session dump JSON here (dev / tests only)",
+        help: "Write session dump JSON here (debug builds only)",
         apply: |a, v| a.dump_dir = v.map(PathBuf::from),
     },
     OptSpec {

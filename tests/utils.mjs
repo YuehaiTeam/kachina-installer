@@ -89,32 +89,34 @@ export function normalizeInstallPath(p) {
     .toLowerCase();
 }
 
-/** Both places a staging directory for `installDir` can live: beside it
- * (elevated writer or another volume) and under `%TEMP%`. */
-export function stagingCandidates(installDir) {
-  const normalized = installDir
-    .replaceAll('/', '\\')
-    .replace(/[\\]+$/, '')
-    .toLowerCase();
-  const hash = crypto
-    .createHash('sha256')
-    .update(normalized)
-    .digest('hex')
-    .slice(0, 16);
-  return [
-    path.join(
-      path.dirname(installDir),
-      `${path.basename(installDir)}.kachina-staged`,
-    ),
-    path.join(os.tmpdir(), 'kachina-staged', hash),
-  ];
+/** Staging roots the installer log records for `installDir`, from its
+ * `staging opened for "<install>" at "<root>"` lines (Rust debug-quoted). */
+export async function loggedStagingRoots(installDir) {
+  const logFile = getLogFilePath();
+  if (!(await fs.pathExists(logFile))) {
+    return [];
+  }
+  const want = normalizeInstallPath(installDir);
+  const quoted = String.raw`("(?:[^"\\]|\\.)*")`;
+  const line = new RegExp(`staging opened for ${quoted} at ${quoted}`, 'g');
+  const roots = new Set();
+  for (const match of (await fs.readFile(logFile, 'utf-8')).matchAll(line)) {
+    if (normalizeInstallPath(JSON.parse(match[1])) === want) {
+      roots.add(JSON.parse(match[2]));
+    }
+  }
+  return [...roots];
 }
 
 export async function assertStagingRemoved(installDir) {
+  const roots = await loggedStagingRoots(installDir);
+  if (roots.length === 0) {
+    throw new Error(`The installer log names no staging root for ${installDir}`);
+  }
   const leftovers = [];
-  for (const candidate of stagingCandidates(installDir)) {
-    if (await fs.pathExists(candidate)) {
-      leftovers.push(candidate);
+  for (const root of roots) {
+    if (await fs.pathExists(root)) {
+      leftovers.push(root);
     }
   }
   if (leftovers.length > 0) {

@@ -18,45 +18,37 @@ pub struct LocalFile {
     pub unwritable: bool,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct PlanInput {
     pub install_path: String,
     pub is_update: bool,
     pub hash_key: HashKey,
     pub hashed: Vec<FileMeta>,
-    #[serde(default)]
     pub patches: Vec<PatchInfo>,
-    #[serde(default)]
     pub deletes: Vec<String>,
     pub local: Vec<LocalFile>,
-    #[serde(default)]
     pub embedded_names: Vec<String>,
-    #[serde(default)]
     pub user_data_path: Vec<String>,
-    #[serde(default)]
     pub ignore_nonempty: Vec<String>,
-    #[serde(default)]
     pub app_name: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[cfg_attr(debug_assertions, derive(Serialize))]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(debug_assertions, derive(Serialize), serde(rename_all = "snake_case"))]
 pub enum SkipReason {
     Unchanged,
     UserData,
     IgnoreFolder,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[cfg_attr(debug_assertions, derive(Serialize))]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(debug_assertions, derive(Serialize), serde(rename_all = "snake_case"))]
 pub enum PlanAction {
     Skip,
     Install,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(debug_assertions, derive(Serialize))]
 pub struct PlanFile {
     pub file_name: String,
@@ -70,7 +62,7 @@ pub struct PlanFile {
     pub has_lpatch: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(debug_assertions, derive(Serialize))]
 pub struct InstallPlan {
     pub files: Vec<PlanFile>,
@@ -144,47 +136,6 @@ pub fn find_local<'a>(locals: &'a [LocalFile], file_name: &str) -> Option<&'a Lo
     locals
         .iter()
         .find(|local| normalize_rel(&local.file_name) == want)
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct SettingsDump {
-    pub install_path: String,
-    pub is_update: bool,
-    #[serde(default)]
-    pub user_data_path: Vec<String>,
-    #[serde(default)]
-    pub app_name: String,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct MetaScanDump {
-    pub hash_key: HashKey,
-    pub hashed: Vec<FileMeta>,
-    #[serde(default)]
-    pub patches: Vec<PatchInfo>,
-    #[serde(default)]
-    pub deletes: Vec<String>,
-    pub local: Vec<LocalFile>,
-    #[serde(default)]
-    pub embedded_names: Vec<String>,
-    #[serde(default)]
-    pub ignore_nonempty: Vec<String>,
-}
-
-pub fn plan_from_dumps(settings: SettingsDump, meta: MetaScanDump) -> InstallPlan {
-    build_plan(&PlanInput {
-        install_path: settings.install_path,
-        is_update: settings.is_update,
-        hash_key: meta.hash_key,
-        hashed: meta.hashed,
-        patches: meta.patches,
-        deletes: meta.deletes,
-        local: meta.local,
-        embedded_names: meta.embedded_names,
-        user_data_path: settings.user_data_path,
-        ignore_nonempty: meta.ignore_nonempty,
-        app_name: settings.app_name,
-    })
 }
 
 pub fn build_plan(input: &PlanInput) -> InstallPlan {
@@ -335,7 +286,6 @@ pub fn mark_unwritable(files: &mut [PlanFile], install_path: &str, unwritable_ab
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
 
     fn hash_info(name: &str, md5: &str) -> FileMeta {
         FileMeta {
@@ -482,59 +432,6 @@ mod tests {
             .find(|f| f.file_name == "other.dll")
             .unwrap();
         assert!(other.has_lpatch);
-    }
-
-    #[test]
-    fn dumps_with_install_path_user_data_skip() {
-        let settings = SettingsDump {
-            install_path: r"C:\tmp\inst".to_string(),
-            is_update: true,
-            user_data_path: vec!["${INSTALL_PATH}/User".to_string()],
-            app_name: "Test Application".to_string(),
-        };
-        let meta = MetaScanDump {
-            hash_key: HashKey::Md5,
-            hashed: vec![
-                hash_info("app.exe", "v2"),
-                hash_info("User/settings.json", "pkg-v2"),
-            ],
-            patches: vec![],
-            deletes: vec![],
-            local: vec![
-                local("app.exe", "v1"),
-                local("User/settings.json", "USER_MODIFIED"),
-            ],
-            embedded_names: vec![],
-            ignore_nonempty: vec![],
-        };
-        let plan = plan_from_dumps(settings, meta);
-        let user = plan
-            .files
-            .iter()
-            .find(|f| f.file_name == "User/settings.json")
-            .unwrap();
-        assert_eq!(user.skip_reason, Some(SkipReason::UserData));
-        assert_eq!(user.action, PlanAction::Skip);
-    }
-
-    #[test]
-    fn compare_offline_install_dump_if_present() {
-        let dir =
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/plan-dumps/offline-install");
-        let settings_path = dir.join("01-settings.json");
-        let meta_path = dir.join("02-meta-scan.json");
-        let js_plan_path = dir.join("03-plan.json");
-        if !settings_path.exists() {
-            return;
-        }
-        let settings: SettingsDump =
-            serde_json::from_slice(&std::fs::read(settings_path).unwrap()).unwrap();
-        let meta: MetaScanDump =
-            serde_json::from_slice(&std::fs::read(meta_path).unwrap()).unwrap();
-        let js_plan: InstallPlan =
-            serde_json::from_slice(&std::fs::read(js_plan_path).unwrap()).unwrap();
-        let rust_plan = plan_from_dumps(settings, meta);
-        assert_eq!(rust_plan, js_plan);
     }
 
     #[test]
