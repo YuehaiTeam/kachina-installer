@@ -136,6 +136,8 @@ B1～B13 与 B15～B22 在修复前逐条对照代码核对，均属实（B20 �
 
 下载失败从错误链上的类型分类，同时给出用户码与 DFS insight 的网络失败标签，规则与标签形式见 [UI 契约](./2026-09-02-ui-contract.md)的错误码一节。为此 H3、SSH、SFTP 中间件把原错误作为原因保留，自己的说明作为 context：h3、msquic、russh、hyper 错误保持类型；自建超时为 io `TimedOut`，畸形或截断的 SFTP 报文为 io `InvalidData`；SSH 认证被拒为 `SshAuthRejected`，SFTP 的非 OK STATUS 为 `SftpStatus`。native-tls 为直接依赖，以便按类型识别 TLS 错误。`fs.rs::read_failure` 以同一套类型判断决定是否加 `DECOMPRESS_ERR` context。
 
+下载码的 detail 带网络失败标签，对话框正文里能看到它与系统错误文本。提权子进程的未挂码错误经 `IpcError` 带上分类结果过管道，主进程挂码时得到与未提权路径相同的码与 detail，两种路径的主文案查同一条文案。
+
 ### 冗余
 
 - 前端只注册 stub 插件，GitHub 来源只由 Rust 解析。
@@ -160,6 +162,7 @@ B1～B13 与 B15～B22 在修复前逐条对照代码核对，均属实（B20 �
 - B3 继续按最长公共前缀判断包装目录：只改一个子目录的增量包必然被误剥。`.metadata.json` 是上传包必带的文件，以它的位置判断不受变更范围影响。
 - 网络错误并成三类：DFS insight 的值由下载调度器直接聚类，需要细分到原因与协议码才有用；用户看到的码另行保持粗粒度。
 - 在现有文本匹配上补模式：响应体错误的 Display 恒为同一句，原因只能从类型取得。
+- 在错误对话框脚注另起一行显示网络失败标签：正文的 detail 已经显示整条错误链文本，让 detail 带上标签即可；另设字段要同时改 `Coded`、`IpcError`、bridge 错误载荷与前端类型。
 - 删除 e2e 的暂存残留断言而不是改读日志：断言是发现暂存目录泄漏的唯一检查，日志行让它跟随 Rust 侧的路径推导。
 
 ## Verification
@@ -194,8 +197,10 @@ B1～B13 与 B15～B22 在修复前逐条对照代码核对，均属实（B20 �
 | Windows 11 21H2 的背景 | 未测：没有 build 22000～22620 的机器 |
 | 过度设计删除后功能不变 | PASS：`progress_frames_reach_only_their_request`（真实命名管道：进度只交给对应请求的回调，未知 id 丢弃，结果照常到达）；主题 GUI 检查同 B16 |
 | 网络失败按类型分类 | PASS：`utils::net_failure::tests` 经 `create_http_stream` 对本机 TCP 服务器：拒绝端口 → 发送阶段 `NET_CONNECT_REFUSED` / `DOWNLOAD_REFUSED`；503 → `NET_HTTP_503` / `SERVER_HTTP_ERROR`；声明 100 字节只发 3 字节后关闭 → 响应体阶段 `NET_EOF` / `DOWNLOAD_FAILED`；同样后 RST → `NET_RESET`；非法 chunk → `NET_PROTOCOL`；reqwest 包装的响应体中的 `SftpStatus` → `SFTP_STATUS:4`；中间件错误无 context 时的 `SshAuthRejected` → `SSH_AUTH` / `DOWNLOAD_REFUSED`；本地 `StorageFull` 不算网络失败、得 `DISK_FULL`。对 `tests/sshd` 服务端：错误指纹 → `SSH_HOST_KEY`，错误密码 → `SSH_AUTH`，SFTP 文件不存在 → `SFTP_STATUS:2`，SSH 端口拒绝 → `NET_CONNECT_REFUSED`，ssh+http 404 → `NET_HTTP_404`。DNS、证书与 H3 / QUIC 的真实失败未测：本机没有对应服务端 |
+| 提权路径与未提权路径的码、detail 一致 | PASS：`code_and_detail_survive_the_elevation_pipe`：拒绝端口的未挂码错误经 `IpcError` 编码成真实管道帧、解码后在主进程挂码，得到 `DOWNLOAD_REFUSED`，detail 与未提权路径逐字相同、以 `NET_CONNECT_REFUSED: ` 开头；去掉 `CarriedFailure` 的还原时该测试失败，得到 `DOWNLOAD_FAILED`。真实提权安装未跑：本机会话未提权 |
+| detail 中去掉 URL 后不留空括号 | PASS：`detail_strips_urls`（`for url (…): x` → `for url: x`，`TAG […]: x` → `TAG: x`，去掉 URL 后不留双空格） |
 | 无效测试删除后 `cargo test` 与 e2e 通过 | PASS：改坏 `Done.tsx` 的一个键时 `web_renderer_keys_exist` 失败并报出缺失键；在已结束的 plugin-stub 暂存根位置建目录时 `assertStagingRemoved` 报残留，对没有日志行的路径报 "names no staging root" |
-| 全部改动后 | PASS：`cargo fmt`、`cargo clippy --all-targets` 无告警；单测 builder 37、installer 216（1 ignored）、sfx 40；`pnpm exec tsc --noEmit` 0 错误；release e2e 14 项通过 |
+| 全部改动后 | PASS：`cargo fmt`、`cargo clippy --all-targets` 无告警；单测 builder 37、installer 217（1 ignored）、sfx 40；`pnpm exec tsc --noEmit` 0 错误；release e2e 14 项通过 |
 
 ## Consequences
 
@@ -206,7 +211,8 @@ B1～B13 与 B15～B22 在修复前逐条对照代码核对，均属实（B20 �
 - 强制退出与结束进程同样处理：阶段一只留暂存残留，阶段二留下的 journal 由下次运行恢复。原生取消确认框开在进度框线程的回调里，会话恰在确认框打开时结束时，进度框关闭会连带销毁确认框，按"否"处理（由代码推断，未实测）。
 - `pack` 在 rcedit、写临时文件等处仍是 `unwrap`，失败以 panic 退出（退出码 101），不删产物。
 - 已安装但残留删除项的目录（删除项指向的文件仍在）会进入一次更新路径，之后判定为已是最新。
-- 提权路径的错误跨管道只带码与 `{:#}` 文本，类型不过管道：提权安装中未挂码的网络失败，在主进程挂码时得到 `DOWNLOAD_FAILED`。insight 标签在子进程里计算，不受影响。
+- 错误类型不过提权管道，过管道的只有码、文本与网络失败分类结果；其他类型信息（例如本地 io 错误的 kind）在主进程不可见，提权子进程中未挂码的本地文件错误在主进程挂 `DOWNLOAD_FAILED`。
+- detail 只剥除 http(s) URL：`sftp://`、`http3://` 地址经 `sanitize_url_for_logging` 去掉 query 与 fragment（含凭据）后，主机与路径仍出现在 detail 中。
 - h3-msquic-async 0.3.1 把 msquic 连接错误转成 h3 错误时对状态码 `unwrap()`，遇到未知 msquic 状态会 panic，release 构建 `panic = "abort"` 下进程直接退出。
 - TLS 标签里的 OS 码从 native-tls 错误的文本里取（native-tls 不公开 schannel 的 `io::Error`），文本格式变化时只丢 OS 码，标签退为 `NET_TLS`。
 - 前端界面没有自动化覆盖，界面改动靠真实窗口检查；文案键的完整性由 Rust 测试守住。
