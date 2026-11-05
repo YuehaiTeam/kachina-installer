@@ -490,7 +490,14 @@ pub async fn write_file(
     output: &mut (impl AsyncWrite + std::marker::Unpin),
     file: &mut PackFile,
 ) -> Result<(), tokio::io::Error> {
-    write_header(output, &file.name, file.size as u32).await?;
+    // the TLV length field is 4 bytes
+    let size = u32::try_from(file.size).map_err(|_| {
+        tokio::io::Error::other(format!(
+            "{} is {} bytes, over the 4 GiB an entry can hold",
+            file.name, file.size
+        ))
+    })?;
+    write_header(output, &file.name, size).await?;
     tokio::io::copy(&mut file.data, output).await?;
     Ok(())
 }
@@ -546,5 +553,24 @@ mod tests {
         assert_eq!(entries[0].name, name);
         assert_eq!(entries[0].size, 3);
         assert_eq!(&bytes[entries[0].offset..], b"abc");
+    }
+
+    /// An entry whose length does not fit the 4-byte field fails before a
+    /// byte is written, instead of a header with the length cut off.
+    #[tokio::test]
+    async fn entry_over_4_gib_is_refused() {
+        let mut bytes = Vec::new();
+        let err = super::write_file(
+            &mut bytes,
+            &mut super::PackFile {
+                name: "big.bin".into(),
+                size: u32::MAX as usize + 1,
+                data: Box::new(tokio::io::empty()),
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("4 GiB"), "{err}");
+        assert!(bytes.is_empty());
     }
 }

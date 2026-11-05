@@ -40,7 +40,12 @@ async fn async_main() {
             }
         }
         Command::Gen(args) => gen::gen_cli(args).await,
-        Command::Append(args) => append::append_cli(args).await,
+        Command::Append(args) => {
+            if let Err(e) = append::append_cli(args).await {
+                eprintln!("Append failed: {e}");
+                std::process::exit(1);
+            }
+        }
         Command::Extract(args) => {
             if let Err(e) = extract::extract_cli(args).await {
                 eprintln!("Extract failed: {e}");
