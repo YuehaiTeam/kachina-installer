@@ -179,7 +179,6 @@ async function runUpdaterInDir(dir, label, extra = []) {
     path.join(dir, 'updater.exe'),
     [FLAGS, '--source', 'local-v2', ...extra],
     label,
-    '3m',
     dir,
   );
   assertExitOk(result, label);
@@ -245,7 +244,6 @@ async function uninstall(dir, otherDir) {
     path.join(dir, 'uninstall.exe'),
     [FLAGS],
     'Uninstall',
-    '3m',
     dir,
   );
   assertExitOk(result, 'Uninstall');
@@ -346,7 +344,6 @@ async function machineUninstall(dir) {
     path.join(dir, 'uninstall.exe'),
     [FLAGS, HELPER],
     'Helper uninstall',
-    '3m',
     dir,
   );
   assertExitOk(result, 'Helper uninstall');

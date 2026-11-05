@@ -217,6 +217,12 @@ fn main() {
     // 所有入口共用的最终收尾：成功替换过自身的会话（Native / 静默）在此
     // 安排 staging 清理；WebView 路径若已在消息循环里清理过，这里为空操作。
     installer::uninstall::delete_self_on_exit();
+    // 用过 msquic 的进程不能从 main 返回：返回后的 CRT exit() 里，seera-msquic 的
+    // `#[ctor::dtor]` 调 MsQuicClose 拆库，而 DOWNLOAD_CLIENT 的 H3 registration
+    // 与连接池活到进程结束。拆库后活连接的定时器或收包访问已释放的内存
+    // （0xc0000005），或主线程一直等 worker pool 而卡死；debug 构建直接断言失败。
+    // process::exit 走 ExitProcess，不执行 CRT 的退出回调。
+    std::process::exit(0);
 }
 
 fn crash_dialog(event_id: Option<&str>) {

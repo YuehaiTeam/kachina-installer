@@ -32,6 +32,8 @@ Status: implemented
 
 CI 另设 `unit-test` job，在 Windows 2022 上执行 `cargo test`；release job 等待该 job 成功后才发布。
 
+场景脚本经 `tests/utils.mjs` 的 `runInstaller` 用 `child_process.spawn` 直接拉起安装器，`assertExitOk` 断言的是安装器自己的退出码。经 zx 的 pwsh `& exe` 启动时，release 构建（GUI 子系统）的安装器无论以何退出码结束，结果都是 0，见[进程退出不拆除 msquic](./2026-11-05-exit-without-msquic-teardown.md)的 Verification。
+
 测试 server 的故障控制只读取测试进程环境变量，不进入 installer 的 release binary。正式 release binary 不包含阶段退出或自动取消的测试逻辑。
 
 ### Scope exclusions

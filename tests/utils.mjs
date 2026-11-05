@@ -279,18 +279,14 @@ export async function clearLogFile() {
   }
 }
 
-export async function runInstaller(exe, args, label, timeout = '3m', cwd) {
-  const { $, usePwsh } = await import('zx');
-  usePwsh();
-  const run = cwd ? $({ cwd }) : $;
+// 直接拉起安装器并等它退出，返回 { exitCode, signal }，退出码非 0 时不抛出。
+// release 安装器是 GUI 子系统程序，经 zx 的 pwsh `& exe` 启动拿不到它的退出码（结果为 0）。
+export async function runInstaller(exe, args, label, cwd) {
   try {
-    const result = await run`& ${exe} ${args}`.timeout(timeout);
-    return result;
+    return await waitForProcess(spawn(exe, args, { cwd, stdio: 'ignore' }));
   } catch (error) {
-    if (error.message && error.message.includes('timed out')) {
-      console.error(chalk.red(`${label} timed out after ${timeout}`));
-      await printLogFileIfExists();
-    }
+    console.error(chalk.red(`${label}: ${error.message}`));
+    await printLogFileIfExists();
     throw error;
   }
 }
@@ -326,14 +322,7 @@ export function assertDfs2BatchCoverage(state, label) {
   }
 }
 
-export function spawnInstaller(exe, args) {
-  return spawn(exe, args, {
-    windowsHide: true,
-    stdio: 'ignore',
-  });
-}
-
-export function waitForProcess(child, timeout = 180000) {
+function waitForProcess(child, timeout = 180000) {
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
       child.kill();

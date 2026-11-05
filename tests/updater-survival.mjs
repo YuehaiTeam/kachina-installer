@@ -7,9 +7,7 @@ import {
   getFileHash,
   getTestDir,
   runInstaller,
-  spawnInstaller,
   verifyFiles,
-  waitForProcess,
 } from './utils.mjs';
 import { FLAGS } from './utils.mjs';
 import 'zx/globals';
@@ -67,14 +65,11 @@ async function main() {
     assertExitOk(result, 'v1 installation');
     const v1UpdaterHash = await getFileHash(path.join(testDir, 'updater.exe'));
 
-    const failedUpdate = spawnInstaller(path.join(testDir, 'updater.exe'), [
-      FLAGS,
-      '-D',
-      testDir,
-      '--source',
-      'local-v2',
-    ]);
-    result = await waitForProcess(failedUpdate);
+    result = await runInstaller(
+      path.join(testDir, 'updater.exe'),
+      [FLAGS, '-D', testDir, '--source', 'local-v2'],
+      'Interrupted v2 update',
+    );
     if (result.exitCode === 0) {
       throw new Error('The interrupted network update unexpectedly succeeded');
     }
