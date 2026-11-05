@@ -12,12 +12,12 @@ Status: implemented
 
 管道帧为 4 字节小端长度前缀 + postcard 编码体（`src/ipc/mod.rs` 的 `encode_frame`/`decode_frame`/`read_frame`），帧长上限 64MiB 在编解码两侧同时检查，只用于识别帧头错位。IPC 类型的 serde 派生与外部标签风格不变（见 [IPC 外部标签改造](./2026-08-28-ipc-external-tagging.md)、[IPC 类型化](./2026-08-29-typed-ipc.md)）；postcard 是位置编码，`#[serde(default)]` 无害，但两类载荷不能直接过管道：
 
-- `serde_json::Value` 需要 `deserialize_any`，postcard 不支持。`PipeMsg::Breadcrumb` 改为承载 JSON 文本，主进程 `utils::sentry::add_breadcrumb_json` 解回 `Value`。
+- `serde_json::Value` 需要 `deserialize_any`，postcard 不支持。`PipeMsg::Breadcrumb` 承载 JSON 文本，主进程 `utils::sentry::add_breadcrumb_json` 解回 `Value`。
 - 带 `skip_serializing_if` 的类型在位置编码下会错位。`RepoMetadata` 仅经 `IpcResult::RunMirrorcInstall` 过管道，该变体改为承载归档内 `.metadata.json` 原文（`Option<String>`），提权侧只解析一次供本地删除列表使用，会话侧用既有的 `serde_json::from_str::<RepoMetadata>` 解析；`MirrorcChangeset` 只在提权侧消费，不再随结果返回。
 
 `IpcError::from_ta` 不再先 `serde_json::to_value(&TACommandError)`：那一步只为触发 `Serialize` 里的上报钩子，而提权进程处于 pipe 模式，钩子恒跳过；去掉后 `uac_ipc_main` 可以在非 pipe 模式的测试进程里运行而不产生上报副作用。
 
-`handle_pipe` 拆为读、写两个任务加一个监督任务：`read_frame` 不可取消，不能与写端共用 `select!`；任一任务结束（对端关闭、帧错位、读写错误、`ManagedElevate` 被丢弃使 `mpsc` 关闭）即中止另一任务，令管道两个半边一起释放、客户端看到 EOF 退出，并以断连错误唤醒所有未完成请求的等待方。客户端 `uac_ipc_main` 读循环改为 `read_frame`，解码失败视为帧错位直接断开。管道任务退出后 `ManagedElevate::run` 向 `mpsc` 投递失败即返回 `IPC_ERR`，不会等待永远不会到的回包。
+`handle_pipe` 拆为读、写两个任务加一个监督任务：`read_frame` 不可取消，不能与写端共用 `select!`；任一任务结束（对端关闭、帧错位、读写错误、`ManagedElevate` 被丢弃使 `mpsc` 关闭）即中止另一任务，令管道两个半边一起释放、客户端看到 EOF 退出，并以断连错误唤醒所有未完成请求的等待方。客户端 `uac_ipc_main` 读循环用 `read_frame`，解码失败视为帧错位直接断开。管道任务退出后 `ManagedElevate::run` 向 `mpsc` 投递失败即返回 `IPC_ERR`，不会等待永远不会到的回包。
 
 ## Alternatives considered
 
