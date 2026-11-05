@@ -521,6 +521,23 @@ fn strip_urls(input: &str) -> String {
                     })
                     .unwrap_or(url_body.len());
                 rest = &url_body[end_rel..];
+                // Drop what only framed the URL, so "for url (…): x" reads
+                // "for url: x", "TAG […]: x" reads "TAG: x" and "ctx: … x"
+                // keeps a single space.
+                let close = match out.chars().last() {
+                    Some('(') => Some(')'),
+                    Some('[') => Some(']'),
+                    _ => None,
+                };
+                if close.is_some_and(|c| rest.starts_with(c)) {
+                    out.pop();
+                    if out.ends_with(' ') {
+                        out.pop();
+                    }
+                    rest = &rest[1..];
+                } else if (out.is_empty() || out.ends_with(' ')) && rest.starts_with(' ') {
+                    rest = &rest[1..];
+                }
             }
         }
     }
@@ -612,12 +629,16 @@ fn local_io_code(err: &anyhow::Error) -> Option<&'static str> {
         .map(|io| code_for_io_kind(io.kind()))
 }
 
-/// Download-family code inferred from typed causes only. `None` when the chain
-/// has no network / io / HTTP-status cause (e.g. a malformed API response).
-fn download_code(err: &anyhow::Error) -> Option<&'static str> {
-    match net_failure::find(err.as_ref()) {
-        Some(failure) => Some(failure.code),
-        None => local_io_code(err),
+/// The chain text led by the network failure tag. A failed body read already
+/// names it (`ClassifiedNetworkError` displays the tag first).
+fn tagged_detail(tag: &str, err: &anyhow::Error) -> String {
+    let text = strip_urls(&format!("{err:#}"));
+    if text.contains(tag) {
+        text
+    } else if text.is_empty() {
+        tag.to_string()
+    } else {
+        format!("{tag}: {text}")
     }
 }
 
@@ -671,6 +692,8 @@ pub fn attach_download(
 
 /// Like `attach_download`, but a chain without any network / io / HTTP-status
 /// cause (the peer answered, the answer is unusable) gets `fallback` instead.
+/// With a network cause, the detail also names its tag, the value the DFS
+/// insight records.
 pub fn attach_download_or(
     err: anyhow::Error,
     fallback: &'static str,
@@ -680,7 +703,12 @@ pub fn attach_download_or(
     if already_coded(&err) {
         return err;
     }
-    let mut coded = Coded::bare(download_code(&err).unwrap_or(fallback));
+    let failure = net_failure::find(err.as_ref());
+    let mut coded = Coded::bare(match &failure {
+        Some(failure) => failure.code,
+        None => local_io_code(&err).unwrap_or(fallback),
+    });
+    coded.detail = failure.map(|f| tagged_detail(&f.tag, &err));
     coded.subject = subject.map(str::to_string);
     coded.sid = sid.map(str::to_string);
     attach_coded(coded, err)
@@ -816,6 +844,22 @@ mod tests {
                 assert!(d.contains("timed out"), "lost non-url text: {d}");
             }
             other => panic!("expected Coded, got {other:?}"),
+        }
+
+        // nothing is left of the brackets or the space around a removed URL
+        for (text, stripped) in [
+            (
+                "error sending request for url (https://a.example/f): timed out",
+                "error sending request for url: timed out",
+            ),
+            ("NET_EOF [http://a.example/f]: closed", "NET_EOF: closed"),
+            (
+                "in create_http_stream: http://a.example/f: refused",
+                "in create_http_stream: refused",
+            ),
+            ("http://a.example/f failed", "failed"),
+        ] {
+            assert_eq!(strip_urls(text), stripped);
         }
     }
 

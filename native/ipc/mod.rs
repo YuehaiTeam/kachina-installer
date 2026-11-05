@@ -97,11 +97,15 @@ pub struct IpcError {
     pub sid: Option<String>,
     pub cancelled: bool,
     pub insight: Option<InsightItem>,
+    /// 未挂码错误链上的网络失败（标签、下载码）。错误类型不过管道，父进程据此
+    /// 还原一个可识别的链节点，挂码时与未提权路径得到同一个码。
+    pub network: Option<(String, String)>,
 }
 
 impl IpcError {
     pub fn from_ta(err: &TACommandError) -> Self {
         use crate::utils::code::{extract, Extracted};
+        let mut network = None;
         let (message, code, subject, sid, cancelled) = match extract(&err.error) {
             Extracted::Coded(c) => (
                 c.detail.clone().unwrap_or_default(),
@@ -111,7 +115,11 @@ impl IpcError {
                 false,
             ),
             Extracted::Cancelled => (String::new(), None, None, None, true),
-            Extracted::Uncoded { detail } => (detail, None, None, None, false),
+            Extracted::Uncoded { detail } => {
+                network = crate::utils::net_failure::find(err.error.as_ref())
+                    .map(|f| (f.tag, f.code.to_string()));
+                (detail, None, None, None, false)
+            }
         };
         Self {
             message,
@@ -120,11 +128,19 @@ impl IpcError {
             sid,
             cancelled,
             insight: err.insight.clone(),
+            network,
         }
     }
 
     pub fn into_ta(self) -> TACommandError {
         use crate::utils::code::{code_from_str, Cancelled, Coded};
+        use crate::utils::net_failure::{CarriedFailure, NetFailure};
+        let failure = self.network.and_then(|(tag, code)| {
+            Some(NetFailure {
+                tag,
+                code: code_from_str(&code)?,
+            })
+        });
         let error = if self.cancelled {
             anyhow::Error::new(Cancelled)
         } else if let Some(code) = self.code.as_deref().and_then(code_from_str) {
@@ -133,6 +149,11 @@ impl IpcError {
             coded.subject = self.subject;
             coded.sid = self.sid;
             anyhow::Error::new(coded)
+        } else if let Some(failure) = failure {
+            anyhow::Error::new(CarriedFailure {
+                failure,
+                text: self.message,
+            })
         } else {
             anyhow::anyhow!(self.message)
         };
@@ -238,6 +259,7 @@ mod tests {
                         sid: None,
                         cancelled: false,
                         insight: Some(insight(Some("HASH_MISMATCH_ERR"))),
+                        network: Some(("NET_RESET".into(), "DOWNLOAD_FAILED".into())),
                     }),
                 ],
                 insight: insight(None),

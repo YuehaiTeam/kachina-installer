@@ -73,6 +73,23 @@ impl NetFailure {
     }
 }
 
+/// A failure the elevated helper classified, rebuilt by the launcher from the
+/// pipe (`IpcError::into_ta`). Only the text of the original chain crosses, so
+/// it displays that text and has no source.
+#[derive(Debug)]
+pub struct CarriedFailure {
+    pub failure: NetFailure,
+    pub text: String,
+}
+
+impl std::fmt::Display for CarriedFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.text)
+    }
+}
+
+impl Error for CarriedFailure {}
+
 /// Classifies an error known to come off the network, such as a failed read
 /// of a download body. `NET_OTHER` when no cause is recognized.
 pub fn classify(err: &(dyn Error + 'static), phase: Phase) -> NetFailure {
@@ -157,6 +174,9 @@ impl Walk {
 
     fn step<'a>(&mut self, e: &'a (dyn Error + 'static)) -> Step<'a> {
         if let Some(c) = e.downcast_ref::<crate::fs::ClassifiedNetworkError>() {
+            return Step::Done(c.failure.clone());
+        }
+        if let Some(c) = e.downcast_ref::<CarriedFailure>() {
             return Step::Done(c.failure.clone());
         }
         if let Some(s) = e.downcast_ref::<crate::dfs::HttpStatus>() {
@@ -449,6 +469,46 @@ mod tests {
             download(&url).await,
             (Phase::Send, "NET_HTTP_503".into(), SERVER_HTTP_ERROR)
         );
+    }
+
+    async fn refused(url: &str) -> crate::utils::error::TACommandError {
+        match crate::fs::create_http_stream(url, 0, 0, None).await {
+            Ok(_) => panic!("connected to a closed port"),
+            Err(err) => err,
+        }
+    }
+
+    fn coded(err: anyhow::Error) -> (&'static str, String) {
+        match extract(&attach_download(err, None, None)) {
+            Extracted::Coded(c) => (c.code, c.detail.unwrap()),
+            other => panic!("not coded: {other:?}"),
+        }
+    }
+
+    /// A send failure's detail starts with its tag. The elevated helper's
+    /// uncoded failure crosses the pipe as text, and the launcher hangs the
+    /// code and detail it would have hung for the same failure itself.
+    #[tokio::test]
+    async fn code_and_detail_survive_the_elevation_pipe() {
+        use crate::ipc::{decode_frame, encode_frame, IpcError, PipeMsg};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let closed = format!("http://{}/f", listener.local_addr().unwrap());
+        drop(listener);
+
+        let local = coded(refused(&closed).await.error);
+        assert_eq!(local.0, DOWNLOAD_REFUSED);
+        assert!(local.1.starts_with("NET_CONNECT_REFUSED: "), "{}", local.1);
+
+        let msg = PipeMsg::Err(
+            "id".into(),
+            IpcError::from_ta(&refused(&closed).await),
+            Default::default(),
+        );
+        let frame = encode_frame(&msg).unwrap();
+        let PipeMsg::Err(_, piped, _) = decode_frame(&frame[4..]).unwrap() else {
+            panic!("variant lost");
+        };
+        assert_eq!(coded(piped.into_ta().error), local);
     }
 
     #[tokio::test]

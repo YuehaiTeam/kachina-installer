@@ -50,6 +50,7 @@ fn retired_error() -> IpcError {
         sid: None,
         cancelled: false,
         insight: None,
+        network: None,
     }
 }
 
@@ -61,6 +62,7 @@ pub fn disconnect_error() -> IpcError {
         sid: None,
         cancelled: false,
         insight: None,
+        network: None,
     }
 }
 

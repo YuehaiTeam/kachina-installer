@@ -3938,6 +3938,7 @@ mod tests {
             sid: None,
             cancelled,
             insight: None,
+            network: None,
         };
         assert_eq!(
             failed_chunks(&[Ok(1), Err(chunk_err(false)), Ok(2)]).unwrap(),
