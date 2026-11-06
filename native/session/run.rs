@@ -1185,6 +1185,11 @@ fn emit_insight(
     });
 }
 
+/// How long an offline package waits for the online metadata before it
+/// installs what it carries. A packed source fetches the package's header
+/// segment, 0.3 to 1 MB in production packages.
+const UPDATE_CHECK_LIMIT: std::time::Duration = std::time::Duration::from_secs(5);
+
 pub async fn run_install(
     settings: &Settings,
     config: &InstallerConfig,
@@ -1263,15 +1268,33 @@ async fn run_dfs_install(
     source_ctx.attach_plugin(ui.plugin_host());
     // span 只包网络部分；pick_metadata 可能弹版本选择框，用户等待不计入
     let mut online_err = None;
+    // an offline package (its own metadata and files) only checks for a newer
+    // version; past the limit it installs what it carries, as on any other
+    // failure of the check
+    let offline_package = embedded_meta.is_some()
+        && config
+            .embedded_index
+            .as_ref()
+            .is_some_and(|index| !index.is_empty());
+    let limit = (offline_package && !settings.online).then_some(UPDATE_CHECK_LIMIT);
     let online_meta = txn
         .timed("metadata", async {
-            match fetch_metadata(
+            let fetch = fetch_metadata(
                 &settings.source_uri,
                 settings.dfs_extras.as_deref(),
                 &mut source_ctx,
-            )
-            .await
-            {
+            );
+            let fetched = match limit {
+                Some(limit) => tokio::time::timeout(limit, fetch)
+                    .await
+                    .unwrap_or_else(|_| {
+                        Err(anyhow::anyhow!(
+                            "update check gave no answer within {limit:?}"
+                        ))
+                    }),
+                None => fetch.await,
+            };
+            match fetched {
                 Ok(meta) => Some(meta),
                 Err(err) => {
                     tracing::warn!("online metadata failed: {err:#}");

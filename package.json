@@ -10,6 +10,7 @@
     "preview": "rsbuild preview",
     "test:prepare": "cd tests && node prepare.mjs",
     "test:offline-install": "cd tests && node offline-install.mjs",
+    "test:offline-update-check": "cd tests && node offline-update-check.mjs",
     "test:online-install": "cd tests && node online-install.mjs",
     "test:offline-update": "cd tests && node offline-update.mjs",
     "test:online-update": "cd tests && node online-update.mjs",
@@ -27,7 +28,7 @@
     "test:plugin-stub": "cd tests && node plugin-stub.mjs",
     "test:machine-acl": "cd tests && node machine-acl.mjs",
     "test:registry": "cd tests && node registry.mjs",
-    "test:all": "npm run test:prepare && npm run test:offline-install && npm run test:online-install && npm run test:offline-update && npm run test:online-update && npm run test:dfs2 && npm run test:updater-survival && npm run test:already-latest && npm run test:uninstall && npm run test:userdata-ignore && npm run test:occupied-process && npm run test:builder-extract-replace && npm run test:plugin-stub && npm run test:machine-acl && npm run test:registry"
+    "test:all": "npm run test:prepare && npm run test:offline-install && npm run test:offline-update-check && npm run test:online-install && npm run test:offline-update && npm run test:online-update && npm run test:dfs2 && npm run test:updater-survival && npm run test:already-latest && npm run test:uninstall && npm run test:userdata-ignore && npm run test:occupied-process && npm run test:builder-extract-replace && npm run test:plugin-stub && npm run test:machine-acl && npm run test:registry"
   },
   "dependencies": {
     "@preact/signals": "^2.3.2",

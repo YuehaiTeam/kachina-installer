@@ -480,16 +480,32 @@ pub async fn get_http_with_range(url: String, offset: u64, size: u64) -> TAResul
     if offset != 0 || size != 0 {
         res = res.header("Range", format!("bytes={}-{}", offset, offset + size - 1));
     }
-    let res = res
+    let mut res = res
         .send()
         .await
         .with_http_context("get_http_with_range", &url)?;
     let status = res.status();
-    let bytes = res
-        .bytes()
-        .await
-        .map(|b| b.to_vec())
-        .with_http_context("get_http_with_range", &url)?;
+    if !status.is_success() {
+        return Err(status_error(res).await.into());
+    }
+    if offset != 0 && status != reqwest::StatusCode::PARTIAL_CONTENT {
+        return Err(anyhow!("server ignored the range {offset}+{size}: {status}").into());
+    }
+    // at most `size` bytes: a server that ignores the range sends the whole
+    // package
+    let limit = if size == 0 { u64::MAX } else { size };
+    let mut bytes = Vec::new();
+    while (bytes.len() as u64) < limit {
+        let Some(chunk) = res
+            .chunk()
+            .await
+            .with_http_context("get_http_with_range", &url)?
+        else {
+            break;
+        };
+        bytes.extend_from_slice(&chunk);
+    }
+    bytes.truncate(usize::try_from(limit).unwrap_or(usize::MAX));
 
     Ok((status.as_u16(), bytes))
 }
@@ -610,5 +626,44 @@ mod tests {
         let status = HttpStatus::new(503, "a".repeat(1000));
         assert_eq!(status.body.len(), 512);
         assert!(status.to_string().starts_with("503: "));
+    }
+
+    /// Serves each connection one fixed response.
+    async fn answer_with(response: Vec<u8>) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            while let Ok((mut sock, _)) = listener.accept().await {
+                let response = response.clone();
+                tokio::spawn(async move {
+                    let mut request = [0u8; 4096];
+                    let _ = sock.read(&mut request).await;
+                    let _ = sock.write_all(&response).await;
+                });
+            }
+        });
+        format!("http://{addr}/pkg.exe")
+    }
+
+    /// The header read of a packed source takes at most what it asked for,
+    /// refuses a range the server ignored, and fails on an error status.
+    #[tokio::test]
+    async fn ranged_read_checks_status_and_length() {
+        let mut whole = b"HTTP/1.1 200 OK\r\nContent-Length: 1000000\r\n\r\n".to_vec();
+        whole.extend(std::iter::repeat_n(7u8, 1_000_000));
+        let url = answer_with(whole).await;
+        let (status, head) = get_http_with_range(url.clone(), 0, 256).await.unwrap();
+        assert_eq!((status, head.len()), (200, 256));
+        assert!(get_http_with_range(url, 4096, 256).await.is_err());
+
+        let url =
+            answer_with(b"HTTP/1.1 404 Not Found\r\nContent-Length: 2\r\n\r\nno".to_vec()).await;
+        let err = get_http_with_range(url, 0, 256).await.unwrap_err();
+        assert!(
+            err.error.chain().any(|c| c.is::<HttpStatus>()),
+            "{:#}",
+            err.error
+        );
     }
 }
