@@ -110,7 +110,7 @@ B1～B13 与 B15～B22 在修复前逐条对照代码核对，均属实（B20 �
 - B18：探测全部失败时 `pick_fastest_test` 返回 `None`，调用方按 `source`、第一个测试地址的顺序回退，与重构前相同。
 - B20：提交 95～97，运行库 97，快捷方式 98，注册表 99。
 - C1：缺省值与重构前前端相同：`appName`、`regName`、`programFilesPath` 为 "Kachina"，`publisher` 为 "YuehaiTeam"，`exeName` 为 "inst.exe"，`uninstallName` 为 "uninst.exe"，`updaterName` 为 "update.exe"，`title` 为 "Title"，`description` 为 "description"，`windowTitle` 为 " "，`source` 为空串。builder 的 `pack` 仍要求 `windowTitle`、`appName`，与重构前一致。
-- C2：自动应答时一律用本地版本。
+- C2：自动应答时离线包一律用本地版本；只内嵌部分文件的包按在线安装器处理，见[离线包何时联网](./2026-11-06-offline-package-network.md)。
 - C4：保留按区域格式选语言、无匹配取第一列。
 
 ### 提交回滚（B1）
