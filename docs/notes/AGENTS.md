@@ -45,7 +45,7 @@ proposed 状态依次包含 `## Problem`、`## Proposal`、`## Alternatives cons
 
 researched 状态包含 `## Problem`、`## Findings`、`## No action`。Findings 陈述事实结论及其来源，测量数据须同行注明条件；No action 明确写明本调研只做了分析，未规划也未实施任何修改。
 
-implemented 状态包含 `## Problem`、`## Decision`、`## Alternatives considered`、`## Verification`、`## Consequences`。Decision 用现在时描述现状；Verification 承接 proposed 时期的验收条件，逐条转化为验收结果，而不是删除。例如：
+implemented 状态包含 `## Problem`、`## Decision`、`## Alternatives considered`、`## Verification`、`## Consequences`。Decision 用现在时描述现状；Verification 承接 proposed 时期的验收条件，逐条转化为验收结果，而不是删除。Verification 每条只写结论、测试名和关键数字；测试步骤、变异检查、排查过程不进 note。例如：
 
 | 判据 | 结果 |
 |---|---|
@@ -64,4 +64,12 @@ rejected 状态冻结原 proposed 正文，只修改 `Status:` 行补充原因�
 
 ## 何时写 note
 
-凡是非平凡的变更——改变行为、契约、跨文件语义或流程——都应产生或更新一篇 note。已被某篇 note 覆盖的决策，后续改名、改路径、改结构属于事实更新，直接修改该 note；决策本身被推翻则另立新 note 取代，旧 note 与新 note 交叉链接。纯机械、局部且语义无变化的编辑可以豁免。
+note 记录以后有人需要回头裁决的东西。只有下列情形新建 note：
+
+- 改变对外可见的契约：安装包格式、命令行参数、错误码与文案键、发给服务端的请求与字段、UI 契约；
+- 在几种做法之间做了取舍，且这个取舍以后可能被重议；
+- 推翻已有 note 记录的决策：新 note 取代旧 note，两者交叉链接。
+
+缺陷修复、补测试、给已有机制加校验或时限、调整常量、行为不变的重构，都不新建 note，原因与验证写进提交说明。改动使已有 note 的某句话失效时，只改这句话，不为这次改动追加 Decision 段落、Verification 行或 Consequences 条目。
+
+agent 新建 note，或给已有 note 加一节，要先向用户说明理由并得到同意。

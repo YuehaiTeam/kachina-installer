@@ -37,5 +37,6 @@ skill 存放在 `.agents/skills/`（harness 自动读取目录），文档引用
 - 推理转录，例如逐步实现叙述、测试走查、对明显分支的证明。删掉推导过程，保留结论性的契约。
 - 段落墙与强调膨胀。粗体和全大写只保留给真正改变行为的那句话。
 - implemented note 中的 spec 话术，如"should"、迁移计划、验收清单。
+- 为小改动新建文档，或把提交说明里的内容（排查过程、变异检查、逐步验证）搬进 note。
 
 审计工具：[trim-cot-leakage](../.agents/skills/trim-cot-leakage/SKILL.md)（推理转录泄漏）、[prose-standard](../.agents/skills/prose-standard/SKILL.md)（散文覆盖与编辑判断）。
