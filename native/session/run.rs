@@ -1190,6 +1190,17 @@ fn emit_insight(
 /// segment, 0.3 to 1 MB in production packages.
 const UPDATE_CHECK_LIMIT: std::time::Duration = std::time::Duration::from_secs(5);
 
+/// Whether the package embeds a block for every file its metadata lists.
+fn carries_every_file(meta: &RepoMetadata, embedded: &[Embedded]) -> bool {
+    let Ok(key) = meta.hash_key() else {
+        return false;
+    };
+    let names: std::collections::HashSet<&str> = embedded.iter().map(|e| e.name.as_str()).collect();
+    meta.hashed
+        .iter()
+        .all(|item| hash_of_item(item, key).is_some_and(|hash| names.contains(hash.as_str())))
+}
+
 pub async fn run_install(
     settings: &Settings,
     config: &InstallerConfig,
@@ -1263,20 +1274,24 @@ async fn run_dfs_install(
         })
     );
 
-    let embedded_meta = config.enbedded_metadata.clone();
-    let mut source_ctx = SourceCtx::from_embedded(config.embedded_files.as_deref().unwrap_or(&[]));
+    let embedded_files = config.embedded_files.as_deref().unwrap_or(&[]);
+    // an offline package carries every file its metadata lists; one that
+    // embeds only some is an online installer that reuses those blocks
+    let offline_meta = config
+        .enbedded_metadata
+        .clone()
+        .filter(|meta| carries_every_file(meta, embedded_files));
+    let offline = offline_meta.is_some();
+    if config.enbedded_metadata.is_some() && !offline {
+        tracing::info!("package metadata lists files it does not embed, installing online");
+    }
+    let mut source_ctx = SourceCtx::from_embedded(embedded_files);
     source_ctx.attach_plugin(ui.plugin_host());
     // span 只包网络部分；pick_metadata 可能弹版本选择框，用户等待不计入
     let mut online_err = None;
-    // an offline package (its own metadata and files) only checks for a newer
-    // version; past the limit it installs what it carries, as on any other
-    // failure of the check
-    let offline_package = embedded_meta.is_some()
-        && config
-            .embedded_index
-            .as_ref()
-            .is_some_and(|index| !index.is_empty());
-    let limit = (offline_package && !settings.online).then_some(UPDATE_CHECK_LIMIT);
+    // an offline package only checks for a newer version; past the limit it
+    // installs what it carries, as on any other failure of the check
+    let limit = (offline && !settings.online).then_some(UPDATE_CHECK_LIMIT);
     let online_meta = txn
         .timed("metadata", async {
             let fetch = fetch_metadata(
@@ -1306,7 +1321,7 @@ async fn run_dfs_install(
         .await;
 
     let (mut latest, used_online) =
-        pick_metadata(settings, config, ui, embedded_meta, online_meta, online_err).await?;
+        pick_metadata(settings, config, ui, offline_meta, online_meta, online_err).await?;
     if !used_online {
         source_ctx.restore_local_package(
             config.embedded_index.as_deref(),
@@ -1316,7 +1331,7 @@ async fn run_dfs_install(
 
     if settings.is_update
         && latest.installer.is_some()
-        && config.enbedded_metadata.is_none()
+        && !offline
         && !latest
             .hashed
             .iter()
@@ -2561,7 +2576,7 @@ async fn install_one(
     for attempt in 1..=if skip_patch_first { 2 } else { 3 } {
         let skip_patch = skip_patch_first || attempt > 1;
         // resolving a node is part of the attempt: a failed resolution is
-        // retried, and from the second attempt on the whole file is fetched
+        // retried, and from the second attempt on the patch is skipped
         let ipc = match build_install_op(settings, plan, hash_key, source_ctx, staging, skip_patch)
             .await
         {
@@ -2738,7 +2753,9 @@ fn failed_chunks(results: &[Result<usize, crate::ipc::IpcError>]) -> anyhow::Res
 }
 
 /// The operation for `plan`'s source; with `skip_patch`, and when the planned
-/// diff cannot be resolved, the whole file is fetched instead.
+/// diff cannot be resolved, the whole file is fetched instead. An embedded
+/// file is read from the package on every attempt when the session installs
+/// the local package, or when the source has no URL for its range.
 async fn build_install_op(
     settings: &Settings,
     plan: &FilePlan,
@@ -2757,23 +2774,25 @@ async fn build_install_op(
     let installer = item.installer.unwrap_or(false) || is_current_exe(&old);
     let extras = settings.dfs_extras.as_deref();
     let diff = |patch| resolve_diff(source_ctx, patch, &hash, hash_key, extras);
+    if let FileSource::Embedded(block) = &plan.source {
+        if !skip_patch || source_ctx.local_package() || !source_ctx.serves_ranges() {
+            return Ok(IpcOperation::InstallFile(InstallFileArgs {
+                mode: InstallFileMode::Direct(InstallFileSource::Local {
+                    offset: block.offset,
+                    size: block.size,
+                    skip_decompress: false,
+                }),
+                target,
+                output_size: item.size,
+                old: None,
+                md5: item.md5.clone(),
+                xxh: item.xxh.clone(),
+                clear_installer_index_mark: Some(installer),
+            }));
+        }
+    }
     if !skip_patch {
         match &plan.source {
-            FileSource::Embedded(block) => {
-                return Ok(IpcOperation::InstallFile(InstallFileArgs {
-                    mode: InstallFileMode::Direct(InstallFileSource::Local {
-                        offset: block.offset,
-                        size: block.size,
-                        skip_decompress: false,
-                    }),
-                    target,
-                    output_size: item.size,
-                    old: None,
-                    md5: item.md5.clone(),
-                    xxh: item.xxh.clone(),
-                    clear_installer_index_mark: Some(installer),
-                }));
-            }
             FileSource::Hybrid { base, patch } => {
                 if let Some(loc) = diff(patch).await {
                     return Ok(hybrid_op(
@@ -2798,7 +2817,7 @@ async fn build_install_op(
                     ));
                 }
             }
-            FileSource::Whole => {}
+            FileSource::Embedded(_) | FileSource::Whole => {}
         }
     }
 
@@ -3731,6 +3750,10 @@ pub async fn silent_main(args: crate::cli::arg::InstallArgs) -> anyhow::Result<(
             return Err(anyhow::Error::from(Coded::bare(PKG_BROKEN)));
         }
     };
+    if !config.index_matches_blocks() {
+        tracing::error!("embedded index does not match packed files");
+        return Err(anyhow::Error::from(Coded::bare(PKG_BROKEN)));
+    }
     let mut settings = crate::session::types::settings_from_cli(&args, &config, &project).await?;
     if config.is_uninstall || args.uninstall {
         let ui = crate::session::ui::SilentUi;
@@ -4267,8 +4290,7 @@ mod tests {
             entry("h4", 1000),
             entry("h5", 1000),
         ];
-        let mut ctx = SourceCtx::from_embedded(&[]);
-        ctx.restore_local_package(Some(&index), None);
+        let ctx = SourceCtx::from_embedded(&index);
         let side = |hash: &str| PatchSide {
             size: 1,
             md5: Some(hash.into()),
@@ -4372,5 +4394,89 @@ mod tests {
         }
         // the large files are fetched in slices
         assert!(most_parts > 1);
+    }
+
+    #[test]
+    fn offline_package_embeds_every_listed_file() {
+        let block = |name: &str| Embedded {
+            name: name.into(),
+            offset: 0,
+            raw_offset: 0,
+            size: 1,
+        };
+        let meta = RepoMetadata {
+            hashed: vec![meta("a.dll", "h1"), meta("b.dll", "h2")],
+            ..serde_json::from_value(json!({"tag_name": "1", "hashed": []})).unwrap()
+        };
+        assert!(carries_every_file(&meta, &[block("h1"), block("h2")]));
+        assert!(!carries_every_file(&meta, &[block("h1")]));
+    }
+
+    /// After a failed read of an embedded block, the local package reads the
+    /// block again and declares nothing for it; an online session fetches the
+    /// whole file, in a range it declared, unless its DFS2 source has no
+    /// session to give that range a URL.
+    #[tokio::test]
+    async fn embedded_retry_leaves_the_package_only_online() {
+        let entry = |name: &str, offset| Embedded {
+            name: name.into(),
+            offset,
+            raw_offset: 0,
+            size: 100,
+        };
+        let index = [entry("h1", 1000), entry("h2", 2000)];
+        let items = [meta("a.dll", "h1"), meta("b.dll", "h2")];
+        let embedded = [entry("h1", 50)];
+        let disk = DiskFiles::new(vec![]);
+        let base =
+            crate::fs::staging::scratch_file(&format!("kachina-retry-{}", uuid::Uuid::new_v4()));
+        let settings = test_settings(&base.join("app"), false);
+        let staging = Staging::at(base.join("staged"));
+
+        for (local, dfs2) in [(false, false), (true, false), (false, true)] {
+            let mut ctx = SourceCtx::from_embedded(&index);
+            if local {
+                ctx.restore_local_package(Some(&index), None);
+            }
+            if dfs2 {
+                ctx.parsed = Some(parse_source("dfs2+packed+http://localhost/api/a.exe").unwrap());
+            }
+            let tasks = plan_tasks(&items, HashKey::Md5, &embedded, &[], &ctx, &disk);
+            let declared = dfs2_ranges(&tasks, &ctx, HashKey::Md5);
+            let plan = tasks
+                .iter()
+                .find_map(|t| match t {
+                    InstallTask::Single(p) if matches!(p.source, FileSource::Embedded(_)) => {
+                        Some(p)
+                    }
+                    _ => None,
+                })
+                .unwrap();
+            let retry = build_install_op(&settings, plan, HashKey::Md5, &ctx, &staging, true)
+                .await
+                .unwrap();
+            let IpcOperation::InstallFile(args) = retry else {
+                panic!("expected a file install")
+            };
+            match (local, dfs2, &args.mode) {
+                (true, _, InstallFileMode::Direct(InstallFileSource::Local { offset: 50, .. })) => {
+                    assert!(!declared.contains(&"1000-1099".to_string()), "{declared:?}");
+                }
+                (
+                    false,
+                    true,
+                    InstallFileMode::Direct(InstallFileSource::Local { offset: 50, .. }),
+                ) => {}
+                (
+                    false,
+                    false,
+                    InstallFileMode::Direct(InstallFileSource::Sliced { parts, .. }),
+                ) => {
+                    assert_eq!(parts, &vec![(1000, 100)]);
+                    assert!(declared.contains(&"1000-1099".to_string()), "{declared:?}");
+                }
+                (local, dfs2, mode) => panic!("local package {local}, dfs2 {dfs2}: {mode:?}"),
+            }
+        }
     }
 }

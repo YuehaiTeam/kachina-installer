@@ -221,49 +221,71 @@ pub fn plan_tasks(
 /// The ranges the executor can request for `tasks`: a single file's planned
 /// diff and the whole file (sliced, and in one piece for retries); a merged
 /// request's range and each member's whole file, which a failed member falls
-/// back to. Embedded files declare nothing.
+/// back to. An embedded file declares its whole file, in one piece, for the
+/// retry after a failed local read, only when the session installs the
+/// online version and needs a session for other files anyway: an install
+/// that reads every file from the package does not depend on the server.
 pub fn dfs2_ranges(tasks: &[InstallTask], ctx: &SourceCtx, hash_key: HashKey) -> Vec<String> {
     let mut ranges = Vec::new();
+    let mut retries = Vec::new();
     for task in tasks {
         match task {
             InstallTask::Merged { range, files, .. } => {
                 ranges.push(range.clone());
                 for file in files {
-                    add_whole_ranges(&mut ranges, &file.item, ctx, hash_key);
+                    add_whole_ranges(&mut ranges, &file.item, ctx, hash_key, true);
                 }
             }
             InstallTask::Single(plan) => {
                 let diff = match &plan.source {
-                    FileSource::Embedded(_) => continue,
+                    FileSource::Embedded(_) => {
+                        if !ctx.local_package() {
+                            add_whole_ranges(&mut retries, &plan.item, ctx, hash_key, false);
+                        }
+                        continue;
+                    }
                     FileSource::Hybrid { patch, .. } | FileSource::Patch(patch) => Some(patch),
                     FileSource::Whole => None,
                 };
                 let hash = hash_of_item(&plan.item, hash_key);
                 if let Some(name) = diff.zip(hash).and_then(|(p, h)| diff_name(p, &h, hash_key)) {
-                    add_index_range(&mut ranges, ctx, &name);
+                    add_index_range(&mut ranges, ctx, &name, true);
                 }
-                add_whole_ranges(&mut ranges, &plan.item, ctx, hash_key);
+                add_whole_ranges(&mut ranges, &plan.item, ctx, hash_key, true);
             }
         }
+    }
+    if !ranges.is_empty() {
+        ranges.extend(retries);
     }
     ranges.sort();
     ranges.dedup();
     ranges
 }
 
-fn add_whole_ranges(ranges: &mut Vec<String>, item: &FileMeta, ctx: &SourceCtx, key: HashKey) {
+fn add_whole_ranges(
+    ranges: &mut Vec<String>,
+    item: &FileMeta,
+    ctx: &SourceCtx,
+    key: HashKey,
+    slices: bool,
+) {
     if let Some(hash) = hash_of_item(item, key) {
-        add_index_range(ranges, ctx, &hash);
+        add_index_range(ranges, ctx, &hash, slices);
     }
     if item.installer.unwrap_or(false) && ctx.installer_end > 0 {
         ranges.push(format!("0-{}", ctx.installer_end.saturating_sub(1)));
     }
 }
 
-fn add_index_range(ranges: &mut Vec<String>, ctx: &SourceCtx, name: &str) {
+/// The entry's whole range, and with `slices` its parts under the policy.
+fn add_index_range(ranges: &mut Vec<String>, ctx: &SourceCtx, name: &str, slices: bool) {
     if let Some(file) = ctx.find(name) {
         let end = file.offset + file.size.saturating_sub(1);
         ranges.push(format!("{}-{}", file.offset, end));
+        if !slices {
+            return;
+        }
         ranges.extend(
             ctx.policy
                 .split(Range {
@@ -382,8 +404,7 @@ mod tests {
 
     #[test]
     fn patch_declares_delta_and_full_file() {
-        let mut ctx = SourceCtx::from_embedded(&[]);
-        ctx.restore_local_package(Some(&[emb("bbb", 100, 50), emb("aaa_bbb", 200, 21)]), None);
+        let ctx = SourceCtx::from_embedded(&[emb("bbb", 100, 50), emb("aaa_bbb", 200, 21)]);
         let disk = DiskFiles::new(vec![on_disk("app.exe", "aaa")]);
         let tasks = plan_tasks(
             &[item("app.exe", "bbb", false)],
@@ -405,16 +426,12 @@ mod tests {
 
     #[test]
     fn merged_members_declare_only_their_whole_files() {
-        let mut ctx = SourceCtx::from_embedded(&[]);
-        ctx.restore_local_package(
-            Some(&[
-                emb("h1", 100, 10),
-                emb("h2", 110, 10),
-                emb("d1_h1", 120, 4),
-                emb("d2_h2", 124, 4),
-            ]),
-            None,
-        );
+        let ctx = SourceCtx::from_embedded(&[
+            emb("h1", 100, 10),
+            emb("h2", 110, 10),
+            emb("d1_h1", 120, 4),
+            emb("d2_h2", 124, 4),
+        ]);
         let disk = DiskFiles::new(vec![on_disk("a.dll", "d1"), on_disk("b.dll", "d2")]);
         let tasks = plan_tasks(
             &[item("a.dll", "h1", false), item("b.dll", "h2", false)],
@@ -437,8 +454,7 @@ mod tests {
 
     #[test]
     fn installer_declares_prefix() {
-        let mut ctx = SourceCtx::from_embedded(&[]);
-        ctx.restore_local_package(Some(&[emb("upd", 80, 10)]), None);
+        let mut ctx = SourceCtx::from_embedded(&[emb("upd", 80, 10)]);
         ctx.installer_end = 80;
         let disk = DiskFiles::new(vec![]);
         let tasks = plan_tasks(

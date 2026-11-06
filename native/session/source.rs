@@ -110,6 +110,9 @@ pub struct SourceCtx {
     pub installer_end: usize,
     pub resource_version: Option<String>,
     pub policy: super::download_plan::Policy,
+    /// The session installs the package's own metadata: see
+    /// [`restore_local_package`](Self::restore_local_package).
+    local_package: bool,
     dfs2: Option<Dfs2Session>,
     plugin_session: bool,
     plugin: Option<Arc<dyn PluginHost>>,
@@ -137,6 +140,7 @@ impl SourceCtx {
             installer_end: 0,
             resource_version: None,
             policy: super::download_plan::Policy::default(),
+            local_package: false,
             dfs2: None,
             plugin_session: false,
             plugin: None,
@@ -172,11 +176,14 @@ impl SourceCtx {
             .unwrap_or_default()
     }
 
+    /// The session installs the package's own metadata: the index is the
+    /// package's, and its files are read from the package only.
     pub fn restore_local_package(
         &mut self,
         embedded_index: Option<&[Embedded]>,
         resource_version: Option<String>,
     ) {
+        self.local_package = true;
         self.index.clear();
         if let Some(index) = embedded_index {
             for file in index {
@@ -187,6 +194,22 @@ impl SourceCtx {
             self.installer_end = 0;
         }
         self.resource_version = resource_version;
+    }
+
+    pub fn local_package(&self) -> bool {
+        self.local_package
+    }
+
+    /// Whether a range of the package can get a URL: a DFS2 source has URLs
+    /// only within its session.
+    pub fn serves_ranges(&self) -> bool {
+        !matches!(
+            self.parsed,
+            Some(ParsedSource::Http {
+                remote: RemoteKind::Dfs2,
+                ..
+            })
+        ) || self.dfs2.is_some()
     }
 }
 

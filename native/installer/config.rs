@@ -119,6 +119,20 @@ pub async fn get_config_pre(
 }
 
 impl InstallerConfig {
+    /// Every block the package's `\0INDEX` lists was found by the scan where
+    /// the index places it; a truncated or damaged package fails this.
+    pub fn index_matches_blocks(&self) -> bool {
+        let (Some(index), Some(files)) = (&self.embedded_index, &self.embedded_files) else {
+            return true;
+        };
+        index.iter().all(|i| {
+            files
+                .iter()
+                .find(|e| e.name == i.name)
+                .is_some_and(|e| e.offset == i.offset && e.raw_offset == i.raw_offset)
+        })
+    }
+
     pub fn fill(
         mut self,
         install_path: &Path,

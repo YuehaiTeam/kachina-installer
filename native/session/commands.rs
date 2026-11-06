@@ -113,22 +113,9 @@ pub async fn prepare_gui(args: InstallArgs, preset: Option<SessionInput>) -> Arc
         None => return failed_runtime_with_config(config, Coded::bare(PKG_BROKEN)),
     };
 
-    if let (Some(index), Some(files)) = (&config.embedded_index, &config.embedded_files) {
-        let mut broken = false;
-        for i in index {
-            match files.iter().find(|e| e.name == i.name) {
-                None => broken = true,
-                Some(target) if target.offset != i.offset || target.raw_offset != i.raw_offset => {
-                    broken = true;
-                }
-                _ => {}
-            }
-        }
-        if broken {
-            tracing::error!("embedded index does not match packed files");
-            return ready_runtime(args, preset, config, project, Some(Coded::bare(PKG_BROKEN)))
-                .await;
-        }
+    if !config.index_matches_blocks() {
+        tracing::error!("embedded index does not match packed files");
+        return ready_runtime(args, preset, config, project, Some(Coded::bare(PKG_BROKEN))).await;
     }
 
     let is_uninstall = config.is_uninstall || args.uninstall;
