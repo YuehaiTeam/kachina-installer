@@ -30,8 +30,8 @@ async function runBuilder(args, label) {
 
 // release 的 kachina-sfx 是 GUI 子系统程序，经 shell 的 `& exe` 调用时 shell 不等它退出；
 // 直接拉起进程才能拿到退出码。
-function runSfx(exe, args, label) {
-  const result = spawnSync(exe, args, { encoding: 'utf8', windowsHide: true });
+function runSfx(exe, args, label, cwd) {
+  const result = spawnSync(exe, args, { encoding: 'utf8', windowsHide: true, cwd });
   if (result.error) {
     throw result.error;
   }
@@ -140,9 +140,10 @@ async function test() {
   // 停留期间核对解压结果，并验证另一次启动的 reaper 不删运行中的目录。
   console.log('Running portable package...');
   const cwdFile = path.join(testDir, 'cwd.txt');
+  const envFile = path.join(testDir, 'env.txt');
   const first = spawn(
     portablePath,
-    ['/c', 'cd > cwd.txt & ping -n 6 127.0.0.1 > nul & exit 42'],
+    ['/c', 'set PORTABLE_EXECUTABLE_>env.txt & cd > cwd.txt & ping -n 6 127.0.0.1 > nul & exit 42'],
     { cwd: testDir, windowsHide: true },
   );
   const firstExit = new Promise((resolve, reject) => {
@@ -159,6 +160,34 @@ async function test() {
     throw new Error('unexpected data.txt content: ' + data);
   }
   console.log(chalk.gray('  data.txt extracted next to app.exe'));
+
+  // 应用看到的 PORTABLE_EXECUTABLE_* 指向 sfx 本体；来源快捷方式以 appName 命名
+  const env = Object.fromEntries(
+    (await fs.readFile(envFile, 'utf8'))
+      .split(/\r?\n/)
+      .filter(Boolean)
+      .map((line) => line.split(/=(.*)/s).slice(0, 2)),
+  );
+  const expectedEnv = {
+    PORTABLE_EXECUTABLE_DIR: testDir,
+    PORTABLE_EXECUTABLE_FILE: portablePath,
+    PORTABLE_EXECUTABLE_APP_FILENAME: 'Sfx Test App',
+  };
+  for (const [key, value] of Object.entries(expectedEnv)) {
+    if (env[key]?.toLowerCase() !== value.toLowerCase()) {
+      throw new Error(key + '=' + env[key] + ', expected ' + value);
+    }
+  }
+  const link = await $`(New-Object -ComObject WScript.Shell).CreateShortcut(${path.join(runDir, 'Sfx Test App.lnk')}) | Select-Object TargetPath, Arguments, WorkingDirectory | ConvertTo-Json -Compress`;
+  const { TargetPath, Arguments, WorkingDirectory } = JSON.parse(link.stdout);
+  if (
+    TargetPath.toLowerCase() !== portablePath.toLowerCase() ||
+    Arguments !== '' ||
+    WorkingDirectory.toLowerCase() !== testDir.toLowerCase()
+  ) {
+    throw new Error('source link: ' + link.stdout);
+  }
+  console.log(chalk.gray('  portable env and source link point at the sfx'));
 
   await $`(Get-Item -LiteralPath ${runDir}).CreationTime = (Get-Date).AddDays(-2)`;
   const second = runSfx(portablePath, ['/c', 'exit 0'], 'reaper with a running instance');
@@ -212,6 +241,24 @@ async function test() {
     throw error;
   }
   console.log(chalk.gray('  dialog path extracted and ran the app'));
+
+  // 提权重启的实例：不再提权，标记不传给应用。这里不经 UAC，直接带标记启动
+  console.log('Running as the relaunched instance...');
+  const argsFile = path.join(testDir, 'args.txt');
+  const relaunched = runSfx(
+    portablePath,
+    ['--kachina-sfx-elevated', '/c', 'echo %CMDCMDLINE%>args.txt'],
+    'relaunched instance',
+    testDir,
+  );
+  if (relaunched.exitCode !== 0) {
+    throw new Error('relaunched instance failed: ' + relaunched.stderr);
+  }
+  const appCommandLine = await fs.readFile(argsFile, 'utf8');
+  if (appCommandLine.includes('--kachina-sfx-elevated') || !appCommandLine.includes('/c')) {
+    throw new Error('app command line of the relaunched instance: ' + appCommandLine);
+  }
+  console.log(chalk.gray('  relaunched instance passed only the user args'));
 
   console.log('Testing reaper...');
   const stamp = Date.now();

@@ -18,7 +18,7 @@ use crate::pack_format::{
     preferred_file_hash, read_json, relative_under_root, scan_embedded, Embedded,
 };
 use crate::verified_write::{copy_into, Expected, Failure, HashingWriter};
-use crate::{dialog, process, reaper, uac};
+use crate::{dialog, process, reaper, shell_link, uac};
 
 /// \0CONFIG 中 sfx 关心的子集；serde 忽略其余字段，与安装器配置双向兼容。
 #[derive(Debug, Deserialize)]
@@ -49,8 +49,12 @@ impl std::fmt::Display for Cancelled {
 
 impl std::error::Error for Cancelled {}
 
-/// 程序入口：返回进程退出码（正常路径透传应用退出码）。
-pub async fn run(console: bool) -> i32 {
+/// 提权重启自身时插在用户参数之前的标记；带标记的实例不再提权，也不把标记传给应用。
+pub const ELEVATED_ARG: &str = "--kachina-sfx-elevated";
+
+/// 程序入口：返回进程退出码（正常路径透传应用退出码）。`relaunched` 表示本进程是带
+/// [`ELEVATED_ARG`] 的提权重启实例。
+pub async fn run(console: bool, relaunched: bool) -> i32 {
     // 先清理历史残留，再做正事；失败不阻塞本次运行。
     reaper::sweep();
 
@@ -61,19 +65,24 @@ pub async fn run(console: bool) -> i32 {
             return 1;
         }
     };
-    let title = config
-        .window_title
-        .clone()
-        .or_else(|| config.app_name.clone())
-        .unwrap_or_else(|| "kachina-sfx".to_string());
-    match run_package(console, &mmap, &embedded, &config, &title).await {
+    match run_package(console, relaunched, &mmap, &embedded, &config).await {
         Ok(code) => code,
         // 临时目录已清理，用户主动取消不弹错误
         Err(err) if err.downcast_ref::<Cancelled>().is_some() => 1,
         Err(err) => {
-            report_error(console, &title, &format!("{err:#}"));
+            report_error(console, &config.title(), &format!("{err:#}"));
             1
         }
+    }
+}
+
+impl SfxConfig {
+    /// 对话框标题：`windowTitle`，其次 `appName`。
+    fn title(&self) -> String {
+        self.window_title
+            .clone()
+            .or_else(|| self.app_name.clone())
+            .unwrap_or_else(|| "kachina-sfx".to_string())
     }
 }
 
@@ -114,13 +123,13 @@ async fn open_self() -> Result<AsyncMmapFile> {
     AsyncMmapFile::open(path).await.context("MMAP_ERR")
 }
 
-/// 解压、运行、清理。创建临时目录之后的任何失败都先删掉临时目录再返回。
+/// 校验、按需提权重启、解压、运行、清理。创建临时目录之后的任何失败都先删掉临时目录再返回。
 async fn run_package(
     console: bool,
+    relaunched: bool,
     mmap: &AsyncMmapFile,
     embedded: &[Embedded],
     config: &SfxConfig,
-    title: &str,
 ) -> Result<i32> {
     let meta: RepoMetadata = read_json(mmap.as_slice(), embedded, "\0META")
         .context("LOCAL_CONFIG_ERR: malformed \\0META")?
@@ -133,8 +142,22 @@ async fn run_package(
     let plan = plan_extraction(embedded, &meta.hashed)?;
     let exe = exe_in_plan(&plan, &config.exe_name)?;
 
+    let args: Vec<OsString> = std::env::args_os().skip(1 + relaunched as usize).collect();
+    let self_elevated = uac::check_elevated().unwrap_or(false);
+    if wants_elevation(relaunched, self_elevated, &config.uac_strategy) {
+        match relaunch_elevated(&args).await {
+            Ok(code) => return Ok(code as i32),
+            Err(e) if is_uac_declined(&e) && config.uac_strategy == "force" => {
+                bail!("用户取消了管理员授权，应用未运行")
+            }
+            // prefer-admin：用户取消则在本进程内以普通权限继续
+            Err(e) if is_uac_declined(&e) => {}
+            Err(e) => return Err(e).context("以管理员身份启动失败"),
+        }
+    }
+
     let temp_dir = create_temp_dir()?;
-    let result = run_staged(console, mmap, &plan, &temp_dir, &exe, config, title).await;
+    let result = run_staged(console, mmap, &plan, &temp_dir, &exe, config, &args).await;
     if result.is_err() {
         cleanup_temp(&temp_dir).await;
     }
@@ -219,7 +242,7 @@ async fn run_staged(
     temp_dir: &Path,
     exe: &Path,
     config: &SfxConfig,
-    title: &str,
+    args: &[OsString],
 ) -> Result<i32> {
     let total: u64 = plan.iter().map(|i| i.output_size).sum();
     if let Some(free) = free_space(temp_dir) {
@@ -231,7 +254,7 @@ async fn run_staged(
     let progress = if console {
         None
     } else {
-        dialog::Progress::show(title, "正在解压…", total).ok()
+        dialog::Progress::show(&config.title(), "正在解压…", total).ok()
     };
     // 运行时是单线程的，这里没有别的任务；解压线程在 extract_all 里自己起
     extract_all(mmap.as_slice(), plan, temp_dir, progress.as_ref())?;
@@ -242,7 +265,7 @@ async fn run_staged(
         p.close().await;
     }
 
-    let code = launch_and_wait(&temp_dir.join(exe), &config.uac_strategy).await?;
+    let code = launch_and_wait(temp_dir, exe, config, args).await?;
     cleanup_temp(temp_dir).await;
     Ok(code as i32)
 }
@@ -385,37 +408,91 @@ fn decode_verify_write(
     Ok(())
 }
 
-/// 按 uacStrategy 拉起应用主体并等待退出，透传退出码。
-/// sfx 自身恒为 asInvoker；提权只发生在这一次启动上。
-async fn launch_and_wait(exe: &Path, strategy: &str) -> Result<u32> {
-    let args: Vec<OsString> = std::env::args_os().skip(1).collect();
-
-    let self_elevated = uac::check_elevated().unwrap_or(false);
-    // 未知取值与 prefer-admin 同义，与安装器 elevate_from_state 的默认分支一致
-    let want_elevated = !self_elevated && strategy != "prefer-user";
-
-    if !want_elevated {
-        return spawn_and_wait(exe, &args).await;
-    }
-
-    match uac::run_elevated(exe, process::join_args(&args)) {
-        // SAFETY: SEE_MASK_NOCLOSEPROCESS 返回的进程句柄归调用方所有，交给 Child 关闭
-        Ok(handle) => unsafe { process::Child::from_raw(handle.0) }
-            .wait()
-            .await
-            .context("等待应用退出失败"),
-        Err(e) if is_uac_declined(&e) && strategy == "force" => {
-            bail!("用户取消了管理员授权，应用未运行")
-        }
-        // prefer-admin：用户取消则回退普通启动
-        Err(e) if is_uac_declined(&e) => spawn_and_wait(exe, &args).await,
-        Err(e) => Err(e).context("启动应用失败"),
-    }
+/// 本进程是否要先提权重启自身再解压。未知取值与 prefer-admin 同义，与安装器
+/// elevate_from_state 的默认分支一致；提权重启的实例即使没拿到管理员权限（如 UAC
+/// 关闭的标准用户）也不再重启，避免循环。
+fn wants_elevation(relaunched: bool, self_elevated: bool, strategy: &str) -> bool {
+    !relaunched && !self_elevated && strategy != "prefer-user"
 }
 
-async fn spawn_and_wait(exe: &Path, args: &[OsString]) -> Result<u32> {
-    let child = process::spawn(exe, args, false).context("启动应用失败")?;
+/// 以 `runas` 重启自身并等待退出，返回它的退出码。cwd 由 `ShellExecuteExW` 继承；
+/// 调用者的环境变量不跨越提权，与直接经 UAC 启动一个程序一致。
+async fn relaunch_elevated(args: &[OsString]) -> io::Result<u32> {
+    let exe = std::env::current_exe()?;
+    let mut relaunch_args = Vec::with_capacity(args.len() + 1);
+    relaunch_args.push(OsString::from(ELEVATED_ARG));
+    relaunch_args.extend_from_slice(args);
+    let handle = uac::run_elevated(&exe, process::join_args(&relaunch_args))?;
+    // SAFETY: SEE_MASK_NOCLOSEPROCESS 返回的进程句柄归调用方所有，交给 Child 关闭
+    unsafe { process::Child::from_raw(handle.0) }.wait().await
+}
+
+/// 以本进程的权限拉起应用主体并等待退出，透传退出码。
+///
+/// 应用的环境额外带 electron-builder portable 目标的三个变量，指向 sfx 本体而不是临时目录；
+/// cwd 继承 sfx 的调用者。应用以临时目录里的 `.lnk`（目标是 sfx 本体、不带参数）作为
+/// 来源快捷方式启动，固定到任务栏的是 sfx 本体；快捷方式建不出来时照常启动。
+async fn launch_and_wait(
+    temp_dir: &Path,
+    exe: &Path,
+    config: &SfxConfig,
+    args: &[OsString],
+) -> Result<u32> {
+    let sfx = std::env::current_exe().context("CURRENT_EXE_ERR")?;
+    let app_filename = config
+        .app_name
+        .clone()
+        .filter(|name| !name.trim().is_empty())
+        .unwrap_or_else(|| {
+            exe.file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_default()
+        });
+    let env = portable_env(&sfx, &app_filename);
+    let link = create_source_link(temp_dir, &sfx, &app_filename);
+    let child = process::spawn_from_link(
+        temp_dir.join(exe),
+        args,
+        &env,
+        link.as_deref().map(Path::as_os_str),
+    )
+    .context("启动应用失败")?;
     child.wait().await.context("等待应用退出失败")
+}
+
+fn portable_env(sfx: &Path, app_filename: &str) -> Vec<(&'static str, OsString)> {
+    let dir = sfx.parent().unwrap_or(sfx);
+    vec![
+        ("PORTABLE_EXECUTABLE_DIR", dir.as_os_str().to_owned()),
+        ("PORTABLE_EXECUTABLE_FILE", sfx.as_os_str().to_owned()),
+        ("PORTABLE_EXECUTABLE_APP_FILENAME", app_filename.into()),
+    ]
+}
+
+/// 解压完成后在临时目录根部写 `<名称>.lnk`，目标是 sfx 本体，起始位置是 sfx 所在目录；
+/// 名称就是任务栏上显示的名称。同名文件已存在（包内文件，按文件系统自己的大小写规则判定）、
+/// 名称清洗后为空或写入失败时返回 `None`，不覆盖任何已解出的文件。
+fn create_source_link(temp_dir: &Path, sfx: &Path, name: &str) -> Option<PathBuf> {
+    let path = temp_dir.join(format!("{}.lnk", link_file_stem(name)?));
+    if path.symlink_metadata().is_ok() {
+        return None;
+    }
+    shell_link::create(sfx, &path, sfx.parent()?).ok()?;
+    Some(path)
+}
+
+/// 把名称变成可用的文件名主干：替换文件名非法字符，去掉 Windows 会剥掉的尾部点与空格。
+fn link_file_stem(name: &str) -> Option<String> {
+    let stem: String = name
+        .chars()
+        .map(|c| match c {
+            '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*' => '_',
+            c if c.is_control() => '_',
+            c => c,
+        })
+        .collect();
+    let stem = stem.trim().trim_end_matches(['.', ' ']);
+    (!stem.is_empty()).then(|| stem.to_string())
 }
 
 fn is_uac_declined(err: &io::Error) -> bool {
@@ -544,6 +621,46 @@ mod tests {
         let plan = plan_extraction(&embedded, &hashed).unwrap();
         let names: Vec<&str> = plan.iter().map(|item| item.file_name.as_str()).collect();
         assert_eq!(names, ["b", "d", "a", "c"]);
+    }
+
+    #[test]
+    fn only_an_unelevated_first_instance_asks_for_elevation() {
+        assert!(wants_elevation(false, false, "prefer-admin"));
+        assert!(wants_elevation(false, false, "force"));
+        assert!(wants_elevation(false, false, "unknown"));
+        assert!(!wants_elevation(false, false, "prefer-user"));
+        assert!(!wants_elevation(false, true, "force"));
+        assert!(!wants_elevation(true, false, "force"));
+    }
+
+    #[test]
+    fn link_name_is_a_usable_file_name() {
+        assert_eq!(link_file_stem("My App").as_deref(), Some("My App"));
+        assert_eq!(link_file_stem("A/B: C?").as_deref(), Some("A_B_ C_"));
+        assert_eq!(link_file_stem("App. . ").as_deref(), Some("App"));
+        assert_eq!(link_file_stem(" .. "), None);
+    }
+
+    #[test]
+    fn source_link_is_named_after_the_app_and_never_replaces_a_packaged_file() {
+        let sfx_dir = temp_dir();
+        let sfx = sfx_dir.join("Portable.exe");
+        std::fs::write(&sfx, b"MZ").unwrap();
+
+        let fresh = temp_dir();
+        let link = create_source_link(&fresh, &sfx, "My App").unwrap();
+        assert_eq!(link, fresh.join("My App.lnk"));
+        assert!(link.is_file());
+
+        // 包内同名文件只差非 ASCII 字母的大小写，文件系统视为同一个
+        let packaged = temp_dir();
+        std::fs::write(packaged.join("Ä.lnk"), b"packaged").unwrap();
+        assert!(create_source_link(&packaged, &sfx, "ä").is_none());
+        assert_eq!(std::fs::read(packaged.join("Ä.lnk")).unwrap(), b"packaged");
+
+        for dir in [sfx_dir, fresh, packaged] {
+            let _ = std::fs::remove_dir_all(dir);
+        }
     }
 
     /// 把每段内容压成一个 zstd 帧依次拼成"包"，返回包字节与对应的解压计划。

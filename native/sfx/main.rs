@@ -10,7 +10,7 @@ mod dialog;
 mod reaper;
 mod run;
 
-// 共享模块里 sfx 只用得到一部分（进程拉起、提权、元数据、包格式读取、校验写出），
+// 共享模块里 sfx 只用得到一部分（进程拉起、提权、快捷方式、元数据、包格式读取、校验写出），
 // 其余导出属于安装器侧，这里整体允许未使用。sfx 不接日志：被包装应用继承同一
 // 控制台，sfx 不往 stdout 写任何东西。
 #[path = "../utils/metadata.rs"]
@@ -22,6 +22,8 @@ mod pack_format;
 #[path = "../utils/process.rs"]
 #[allow(dead_code)]
 mod process;
+#[path = "../utils/shell_link.rs"]
+mod shell_link;
 #[path = "../utils/uac.rs"]
 #[allow(dead_code)]
 mod uac;
@@ -31,16 +33,20 @@ mod verified_write;
 
 fn main() {
     use windows::Win32::System::Console::{AttachConsole, GetConsoleWindow, ATTACH_PARENT_PROCESS};
+    let relaunched = std::env::args_os().nth(1).as_deref() == Some(run::ELEVATED_ARG.as_ref());
     // 从终端启动时接上父控制台：控制台与输出重定向（管道/文件）场景不弹
-    // 对话框（也不显示进度），错误写 stderr。
-    let attached = unsafe { AttachConsole(ATTACH_PARENT_PROCESS) }.is_ok();
-    let console = attached || unsafe { !GetConsoleWindow().0.is_null() } || stdio_redirected();
+    // 对话框（也不显示进度），错误写 stderr。提权重启的实例不接外层的控制台，
+    // 应用与直接经 UAC 启动时一样另开窗口。
+    let console = !relaunched
+        && (unsafe { AttachConsole(ATTACH_PARENT_PROCESS) }.is_ok()
+            || unsafe { !GetConsoleWindow().0.is_null() }
+            || stdio_redirected());
 
     let code = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .unwrap()
-        .block_on(run::run(console));
+        .block_on(run::run(console, relaunched));
     std::process::exit(code);
 }
 
