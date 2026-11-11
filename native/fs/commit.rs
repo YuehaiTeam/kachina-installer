@@ -17,9 +17,11 @@ use anyhow::Context;
 use serde::{Deserialize, Serialize};
 
 use crate::fs::staging::{is_safe_rel, join_rel, remove_tree, Staging};
+use crate::fs::write_staged_verified;
 use crate::ipc::{Progress, ProgressNotify};
 use crate::utils::code::{code_for_local_io, Attach, Coded, FILE_IO_FAILED, ROLLBACK_INCOMPLETE};
 use crate::utils::hash::hash_file;
+use crate::verified_write::{Algorithm, Failure};
 
 pub const JOURNAL_VERSION: &str = "kachina-journal 1";
 const BACKOFF_MS: &[u64] = &[50, 100, 200, 400, 800];
@@ -427,8 +429,19 @@ fn apply_copy(ctx: &Ctx, entry: &FileEntry, state: &mut FileState) -> anyhow::Re
     if let Some(parent) = target.parent() {
         std::fs::create_dir_all(parent).map_err(|e| local_err(e, &entry.rel))?;
     }
-    std::fs::copy(ctx.new_of(&entry.rel), &tmp).map_err(|e| local_err(e, &entry.rel))?;
-    let got = hash_file(ctx.algo, &tmp.to_string_lossy())?;
+    let algorithm =
+        Algorithm::from_name(ctx.algo).ok_or_else(|| anyhow::anyhow!("NO_HASH_ALGO_ERR"))?;
+    let mut staged =
+        std::fs::File::open(ctx.new_of(&entry.rel)).map_err(|e| local_err(e, &entry.rel))?;
+    // like every staged file, the copy is read back and on disk before it is
+    // renamed into place
+    let got = write_staged_verified(&mut staged, &tmp, algorithm, false, &|| false).map_err(
+        |failure| match failure {
+            Failure::Read(e) | Failure::Write(e) | Failure::ReadBack(e) => local_err(e, &entry.rel),
+            other => anyhow::anyhow!("copy verify failed: {other:?}")
+                .attach_with(FILE_IO_FAILED, &entry.rel),
+        },
+    )?;
     if got != entry.new {
         let _ = std::fs::remove_file(&tmp);
         return Err(anyhow::anyhow!("copy verify mismatch").attach_with(FILE_IO_FAILED, &entry.rel));

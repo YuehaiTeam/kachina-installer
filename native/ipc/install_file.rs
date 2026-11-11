@@ -2,10 +2,10 @@
 //!
 //! Network sources are opened as raw byte streams in the async context and
 //! bridged into a blocking task; local blocks are read straight from the
-//! mapped package. Decompression, patching, hashing and the final
-//! `FlushFileBuffers` all happen in that task on the one handle the file was
-//! created with, so a staged file is opened and closed exactly once and is
-//! never read back to verify it.
+//! mapped package. Decompression, patching, hashing, the read back that checks
+//! what the file system holds, and the final `FlushFileBuffers` all happen in
+//! that task on the one handle the file was created with, so a staged file is
+//! opened and closed exactly once.
 
 use crate::utils::code::{extract, Attach, Cancelled, Extracted, FILE_IO_FAILED, HASH_MISMATCH};
 use crate::verified_write::{
@@ -203,8 +203,10 @@ fn fail_with_insight(
     handle: &InsightHandle,
 ) -> crate::utils::error::TACommandError {
     if let Some(handle) = handle {
-        if let Ok(mut insight) = handle.lock() {
-            apply_insight_error(&mut insight, &err);
+        if !altered_after_write(&err) {
+            if let Ok(mut insight) = handle.lock() {
+                apply_insight_error(&mut insight, &err);
+            }
         }
         crate::utils::error::TACommandError::with_insight_handle(err, handle.clone())
     } else {
@@ -227,7 +229,42 @@ fn write_failure(failure: Failure, target: &Path) -> anyhow::Error {
             target.display()
         )
         .attach(HASH_MISMATCH),
+        Failure::ReadBack(e) => anyhow::Error::new(e).context("VERIFY_TARGET_ERR"),
+        Failure::Altered { written, read } => anyhow::Error::new(AlteredAfterWrite {
+            target: target.display().to_string(),
+            written,
+            read,
+        })
+        .attach(HASH_MISMATCH),
     }
+}
+
+/// The staged file read back differently from what was written. The source
+/// delivered the right bytes (they passed the size and hash checks on the way
+/// in), so the fault is on this machine: the file is retried like any
+/// `HASH_MISMATCH`, and no download request's insight records it.
+#[derive(Debug)]
+struct AlteredAfterWrite {
+    target: String,
+    written: String,
+    read: String,
+}
+
+impl std::fmt::Display for AlteredAfterWrite {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "File {} read back as {}, written as {}",
+            self.target, self.read, self.written
+        )
+    }
+}
+
+impl std::error::Error for AlteredAfterWrite {}
+
+fn altered_after_write(err: &anyhow::Error) -> bool {
+    err.chain()
+        .any(|e| e.downcast_ref::<AlteredAfterWrite>().is_some())
 }
 
 /// A failed read of the input. Data the decoder rejected is `HASH_MISMATCH`:
@@ -407,7 +444,9 @@ impl SlicedParts {
     /// decoder gave up, or every part when nothing narrows it down (a hash
     /// that does not match, a frame that runs past the end).
     fn blame(&self, err: &anyhow::Error) {
-        if !matches!(extract(err), Extracted::Coded(c) if c.code == HASH_MISMATCH) {
+        if !matches!(extract(err), Extracted::Coded(c) if c.code == HASH_MISMATCH)
+            || altered_after_write(err)
+        {
             return;
         }
         let before = err
@@ -577,18 +616,20 @@ fn staged_writer<'a>(
     ))
 }
 
-/// Check the written content, flush it to disk on the same handle and close
-/// it: rename is atomic only for metadata, so an unflushed file swapped in
-/// right before power loss would come back truncated.
+/// Check the written content, read it back, flush it to disk and close it, all
+/// on the handle it was written through. The read back checks what the file
+/// system holds after the write buffer, the page cache and any filter driver.
+/// The flush is there because rename is atomic only for metadata: an
+/// unflushed file swapped in right before power loss would come back
+/// truncated.
 fn commit_output(writer: StagedWriter<'_>, target: &Path) -> Result<u64> {
-    let (buffered, written) = writer.finish().map_err(|f| write_failure(f, target))?;
-    let file = buffered
-        .into_inner()
-        .map_err(|e| anyhow::Error::new(e.into_error()).context("WRITE_TARGET_ERR"))?;
+    let (file, written) = writer
+        .finish_verified()
+        .map_err(|f| write_failure(f, target))?;
     file.sync_all()
         .context("SYNC_TARGET_ERR")
         .attach(FILE_IO_FAILED)?;
-    Ok(written)
+    Ok(written.bytes)
 }
 
 fn write_direct(
@@ -726,8 +767,8 @@ pub async fn ipc_install_file(
                 .with_progress(|written| job_reporter.bytes(written as usize));
                 copy_into(&mut *base_input, &mut writer)
                     .map_err(|f| write_failure(f, &base_path))?;
-                let (buffered, base_len) =
-                    writer.finish().map_err(|f| write_failure(f, &base_path))?;
+                let (buffered, base) = writer.finish().map_err(|f| write_failure(f, &base_path))?;
+                let base_len = base.bytes;
                 drop(buffered);
                 base_file
                     .rewind()
@@ -1074,6 +1115,95 @@ mod tests {
             crate::utils::code::Extracted::Coded(c) if c.code == HASH_MISMATCH
         ));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A staged file changed between the write and the read back fails the
+    /// write as `HASH_MISMATCH`, though the bytes handed in match the
+    /// expected hash.
+    #[test]
+    fn file_changed_before_the_read_back_is_a_hash_mismatch() {
+        let data = crate::verified_write::testing::bytes(600 * 1024);
+        let dir = temp_dir();
+        let target = dir.join("out.bin");
+        let mut input = crate::verified_write::testing::TamperAtEnd::new(data.clone(), &target);
+        let never = || false;
+        let err = write_direct(
+            &mut input,
+            &args_for(&target, &data),
+            &target,
+            &reporter(Arc::new(Mutex::new(Vec::new()))),
+            &never,
+        )
+        .unwrap_err();
+        assert!(matches!(extract(&err), Extracted::Coded(c) if c.code == HASH_MISMATCH));
+        assert!(altered_after_write(&err));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A file that read back differently is retried as `HASH_MISMATCH`, and
+    /// no request that delivered its bytes is blamed, sliced or not; a
+    /// request that delivered wrong bytes still is.
+    #[test]
+    fn altered_read_back_is_not_recorded_on_the_request() {
+        let insight = || {
+            Arc::new(Mutex::new(InsightItem {
+                url: "http://x/f".into(),
+                ttfb: 0,
+                time: 0,
+                size: 0,
+                error: None,
+                range: Vec::new(),
+                mode: None,
+            }))
+        };
+        let altered = || {
+            write_failure(
+                Failure::Altered {
+                    written: "4 bytes aa".into(),
+                    read: "4 bytes bb".into(),
+                },
+                Path::new("x.bin"),
+            )
+        };
+        let wrong = || {
+            write_failure(
+                Failure::Hash {
+                    expected: "a".into(),
+                    actual: "b".into(),
+                },
+                Path::new("x.bin"),
+            )
+        };
+        assert!(matches!(extract(&altered()), Extracted::Coded(c) if c.code == HASH_MISMATCH));
+        let failed = fail_with_insight(altered(), &Some(insight()));
+        assert!(failed.insight.is_some_and(|i| i.error.is_none()));
+        let failed = fail_with_insight(wrong(), &Some(insight()));
+        assert_eq!(
+            failed.insight.and_then(|i| i.error).as_deref(),
+            Some(HASH_MISMATCH)
+        );
+
+        let parts = SlicedParts {
+            lens: vec![2, 2],
+            insights: Arc::new(Mutex::new(vec![Some(insight()), Some(insight())])),
+        };
+        let blamed = |parts: &SlicedParts| -> Vec<Option<String>> {
+            let insights = parts.insights.lock().unwrap();
+            insights
+                .iter()
+                .map(|i| i.as_ref().unwrap().lock().unwrap().error.clone())
+                .collect()
+        };
+        parts.blame(&altered());
+        assert_eq!(blamed(&parts), [None, None]);
+        parts.blame(&wrong());
+        assert_eq!(
+            blamed(&parts),
+            [
+                Some(HASH_MISMATCH.to_string()),
+                Some(HASH_MISMATCH.to_string())
+            ]
+        );
     }
 
     #[test]

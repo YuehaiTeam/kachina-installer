@@ -572,7 +572,7 @@ mod tests {
 
     #[test]
     fn cleared_layout_header_located_at_pe_end() {
-        // 卸载器/更新器：clear_index_mark 把布局头抹零
+        // 卸载器/更新器：写出时布局头已抹零
         let mut pack = build(pe(0x400), &files());
         write_layout(&mut pack.bytes, [0; 5]);
         let found = scan_embedded(&pack.bytes);

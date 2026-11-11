@@ -22,12 +22,13 @@ use crate::{
     ipc::{Progress, ProgressNotify},
     local::mmap,
     utils::{
-        code::Cancelled,
+        code::{Attach, Cancelled, FILE_IO_FAILED},
         error::{TACommandError, TAResult},
         hash::{hash_file_with, HASH_BUFFER_SIZE},
         net_failure::{self, NetFailure, Phase},
         url::HttpContextExt,
     },
+    verified_write::{copy_into, create_file, Algorithm, Expected, Failure, HashingWriter},
     DOWNLOAD_CLIENT,
 };
 use anyhow::{Context, Result};
@@ -859,12 +860,64 @@ pub async fn create_local_stream(
     Ok(Box::new(reader))
 }
 
-/// [`create_staged_file`] for blocking writers; the handle is unbuffered.
+/// [`create_staged_file`] for blocking writers; the handle is unbuffered and
+/// also readable, for the read back after the write.
 pub fn create_staged_file_blocking(path: &Path) -> Result<std::fs::File, anyhow::Error> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).context("CREATE_PARENT_DIR_ERR")?;
     }
-    std::fs::File::create(path).context("CREATE_TARGET_FILE_ERR")
+    create_file(path).context("CREATE_TARGET_FILE_ERR")
+}
+
+/// Write `input` to a new file at `path` through one handle: hash it while
+/// writing, read it back, flush it to disk. Returns the hash of the content,
+/// which the read back has confirmed the file holds. `clear_layout_header`
+/// clears the packed layout header of an installer image before hashing. A
+/// failure removes the file.
+pub fn write_staged_verified(
+    input: &mut dyn std::io::Read,
+    path: &Path,
+    algorithm: Algorithm,
+    clear_layout_header: bool,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<String, Failure> {
+    let written = create_file(path).map_err(Failure::Write).and_then(|file| {
+        let mut writer = HashingWriter::new(
+            std::io::BufWriter::with_capacity(256 * 1024, file),
+            Expected::default(),
+            clear_layout_header,
+            cancelled,
+        )
+        .with_algorithm(algorithm);
+        copy_into(input, &mut writer)?;
+        let (file, written) = writer.finish_verified()?;
+        file.sync_all().map_err(Failure::Write)?;
+        Ok(written)
+    });
+    match written {
+        Ok(written) => Ok(written
+            .hash()
+            .expect("the writer was given an algorithm")
+            .to_string()),
+        Err(failure) => {
+            let _ = std::fs::remove_file(path);
+            Err(failure)
+        }
+    }
+}
+
+/// The error of a failed [`write_staged_verified`] at `path`. A cancel stays
+/// `Cancelled`; an io error keeps its cause, for the caller to infer the code
+/// from; a file that read back differently is `FILE_IO_FAILED`.
+pub fn staged_write_error(failure: Failure, path: &Path) -> anyhow::Error {
+    let at = path.display();
+    match failure {
+        Failure::Cancelled => Cancelled.into(),
+        Failure::Read(e) => anyhow::Error::new(e).context(format!("READ_SOURCE_ERR: {at}")),
+        Failure::Write(e) => anyhow::Error::new(e).context(format!("WRITE_TARGET_ERR: {at}")),
+        Failure::ReadBack(e) => anyhow::Error::new(e).context(format!("VERIFY_TARGET_ERR: {at}")),
+        other => anyhow::anyhow!("File {at} failed verification: {other:?}").attach(FILE_IO_FAILED),
+    }
 }
 
 /// Create a file under the staging directory (parents included). This is the
@@ -882,21 +935,6 @@ pub async fn create_staged_file(
         .await
         .context("CREATE_TARGET_FILE_ERR")?;
     Ok(tokio::io::BufWriter::new(file))
-}
-
-/// `FlushFileBuffers` on a finished staged file: rename is atomic only for
-/// metadata, so an unflushed file swapped in right before power loss would
-/// come back truncated.
-pub async fn sync_staged_file(path: &Path) -> Result<(), anyhow::Error> {
-    // Windows requires a writable handle for FlushFileBuffers.
-    let file = tokio::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(path)
-        .await
-        .context("OPEN_TARGET_ERR")?;
-    file.sync_all().await.context("SYNC_TARGET_ERR")?;
-    Ok(())
 }
 
 pub async fn progressed_copy(
@@ -956,6 +994,48 @@ mod tests {
         file.write_all(bytes).unwrap();
         file.flush().unwrap();
         path
+    }
+
+    /// The returned hash is that of the file's content. A file changed before
+    /// the read back, or a source that fails part way, is an error that leaves
+    /// no file behind.
+    #[test]
+    fn staged_write_returns_the_file_hash_and_removes_a_failed_file() {
+        use crate::verified_write::testing::{bytes, TamperAtEnd};
+        struct Broken;
+        impl std::io::Read for Broken {
+            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::other("source failed"))
+            }
+        }
+        let dir = temp_dir();
+        let path = dir.join("staged.bin");
+        let data = bytes(600 * 1024);
+        let never = || false;
+        let write = |input: &mut dyn std::io::Read| {
+            write_staged_verified(input, &path, Algorithm::Md5, false, &never)
+        };
+
+        let hash = write(&mut data.as_slice()).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), data);
+        assert_eq!(
+            hash,
+            crate::utils::hash::hash_file("md5", &path.to_string_lossy()).unwrap()
+        );
+
+        let altered = write(&mut TamperAtEnd::new(data.clone(), &path)).unwrap_err();
+        assert!(matches!(altered, Failure::Altered { .. }));
+        assert!(!path.exists());
+        let coded = staged_write_error(altered, &path);
+        assert!(matches!(
+            crate::utils::code::extract(&coded),
+            crate::utils::code::Extracted::Coded(c) if c.code == FILE_IO_FAILED
+        ));
+
+        let mut cut = std::io::Read::chain(&data[..300 * 1024], Broken);
+        assert!(matches!(write(&mut cut), Err(Failure::Read(_))));
+        assert!(!path.exists());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]

@@ -297,8 +297,8 @@ fn extract_all(
     }
 }
 
-/// 解码一个数据块到临时目录，边写边算 hash；失败时删掉半成品文件。
-/// 临时目录是本进程刚建的空目录，`rel` 只含普通组件，路径不会落到目录之外。
+/// 解码一个数据块到临时目录，边写边算 hash，写完从同一个句柄读回核对；失败时删掉半成品
+/// 文件。临时目录是本进程刚建的空目录，`rel` 只含普通组件，路径不会落到目录之外。
 fn extract_one(
     package: &[u8],
     item: &ExtractItem,
@@ -327,7 +327,7 @@ fn decode_verify_write(
     let mut decoder = zstd::stream::read::Decoder::with_buffer(std::io::Cursor::new(block))
         .context("初始化解压失败")?
         .single_frame();
-    let file = std::fs::File::create(out_path)
+    let file = crate::verified_write::create_file(out_path)
         .with_context(|| format!("创建文件失败 {}", out_path.display()))?;
 
     let cancelled =
@@ -368,10 +368,17 @@ fn decode_verify_write(
                 "{} 校验失败：期望 {expected}，实际 {actual}",
                 item.file_name
             ),
+            Failure::ReadBack(e) => {
+                anyhow::Error::new(e).context(format!("读回失败 {}", out_path.display()))
+            }
+            Failure::Altered { written, read } => anyhow::anyhow!(
+                "{} 读回校验失败：写入 {written}，读回 {read}",
+                item.file_name
+            ),
         }
     };
     copy_into(&mut decoder, &mut writer).map_err(failed)?;
-    writer.finish().map_err(failed)?;
+    writer.finish_verified().map_err(failed)?;
     Ok(())
 }
 

@@ -5,7 +5,10 @@ use anyhow::Context;
 use sha2::Digest;
 
 use crate::{
-    fs::{create_http_stream, create_staged_file, progressed_copy},
+    fs::{
+        create_http_stream, create_staged_file, progressed_copy, staged_write_error,
+        write_staged_verified,
+    },
     ipc::{Progress, ProgressNotify},
     utils::{
         code::{Attach, Cancelled, Coded, MIRRORC_FAILED},
@@ -13,6 +16,7 @@ use crate::{
         metadata::RepoMetadata,
         url::HttpContextExt,
     },
+    verified_write::Algorithm,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -167,30 +171,12 @@ pub fn run_mirrorc_install_sync(
                 .into_ta_result()
                 .context("CREATE_DIR_ERR")?;
         }
-        let mut out_file = std::fs::File::create(&out_path)
-            .into_ta_result()
-            .context(format!("CREATE_FILE_ERR: {}", out_path.display()))?;
-        let mut hasher = chksum_md5::MD5::new();
-        let mut buf = vec![0u8; 256 * 1024];
-        loop {
-            check_stop(stop)?;
-            let n = file
-                .read(&mut buf)
-                .into_ta_result()
-                .context(format!("READ_ENTRY_ERR: {}", out_path.display()))?;
-            if n == 0 {
-                break;
-            }
-            hasher.update(&buf[..n]);
-            std::io::Write::write_all(&mut out_file, &buf[..n])
-                .into_ta_result()
-                .context(format!("WRITE_FILE_ERR: {}", out_path.display()))?;
-        }
-        out_file.sync_all().into_ta_result()?;
-        files.push((
-            file_name.replace('\\', "/"),
-            hasher.digest().to_hex_lowercase(),
-        ));
+        let cancelled = || stop.is_cancelled();
+        // the archive carries no per-file hash: the md5 taken while writing is
+        // what the journal records, and the read back confirms the file holds it
+        let md5 = write_staged_verified(&mut file, &out_path, Algorithm::Md5, false, &cancelled)
+            .map_err(|failure| staged_write_error(failure, &out_path))?;
+        files.push((file_name.replace('\\', "/"), md5));
         notify(Progress::Extract {
             file: file_name,
             done: (i + 1) as u64,

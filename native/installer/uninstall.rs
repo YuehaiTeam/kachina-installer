@@ -1,12 +1,14 @@
 use anyhow::Context;
 use std::io;
 use std::path::{Path, PathBuf};
-use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
+use tokio::io::AsyncReadExt;
 
 use crate::fs::staging::{staging_root, Staging};
+use crate::fs::{staged_write_error, write_staged_verified};
 use crate::utils::code::{Coded, FILE_IO_FAILED};
 use crate::utils::error::TAResult;
 use crate::utils::process;
+use crate::verified_write::Algorithm;
 
 lazy_static::lazy_static!(
     /// Staging directory to remove after this process exits. It holds the
@@ -304,6 +306,31 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
+    /// The installer's own image is staged without its layout header; a copied
+    /// file keeps every byte, layout header included.
+    #[test]
+    fn only_the_own_image_loses_its_layout_header() {
+        let dir =
+            crate::fs::staging::scratch_file(&format!("kachina-image-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut image: Vec<u8> = (0..8192u32).map(|i| (i % 249) as u8).collect();
+        image[0x4E..0x4E + 18].copy_from_slice(crate::pack_format::LAYOUT_MARKER);
+        image[0x4E + 18..0x4E + 38].fill(0x5A);
+        let mut cleared = image.clone();
+        crate::pack_format::clear_layout(&mut cleared);
+
+        let own = dir.join("uninstall.exe");
+        write_image(ImageSource::Own(image.clone()), &own, Algorithm::Md5).unwrap();
+        assert_eq!(std::fs::read(&own).unwrap(), cleared);
+
+        let source = dir.join("source.exe");
+        std::fs::write(&source, &image).unwrap();
+        let copy = dir.join("updater.exe");
+        write_image(ImageSource::File(source), &copy, Algorithm::Xxh).unwrap();
+        assert_eq!(std::fs::read(&copy).unwrap(), image);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn staging_cleanup_deletes_ampersand_path_and_spares_sibling() {
         let root =
@@ -399,6 +426,20 @@ pub struct StagedImage {
 pub async fn stage_self_image(args: StageSelfImageArgs) -> TAResult<Vec<StagedImage>> {
     let new_dir = Path::new(&args.new_dir);
     let install = Path::new(&args.install_dir);
+    let algorithm = Algorithm::from_name(&args.hash_algorithm)
+        .ok_or_else(|| anyhow::anyhow!("NO_HASH_ALGO_ERR"))?;
+    let own_image = match &args.copy_from {
+        Some(_) => None,
+        None => {
+            let mut image = crate::local::get_base_with_config().await?;
+            let mut bytes = Vec::new();
+            image
+                .read_to_end(&mut bytes)
+                .await
+                .context("CREATE_UNINSTALLER_ERR")?;
+            Some(bytes)
+        }
+    };
     let mut out = Vec::new();
     for name in &args.names {
         if !crate::fs::staging::is_safe_rel(name) {
@@ -410,29 +451,15 @@ pub async fn stage_self_image(args: StageSelfImageArgs) -> TAResult<Vec<StagedIm
                 .await
                 .context("CREATE_DIR_ERR")?;
         }
-        match &args.copy_from {
-            Some(src) => {
-                tokio::fs::copy(src, &staged)
-                    .await
-                    .context("CREATE_UPDATER_ERR")?;
-            }
-            None => {
-                let mut image = crate::local::get_base_with_config().await?;
-                let file = tokio::fs::File::create(&staged)
-                    .await
-                    .context("CREATE_UNINSTALLER_ERR")?;
-                let mut writer = tokio::io::BufWriter::new(file);
-                tokio::io::copy(&mut image, &mut writer)
-                    .await
-                    .context("CREATE_UNINSTALLER_ERR")?;
-                writer.flush().await.context("CREATE_UNINSTALLER_ERR")?;
-                drop(writer);
-                clear_index_mark(&staged).await?;
-            }
-        }
-        crate::fs::sync_staged_file(&staged).await?;
-        let hash =
-            crate::utils::hash::run_hash(&args.hash_algorithm, &staged.to_string_lossy()).await?;
+        let source = match (&args.copy_from, &own_image) {
+            (Some(src), _) => ImageSource::File(PathBuf::from(src)),
+            (None, Some(bytes)) => ImageSource::Own(bytes.clone()),
+            (None, None) => unreachable!("own image is read when nothing is copied"),
+        };
+        let target = staged.clone();
+        let hash = tokio::task::spawn_blocking(move || write_image(source, &target, algorithm))
+            .await
+            .context("STAGE_IMAGE_THREAD_ERR")??;
         let existing = crate::fs::staging::join_rel(install, name);
         let old = if existing.is_file() {
             crate::utils::hash::run_hash(&args.hash_algorithm, &existing.to_string_lossy())
@@ -454,34 +481,28 @@ pub async fn stage_self_image(args: StageSelfImageArgs) -> TAResult<Vec<StagedIm
     }
     Ok(out)
 }
-pub async fn clear_index_mark(path: &PathBuf) -> anyhow::Result<()> {
-    // open again with rw
-    let mut output_file = tokio::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(&path)
-        .await
-        .context("SELF_UPDATE_ERR")?;
-    // 布局头在 DOS stub 里，读文件开头一段即可
-    let mut head = Vec::with_capacity(512);
-    (&mut output_file)
-        .take(512)
-        .read_to_end(&mut head)
-        .await
-        .context("SELF_UPDATE_ERR")?;
-    if crate::pack_format::clear_layout(&mut head) {
-        output_file
-            .seek(tokio::io::SeekFrom::Start(0))
-            .await
-            .context("SELF_UPDATE_ERR")?;
-        output_file
-            .write_all(&head)
-            .await
-            .context("SELF_UPDATE_ERR")?;
-    }
-    // close file
-    output_file.flush().await.context("SELF_UPDATE_ERR")?;
-    output_file.sync_all().await.context("SELF_UPDATE_ERR")?;
-    drop(output_file);
-    Ok(())
+
+/// Where a staged image comes from.
+enum ImageSource {
+    /// The running installer's `base + config`; its layout header is cleared
+    /// on the way out, since the image carries no packed data.
+    Own(Vec<u8>),
+    /// An existing file, duplicated byte for byte.
+    File(PathBuf),
+}
+
+/// Write one image to `staged` and return the hash of what the file holds
+/// (see [`write_staged_verified`]).
+fn write_image(source: ImageSource, staged: &Path, algorithm: Algorithm) -> anyhow::Result<String> {
+    let never = || false;
+    let written = match source {
+        ImageSource::Own(bytes) => {
+            write_staged_verified(&mut bytes.as_slice(), staged, algorithm, true, &never)
+        }
+        ImageSource::File(path) => {
+            let mut file = std::fs::File::open(path).context("CREATE_UPDATER_ERR")?;
+            write_staged_verified(&mut file, staged, algorithm, false, &never)
+        }
+    };
+    written.map_err(|failure| staged_write_error(failure, staged))
 }
