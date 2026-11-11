@@ -1190,6 +1190,13 @@ fn emit_insight(
 /// segment, 0.3 to 1 MB in production packages.
 const UPDATE_CHECK_LIMIT: std::time::Duration = std::time::Duration::from_secs(5);
 
+/// Whether the session asks its source for metadata. An offline package run
+/// unattended (`-S` / `-I`) installs the version it carries whatever the
+/// source has (see `pick_metadata`), so it does not ask; `-O` always asks.
+fn asks_source(offline: bool, settings: &Settings) -> bool {
+    !offline || settings.online || !settings.auto_answer
+}
+
 /// Whether the package embeds a block for every file its metadata lists.
 fn carries_every_file(meta: &RepoMetadata, embedded: &[Embedded]) -> bool {
     let Ok(key) = meta.hash_key() else {
@@ -1292,8 +1299,8 @@ async fn run_dfs_install(
     // an offline package only checks for a newer version; past the limit it
     // installs what it carries, as on any other failure of the check
     let limit = (offline && !settings.online).then_some(UPDATE_CHECK_LIMIT);
-    let online_meta = txn
-        .timed("metadata", async {
+    let online_meta = if asks_source(offline, settings) {
+        txn.timed("metadata", async {
             let fetch = fetch_metadata(
                 &settings.source_uri,
                 settings.dfs_extras.as_deref(),
@@ -1318,7 +1325,11 @@ async fn run_dfs_install(
                 }
             }
         })
-        .await;
+        .await
+    } else {
+        tracing::info!("unattended offline install, source not asked");
+        None
+    };
 
     let (mut latest, used_online) =
         pick_metadata(settings, config, ui, offline_meta, online_meta, online_err).await?;
@@ -4394,6 +4405,24 @@ mod tests {
         }
         // the large files are fetched in slices
         assert!(most_parts > 1);
+    }
+
+    #[test]
+    fn only_an_unattended_offline_install_skips_its_source() {
+        let unattended = test_settings(std::path::Path::new("x"), false);
+        let attended = Settings {
+            auto_answer: false,
+            ..test_settings(std::path::Path::new("x"), false)
+        };
+        let forced_online = Settings {
+            online: true,
+            ..test_settings(std::path::Path::new("x"), false)
+        };
+        assert!(!asks_source(true, &unattended));
+        assert!(asks_source(true, &attended));
+        assert!(asks_source(true, &forced_online));
+        // an online installer has nothing to install without its source
+        assert!(asks_source(false, &unattended));
     }
 
     #[test]
