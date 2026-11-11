@@ -68,7 +68,6 @@ windows = { version = "0.62", features = [
 
 nt_version = "0.1"
 lazy_static = "1.5"
-mslnk = "=0.1"
 twox-hash = "2.1.0"
 pin-project = "1.1.7"
 fmmap = { version = "0.4", features = ["tokio"] }

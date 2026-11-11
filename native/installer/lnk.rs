@@ -36,8 +36,15 @@ pub async fn create_lnk(target: String, lnk: String) -> TAResult<()> {
     tokio::fs::create_dir_all(lnk_dir)
         .await
         .context("CREATE_LNK_ERR")?;
-    let sl = mslnk::ShellLink::new(target).context("CREATE_LNK_ERR")?;
-    sl.create_lnk(lnk).context("CREATE_LNK_ERR")?;
+    let target = target.to_path_buf();
+    let lnk = lnk.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        let working_dir = target.parent().unwrap_or(&target);
+        crate::utils::shell_link::create(&target, &lnk, working_dir)
+    })
+    .await
+    .context("CREATE_LNK_ERR")?
+    .context("CREATE_LNK_ERR")?;
     Ok(())
 }
 

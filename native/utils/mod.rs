@@ -12,6 +12,7 @@ pub mod metadata;
 pub mod net_failure;
 pub mod process;
 pub mod sentry;
+pub mod shell_link;
 pub mod taskdialog;
 pub mod uac;
 pub mod url;
