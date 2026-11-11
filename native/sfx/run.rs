@@ -153,6 +153,8 @@ struct ExtractItem {
     block: Embedded,
 }
 
+/// 解压计划：meta 的每个文件配上它的数据块，按解出大小降序排列，大小相同的保持 meta
+/// 顺序。解压线程按这个顺序领取，最大的文件最先开始，收尾时不会只剩一两个线程在解大文件。
 fn plan_extraction(embedded: &[Embedded], hashed: &[FileMeta]) -> Result<Vec<ExtractItem>> {
     let mut plan = Vec::with_capacity(hashed.len());
     for file in hashed {
@@ -173,6 +175,7 @@ fn plan_extraction(embedded: &[Embedded], hashed: &[FileMeta]) -> Result<Vec<Ext
             block: block.clone(),
         });
     }
+    plan.sort_by_key(|item| std::cmp::Reverse(item.output_size));
     Ok(plan)
 }
 
@@ -518,6 +521,29 @@ mod tests {
         assert!(
             format!("{:#}", exe_in_plan(&plan, "../App.exe").unwrap_err()).contains("路径不安全")
         );
+    }
+
+    #[test]
+    fn plan_puts_the_largest_files_first() {
+        let embedded = vec![Embedded {
+            name: "h".into(),
+            offset: 0,
+            raw_offset: 0,
+            size: 1,
+        }];
+        let hashed: Vec<FileMeta> = [("a", 5), ("b", 900), ("c", 5), ("d", 40)]
+            .into_iter()
+            .map(|(name, size)| FileMeta {
+                file_name: name.into(),
+                size,
+                md5: None,
+                xxh: Some("h".into()),
+                installer: None,
+            })
+            .collect();
+        let plan = plan_extraction(&embedded, &hashed).unwrap();
+        let names: Vec<&str> = plan.iter().map(|item| item.file_name.as_str()).collect();
+        assert_eq!(names, ["b", "d", "a", "c"]);
     }
 
     /// 把每段内容压成一个 zstd 帧依次拼成"包"，返回包字节与对应的解压计划。

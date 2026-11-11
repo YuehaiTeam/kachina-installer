@@ -15,14 +15,16 @@ pub fn sweep() {
     };
     let now = SystemTime::now();
     for entry in entries.flatten() {
-        let path = entry.path();
-        if !path.is_dir() {
+        // 先按名字筛：名字来自目录列举本身，其余检查每个条目都要再访问一次文件系统
+        if !entry
+            .file_name()
+            .to_str()
+            .is_some_and(|name| name.starts_with(TEMP_PREFIX))
+        {
             continue;
         }
-        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
-            continue;
-        };
-        if !name.starts_with(TEMP_PREFIX) {
+        let path = entry.path();
+        if !path.is_dir() {
             continue;
         }
         // 读不到创建时间时无法判断年龄，留给下次或操作系统
