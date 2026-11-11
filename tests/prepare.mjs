@@ -40,10 +40,16 @@ const rnd_100k_5 = crypto.randomBytes(1024 * 1000);
 const rnd_100k_6 = crypto.randomBytes(1024 * 500);
 
 async function createAppFiles() {
+  // app.exe 以 cmd.exe 映像开头，版本标记与数据接在映像之后：shell 只给合法 PE 建快捷方式，
+  // 映像之后的数据不影响 PE 解析
+  const peImage = await fs.readFile(
+    path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'cmd.exe'),
+  );
+
   // === V1 文件 ===
   // app.exe - 主程序
   const appExeV1 = Buffer.concat([
-    Buffer.from('MZ'), // PE签名
+    peImage,
     Buffer.from('APP_V1'), // 版本标记
     rnd_100k_1,
     rnd_100k_2,
@@ -87,7 +93,7 @@ async function createAppFiles() {
   // === V2 文件 ===
   // app.exe - 更新的主程序
   const appExeV2 = Buffer.concat([
-    Buffer.from('MZ'),
+    peImage,
     Buffer.from('APP_V2'), // 版本标记
     rnd_100k_1, // 保持部分内容相同
     rnd_100k_2,

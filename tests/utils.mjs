@@ -82,6 +82,35 @@ export async function removeUserShortcuts(appName) {
   await fs.remove(path.join(programs, appName));
 }
 
+/** 新安装建的桌面与开始菜单快捷方式都指向 `<installDir>\<exeName>`、起始位置为安装目录；返回不符项。 */
+export async function verifyUserShortcuts(appName, installDir, exeName) {
+  const { $, usePwsh } = await import('zx');
+  usePwsh();
+  const failed = [];
+  const expectedTarget = path.join(installDir, exeName).toLowerCase();
+  const desktop = (await $`[Environment]::GetFolderPath('Desktop')`.quiet()).stdout.trim();
+  const programs = (await $`[Environment]::GetFolderPath('Programs')`.quiet()).stdout.trim();
+  for (const lnk of [
+    path.join(desktop, `${appName}.lnk`),
+    path.join(programs, appName, `${appName}.lnk`),
+  ]) {
+    if (!(await fs.pathExists(lnk))) {
+      failed.push(`Missing shortcut: ${lnk}`);
+      continue;
+    }
+    const read =
+      await $`(New-Object -ComObject WScript.Shell).CreateShortcut(${lnk}) | Select-Object TargetPath, WorkingDirectory | ConvertTo-Json -Compress`.quiet();
+    const { TargetPath, WorkingDirectory } = JSON.parse(read.stdout);
+    if (
+      TargetPath.toLowerCase() !== expectedTarget ||
+      WorkingDirectory.toLowerCase() !== installDir.toLowerCase()
+    ) {
+      failed.push(`Shortcut ${lnk}: target=${TargetPath} start-in=${WorkingDirectory}`);
+    }
+  }
+  return failed;
+}
+
 export function normalizeInstallPath(p) {
   return p
     .replaceAll('/', '\\')

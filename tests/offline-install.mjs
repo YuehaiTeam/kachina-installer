@@ -6,6 +6,8 @@ import {
   runInstaller,
   assertExitOk,
   assertStagingRemoved,
+  removeUserShortcuts,
+  verifyUserShortcuts,
 } from './utils.mjs';
 import 'zx/globals';
 import { usePwsh } from 'zx';
@@ -19,7 +21,10 @@ async function test() {
   console.log(`Test directory: ${testDir}`);
   console.log(`Installer: ${installerPath}`);
 
+  // 先清掉别的测试留下的同名快捷方式，安装后读到的只能是本次建的
+  const APP_NAME = 'Test Application';
   try {
+    await removeUserShortcuts(APP_NAME);
     // 执行离线安装
     console.log('Running offline installation...');
     const result = await runInstaller(
@@ -40,6 +45,7 @@ async function test() {
 
     console.log('Verifying installed files...');
     const verification = await verifyFiles(testDir, expectedFiles);
+    verification.failed.push(...(await verifyUserShortcuts(APP_NAME, testDir, 'app.exe')));
 
     // 输出结果
     if (verification.failed.length === 0) {
@@ -57,6 +63,7 @@ async function test() {
     console.error(chalk.red('Test failed:'), error.message);
     process.exit(1);
   } finally {
+    await removeUserShortcuts(APP_NAME);
     await cleanupTestDir(testDir);
   }
   process.exit(0);
