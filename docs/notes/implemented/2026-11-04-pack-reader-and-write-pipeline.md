@@ -10,7 +10,7 @@ Status: implemented
 
 `replace-bin --base` 换上的 base 不带包内应用的名称、窗口标题与图标。三个二进制共用的资源脚本 `resources/app.rc` 没有 `VERSIONINFO`，而 rcedit 只改写已有的 StringFileInfo，pack 写入的 `windowTitle`、`appName` 同样进不了产物。
 
-安装器每写出一个暂存文件要打开三次：写完关闭，重新打开把全文件读一遍算 hash，再以写权限打开一次做 `FlushFileBuffers`；需要抹布局头时，算 hash 之前还要打开一次改写文件开头 256 字节。重读拿到的是刚写入页缓存的同一份数据。zstd 解码与写文件用异步的 `ZstdDecoder` 与 `tokio::fs::File`：16 路本地解压的 CPU 解码跑在异步工作线程上，每次写入都经 `spawn_blocking` 调度。合并请求在同一个异步任务里依次读一个成员、写盘、重读、刷盘，期间网络流停读。
+安装器每写出一个暂存文件要打开三次：写完关闭，重新打开把全文件读一遍算 hash，再以写权限打开一次做 `FlushFileBuffers`；需要抹布局头时，算 hash 之前还要打开一次改写文件开头 256 字节。zstd 解码与写文件用异步的 `ZstdDecoder` 与 `tokio::fs::File`：16 路本地解压的 CPU 解码跑在异步工作线程上，每次写入都经 `spawn_blocking` 调度。合并请求在同一个异步任务里依次读一个成员、写盘、重读、刷盘，期间网络流停读。
 
 hpatch 的集成层三路缓冲各 4 KiB；输出流容量写死为 1 GiB，产物超过 1 GiB 的补丁必然失败；读 old 文件每次都先 seek；回调里的 io 错误只打印到 stdout，网络取消与连接错误到调用方只剩一个失败码。
 
@@ -42,17 +42,17 @@ hpatch 的集成层三路缓冲各 4 KiB；输出流容量写死为 1 GiB，产�
 
 ### 写出管线
 
-[native/verified_write.rs](../../../native/verified_write.rs) 是安装器与 sfx 共用的写出校验。`HashingWriter` 写入目标的同时计算 md5 或 xxh（md5 优先，与数据块命名一致）并累计字节数，每次 `write` 先检查取消；需要抹布局头时先攒下文件开头 512 字节，经 `clear_layout` 抹掉布局头字段后再 hash 与写出。`finish` 在有期望 hash 时核对字节数与 hash；没有期望 hash 时两者都不核对。
+[native/verified_write.rs](../../../native/verified_write.rs) 是安装器与 sfx 共用的写出校验。`HashingWriter` 写入目标的同时计算 md5 或 xxh（md5 优先，与数据块命名一致）并累计字节数，每次 `write` 先检查取消；需要抹布局头时先攒下文件开头 512 字节，经 `clear_layout` 抹掉布局头字段后再 hash 与写出。`finish` 在有期望 hash 时核对字节数与 hash；没有期望 hash 时两者都不核对，调用方可以指定摘要算法（`with_algorithm`）取得写出内容的摘要。写完的文件再从写入用的句柄读回一遍（`finish_verified`、`Written::read_back`），字节数与摘要须同写入时一致：`finish` 核对的是交给写入端的数据，读回核对的是文件系统交回的内容，两者之间隔着写缓冲、页缓存与过滤驱动。
 
-[native/ipc/install_file.rs](../../../native/ipc/install_file.rs) 在异步侧把来源打开为原始字节：本地块是 mmap 切片，网络与分片来源是未解压的流，经 `SyncIoBridge` 桥接成同步读取。zstd 解码（同步 `Decoder`，每块一帧）、补丁、hash 与大小核对、`sync_all` 都在一个 `spawn_blocking` 任务里用创建文件的那个句柄完成，随后关闭。`InstallFile` 与合并请求写出的暂存文件只打开一次，不回读；任一步失败时在阻塞任务内删除该文件。
+[native/ipc/install_file.rs](../../../native/ipc/install_file.rs) 在异步侧把来源打开为原始字节：本地块是 mmap 切片，网络与分片来源是未解压的流，经 `SyncIoBridge` 桥接成同步读取。zstd 解码（同步 `Decoder`，每块一帧）、补丁、hash 与大小核对、读回核对、`sync_all` 都在一个 `spawn_blocking` 任务里用创建文件的那个句柄完成，随后关闭。`InstallFile` 与合并请求写出的暂存文件只打开一次；任一步失败时在阻塞任务内删除该文件。
 
 - 进度：直写按写出字节回报（分母 `output_size`），补丁按 diff 读取字节回报（分母 `diff_size`），均 20 ms 节流，与 `transfer_total` 一致。
 - HybridPatch：`.hybrid-base` 以读写方式打开一次，解压写入后 `rewind`，作为补丁的旧文件；diff 请求在 base 写完之后才发起，不占着请求名额等 base 解压。
 - 取消：下载任务的取消令牌是 task-local，不跨 `spawn_blocking` 与 `tokio::spawn`，由 `spawn_job` 在异步侧取出后交给阻塞任务；写入端每次 `write` 检查，网络读端沿用 `network::Reader` 的取消。
 - 合并请求：每个成员从共享响应里切出 `Vec<u8>` 交给阻塞任务，至多 4 个同时在写，网络侧继续读下一个成员；按成员顺序等待最早的任务，结果保持成员顺序。会话侧（[session/run.rs](../../../native/session/run.rs) 的 `failed_chunks`）遇到因取消失败的成员时整体按取消返回，不重试合并请求，也不退回逐文件请求。
-- 错误码：读源的错误原样传播，由调用方按类型推断码；zstd 解不开的数据为 `DECOMPRESS_ERR` 并挂 `HASH_MISMATCH`（解码器包着源，源自己的读错不算解不开）；写错为 `WRITE_TARGET_ERR`；大小或 hash 不符挂 `HASH_MISMATCH`；`sync_all` 失败挂 `FILE_IO_FAILED`；补丁失败为 `PATCH_FAILED_ERR`，diff 解不开时同样挂 `HASH_MISMATCH`，由取消引起的按取消处理。
+- 错误码：读源的错误原样传播，由调用方按类型推断码；zstd 解不开的数据为 `DECOMPRESS_ERR` 并挂 `HASH_MISMATCH`（解码器包着源，源自己的读错不算解不开）；写错为 `WRITE_TARGET_ERR`；大小或 hash 不符挂 `HASH_MISMATCH`；读回与写入不一致同样挂 `HASH_MISMATCH`、按文件重试，但不记到下载请求的 insight 上，因为来源的数据已通过写入时的核对；`sync_all` 失败挂 `FILE_IO_FAILED`；补丁失败为 `PATCH_FAILED_ERR`，diff 解不开时同样挂 `HASH_MISMATCH`，由取消引起的按取消处理。
 
-[native/fs.rs](../../../native/fs.rs) 的 HTTP、已解析来源与本地流辅助函数只返回原始字节。运行库安装器与 Mirror酱 归档的下载走异步写出（`create_staged_file` 与 `progressed_copy`）。卸载器、更新器镜像抹布局头用 `clear_layout`：读文件开头 512 字节，找到完整布局头才写回。
+[native/fs.rs](../../../native/fs.rs) 的 HTTP、已解析来源与本地流辅助函数只返回原始字节。运行库安装器与 Mirror酱 归档的下载走异步写出（`create_staged_file` 与 `progressed_copy`）。卸载器与更新器镜像、Mirror酱 归档解压出的文件、复制单元的副本都经 [`write_staged_verified`](../../../native/fs.rs) 写出：一个句柄完成写入、读回与 `sync_all`，失败时删除该文件，返回写入时算出的摘要。镜像与 Mirror酱 文件记进 journal 的 hash 取这个摘要，复制单元拿它与 journal 的 hash 比对；安装器自身的镜像在写出时抹布局头。这三处读回不一致时挂 `FILE_IO_FAILED`，不重试。
 
 ### hpatch
 
@@ -83,7 +83,8 @@ hpatch 的集成层三路缓冲各 4 KiB；输出流容量写死为 1 GiB，产�
 - 计划删除的文件并入 `file_list`：待删文件会算作受管文件，只含受管文件与待删文件的目录会被判为干净并作为目录单元整体换入，而目录单元的恢复要求目录内容恰好等于 journal 列出的文件，待删文件会让恢复判为"有变"。
 - `sliced` 把 64 KiB 缓冲移出循环复用：缓冲以 `Bytes` 交给接收方，所有权随消息离开，无法复用。
 - 写出沿用异步解码与 `tokio::fs::File`：每次写入要跨线程调度，CPU 解码占用异步工作线程。
-- 写完重读校验：重读拿到的是刚写入页缓存的同一份数据，发现不了介质错误；边写边算的 hash 覆盖解码、补丁与写出，加上字节数核对，能发现的问题与重读相同。
+- 写完关闭后重新打开重读：每个文件多一到两次打开，每次打开都要经过过滤驱动。在写入的句柄上读回核对的是同一份内容，只漏掉文件关闭时才被改动的情况。
+- 只靠边写边算的 hash、不读回：这个 hash 核对的是交给写入端的数据，写缓冲、页缓存与过滤驱动里发生的改动发现不了，坏文件会照常提交。
 - 写出前由一个线程预建全部目标文件句柄：同一组 1787 个空文件（取自一个 476 MiB 生产包的目录结构，93 个目录已预建），单线程逐个创建并关闭 1094 ms，16 线程并发 318 ms（C# `Parallel.ForEach` 经 PowerShell `Add-Type`，`%TEMP%` 在 C 盘，32 逻辑处理器，Windows 11 Insider 26H1 build 28020）。本地写出已是 16 路并发，各任务在自己的阻塞线程里建文件，单个预建线程赶不到写出任务前面；联网安装时写出任务在等网络，建文件不在关键路径上。预建还要按路径登记写者，避免与重试、回退时的 `File::create` 互相截断。
 - Mirror酱 解压时复用 256 KiB 缓冲：分配并清零这块缓冲一次 111 µs（1000 次平均），建文件、写 16 KiB 再 `sync_all` 一个文件 3162 µs（200 个平均，`%TEMP%` 在 C 盘），缓冲只占小文件单文件耗时的 3.5%，文件越大占比越小。
 - 下载进度按变化增量汇总：`DownloadProg::render` 每 100 ms 遍历一次全部条目，1800 条 0.005 ms，10000 条 0.034 ms（100 次平均）。
@@ -128,7 +129,7 @@ hpatch 的集成层三路缓冲各 4 KiB；输出流容量写死为 1 GiB，产�
 ## Consequences
 
 - 有效 `\0INDEX` 下只核对首末两个数据块的 TLV 头，中间数据块的 TLV 头损坏不在启动时报 `PKG_BROKEN`。内容按索引偏移读取，只坏了 TLV 头的块照常安装；损坏延伸到内容时，安装时的 hash 校验报 `HASH_MISMATCH`。换来的是启动不触碰数据块所在的页。
-- 写出校验覆盖写出流：hash 与字节数核对能发现解码、补丁与写出的错误，发现不了写入后介质上的位翻转，重读页缓存同样发现不了。没有期望 hash 的写出不核对大小；HybridPatch 的 base 中间文件属于这种情况，其内容由补丁产物的 hash 兜底。
+- 写出校验分两步：边写边算的 hash 与字节数核对覆盖解码与补丁，读回覆盖写缓冲、页缓存与过滤驱动。读回的内容通常来自页缓存，介质上的位翻转两步都发现不了。每个文件的输出因此多读一遍。没有期望 hash 的写出不核对大小；HybridPatch 的 base 中间文件不读回，其内容由补丁产物的 hash 兜底。
 - 合并请求至多 4 个成员同时在写，这些成员的内容同时在内存里；成员是合并接纳的小文件。
 - 本地扫描每个 CPU 一个阻塞线程、各持 1 MiB 缓冲，32 逻辑处理器的机器上是 32 个线程与 32 MiB。
 - 每个补丁的工作区为 `stepMemSize` 加 192 KiB。

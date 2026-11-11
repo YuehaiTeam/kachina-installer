@@ -24,7 +24,7 @@ Status: implemented
 
 ### 检查更新
 
-离线包在会话开始时请求在线 metadata。没有加 `-O` 时这次请求整体限时 5 秒（`UPDATE_CHECK_LIMIT`）。连接被拒、不可达、超时、HTTP 错误状态、响应不是安装包、metadata 解析失败，都按没有在线版本处理：使用包内 metadata，只记一条 `online metadata failed` 日志，不提示用户。检查成功且在线版本更新时，交互安装询问是否改用在线版本（更新时包内没有索引则直接改用），`-S` / `-I` 用包内版本。
+离线包在交互会话开始时请求在线 metadata。`-S` / `-I` 安装包内版本，不发这次请求（[`asks_source`](../../../native/session/run.rs)）；加 `-O` 时照常请求。没有加 `-O` 时这次请求整体限时 5 秒（`UPDATE_CHECK_LIMIT`）。连接被拒、不可达、超时、HTTP 错误状态、响应不是安装包、metadata 解析失败，都按没有在线版本处理：使用包内 metadata，只记一条 `online metadata failed` 日志，不提示用户。检查成功且在线版本更新时，询问是否改用在线版本（更新时包内没有索引则直接改用）。
 
 packed 来源读包头的 [`get_http_with_range`](../../../native/dfs.rs) 在状态码不是成功、或非零偏移的响应不是 206 时报错，响应体最多读到所请求的长度。
 
@@ -50,8 +50,9 @@ e2e 为 x86_64-win7-windows-msvc release（`pnpm build`），测试 server 在�
 
 | 判据 | 结果 |
 |---|---|
-| 检查更新失败时装包内版本，不提示，除包头外不请求服务器 | PASS：e2e `test:offline-update-check` 以 `-S` 安装 v1 离线包，测试 server 回 500 或接受连接不回应时都装上 v1、日志含 `online metadata failed`，服务器只收到一次包头请求。其余失败种类走同一处回退，包头读取的规则见下一行 |
-| 服务器不回应时最多多等 5 秒 | PASS：同一 e2e 中不回应的安装用时 5.8 s |
+| `-S` / `-I` 不请求来源服务器 | PASS：e2e `test:offline-update-check` 以 `-S` 安装 v1 离线包，来源地址上的测试 server 接受连接、不回应，安装装上 v1，server 没有收到任何请求；单测 `only_an_unattended_offline_install_skips_its_source` |
+| 交互会话检查更新失败时装包内版本，不提示，除包头外不请求服务器 | 未自动化：e2e 没有交互会话。包头读取的规则见下面的包头读取一行 |
+| 交互会话里服务器不回应时最多多等 5 秒 | 未自动化：e2e 没有交互会话 |
 | 包头读取核对状态码、Range 与长度 | PASS：`ranged_read_checks_status_and_length` |
 | 离线包判定 | PASS：`offline_package_embeds_every_listed_file`；e2e 的 v1、v2 离线包按离线安装：`offline-install`、`offline-update`、`already-latest` 不启动测试 server，按在线安装器处理时会因取不到 metadata 失败 |
 | 装包内版本时内嵌文件重试读包内数据块且不申报；装在线版本时整文件重试且范围已申报，DFS2 没有会话时读包内数据块；全部文件都内嵌时不申报 | PASS：`embedded_retry_leaves_the_package_only_online`、`merge.rs` 的 `skip_ranges_for_embedded_files` |
@@ -62,6 +63,6 @@ e2e 为 x86_64-win7-windows-msvc release（`pnpm build`），测试 server 在�
 ## Consequences
 
 - 慢于约 190 KB/s 的连接 5 秒内取不完带图片的包头，检查按失败处理，用户看不到新版本提示。
-- `-S` / `-I` 也发这次请求；在线版本更新时只记日志，安装包内版本。
+- `-S` / `-I` 不发这次请求：无人值守的安装不依赖来源服务器，也不知道来源有没有更新的版本。
 - 部分内嵌的包离不开服务器，`-S` / `-I` 下装的是在线版本。
 - 部分内嵌的包使用 hashed 存储、metadata 接口不可用而文件仍可下载时，安装失败。
