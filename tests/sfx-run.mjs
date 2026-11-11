@@ -189,6 +189,30 @@ async function test() {
   }
   console.log(chalk.gray('  temp dirs cleaned after app exit'));
 
+  // 双击路径（显示进度框）：没有可接的父控制台、输出也没重定向。node 拉起的子进程总能接上
+  // node 的控制台，所以经 WMI 拉起，父进程是没有控制台的 WMI 服务进程；应用写下标记文件即通过。
+  console.log('Running without a console...');
+  const dialogMarker = path.join(testDir, 'dialog.txt');
+  const commandLine = '"' + portablePath + '" /c "echo ok>dialog.txt"';
+  const created = await $`$r = Invoke-CimMethod Win32_Process -MethodName Create -Arguments @{ CommandLine = ${commandLine}; CurrentDirectory = ${testDir} }; "$($r.ReturnValue) $($r.ProcessId)"`;
+  const [createStatus, dialogPid] = created.stdout.trim().split(' ');
+  if (createStatus !== '0') {
+    throw new Error('Win32_Process.Create returned ' + createStatus);
+  }
+  try {
+    await waitFor(() => fs.existsSync(dialogMarker), 'app started from the dialog path', 30000);
+    await waitFor(
+      () => sfxTempDirs().filter((d) => !before.has(d)).length === 0,
+      'temp dir cleanup after the dialog path',
+      30000,
+    );
+  } catch (error) {
+    // 失败时 sfx 停在错误框上不会自己退出
+    spawnSync('taskkill', ['/F', '/T', '/PID', dialogPid]);
+    throw error;
+  }
+  console.log(chalk.gray('  dialog path extracted and ran the app'));
+
   console.log('Testing reaper...');
   const stamp = Date.now();
   const staleDir = path.join(os.tmpdir(), 'kachina-sfx-stale-' + stamp);

@@ -3,10 +3,9 @@
 //! sfx 只需要这两种对话框，单独维护。
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{mpsc, Arc, Mutex};
 
 use anyhow::Result;
-use tokio::sync::oneshot;
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::{HWND, LPARAM, S_OK, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -53,7 +52,7 @@ struct Shared {
     closing: AtomicBool,
     /// 用户点了取消或关掉了对话框
     cancelled: AtomicBool,
-    created: Mutex<Option<oneshot::Sender<()>>>,
+    created: Mutex<Option<mpsc::SyncSender<()>>>,
     total: u64,
     done: AtomicU64,
     /// 最近一次发给进度条的整数百分比
@@ -77,7 +76,7 @@ impl Progress {
             done: AtomicU64::new(0),
             shown_pct: AtomicU64::new(0),
         });
-        let (tx, rx) = oneshot::channel();
+        let (tx, rx) = mpsc::sync_channel(1);
         *shared.created.lock().unwrap_or_else(|e| e.into_inner()) = Some(tx);
 
         let shared_thread = shared.clone();
@@ -85,8 +84,9 @@ impl Progress {
         let heading = heading.to_string();
         let join = std::thread::spawn(move || progress_thread(shared_thread, title, heading));
 
-        // 等对话框创建完成；线程提前退出（例如无 UI 会话）则降级为无进度条
-        match rx.blocking_recv() {
+        // 等对话框创建完成；线程提前退出（例如无 UI 会话）则降级为无进度条。在 tokio 运行时里
+        // 调用，用 std 通道阻塞：tokio 的 blocking_recv 在运行时线程上会 panic。
+        match rx.recv() {
             Ok(()) => Ok(Self {
                 shared,
                 join: Some(join),
