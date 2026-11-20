@@ -170,7 +170,14 @@ pub async fn run_uninstall(
     uninstall_name: String,
 ) -> TAResult<UninstallOutcome> {
     let exe_path = std::env::current_exe().context("GET_EXE_PATH_ERR")?;
-    let self_moved_to = if exe_path.starts_with(&source) {
+    // `source` may carry 8.3 short-name components while `exe_path` is in the
+    // launch form (or vice versa); compare in long form.
+    let exe_long = std::path::PathBuf::from(crate::utils::path::long_path(
+        &exe_path.to_string_lossy(),
+    ));
+    let source_long = crate::utils::path::long_path(&source);
+    let in_source = exe_long.starts_with(&source_long);
+    let self_moved_to = if in_source {
         Some(park_self(&exe_path, &source, &uninstall_name).await?)
     } else {
         None
@@ -179,9 +186,13 @@ pub async fn run_uninstall(
     let mut delete_list = files
         .iter()
         .map(|f| Path::new(source.as_str()).join(f))
-        .filter(|f| f.exists() && *f != exe_path)
+        .filter(|f| {
+            f.exists()
+                && crate::session::plan::normalize_existing(&f.to_string_lossy())
+                    != crate::session::plan::normalize_existing(&exe_path.to_string_lossy())
+        })
         .collect::<Vec<_>>();
-    if !exe_path.starts_with(&source) {
+    if !in_source {
         // external uninstaller
         delete_list.push(Path::new(source.as_str()).join(uninstall_name));
     }

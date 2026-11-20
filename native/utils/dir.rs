@@ -53,6 +53,12 @@ pub fn on_session_drive(path: &str) -> bool {
 }
 
 pub fn in_private_folder(path: &Path) -> bool {
+    // `path` may carry 8.3 short-name components (e.g. when derived from
+    // %TEMP%); the known-folder roots below are always in long form.
+    let path = std::path::PathBuf::from(crate::utils::path::long_path(
+        &path.to_string_lossy(),
+    ));
+    let path = path.as_path();
     let path_ids = vec![
         FOLDERID_LocalAppData,
         FOLDERID_LocalAppDataLow,

@@ -116,6 +116,14 @@ pub fn normalize_full(path: &str) -> String {
         .to_ascii_lowercase()
 }
 
+/// Like [`normalize_full`] but also expands 8.3 short-name components, so
+/// `C:\Users\ADMINI~1\x` and `C:\Users\Administrator\x` compare equal. Use
+/// this when comparing a stored path against a runtime-supplied one, which
+/// may arrive in either form (env vars like %TEMP% can carry the short form).
+pub fn normalize_existing(path: &str) -> String {
+    normalize_full(&crate::utils::path::long_path(path))
+}
+
 pub fn expand_template(template: &str, install_path: &str, app_name: &str) -> String {
     template
         .replace("${INSTALL_PATH}", install_path)

@@ -2898,8 +2898,8 @@ fn staged_target(staging: &Staging, file_name: &str) -> String {
 
 fn is_current_exe(path: &str) -> bool {
     std::env::current_exe().is_ok_and(|exe| {
-        crate::session::plan::normalize_full(&exe.to_string_lossy())
-            == crate::session::plan::normalize_full(path)
+        crate::session::plan::normalize_existing(&exe.to_string_lossy())
+            == crate::session::plan::normalize_existing(path)
     })
 }
 

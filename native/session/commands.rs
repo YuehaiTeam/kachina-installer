@@ -404,7 +404,7 @@ pub(crate) fn settings_from_ui(
     let st = &sess.state;
     let registry = sess.registry.clone().unwrap_or_default();
     Settings {
-        install_path: st.options.install_path.clone(),
+        install_path: crate::utils::path::long_path(&st.options.install_path),
         source_uri: st.options.source_uri.clone(),
         create_lnk: st.options.create_lnk,
         delete_user_data: st.options.delete_user_data,

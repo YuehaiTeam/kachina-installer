@@ -376,8 +376,8 @@ impl Ctx<'_> {
 }
 
 fn same_path(a: &Path, b: &Path) -> bool {
-    crate::session::plan::normalize_full(&a.to_string_lossy())
-        == crate::session::plan::normalize_full(&b.to_string_lossy())
+    crate::session::plan::normalize_existing(&a.to_string_lossy())
+        == crate::session::plan::normalize_existing(&b.to_string_lossy())
 }
 
 fn apply_file(ctx: &Ctx, rel: &str, state: &mut FileState) -> anyhow::Result<()> {

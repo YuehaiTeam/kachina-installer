@@ -10,6 +10,7 @@ pub mod icon;
 pub mod log;
 pub mod metadata;
 pub mod net_failure;
+pub mod path;
 pub mod process;
 pub mod sentry;
 pub mod shell_link;
