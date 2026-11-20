@@ -107,6 +107,11 @@ export async function verifyUserShortcuts(appName, installDir, exeName) {
     ) {
       failed.push(`Shortcut ${lnk}: target=${TargetPath} start-in=${WorkingDirectory}`);
     }
+    // The shortcut's fields must be written in the canonical long form; the
+    // normalized compare above would also pass for a short (8.3) spelling.
+    if (WorkingDirectory !== fs.realpathSync.native(installDir)) {
+      failed.push(`Shortcut ${lnk}: start-in not canonical: ${WorkingDirectory}`);
+    }
   }
   return failed;
 }

@@ -104,6 +104,13 @@ async function expectRecord(check, hive, dir, metadata) {
     normalizeInstallPath(dir),
     normalizeInstallPath(record.InstallLocation ?? ''),
   );
+  // Records must be written in the canonical long form; normalizeInstallPath
+  // would also pass for a short (8.3) spelling, so check the raw value too.
+  check.equal(
+    `${hive}.InstallLocation raw form`,
+    fs.realpathSync.native(dir),
+    record.InstallLocation ?? '',
+  );
   const uninstaller = path.join(dir, 'uninstall.exe');
   check.equal(
     `${hive}.UninstallString`,

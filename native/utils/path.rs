@@ -13,7 +13,9 @@ fn expand_8dot3(path: &Path) -> Option<String> {
     }
     let mut buf = vec![0u16; len as usize];
     let written = unsafe { GetLongPathNameW(PCWSTR(wide.as_ptr()), Some(&mut buf)) };
-    if written == 0 {
+    // The name behind a short alias can change between the two queries; a
+    // return >= len means the buffer was too small, not chars written.
+    if written == 0 || written >= len {
         return None;
     }
     Some(String::from_utf16_lossy(&buf[..written as usize]))
@@ -29,12 +31,14 @@ pub fn long_path(path: &str) -> String {
     let mut cursor = PathBuf::from(&path);
     let mut tail: Vec<String> = Vec::new();
     loop {
-        if let Some(mut expanded) = expand_8dot3(&cursor) {
+        if let Some(expanded) = expand_8dot3(&cursor) {
+            // PathBuf::push keeps a root like `C:\` from gaining a second
+            // separator — the staging-root hash does not collapse `\\`.
+            let mut out = PathBuf::from(expanded);
             for seg in tail.iter().rev() {
-                expanded.push('\\');
-                expanded.push_str(seg);
+                out.push(seg);
             }
-            return expanded;
+            return out.to_string_lossy().to_string();
         }
         match cursor.file_name() {
             Some(name) => {
