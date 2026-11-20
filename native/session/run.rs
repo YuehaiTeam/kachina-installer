@@ -2881,7 +2881,10 @@ async fn resolve_install_source(
             skip_decompress: false,
         });
     }
-    if installer && ctx.has_dfs2_session() && ctx.installer_end > 0 {
+    if installer
+        && (ctx.has_dfs2_session() || ctx.extents.is_some())
+        && ctx.installer_end > 0
+    {
         return Ok(InstallFileSource::Sliced {
             parts: vec![(0, ctx.installer_end as u64)],
             skip_decompress: true,

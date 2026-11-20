@@ -102,6 +102,17 @@ struct Dfs2Session {
     res_id: String,
 }
 
+/// A logical range of the virtual package mapped onto `path` (relative to the
+/// metadata document's directory) at `phys_offset`.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct Extent {
+    pub offset: u64,
+    pub len: u64,
+    #[serde(default)]
+    pub phys_offset: u64,
+    pub path: String,
+}
+
 #[derive(Default)]
 pub struct SourceCtx {
     pub parsed: Option<ParsedSource>,
@@ -112,6 +123,10 @@ pub struct SourceCtx {
     /// `data_split_hint` shifted into absolute package coordinates by
     /// `data_end`; `None` lets the planner merge freely.
     pub merge_windows: Option<Vec<(u64, u64)>>,
+    /// Static extent map served without a scheduler: logical ranges resolve
+    /// into `{extent_base}/{path}#range=...` instead of the package URL.
+    pub extents: Option<Vec<Extent>>,
+    pub extent_base: String,
     /// The session installs the package's own metadata: see
     /// [`restore_local_package`](Self::restore_local_package).
     local_package: bool,
@@ -143,6 +158,8 @@ impl SourceCtx {
             resource_version: None,
             policy: super::download_plan::Policy::default(),
             merge_windows: None,
+            extents: None,
+            extent_base: String::new(),
             local_package: false,
             dfs2: None,
             plugin_session: false,
@@ -312,7 +329,7 @@ pub fn needs_js_plugin(source: &str) -> bool {
     matches!(parse_source(source), Ok(ParsedSource::Plugin { .. }))
 }
 
-async fn fetch_hashed_metadata(url: &str) -> anyhow::Result<RepoMetadata> {
+async fn fetch_hashed_metadata(url: &str, ctx: &mut SourceCtx) -> anyhow::Result<RepoMetadata> {
     let res = API_CLIENT
         .get(url)
         .send()
@@ -326,7 +343,66 @@ async fn fetch_hashed_metadata(url: &str) -> anyhow::Result<RepoMetadata> {
         )));
     }
     let body = res.text().await.map_err(|e| attach_metadata(e.into()))?;
-    serde_json::from_str(&body).map_err(|e| attach_metadata(e.into()))
+    let doc: serde_json::Value =
+        serde_json::from_str(&body).map_err(|e| attach_metadata(e.into()))?;
+    // A split artifact (`{ver}.json`) is the dfs2 `data` payload on disk:
+    // `index`/`metadata`/`installer_end` populate the context, `size`/`extents`
+    // give the logical -> physical map the download side derives URLs from.
+    // A bare RepoMetadata document is the hashed layout.
+    if doc.get("index").is_some() && doc.get("metadata").is_some() && doc.get("extents").is_some() {
+        return apply_extent_doc(&doc, url, ctx);
+    }
+    serde_json::from_value(doc).map_err(|e| attach_metadata(e.into()))
+}
+
+fn apply_extent_doc(
+    doc: &serde_json::Value,
+    url: &str,
+    ctx: &mut SourceCtx,
+) -> anyhow::Result<RepoMetadata> {
+    let index = doc["index"].as_object().ok_or_else(|| {
+        anyhow!("extent document has no index object").attach(crate::utils::code::METADATA_INVALID)
+    })?;
+    ctx.index.clear();
+    let mut data_end = None;
+    for (key, info) in index {
+        let name = info["name"].as_str().unwrap_or_default().to_string();
+        let offset = info["offset"].as_u64().unwrap_or_default() as usize;
+        let size = info["size"].as_u64().unwrap_or_default() as usize;
+        if name == "\0META" {
+            data_end = Some(offset + size);
+        }
+        ctx.index.insert(
+            key.clone(),
+            Embedded {
+                name,
+                offset,
+                raw_offset: info["raw_offset"].as_u64().unwrap_or_default() as usize,
+                size,
+            },
+        );
+    }
+    ctx.installer_end = doc["installer_end"].as_u64().unwrap_or_default() as usize;
+    let mut extents: Vec<Extent> = serde_json::from_value(doc["extents"].clone())
+        .map_err(|e| attach_metadata(e.into()))?;
+    extents.sort_by_key(|e| e.offset);
+    ctx.extents = Some(extents);
+    ctx.extent_base = url.rsplit_once('/').map(|(dir, _)| dir.to_string()).unwrap_or_default();
+    let metadata: RepoMetadata = serde_json::from_value(doc["metadata"].clone())
+        .map_err(|e| attach_metadata(e.into()))?;
+    if let (Some(hint), Some(data_end)) = (metadata.data_split_hint.clone(), data_end) {
+        ctx.merge_windows = Some(crate::session::download_plan::windows(
+            &hint,
+            data_end as u64,
+        ));
+    }
+    tracing::info!(
+        "extents={:?} data_end={:?} windows={:?}",
+        ctx.extents.as_ref().map(|e| e.len()),
+        data_end,
+        ctx.merge_windows
+    );
+    Ok(metadata)
 }
 
 async fn fetch_dfs2_metadata(api_url: &str, ctx: &mut SourceCtx) -> anyhow::Result<RepoMetadata> {
@@ -439,7 +515,7 @@ pub async fn fetch_metadata(source: &str, ctx: &mut SourceCtx) -> anyhow::Result
         ParsedSource::GitHub { raw, storage } => match storage {
             StorageKind::Hashed => {
                 let url = resolve_github_file_url(&raw).await?;
-                fetch_hashed_metadata(&url).await
+                fetch_hashed_metadata(&url, ctx).await
             }
             StorageKind::Packed => {
                 let url = resolve_github_file_url(&raw).await?;
@@ -453,7 +529,7 @@ pub async fn fetch_metadata(source: &str, ctx: &mut SourceCtx) -> anyhow::Result
         } => match remote {
             RemoteKind::Dfs2 => fetch_dfs2_metadata(&url, ctx).await,
             RemoteKind::Direct => match storage {
-                StorageKind::Hashed => fetch_hashed_metadata(&url).await,
+                StorageKind::Hashed => fetch_hashed_metadata(&url, ctx).await,
                 StorageKind::Packed => refresh_packed_index(&url, ctx).await,
             },
         },
@@ -625,7 +701,28 @@ async fn resolve_range_url(
         }
         ParsedSource::GitHub { raw, .. } => resolve_github_file_url(raw).await,
         ParsedSource::Http { remote, url, .. } => match remote {
-            RemoteKind::Direct => Ok(url.clone()),
+            RemoteKind::Direct => {
+                if let Some(extents) = ctx.extents.as_ref() {
+                    // 无调度器的静态映射：逻辑区间落到单个 extent 内时才有 URL；
+                    // 跨 extent 或落入间隙由规划保证不发生，这里兜底报错。
+                    let end = start as u64 + size as u64;
+                    let extent = extents
+                        .iter()
+                        .find(|e| e.offset <= start as u64 && end <= e.offset + e.len)
+                        .ok_or_else(|| {
+                            anyhow!("no extent covers range {start}-{end}")
+                                .attach(crate::utils::code::METADATA_INVALID)
+                        })?;
+                    let phys = extent.phys_offset + start as u64 - extent.offset;
+                    let fragment = if phys == 0 && size as u64 == extent.len {
+                        "#range=0-".to_string()
+                    } else {
+                        format!("#range={phys}-{}", phys + size as u64 - 1)
+                    };
+                    return Ok(format!("{}/{}{fragment}", ctx.extent_base, extent.path));
+                }
+                Ok(url.clone())
+            }
             RemoteKind::Dfs2 => Err(anyhow!("DFS2 session not found").attach(NO_DOWNLOAD_NODE)),
         },
     }

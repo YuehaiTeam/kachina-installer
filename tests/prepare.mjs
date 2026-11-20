@@ -165,6 +165,12 @@ async function createConfig() {
         hidden: true,
       },
       {
+        id: 'split-v2',
+        name: 'Split v2',
+        uri: 'http://localhost:8080/split/v2.json',
+        hidden: true,
+      },
+      {
         id: 'stub-v1',
         name: 'Stub plugin v1',
         uri: 'plugin-stub+http://localhost:8080/test-app-v1.exe',
@@ -279,6 +285,10 @@ async function buildCompletePackages() {
   console.log(chalk.gray('  Building v2 offline package...'));
   // 步骤4: 构建v2离线包
   await $`& ${builderPath} pack -c ${path.join(FIXTURES_DIR, 'kachina.config.v2.json')} -m ${path.join(FIXTURES_DIR, 'v2-metadata.json')} -d ${path.join(FIXTURES_DIR, 'v2-hashed')} --icon ${iconPath} -o ${path.join(FIXTURES_DIR, 'test-app-v2.exe')}`;
+
+  console.log(chalk.gray('  Splitting v2 package...'));
+  // 模拟服务端拆包产物：cas/{xxh} + v2.json 由静态 HTTP 直接 serve。
+  await $`& ${builderPath} split -i ${path.join(FIXTURES_DIR, 'test-app-v2.exe')} -o ${path.join(FIXTURES_DIR, 'split')} -n v2`;
 
   console.log(chalk.gray('  All packages built'));
 }

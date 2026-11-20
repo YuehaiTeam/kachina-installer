@@ -245,7 +245,50 @@ async function testSplitHint() {
   }
 }
 
+// 拆包产物(cas/{xxh} + v2.json)直接放在静态 HTTP 上：客户端把 {ver}.json
+// 当成 dfs2 data 载荷读，按 extents 自行把逻辑区间映射成 cas 文件的
+// `#range=` 物理请求，不经任何调度器。
+async function testExtentInstall() {
+  const label = 'DFS2 extent-source installation';
+  const testDir = getTestDir('dfs2-extent');
+  cleanupTestDir(testDir);
+  await fs.ensureDir(testDir);
+  const server = await startServer();
+  try {
+    const result = await runInstaller(
+      './fixtures/test-app-v1.exe',
+      [FLAGS, '-O', '-D', testDir, '--source', 'split-v2'],
+      label,
+    );
+    assertExitOk(result, label);
+    await verifyV2(testDir);
+
+    const casRequests = server.dfs2State.requests.filter((r) =>
+      r.includes('GET /split/cas/'),
+    );
+    if (!casRequests.length) {
+      throw new Error(`${label}: no cas/ file was requested`);
+    }
+    const stray = server.dfs2State.requests.filter(
+      (r) => r.includes('/split/') && !r.includes('/split/cas/') && !r.includes('/split/v2.json'),
+    );
+    if (stray.length) {
+      throw new Error(`${label}: unexpected requests ${stray.join(', ')}`);
+    }
+    if (server.dfs2State.requests.some((r) => r.includes('/api/'))) {
+      throw new Error(`${label}: scheduler was touched without dfs2`);
+    }
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+}
+
 async function main() {
+  if (scenario === 'online-install-extent') {
+    await testExtentInstall();
+    console.log(`✓ ${scenario}`);
+    return;
+  }
   if (scenario === 'online-install-dfs2-sliced') {
     await testSlicedInstall();
     console.log(`✓ ${scenario}`);

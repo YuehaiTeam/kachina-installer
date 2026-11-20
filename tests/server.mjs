@@ -149,6 +149,7 @@ function challengeData() {
 function createState() {
   return {
     resources: new Map(),
+    requests: [],
     sessions: new Map(),
     batchRequests: [],
     singleRequests: [],
@@ -198,6 +199,7 @@ function createServer(options = {}) {
   app.use(express.json());
   app.use((req, _res, next) => {
     console.log(`${req.method} ${req.originalUrl}`);
+    state.requests.push(`${req.method} ${req.originalUrl}`);
     next();
   });
 
