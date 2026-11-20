@@ -8,18 +8,6 @@ use crate::{
     API_CLIENT,
 };
 
-#[derive(Deserialize, Serialize, Debug)]
-pub struct DownloadResp {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub url: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub source: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tests: Option<Vec<(String, String)>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub challenge: Option<String>,
-}
-
 #[derive(Serialize, Debug)]
 pub struct HttpGetResponse {
     pub status_code: u16,
@@ -187,87 +175,6 @@ pub struct Dfs2SessionInsights {
 pub struct Dfs2DeleteRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub insights: Option<Dfs2SessionInsights>,
-}
-
-pub async fn get_dfs(
-    url: String,
-    range: Option<String>,
-    extras: Option<String>,
-) -> anyhow::Result<DownloadResp> {
-    let url_with_range_in_query = if let Some(range) = range {
-        format!("{url}?range={range}")
-    } else {
-        format!("{url}?")
-    };
-    let extras = if let Some(extras) = extras {
-        extras
-    } else {
-        "".to_string()
-    };
-    let res = API_CLIENT
-        .post(&url_with_range_in_query)
-        .body(extras.clone())
-        .send()
-        .await
-        .with_http_context("get_dfs", &url_with_range_in_query)?;
-    // 401 carries the challenge in the body
-    if res.status() != reqwest::StatusCode::OK && res.status() != reqwest::StatusCode::UNAUTHORIZED
-    {
-        return Err(status_error(res).await);
-    }
-    let body_text = res
-        .text()
-        .await
-        .with_http_context("get_dfs", &url)
-        .context("read response body")?;
-    let json: DownloadResp = parse_json(&body_text)?;
-    // directly return if not challenge
-    if json.challenge.is_none() {
-        return Ok(json);
-    }
-    let challenge = json.challenge.unwrap();
-    // split challenge into "hash/source"
-    let challenge: Vec<&str> = challenge.split('/').collect();
-    if challenge.len() != 2 {
-        return Err(anyhow!("Invalid challenge"));
-    }
-    let hash = challenge[0];
-    let source = challenge[1];
-    let mut solve = "".to_string();
-    // loop 1 to 256
-    for i in 0..=255 {
-        // suffix i in source as hex 2 digits
-        let new_src = format!("{source}{i:02x}");
-        let new_hash = chksum_md5::hash(new_src.as_bytes()).to_hex_lowercase();
-        if hash == new_hash {
-            solve = new_src;
-            break;
-        }
-    }
-    if solve.is_empty() {
-        return Err(anyhow!("Failed to solve challenge"));
-    }
-    let url = format!("{url_with_range_in_query}&sid={solve}");
-    let res = API_CLIENT
-        .post(&url)
-        .body(extras)
-        .send()
-        .await
-        .with_http_context("get_dfs", &url)?;
-    if res.status() != reqwest::StatusCode::OK && res.status() != reqwest::StatusCode::UNAUTHORIZED
-    {
-        return Err(status_error(res).await);
-    }
-    let body_text = res
-        .text()
-        .await
-        .with_http_context("get_dfs", &url)
-        .context("read response body")?;
-    let json: DownloadResp = parse_json(&body_text)?;
-    if json.challenge.is_some() {
-        return Err(anyhow!("Challenge not solved"));
-    }
-    Ok(json)
 }
 
 // DFS2 API commands
