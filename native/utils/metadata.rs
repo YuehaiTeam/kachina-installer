@@ -51,4 +51,9 @@ pub struct RepoMetadata {
     pub deletes: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub packing_info: Vec<Vec<String>>,
+    /// Mergeable windows `[start, end)` relative to `data_end` (the data area
+    /// origin), ascending and non-overlapping. `None` means the whole package
+    /// can merge freely; `Some([])` forbids every cross-block merge.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data_split_hint: Option<Vec<(u64, u64)>>,
 }

@@ -180,9 +180,130 @@ async function testSlicedInstall() {
   }
 }
 
+// The v2 fixture's \0META carries a real data_split_hint written by pack: no
+// declared or requested range may cross a window boundary, and at least one
+// merged download must land strictly inside a hint window.
+async function testSplitHint() {
+  const label = 'DFS2 split-hint installation';
+  const server = await startServer();
+  const testDir = getTestDir('dfs2-split-hint');
+  try {
+    const result = await runInstaller(
+      './fixtures/test-app-v1/updater.exe',
+      [FLAGS, '-O', '-D', testDir, '--source', 'dfs2-v2'],
+      label,
+    );
+    assertExitOk(result, label);
+    const verification = await verifyFiles(testDir, [
+      { path: 'app.exe', contains: 'APP_V2' },
+      { path: 'feature.dll', size: 30720 },
+      { path: 'updater.exe' },
+    ]);
+    if (verification.failed.length) {
+      throw new Error(verification.failed.join('; '));
+    }
+    assertDfs2BatchCoverage(server.dfs2State, label);
+    const resource = server.dfs2State.getResource('v2');
+    const hint = resource.data.metadata.data_split_hint;
+    if (!Array.isArray(hint) || hint.length === 0) {
+      throw new Error(`${label}: fixture metadata has no data_split_hint`);
+    }
+    const windows = hint.map(([start, end]) => [
+      start + resource.dataEnd,
+      end + resource.dataEnd,
+    ]);
+    const declared = Array.from(server.dfs2State.sessions.values()).flatMap(
+      (session) => session.declared ?? [],
+    );
+    const requested = server.dfs2State.batchRequests.flatMap(
+      (request) => request.ranges,
+    );
+    const crossing = [...declared, ...requested].filter((range) => {
+      const [start, end] = range.split('-').map(Number);
+      return (
+        start > end ||
+        windows.some(([w0, w1]) => (start < w0 && w0 <= end) || (start < w1 && w1 <= end))
+      );
+    });
+    if (crossing.length) {
+      throw new Error(
+        `${label}: ranges crossing a data_split_hint boundary: ${crossing.join(', ')}`,
+      );
+    }
+    // 证明真的发生了跨块合并：存在某条声明 range 覆盖 ≥2 个 index 项的
+    // payload 区间（单文件 fallback 的 range 只含一项）。
+    const entries = Object.values(resource.data.index)
+      .filter((entry) => entry.name !== '\\0META')
+      .map((entry) => [entry.offset, entry.offset + entry.size]);
+    const merged = declared.some((range) => {
+      const [start, end] = range.split('-').map(Number);
+      return (
+        windows.some(([w0, w1]) => w0 <= start && end + 1 <= w1) &&
+        entries.filter(([e0, e1]) => start <= e0 && e1 <= end + 1).length >= 2
+      );
+    });
+    if (!merged) {
+      throw new Error(
+        `${label}: no declared range covers multiple index entries inside a hint window`,
+      );
+    }
+  } finally {
+    await cleanupTestDir(testDir);
+    await new Promise((resolve) => server.close(resolve));
+  }
+}
+
+// 拆包产物(cas/{xxh} + v2.json)直接放在静态 HTTP 上：客户端把 {ver}.json
+// 当成 dfs2 data 载荷读，按 extents 自行把逻辑区间映射成 cas 文件的
+// `#range=` 物理请求，不经任何调度器。
+async function testExtentInstall() {
+  const label = 'DFS2 extent-source installation';
+  const testDir = getTestDir('dfs2-extent');
+  cleanupTestDir(testDir);
+  await fs.ensureDir(testDir);
+  const server = await startServer();
+  try {
+    const result = await runInstaller(
+      './fixtures/test-app-v1.exe',
+      [FLAGS, '-O', '-D', testDir, '--source', 'split-v2'],
+      label,
+    );
+    assertExitOk(result, label);
+    await verifyV2(testDir);
+
+    const casRequests = server.dfs2State.requests.filter((r) =>
+      r.includes('GET /split/cas/'),
+    );
+    if (!casRequests.length) {
+      throw new Error(`${label}: no cas/ file was requested`);
+    }
+    const stray = server.dfs2State.requests.filter(
+      (r) => r.includes('/split/') && !r.includes('/split/cas/') && !r.includes('/split/v2.json'),
+    );
+    if (stray.length) {
+      throw new Error(`${label}: unexpected requests ${stray.join(', ')}`);
+    }
+    if (server.dfs2State.requests.some((r) => r.includes('/api/'))) {
+      throw new Error(`${label}: scheduler was touched without dfs2`);
+    }
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+}
+
 async function main() {
+  if (scenario === 'online-install-extent') {
+    await testExtentInstall();
+    console.log(`✓ ${scenario}`);
+    return;
+  }
   if (scenario === 'online-install-dfs2-sliced') {
     await testSlicedInstall();
+    console.log(`✓ ${scenario}`);
+    return;
+  }
+  if (scenario === 'online-install-dfs2-split-hint') {
+    await testSplitHint();
     console.log(`✓ ${scenario}`);
     return;
   }

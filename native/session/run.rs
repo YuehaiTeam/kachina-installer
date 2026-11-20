@@ -2411,6 +2411,19 @@ async fn install_files(
                         }
                         // 取消时既不重试合并请求，也不退回逐个下载
                         Err(err) if is_cancelled(&err) => Err(err),
+                        // the server cannot sign this window into one URL;
+                        // retrying the same merged range signs the same
+                        // refusal, so members fall back to whole files at
+                        // once instead of after another failing resolve
+                        Err(err) if crate::dfs::is_range_not_satisfiable(&err) => {
+                            tracing::warn!("merged range not satisfiable, fallback: {err:#}");
+                            let all: Vec<usize> = (0..files.len()).collect();
+                            fallback_merged_files(
+                                settings, hash_key, files, &all, source_ctx, staging, mgr,
+                                &handle, &has_error,
+                            )
+                            .await
+                        }
                         Err(err) => {
                             tracing::warn!("merged download failed, retry: {err:#}");
                             match install_merged(
@@ -2854,17 +2867,24 @@ async fn resolve_install_source(
             start: entry.offset as u64,
             len: entry.size as u64,
         };
+        // `split_bounded` keeps the policy's slicing; `cut_at_windows` keeps
+        // the range whole unless a hint window's boundary falls inside it —
+        // such a straddling range cannot be signed as one request either.
         let parts = if slice {
-            ctx.policy.split(range)
+            ctx.policy
+                .split_bounded(range, ctx.merge_windows.as_deref())
         } else {
-            vec![range]
+            super::download_plan::cut_at_windows(range, ctx.merge_windows.as_deref())
         };
         return Ok(InstallFileSource::Sliced {
             parts: parts.into_iter().map(|p| (p.start, p.len)).collect(),
             skip_decompress: false,
         });
     }
-    if installer && ctx.has_dfs2_session() && ctx.installer_end > 0 {
+    if installer
+        && (ctx.has_dfs2_session() || ctx.extents.is_some())
+        && ctx.installer_end > 0
+    {
         return Ok(InstallFileSource::Sliced {
             parts: vec![(0, ctx.installer_end as u64)],
             skip_decompress: true,

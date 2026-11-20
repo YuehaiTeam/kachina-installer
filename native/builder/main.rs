@@ -13,6 +13,7 @@ mod pack;
 #[allow(dead_code)]
 mod pack_format;
 mod replace_bin;
+mod split;
 mod utils;
 
 pub fn main() {
@@ -55,6 +56,12 @@ async fn async_main() {
         Command::ReplaceBin(args) => {
             if let Err(e) = replace_bin::replace_bin_cli(args).await {
                 eprintln!("Replace-bin failed: {e}");
+                std::process::exit(1);
+            }
+        }
+        Command::Split(args) => {
+            if let Err(e) = split::split_cli(args).await {
+                eprintln!("Split failed: {e}");
                 std::process::exit(1);
             }
         }

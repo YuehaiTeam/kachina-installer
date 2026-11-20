@@ -597,6 +597,7 @@ mod tests {
             installer: None,
             deletes: Vec::new(),
             packing_info: Vec::new(),
+            data_split_hint: None,
         };
         // 一个数据块映射到多个目标路径；补丁块不占用完整文件路径
         let names = build_hash_to_names_map(&metadata);

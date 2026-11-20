@@ -707,15 +707,26 @@ async fn open_http_stream(
     permit: Option<tokio::sync::OwnedSemaphorePermit>,
 ) -> TAResult<HttpStream> {
     let request_start_time = Instant::now();
-    let has_range = size > 0;
+    // A URL the server signed for a slice pins that window in its fragment
+    // (`#range=start-end`, or `#range=0-` for a whole-file signature); it wins
+    // over the caller's logical offset/size.
+    use crate::utils::url::PinnedRange;
+    let pinned = crate::utils::url::fragment_range(url);
+    let wire_range = match pinned {
+        Some(PinnedRange::Window(start, len)) => Some((start, len)),
+        Some(PinnedRange::Whole) => None,
+        None => (size > 0).then_some((offset as u64, size as u64)),
+    };
+    let has_range = wire_range.is_some();
+    // 遥测始终上报原逻辑区间；#range= 的物理偏移只影响 wire_range。
     let insight_range = insight_range_vec(request_range, offset, size);
 
     // 构建HTTP请求
     let mut builder = DOWNLOAD_CLIENT
         .get(url)
         .header("Accept-Encoding", "identity");
-    if has_range {
-        builder = builder.header("Range", format!("bytes={}-{}", offset, offset + size - 1));
+    if let Some((start, len)) = wire_range {
+        builder = builder.header("Range", format!("bytes={}-{}", start, start + len - 1));
     }
 
     // 发送请求
@@ -755,8 +766,8 @@ async fn open_http_stream(
         .headers()
         .get(reqwest::header::CONTENT_LENGTH)
         .and_then(|v| v.to_str().ok()?.parse::<u64>().ok());
-    if has_range {
-        if let Err(cause) = validate_range_response(&res, offset as u64, size as u64, declared) {
+    if let Some((start, len)) = wire_range {
+        if let Err(cause) = validate_range_response(&res, start, len, declared) {
             let error = anyhow::Error::new(ClassifiedNetworkError {
                 failure: NetFailure::bad_range(),
                 original_error: cause.into(),
@@ -765,7 +776,10 @@ async fn open_http_stream(
             return Err(failed(error));
         }
     }
-    let expected = if has_range {
+    let expected = if let Some((_, len)) = wire_range {
+        Some(len)
+    } else if matches!(pinned, Some(PinnedRange::Whole)) && size > 0 {
+        // a whole-file signature is expected to answer exactly what was asked
         Some(size as u64)
     } else {
         declared

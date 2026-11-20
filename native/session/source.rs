@@ -102,6 +102,17 @@ struct Dfs2Session {
     res_id: String,
 }
 
+/// A logical range of the virtual package mapped onto `path` (relative to the
+/// metadata document's directory) at `phys_offset`.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct Extent {
+    pub offset: u64,
+    pub len: u64,
+    #[serde(default)]
+    pub phys_offset: u64,
+    pub path: String,
+}
+
 #[derive(Default)]
 pub struct SourceCtx {
     pub parsed: Option<ParsedSource>,
@@ -109,6 +120,13 @@ pub struct SourceCtx {
     pub installer_end: usize,
     pub resource_version: Option<String>,
     pub policy: super::download_plan::Policy,
+    /// `data_split_hint` shifted into absolute package coordinates by
+    /// `data_end`; `None` lets the planner merge freely.
+    pub merge_windows: Option<Vec<(u64, u64)>>,
+    /// Static extent map served without a scheduler: logical ranges resolve
+    /// into `{extent_base}/{path}#range=...` instead of the package URL.
+    pub extents: Option<Vec<Extent>>,
+    pub extent_base: String,
     /// The session installs the package's own metadata: see
     /// [`restore_local_package`](Self::restore_local_package).
     local_package: bool,
@@ -139,6 +157,9 @@ impl SourceCtx {
             installer_end: 0,
             resource_version: None,
             policy: super::download_plan::Policy::default(),
+            merge_windows: None,
+            extents: None,
+            extent_base: String::new(),
             local_package: false,
             dfs2: None,
             plugin_session: false,
@@ -308,7 +329,7 @@ pub fn needs_js_plugin(source: &str) -> bool {
     matches!(parse_source(source), Ok(ParsedSource::Plugin { .. }))
 }
 
-async fn fetch_hashed_metadata(url: &str) -> anyhow::Result<RepoMetadata> {
+async fn fetch_hashed_metadata(url: &str, ctx: &mut SourceCtx) -> anyhow::Result<RepoMetadata> {
     let res = API_CLIENT
         .get(url)
         .send()
@@ -321,8 +342,128 @@ async fn fetch_hashed_metadata(url: &str) -> anyhow::Result<RepoMetadata> {
             crate::dfs::HttpStatus::new(status, body),
         )));
     }
+    // extent paths are relative to the document that was actually served;
+    // a redirect must not leave them anchored to the original URL.
+    let final_url = res.url().to_string();
     let body = res.text().await.map_err(|e| attach_metadata(e.into()))?;
-    serde_json::from_str(&body).map_err(|e| attach_metadata(e.into()))
+    let doc: serde_json::Value =
+        serde_json::from_str(&body).map_err(|e| attach_metadata(e.into()))?;
+    // A split artifact (`{ver}.json`) is the dfs2 `data` payload on disk:
+    // `index`/`metadata`/`installer_end` populate the context, `size`/`extents`
+    // give the logical -> physical map the download side derives URLs from.
+    // A bare RepoMetadata document is the hashed layout.
+    if doc.get("extents").is_some() {
+        return apply_extent_doc(&doc, &final_url, ctx).await;
+    }
+    serde_json::from_value(doc).map_err(|e| attach_metadata(e.into()))
+}
+
+/// `{base}/{path}#range=phys-phys` for a logical range covered by one extent,
+/// `#range=0-` when it is the whole extent.
+fn extent_url(extents: &[Extent], base: &str, start: u64, size: u64) -> anyhow::Result<String> {
+    let end = start + size;
+    let extent = extents
+        .iter()
+        .find(|e| e.offset <= start && end <= e.offset + e.len)
+        .ok_or_else(|| {
+            anyhow!("no extent covers range {start}-{end}")
+                .attach(crate::utils::code::METADATA_INVALID)
+        })?;
+    let phys = extent.phys_offset + start - extent.offset;
+    // `#range=0-` 只在请求恰好覆盖整个物理文件时使用：起点为 0、长度等满，
+    // 且没有别的 extent 引用同一路径的更后段（多段共用一个物理文件时
+    // 不能按整文件签名，否则会把后续段也拉回来）。
+    let whole_file = phys == 0
+        && size == extent.len
+        && !extents
+            .iter()
+            .any(|o| o.path == extent.path && o.phys_offset + o.len > phys + size);
+    let fragment = if whole_file {
+        "#range=0-".to_string()
+    } else {
+        format!("#range={phys}-{}", phys + size - 1)
+    };
+    Ok(format!("{base}/{}{fragment}", extent.path))
+}
+
+async fn apply_extent_doc(
+    doc: &serde_json::Value,
+    url: &str,
+    ctx: &mut SourceCtx,
+) -> anyhow::Result<RepoMetadata> {
+    let mut extents: Vec<Extent> = serde_json::from_value(doc["extents"].clone())
+        .map_err(|e| attach_metadata(e.into()))?;
+    extents.sort_by_key(|e| e.offset);
+    ctx.extents = Some(extents);
+    let url_path = url.split(['?', '#']).next().unwrap_or(url);
+    ctx.extent_base = url_path
+        .rsplit_once('/')
+        .map(|(dir, _)| dir.to_string())
+        .unwrap_or_default();
+    // 仅 extents 的文档是一个虚拟整包：头部与索引区都落在 extent 0，
+    // 用 extent 映射虚拉回这些字节，走整包索引路径补齐 index/metadata。
+    if !(doc.get("index").is_some() && doc.get("metadata").is_some()) {
+        let (extents, base) = (
+            ctx.extents.clone().unwrap_or_default(),
+            ctx.extent_base.clone(),
+        );
+        let fetch = |off: u64, len: u64| -> anyhow::Result<_> {
+            let url = extent_url(&extents, &base, off, len)?;
+            Ok(get_http_with_range(url, off, len))
+        };
+        let (_status, pre) = fetch(0, 256)?.await.into_anyhow()?;
+        let layout = parse_pack_layout(&pre).ok_or_else(|| {
+            anyhow!("invalid remote index header").attach(crate::utils::code::METADATA_INVALID)
+        })?;
+        let index_start = layout.base_end as u64;
+        let data_end = index_start
+            + layout.config_len as u64
+            + layout.theme_len as u64
+            + layout.index_len as u64
+            + layout.manifest_len as u64;
+        let (_status, index_data) = fetch(index_start, data_end - index_start)?
+            .await
+            .into_anyhow()?;
+        return apply_packed_index(&index_data, index_start, &layout, ctx);
+    }
+    let index = doc["index"].as_object().ok_or_else(|| {
+        anyhow!("extent document has no index object").attach(crate::utils::code::METADATA_INVALID)
+    })?;
+    ctx.index.clear();
+    let mut data_end = None;
+    for (key, info) in index {
+        let name = info["name"].as_str().unwrap_or_default().to_string();
+        let offset = info["offset"].as_u64().unwrap_or_default() as usize;
+        let size = info["size"].as_u64().unwrap_or_default() as usize;
+        if name == "\0META" {
+            data_end = Some(offset + size);
+        }
+        ctx.index.insert(
+            key.clone(),
+            Embedded {
+                name,
+                offset,
+                raw_offset: info["raw_offset"].as_u64().unwrap_or_default() as usize,
+                size,
+            },
+        );
+    }
+    ctx.installer_end = doc["installer_end"].as_u64().unwrap_or_default() as usize;
+    let metadata: RepoMetadata = serde_json::from_value(doc["metadata"].clone())
+        .map_err(|e| attach_metadata(e.into()))?;
+    if let (Some(hint), Some(data_end)) = (metadata.data_split_hint.clone(), data_end) {
+        ctx.merge_windows = Some(crate::session::download_plan::windows(
+            &hint,
+            data_end as u64,
+        ));
+    }
+    tracing::info!(
+        "extents={:?} data_end={:?} windows={:?}",
+        ctx.extents.as_ref().map(|e| e.len()),
+        data_end,
+        ctx.merge_windows
+    );
+    Ok(metadata)
 }
 
 async fn fetch_dfs2_metadata(api_url: &str, ctx: &mut SourceCtx) -> anyhow::Result<RepoMetadata> {
@@ -334,7 +475,11 @@ async fn fetch_dfs2_metadata(api_url: &str, ctx: &mut SourceCtx) -> anyhow::Resu
         anyhow!("dfs2 metadata is null").attach(crate::utils::code::METADATA_INVALID)
     })?;
     ctx.index.clear();
+    let mut data_end = None;
     for (name, info) in data.index {
+        if info.name == "\0META" {
+            data_end = Some(info.offset + info.size);
+        }
         ctx.index.insert(
             name,
             Embedded {
@@ -347,6 +492,23 @@ async fn fetch_dfs2_metadata(api_url: &str, ctx: &mut SourceCtx) -> anyhow::Resu
     }
     ctx.installer_end = data.installer_end as usize;
     ctx.resource_version = Some(dfs2.resource_version);
+    // `data_end` is the end of the `\0META` index entry; the hint's windows
+    // are relative to it. A hint without a recoverable `data_end` is dropped:
+    // an unsignable merge then falls back to whole files instead.
+    if let Some(hint) = data.metadata.data_split_hint.clone() {
+        if let Some(data_end) = data_end {
+            ctx.merge_windows = Some(crate::session::download_plan::windows(
+                &hint,
+                u64::from(data_end),
+            ));
+        }
+    }
+    tracing::info!(
+        "dfs2 hint={:?} data_end={:?} windows={:?}",
+        data.metadata.data_split_hint,
+        data_end,
+        ctx.merge_windows
+    );
     Ok(data.metadata)
 }
 
@@ -358,14 +520,33 @@ async fn refresh_packed_index(apiurl: &str, ctx: &mut SourceCtx) -> anyhow::Resu
         anyhow!("invalid remote index header").attach(crate::utils::code::METADATA_INVALID)
     })?;
     let index_start = layout.base_end as u64;
-    let config_sz = layout.config_len as u64;
-    let theme_sz = layout.theme_len as u64;
-    let data_end =
-        index_start + layout.index_len as u64 + config_sz + theme_sz + layout.manifest_len as u64;
+    let data_end = index_start
+        + layout.config_len as u64
+        + layout.theme_len as u64
+        + layout.index_len as u64
+        + layout.manifest_len as u64;
     let (_status, index_data) =
         get_http_with_range(apiurl.to_string(), index_start, data_end - index_start)
             .await
             .into_anyhow()?;
+    apply_packed_index(&index_data, index_start, &layout, ctx)
+}
+
+/// Parse the `\\0CONFIG\\0IMAGE\\0INDEX\\0META` block fetched from `index_start`
+/// and populate `ctx` with index, installer_end and merge windows.
+fn apply_packed_index(
+    index_data: &[u8],
+    index_start: u64,
+    layout: &crate::pack_format::PackLayout,
+    ctx: &mut SourceCtx,
+) -> anyhow::Result<RepoMetadata> {
+    let config_sz = layout.config_len as u64;
+    let theme_sz = layout.theme_len as u64;
+    let data_end = index_start
+        + layout.index_len as u64
+        + config_sz
+        + theme_sz
+        + layout.manifest_len as u64;
     // 取回的是 \0CONFIG、\0IMAGE、\0INDEX、\0META 首尾相接的一段
     let mut metadata = None;
     let mut pos = 0;
@@ -394,9 +575,14 @@ async fn refresh_packed_index(apiurl: &str, ctx: &mut SourceCtx) -> anyhow::Resu
         }
     }
     ctx.installer_end = (index_start + config_sz + theme_sz) as usize;
-    metadata.ok_or_else(|| {
+    let metadata = metadata.ok_or_else(|| {
         anyhow!("packed index has no metadata").attach(crate::utils::code::METADATA_INVALID)
-    })
+    })?;
+    ctx.merge_windows = metadata
+        .data_split_hint
+        .clone()
+        .map(|hint| crate::session::download_plan::windows(&hint, data_end));
+    Ok(metadata)
 }
 
 pub async fn fetch_metadata(source: &str, ctx: &mut SourceCtx) -> anyhow::Result<RepoMetadata> {
@@ -409,7 +595,7 @@ pub async fn fetch_metadata(source: &str, ctx: &mut SourceCtx) -> anyhow::Result
         ParsedSource::GitHub { raw, storage } => match storage {
             StorageKind::Hashed => {
                 let url = resolve_github_file_url(&raw).await?;
-                fetch_hashed_metadata(&url).await
+                fetch_hashed_metadata(&url, ctx).await
             }
             StorageKind::Packed => {
                 let url = resolve_github_file_url(&raw).await?;
@@ -423,7 +609,7 @@ pub async fn fetch_metadata(source: &str, ctx: &mut SourceCtx) -> anyhow::Result
         } => match remote {
             RemoteKind::Dfs2 => fetch_dfs2_metadata(&url, ctx).await,
             RemoteKind::Direct => match storage {
-                StorageKind::Hashed => fetch_hashed_metadata(&url).await,
+                StorageKind::Hashed => fetch_hashed_metadata(&url, ctx).await,
                 StorageKind::Packed => refresh_packed_index(&url, ctx).await,
             },
         },
@@ -582,6 +768,11 @@ async fn resolve_range_url(
     start: usize,
     size: usize,
 ) -> anyhow::Result<String> {
+    // 无调度器的静态映射优先于源形态：逻辑区间落到单个 extent 内才有 URL，
+    // 跨 extent 或落入间隙由规划保证不发生，这里兜底报错。
+    if let Some(extents) = ctx.extents.as_ref() {
+        return extent_url(extents, &ctx.extent_base, start as u64, size as u64);
+    }
     let Some(parsed) = ctx.parsed.as_ref() else {
         return Err(anyhow!("source not loaded").attach(crate::utils::code::SOURCE_INVALID));
     };
@@ -1106,5 +1297,94 @@ mod tests {
                 format!("{}-{}", 512, 512 + meta_tlv.len() - 1)
             ]
         );
+    }
+
+    /// A window the server cannot sign in one URL surfaces its refusal code
+    /// to the caller, so the merged task falls back instead of retrying the
+    /// same range.
+    #[tokio::test]
+    async fn unsatisfiable_range_surfaces_its_code() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let host = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            loop {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                tokio::spawn(async move {
+                    let mut head = Vec::new();
+                    while !head.ends_with(b"\r\n\r\n") {
+                        head.push(socket.read_u8().await.unwrap());
+                    }
+                    let body = format!(
+                        "{{\"urls\":{{\"0-99\":{{\"url\":\"http://{host}/blob\"}},\"100-199\":{{\"error\":\"{}\"}}}}}}",
+                        crate::dfs::RANGE_NOT_SATISFIABLE
+                    );
+                    let res = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = socket.write_all(res.as_bytes()).await;
+                    let _ = socket.shutdown().await;
+                });
+            }
+        });
+        let mut ctx = SourceCtx::default();
+        ctx.parsed = Some(ParsedSource::Http {
+            remote: RemoteKind::Dfs2,
+            storage: StorageKind::Hashed,
+            url: format!("http://{host}/meta"),
+        });
+        ctx.dfs2 = Some(Dfs2Session {
+            api_url: format!("http://{host}/meta"),
+            session_id: "s".into(),
+            base_url: format!("http://{host}"),
+            res_id: "r".into(),
+        });
+        let urls = resolve_range_urls(&ctx, &[(0, 100), (100, 100)]).await;
+        server.abort();
+        assert_eq!(
+            urls[0].as_ref().unwrap(),
+            &format!("http://{host}/blob")
+        );
+        let err = urls[1].as_ref().unwrap_err().clone();
+        assert!(err.contains(crate::dfs::RANGE_NOT_SATISFIABLE));
+        // the merged executor meets the refusal as a plain message
+        assert!(crate::dfs::is_range_not_satisfiable(&anyhow::Error::msg(err)));
+    }
+
+    #[tokio::test]
+    async fn dfs2_metadata_populates_merge_windows() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let host = listener.local_addr().unwrap();
+        let body = "{\"resource_version\":\"v9\",\"name\":\"r\",\"data\":{\"index\":{\"\\u0000META\":{\"name\":\"\\u0000META\",\"offset\":1000,\"raw_offset\":0,\"size\":100}},\"metadata\":{\"tag_name\":\"v9\",\"hashed\":[],\"data_split_hint\":[[0,500],[500,2000]]},\"installer_end\":500}}".to_string();
+        let server = tokio::spawn(async move {
+            loop {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let body = body.clone();
+                tokio::spawn(async move {
+                    let mut head = Vec::new();
+                    while !head.ends_with(b"\r\n\r\n") {
+                        head.push(socket.read_u8().await.unwrap());
+                    }
+                    let res = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = socket.write_all(res.as_bytes()).await;
+                    let _ = socket.shutdown().await;
+                });
+            }
+        });
+        let mut ctx = SourceCtx::default();
+        let meta = fetch_dfs2_metadata(&format!("http://{host}/meta"), &mut ctx)
+            .await
+            .unwrap();
+        server.abort();
+        assert_eq!(meta.tag_name, "v9");
+        // data_end = 1000 + 100 = 1100
+        assert_eq!(ctx.merge_windows, Some(vec![(1100, 1600), (1600, 3100)]));
     }
 }
