@@ -180,22 +180,12 @@ async function testSlicedInstall() {
   }
 }
 
-// The server answers the resource's metadata with a data_split_hint whose
-// boundary falls inside app.exe: no declared or requested range may cross a
-// window boundary, and the boundary must actually cut app.exe's download.
+// The v2 fixture's \0META carries a real data_split_hint written by pack: no
+// declared or requested range may cross a window boundary, and at least one
+// merged download must land strictly inside a hint window.
 async function testSplitHint() {
   const label = 'DFS2 split-hint installation';
-  let boundary;
-  const server = await startServer({
-    splitHint: (resource) => {
-      const app = appRange(resource);
-      boundary = app.start + MIB;
-      return [
-        [0, boundary - resource.dataEnd],
-        [boundary - resource.dataEnd, 1 << 30],
-      ];
-    },
-  });
+  const server = await startServer();
   const testDir = getTestDir('dfs2-split-hint');
   try {
     const result = await runInstaller(
@@ -213,30 +203,40 @@ async function testSplitHint() {
       throw new Error(verification.failed.join('; '));
     }
     assertDfs2BatchCoverage(server.dfs2State, label);
+    const resource = server.dfs2State.getResource('v2');
+    const hint = resource.data.metadata.data_split_hint;
+    if (!Array.isArray(hint) || hint.length === 0) {
+      throw new Error(`${label}: fixture metadata has no data_split_hint`);
+    }
+    const windows = hint.map(([start, end]) => [
+      start + resource.dataEnd,
+      end + resource.dataEnd,
+    ]);
     const declared = Array.from(server.dfs2State.sessions.values()).flatMap(
       (session) => session.declared ?? [],
     );
     const requested = server.dfs2State.batchRequests.flatMap(
       (request) => request.ranges,
     );
-    const boundaries = [boundary, server.dfs2State.getResource('v2').dataEnd];
     const crossing = [...declared, ...requested].filter((range) => {
       const [start, end] = range.split('-').map(Number);
-      return boundaries.some((b) => start < b && b <= end);
+      return (
+        start > end ||
+        windows.some(([w0, w1]) => (start < w0 && w0 <= end) || (start < w1 && w1 <= end))
+      );
     });
     if (crossing.length) {
       throw new Error(
         `${label}: ranges crossing a data_split_hint boundary: ${crossing.join(', ')}`,
       );
     }
-    if (
-      !(
-        declared.some((r) => r.endsWith(`-${boundary - 1}`)) &&
-        declared.some((r) => r.startsWith(`${boundary}-`))
-      )
-    ) {
+    const inside = declared.some((range) => {
+      const [start, end] = range.split('-').map(Number);
+      return windows.some(([w0, w1]) => w0 < start && end < w1);
+    });
+    if (!inside) {
       throw new Error(
-        `${label}: the boundary inside app.exe did not cut its download at ${boundary}`,
+        `${label}: no declared range sits strictly inside a hint window`,
       );
     }
   } finally {
