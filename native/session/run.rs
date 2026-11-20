@@ -1301,11 +1301,7 @@ async fn run_dfs_install(
     let limit = (offline && !settings.online).then_some(UPDATE_CHECK_LIMIT);
     let online_meta = if asks_source(offline, settings) {
         txn.timed("metadata", async {
-            let fetch = fetch_metadata(
-                &settings.source_uri,
-                settings.dfs_extras.as_deref(),
-                &mut source_ctx,
-            );
+            let fetch = fetch_metadata(&settings.source_uri, &mut source_ctx);
             let fetched = match limit {
                 Some(limit) => tokio::time::timeout(limit, fetch)
                     .await
@@ -2252,7 +2248,7 @@ const RESOLVE_WINDOW: std::time::Duration = std::time::Duration::from_millis(50)
 /// reset by each new request, are resolved together so DFS2 pays for one batch
 /// request. Every waiting request holds a request slot, so the window closes
 /// once all slots are waiting. Never returns.
-async fn resolve_in_windows(mgr: &ManagedElevate, ctx: &SourceCtx, extras: Option<&str>) {
+async fn resolve_in_windows(mgr: &ManagedElevate, ctx: &SourceCtx) {
     let mut window = Vec::new();
     let mut inflight = futures::stream::FuturesUnordered::new();
     let timer = tokio::time::sleep(RESOLVE_WINDOW);
@@ -2267,7 +2263,7 @@ async fn resolve_in_windows(mgr: &ManagedElevate, ctx: &SourceCtx, extras: Optio
                 let queries: Vec<(crate::ipc::download::Resolve, bool)> = std::mem::take(&mut window);
                 inflight.push(async move {
                     let ranges: Vec<_> = queries.iter().map(|(q, _)| (q.offset, q.len)).collect();
-                    let urls = resolve_range_urls(ctx, extras, &ranges).await;
+                    let urls = resolve_range_urls(ctx, &ranges).await;
                     for ((query, remote), url) in queries.into_iter().zip(urls) {
                         mgr.resolve_reply(crate::ipc::download::Reply { id: query.id, url }, remote)
                             .await;
@@ -2324,11 +2320,7 @@ async fn install_files(
     let local_sem = Arc::new(Semaphore::new(16));
     let large_sem = Arc::new(Semaphore::new(large_limit));
     let small_sem = Arc::new(Semaphore::new(small_limit));
-    let mut resolving = Box::pin(resolve_in_windows(
-        mgr,
-        source_ctx,
-        settings.dfs_extras.as_deref(),
-    ));
+    let mut resolving = Box::pin(resolve_in_windows(mgr, source_ctx));
     let mut file_cursor = 0usize;
     let mut futs = Vec::new();
     for task in tasks {
@@ -2781,8 +2773,7 @@ async fn build_install_op(
     // the packed installer image carries an index mark that must be cleared
     // once it lands as the app's updater; a self-update is the same case
     let installer = item.installer.unwrap_or(false) || is_current_exe(&old);
-    let extras = settings.dfs_extras.as_deref();
-    let diff = |patch| resolve_diff(source_ctx, patch, &hash, hash_key, extras);
+    let diff = |patch| resolve_diff(source_ctx, patch, &hash, hash_key);
     if let FileSource::Embedded(block) = &plan.source {
         if !skip_patch || source_ctx.local_package() || !source_ctx.serves_ranges() {
             return Ok(IpcOperation::InstallFile(InstallFileArgs {
@@ -2833,7 +2824,6 @@ async fn build_install_op(
     let loc = resolve_install_source(
         source_ctx,
         &hash,
-        settings.dfs_extras.as_deref(),
         installer,
         !skip_patch,
     )
@@ -2848,18 +2838,14 @@ async fn resolve_diff(
     patch: &PatchInfo,
     hash: &str,
     key: HashKey,
-    extras: Option<&str>,
 ) -> Option<InstallFileSource> {
     let name = diff_name(patch, hash, key)?;
-    resolve_install_source(ctx, &name, extras, false, true)
-        .await
-        .ok()
+    resolve_install_source(ctx, &name, false, true).await.ok()
 }
 
 async fn resolve_install_source(
     ctx: &SourceCtx,
     hash: &str,
-    extras: Option<&str>,
     installer: bool,
     slice: bool,
 ) -> anyhow::Result<InstallFileSource> {
@@ -2885,7 +2871,7 @@ async fn resolve_install_source(
         });
     }
     Ok(file_source(
-        resolve_file_location(ctx, hash, extras, installer).await?,
+        resolve_file_location(ctx, hash, installer).await?,
     ))
 }
 

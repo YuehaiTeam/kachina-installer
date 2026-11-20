@@ -6,7 +6,7 @@ use anyhow::anyhow;
 use serde_json::Value;
 
 use crate::dfs::{
-    create_dfs2_session, end_dfs2_session, get_dfs, get_dfs2_batch_chunk_urls, get_dfs2_metadata,
+    create_dfs2_session, end_dfs2_session, get_dfs2_batch_chunk_urls, get_dfs2_metadata,
     get_http_with_range, solve_dfs2_challenge, Dfs2Data, Dfs2SessionInsights, InsightItem,
 };
 use crate::pack_format::{parse_index, parse_pack_layout, read_tlv, Embedded};
@@ -27,7 +27,6 @@ use crate::API_CLIENT;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RemoteKind {
     Direct,
-    Dfs,
     Dfs2,
 }
 
@@ -256,8 +255,9 @@ pub fn parse_source(source: &str) -> anyhow::Result<ParsedSource> {
     let rest = source;
     let (remote, rest) = if let Some(r) = rest.strip_prefix("dfs2+") {
         (RemoteKind::Dfs2, r)
-    } else if let Some(r) = rest.strip_prefix("dfs+") {
-        (RemoteKind::Dfs, r)
+    } else if rest.starts_with("dfs+") {
+        return Err(anyhow!("dfs1 sources are no longer supported: {source}")
+            .attach(SOURCE_INVALID));
     } else {
         (RemoteKind::Direct, rest)
     };
@@ -350,19 +350,8 @@ async fn fetch_dfs2_metadata(api_url: &str, ctx: &mut SourceCtx) -> anyhow::Resu
     Ok(data.metadata)
 }
 
-async fn refresh_packed_index(
-    _source: &str,
-    apiurl: &str,
-    remote: RemoteKind,
-    extras: Option<&str>,
-    ctx: &mut SourceCtx,
-) -> anyhow::Result<RepoMetadata> {
-    let binurl = if remote == RemoteKind::Direct {
-        apiurl.to_string()
-    } else {
-        resolve_dfs_file_url(apiurl, extras, Some(256), 0).await?
-    };
-    let (_status, pre) = get_http_with_range(binurl.clone(), 0, 256)
+async fn refresh_packed_index(apiurl: &str, ctx: &mut SourceCtx) -> anyhow::Result<RepoMetadata> {
+    let (_status, pre) = get_http_with_range(apiurl.to_string(), 0, 256)
         .await
         .into_anyhow()?;
     let layout = parse_pack_layout(&pre).ok_or_else(|| {
@@ -373,9 +362,10 @@ async fn refresh_packed_index(
     let theme_sz = layout.theme_len as u64;
     let data_end =
         index_start + layout.index_len as u64 + config_sz + theme_sz + layout.manifest_len as u64;
-    let (_status, index_data) = get_http_with_range(binurl, index_start, data_end - index_start)
-        .await
-        .into_anyhow()?;
+    let (_status, index_data) =
+        get_http_with_range(apiurl.to_string(), index_start, data_end - index_start)
+            .await
+            .into_anyhow()?;
     // 取回的是 \0CONFIG、\0IMAGE、\0INDEX、\0META 首尾相接的一段
     let mut metadata = None;
     let mut pos = 0;
@@ -409,15 +399,11 @@ async fn refresh_packed_index(
     })
 }
 
-pub async fn fetch_metadata(
-    source: &str,
-    extras: Option<&str>,
-    ctx: &mut SourceCtx,
-) -> anyhow::Result<RepoMetadata> {
+pub async fn fetch_metadata(source: &str, ctx: &mut SourceCtx) -> anyhow::Result<RepoMetadata> {
     let parsed = parse_source(source)?;
     ctx.parsed = Some(parsed.clone());
     match parsed {
-        ParsedSource::Plugin { name, raw } => fetch_plugin_metadata(&name, &raw, extras, ctx).await,
+        ParsedSource::Plugin { name, raw } => fetch_plugin_metadata(&name, &raw, ctx).await,
         ParsedSource::Mirrorc { .. } => Err(anyhow!("mirrorc metadata is handled separately")
             .attach(crate::utils::code::SOURCE_INVALID)),
         ParsedSource::GitHub { raw, storage } => match storage {
@@ -427,7 +413,7 @@ pub async fn fetch_metadata(
             }
             StorageKind::Packed => {
                 let url = resolve_github_file_url(&raw).await?;
-                refresh_packed_index(&raw, &url, RemoteKind::Direct, extras, ctx).await
+                refresh_packed_index(&url, ctx).await
             }
         },
         ParsedSource::Http {
@@ -436,11 +422,9 @@ pub async fn fetch_metadata(
             url,
         } => match remote {
             RemoteKind::Dfs2 => fetch_dfs2_metadata(&url, ctx).await,
-            _ => match storage {
+            RemoteKind::Direct => match storage {
                 StorageKind::Hashed => fetch_hashed_metadata(&url).await,
-                StorageKind::Packed => {
-                    refresh_packed_index(source, &url, remote, extras, ctx).await
-                }
+                StorageKind::Packed => refresh_packed_index(&url, ctx).await,
             },
         },
     }
@@ -449,7 +433,6 @@ pub async fn fetch_metadata(
 pub async fn resolve_file_location(
     ctx: &SourceCtx,
     hash: &str,
-    extras: Option<&str>,
     installer: bool,
 ) -> anyhow::Result<FileLocation> {
     let Some(parsed) = ctx.parsed.as_ref() else {
@@ -502,42 +485,31 @@ pub async fn resolve_file_location(
             // Index entries and the installer prefix become `Sliced` sources that
             // the executor resolves once it holds a request slot.
             RemoteKind::Dfs2 => Err(anyhow!("no file in dfs2 index").attach(REMOTE_FILE_MISSING)),
-            _ => match storage {
-                StorageKind::Hashed => {
-                    let file_url = if *remote == RemoteKind::Direct {
-                        hashed_file_url(url, hash)
-                    } else {
-                        resolve_dfs_file_url(&hashed_file_url(url, hash), extras, None, 0).await?
-                    };
-                    Ok(FileLocation::remote(
-                        file_url,
-                        0,
-                        0,
-                        false,
-                        Some("0-".to_string()),
-                    ))
-                }
+            RemoteKind::Direct => match storage {
+                StorageKind::Hashed => Ok(FileLocation::remote(
+                    hashed_file_url(url, hash),
+                    0,
+                    0,
+                    false,
+                    Some("0-".to_string()),
+                )),
                 StorageKind::Packed => {
                     if let Some(file) = ctx.find(hash) {
-                        let full = if *remote == RemoteKind::Direct {
-                            url.clone()
-                        } else {
-                            resolve_dfs_file_url(url, extras, Some(file.size), file.offset).await?
-                        };
                         Ok(FileLocation::remote(
-                            full,
+                            url.clone(),
                             file.offset,
                             file.size,
                             false,
                             None,
                         ))
                     } else if installer {
-                        let full = if *remote == RemoteKind::Direct {
-                            url.clone()
-                        } else {
-                            resolve_dfs_file_url(url, extras, Some(ctx.installer_end), 0).await?
-                        };
-                        Ok(FileLocation::remote(full, 0, ctx.installer_end, true, None))
+                        Ok(FileLocation::remote(
+                            url.clone(),
+                            0,
+                            ctx.installer_end,
+                            true,
+                            None,
+                        ))
                     } else {
                         Err(anyhow!("no file in remote binary").attach(REMOTE_FILE_MISSING))
                     }
@@ -553,7 +525,6 @@ pub async fn resolve_file_location(
 /// range. Other sources resolve each range on its own.
 pub async fn resolve_range_urls(
     ctx: &SourceCtx,
-    extras: Option<&str>,
     ranges: &[(u64, u64)],
 ) -> Vec<Result<String, String>> {
     let session = match (&ctx.parsed, &ctx.dfs2) {
@@ -566,7 +537,7 @@ pub async fn resolve_range_urls(
         ) => session,
         _ => {
             return futures::future::join_all(ranges.iter().map(|&(start, len)| async move {
-                resolve_range_url(ctx, extras, start as usize, len as usize)
+                resolve_range_url(ctx, start as usize, len as usize)
                     .await
                     .map_err(|err| format!("{err:#}"))
             }))
@@ -608,7 +579,6 @@ pub async fn resolve_range_urls(
 
 async fn resolve_range_url(
     ctx: &SourceCtx,
-    extras: Option<&str>,
     start: usize,
     size: usize,
 ) -> anyhow::Result<String> {
@@ -626,7 +596,6 @@ async fn resolve_range_url(
         ParsedSource::GitHub { raw, .. } => resolve_github_file_url(raw).await,
         ParsedSource::Http { remote, url, .. } => match remote {
             RemoteKind::Direct => Ok(url.clone()),
-            RemoteKind::Dfs => resolve_dfs_file_url(url, extras, Some(size), start).await,
             RemoteKind::Dfs2 => Err(anyhow!("DFS2 session not found").attach(NO_DOWNLOAD_NODE)),
         },
     }
@@ -840,7 +809,6 @@ pub async fn cleanup_dfs2(ctx: &mut SourceCtx) {
 async fn fetch_plugin_metadata(
     name: &str,
     raw: &str,
-    extras: Option<&str>,
     ctx: &mut SourceCtx,
 ) -> anyhow::Result<RepoMetadata> {
     let clean = clean_plugin_url(raw);
@@ -862,7 +830,7 @@ async fn fetch_plugin_metadata(
         }
         PluginResult::Unimplemented | PluginResult::Value(_) => {
             let url = plugin_chunk_url(ctx, name, raw, "").await?;
-            refresh_packed_index(raw, &url, RemoteKind::Direct, extras, ctx).await
+            refresh_packed_index(&url, ctx).await
         }
     }
 }
@@ -1023,62 +991,6 @@ fn hashed_file_url(json_url: &str, hash: &str) -> String {
     json_url.to_string()
 }
 
-async fn resolve_dfs_file_url(
-    apiurl: &str,
-    extras: Option<&str>,
-    length: Option<usize>,
-    start: usize,
-) -> anyhow::Result<String> {
-    let range = length.map(|len| format!("{}-{}", start, start + len.saturating_sub(1)));
-    let dfs = get_dfs(apiurl.to_string(), range, extras.map(|s| s.to_string()))
-        .await
-        .map_err(|e| attach_download_or(e, NO_DOWNLOAD_NODE, None, None))?;
-    if let Some(url) = dfs.url {
-        return Ok(url);
-    }
-    // a node whose probe answers first, else the origin, else the first node
-    let first_test = dfs
-        .tests
-        .as_ref()
-        .and_then(|t| t.first())
-        .map(|t| t.1.clone());
-    if let Some(tests) = dfs.tests {
-        if let Some(url) = pick_fastest_test(tests).await {
-            return Ok(url);
-        }
-    }
-    if let Some(url) = dfs.source.or(first_test) {
-        return Ok(url);
-    }
-    Err(anyhow::Error::from(Coded::bare(NO_DOWNLOAD_NODE)))
-}
-
-/// The download URL of the first node whose probe answers `HEAD` with a
-/// success status within 2 s; `None` when every probe fails.
-async fn pick_fastest_test(tests: Vec<(String, String)>) -> Option<String> {
-    let mut joins = tokio::task::JoinSet::new();
-    for (probe, url) in tests {
-        joins.spawn(async move {
-            let client = reqwest::Client::builder()
-                .timeout(Duration::from_millis(2000))
-                .build()
-                .ok()?;
-            let ok = client.head(&probe).send().await.ok()?.status().is_success();
-            if ok {
-                Some(url)
-            } else {
-                None
-            }
-        });
-    }
-    while let Some(res) = joins.join_next().await {
-        if let Ok(Some(url)) = res {
-            return Some(url);
-        }
-    }
-    None
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1122,5 +1034,77 @@ mod tests {
         assert!(!needs_js_plugin(
             "dfs2+hashed+https://example.com/meta.json"
         ));
+    }
+
+    /// The packed index loads in two plain range GETs on the package URL:
+    /// first the 256-byte layout header, then the index window it declares.
+    #[tokio::test]
+    async fn packed_index_fetches_header_then_index() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let tlv = |name: &[u8], data: &[u8]| {
+            let mut out = b"!IN\0".to_vec();
+            out.extend((name.len() as u16).to_be_bytes());
+            out.extend(name);
+            out.extend((data.len() as u32).to_be_bytes());
+            out.extend(data);
+            out
+        };
+        let meta_tlv = tlv(b"\0META", br#"{"tag_name":"v9","hashed":[]}"#);
+        // header: layout marker + base_end=512, index_len covers the meta TLV
+        let mut blob = vec![0u8; 256];
+        blob[..18].copy_from_slice(b"!KachinaInstaller!");
+        let mut at = 18;
+        for value in [512u32, 0, 0, meta_tlv.len() as u32, 0] {
+            blob[at..at + 4].copy_from_slice(&value.to_be_bytes());
+            at += 4;
+        }
+        blob.resize(512 + meta_tlv.len(), 0);
+        blob[512..].copy_from_slice(&meta_tlv);
+        let blob = std::sync::Arc::new(blob);
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let host = listener.local_addr().unwrap();
+        let gets = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let server = tokio::spawn({
+            let gets = gets.clone();
+            async move {
+                loop {
+                    let (mut socket, _) = listener.accept().await.unwrap();
+                    let (gets, blob) = (gets.clone(), blob.clone());
+                    tokio::spawn(async move {
+                        let mut head = Vec::new();
+                        while !head.ends_with(b"\r\n\r\n") {
+                            head.push(socket.read_u8().await.unwrap());
+                        }
+                        let head = String::from_utf8(head).unwrap();
+                        let range = head
+                            .to_ascii_lowercase()
+                            .lines()
+                            .find_map(|l| l.strip_prefix("range: bytes=").map(str::to_string))
+                            .unwrap();
+                        gets.lock().unwrap().push(range.clone());
+                        let (start, end) = range.split_once('-').unwrap();
+                        let (start, end): (usize, usize) =
+                            (start.parse().unwrap(), end.parse().unwrap());
+                        let body = &blob[start..=end];
+                        let res = format!("HTTP/1.1 206 Partial Content\r\nContent-Range: bytes {start}-{end}/{}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", blob.len(), body.len());
+                        let _ = socket.write_all(res.as_bytes()).await;
+                        let _ = socket.write_all(body).await;
+                    });
+                }
+            }
+        });
+        let api = format!("http://{host}/blob");
+        let mut ctx = SourceCtx::default();
+        let meta = refresh_packed_index(&api, &mut ctx).await.unwrap();
+        server.abort();
+        assert_eq!(meta.tag_name, "v9");
+        assert_eq!(
+            *gets.lock().unwrap(),
+            vec![
+                "0-255".to_string(),
+                format!("{}-{}", 512, 512 + meta_tlv.len() - 1)
+            ]
+        );
     }
 }
