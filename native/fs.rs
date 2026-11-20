@@ -718,11 +718,8 @@ async fn open_http_stream(
         None => (size > 0).then_some((offset as u64, size as u64)),
     };
     let has_range = wire_range.is_some();
-    let insight_range = if let Some(PinnedRange::Window(start, len)) = pinned {
-        vec![(start as u32, (start + len - 1) as u32)]
-    } else {
-        insight_range_vec(request_range, offset, size)
-    };
+    // 遥测始终上报原逻辑区间；#range= 的物理偏移只影响 wire_range。
+    let insight_range = insight_range_vec(request_range, offset, size);
 
     // 构建HTTP请求
     let mut builder = DOWNLOAD_CLIENT

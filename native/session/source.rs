@@ -370,7 +370,15 @@ fn extent_url(extents: &[Extent], base: &str, start: u64, size: u64) -> anyhow::
                 .attach(crate::utils::code::METADATA_INVALID)
         })?;
     let phys = extent.phys_offset + start - extent.offset;
-    let fragment = if phys == 0 && size == extent.len {
+    // `#range=0-` 只在请求恰好覆盖整个物理文件时使用：起点为 0、长度等满，
+    // 且没有别的 extent 引用同一路径的更后段（多段共用一个物理文件时
+    // 不能按整文件签名，否则会把后续段也拉回来）。
+    let whole_file = phys == 0
+        && size == extent.len
+        && !extents
+            .iter()
+            .any(|o| o.path == extent.path && o.phys_offset + o.len > phys + size);
+    let fragment = if whole_file {
         "#range=0-".to_string()
     } else {
         format!("#range={phys}-{}", phys + size - 1)
@@ -387,7 +395,8 @@ async fn apply_extent_doc(
         .map_err(|e| attach_metadata(e.into()))?;
     extents.sort_by_key(|e| e.offset);
     ctx.extents = Some(extents);
-    ctx.extent_base = url
+    let url_path = url.split(['?', '#']).next().unwrap_or(url);
+    ctx.extent_base = url_path
         .rsplit_once('/')
         .map(|(dir, _)| dir.to_string())
         .unwrap_or_default();

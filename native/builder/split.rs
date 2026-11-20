@@ -5,7 +5,7 @@ use twox_hash::XxHash3_128;
 
 use crate::{
     cli::SplitArgs,
-    pack_format::{parse_pack_layout, scan_embedded, LAYOUT_SEARCH_LEN},
+    pack_format::{parse_index, parse_pack_layout, scan_embedded, LAYOUT_SEARCH_LEN},
 };
 
 #[derive(Serialize)]
@@ -93,7 +93,7 @@ pub async fn split_cli(args: SplitArgs) -> Result<(), String> {
     let mut emit = |offset: u64, block: &[u8]| -> Result<(), String> {
         let mut hasher = XxHash3_128::new();
         hasher.write(block);
-        let name = format!("{:x}", hasher.finish_128());
+        let name = format!("{:032x}", hasher.finish_128());
         if written.insert(name.clone()) {
             let p = cas_dir.join(&name);
             std::fs::write(&p, block).map_err(|e| format!("Failed to write {:?}: {e}", p))?;
@@ -122,70 +122,31 @@ pub async fn split_cli(args: SplitArgs) -> Result<(), String> {
     }
     extents.sort_by_key(|e| e.offset);
 
-    // dfs2 形态的 index：hash/patch key -> {name, offset, raw_offset, size}。
-    // name 是内嵌块的物理名（pack 按 md5 优先命名），不是展示文件名。
-    let mut index = BTreeMap::<String, IndexEntry>::new();
-    let mut put = |index: &mut BTreeMap<String, IndexEntry>,
-                   key: String,
-                   e: &crate::pack_format::Embedded| {
-        index.insert(
-            key,
-            IndexEntry {
-                name: e.name.clone(),
-                offset: e.offset as u64,
-                raw_offset: e.raw_offset as u64,
-                size: e.size as u64,
-            },
-        );
-    };
-    let hashes_of = |v: &serde_json::Value| -> Vec<String> {
-        ["md5", "xxh"]
-            .into_iter()
-            .filter_map(|k| v.get(k).and_then(|h| h.as_str()).map(str::to_string))
-            .collect()
-    };
-    for item in metadata.get("hashed").and_then(|v| v.as_array()).into_iter().flatten() {
-        let hashes = hashes_of(item);
-        // 物理块名按 md5 优先取，客户端则可能用任一 hash 查 index。
-        if let Some(e) = hashes
-            .iter()
-            .find_map(|h| entries.iter().find(|e| e.name == *h))
-        {
-            for h in hashes {
-                put(&mut index, h, e);
-            }
-        }
-    }
-    for patch in metadata.get("patches").and_then(|v| v.as_array()).into_iter().flatten() {
-        let (Some(froms), Some(tos)) = (
-            patch.get("from").map(&hashes_of),
-            patch.get("to").map(&hashes_of),
-        ) else {
-            continue;
-        };
-        // 物理名两侧各自 md5 优先；查找键是 `{from的任一hash}_{to的物理名}`，
-        // 覆盖客户端的两种 hash_key 构造。
-        let pref_to = tos.first();
-        let entry = froms.iter().flat_map(|f| tos.iter().map(move |t| (f, t))).find_map(|(f, t)| {
-            entries
-                .iter()
-                .find(|e| e.name == format!("{f}_{t}"))
-        });
-        if let (Some(e), Some(pref_to)) = (entry, pref_to) {
-            for f in froms {
-                put(&mut index, format!("{f}_{pref_to}"), e);
-            }
-        }
-    }
-    index.insert(
-        "\0META".to_string(),
-        IndexEntry {
-            name: "\0META".to_string(),
-            offset: meta.offset as u64,
-            raw_offset: meta.raw_offset as u64,
-            size: meta.size as u64,
-        },
-    );
+    // dfs2 形态的 index：物理块名 -> {name, offset, raw_offset, size}，
+    // 与包内 \0INDEX 1:1（同 dfs2 服务端与 apply_packed_index 的读法）。
+    let index_entry = entries
+        .iter()
+        .find(|e| e.name == "\0INDEX")
+        .ok_or_else(|| "package has no \\0INDEX".to_string())?;
+    let parsed = parse_index(
+        &bytes[index_entry.offset..index_entry.offset + index_entry.size],
+        index_start as usize,
+    )
+    .ok_or_else(|| "malformed \\0INDEX".to_string())?;
+    let index: BTreeMap<String, IndexEntry> = parsed
+        .into_iter()
+        .map(|e| {
+            (
+                e.name.clone(),
+                IndexEntry {
+                    name: e.name,
+                    offset: e.offset as u64,
+                    raw_offset: e.raw_offset as u64,
+                    size: e.size as u64,
+                },
+            )
+        })
+        .collect();
 
     let doc = serde_json::json!({
         "index": index,
