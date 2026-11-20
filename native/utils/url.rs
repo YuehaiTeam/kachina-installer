@@ -53,6 +53,25 @@ pub fn sanitize_url_for_logging(url: &str) -> String {
     }
 }
 
+/// The physical window a URL's fragment pins (`...#range=<start>-<end>&...`):
+/// when the server signs a node URL for a slice of a larger object it records
+/// that window in the fragment, and it wins over the caller's logical range.
+/// Other fragment keys (`cert`, ...) are left for the node itself. Returns
+/// `(start, len)` of the pinned window, `None` when absent or malformed.
+pub fn fragment_range(url: &str) -> Option<(u64, u64)> {
+    let fragment = url.split_once('#')?.1;
+    fragment.split('&').find_map(|part| {
+        let (start, end) = part.strip_prefix("range=")?.split_once('-')?;
+        let start = start.parse::<u64>().ok()?;
+        let end = end.parse::<u64>().ok()?;
+        if start <= end {
+            Some((start, end - start + 1))
+        } else {
+            None
+        }
+    })
+}
+
 /// `text` with every `http(s)://` URL in it cut to protocol, host and path
 /// ([`sanitize_url_for_logging`]). A URL ends at whitespace or at one of
 /// `)`, `,`, `"`, `'`, `>`, `]`, `;`.
@@ -249,6 +268,28 @@ mod tests {
              retry http://b.example:8080/p, done"
         );
         assert_eq!(sanitize_urls_in_text("no url here"), "no url here");
+    }
+
+    #[test]
+    fn fragment_range_reads_the_pinned_window() {
+        assert_eq!(
+            fragment_range("https://cdn.example.com/pack#range=4096-8191&cert=00ff"),
+            Some((4096, 4096))
+        );
+        assert_eq!(
+            fragment_range("https://cdn.example.com/pack#cert=00ff&range=0-99"),
+            Some((0, 100))
+        );
+        assert_eq!(fragment_range("https://cdn.example.com/pack"), None);
+        assert_eq!(fragment_range("https://cdn.example.com/pack#cert=00ff"), None);
+        assert_eq!(
+            fragment_range("https://cdn.example.com/pack#range=abc"),
+            None
+        );
+        assert_eq!(
+            fragment_range("https://cdn.example.com/pack#range=200-100"),
+            None
+        );
     }
 
     #[test]

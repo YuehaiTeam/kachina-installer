@@ -710,6 +710,38 @@ mod tests {
         let _ = tokio::fs::remove_dir_all(dir).await;
     }
 
+    /// A `#range=` fragment in the URL the session resolves pins the physical
+    /// window: the node is asked for it, not for the part's logical offset.
+    #[tokio::test]
+    async fn url_fragment_range_overrides_the_part_window() {
+        let data: Vec<u8> = (0..4096u32).map(|i| (i % 251) as u8).collect();
+        let (url, requests, server) = range_server(Arc::new(data.clone()), |_, end, _| end).await;
+        let url = format!("{url}#range=100-199&cert=00ff");
+        let dir = std::env::temp_dir().join(format!("kachina-frag-{}", uuid::Uuid::new_v4()));
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let target = dir.join("output");
+        let args = InstallFileArgs {
+            mode: InstallFileMode::Direct(InstallFileSource::Sliced {
+                parts: vec![(0, 16)],
+                skip_decompress: true,
+            }),
+            target: target.to_string_lossy().into_owned(),
+            output_size: 100,
+            old: None,
+            md5: None,
+            xxh: None,
+            clear_installer_index_mark: None,
+        };
+        let run = in_job(url, &dir, args).await;
+        server.abort();
+        run.finished.unwrap();
+        run.result.unwrap();
+        assert_eq!(tokio::fs::read(&target).await.unwrap(), &data[100..=199]);
+        assert_eq!(requests.lock().unwrap().get(&100), Some(&1));
+        assert!(requests.lock().unwrap().get(&0).is_none());
+        let _ = tokio::fs::remove_dir_all(dir).await;
+    }
+
     #[tokio::test]
     async fn cancel_while_waiting_for_slot_requests_no_url() {
         let id = uuid::Uuid::new_v4().to_string();

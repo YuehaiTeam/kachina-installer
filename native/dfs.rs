@@ -383,6 +383,8 @@ pub async fn solve_dfs2_challenge(challenge_type: String, data: String) -> Resul
 }
 
 pub async fn get_http_with_range(url: String, offset: u64, size: u64) -> TAResult<(u16, Vec<u8>)> {
+    // A `#range=` fragment in a server-issued URL pins the physical window.
+    let (offset, size) = crate::utils::url::fragment_range(&url).unwrap_or((offset, size));
     let mut res = API_CLIENT.get(&url);
     if offset != 0 || size != 0 {
         res = res.header("Range", format!("bytes={}-{}", offset, offset + size - 1));
