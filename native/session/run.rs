@@ -32,8 +32,8 @@ use crate::session::merge::{
 };
 use crate::session::plan::{
     build_plan, collect_skip_hash, files_to_probe_writable, is_under, join_install,
-    mark_unwritable, normalize_rel, strip_install_prefix, DiskFiles, HashKey, InstallPlan,
-    LocalFile, PlanAction, PlanInput, SkipReason,
+    mark_unwritable, normalize_existing, normalize_rel, strip_install_prefix, DiskFiles,
+    HashKey, InstallPlan, LocalFile, PlanAction, PlanInput, SkipReason,
 };
 use crate::session::source::{
     cleanup_dfs2, ensure_dfs2_session, fetch_metadata, hash_of_item, needs_js_plugin, parse_source,
@@ -1884,12 +1884,10 @@ async fn prepare_process(
     let IpcResult::FindProcessByName(procs) = found else {
         bail!("IPC_SHAPE_ERR");
     };
-    let target = join_install(&settings.install_path, &project.exe_name)
-        .replace('\\', "/")
-        .to_lowercase();
+    let target = normalize_existing(&join_install(&settings.install_path, &project.exe_name));
     let running: Vec<(u32, String)> = procs
         .into_iter()
-        .filter(|(_, path)| path.replace('\\', "/").to_lowercase() == target)
+        .filter(|(_, path)| !path.is_empty() && normalize_existing(path) == target)
         .collect();
     if running.is_empty() {
         return Ok(true);
@@ -2898,8 +2896,8 @@ fn staged_target(staging: &Staging, file_name: &str) -> String {
 
 fn is_current_exe(path: &str) -> bool {
     std::env::current_exe().is_ok_and(|exe| {
-        crate::session::plan::normalize_full(&exe.to_string_lossy())
-            == crate::session::plan::normalize_full(path)
+        crate::session::plan::normalize_existing(&exe.to_string_lossy())
+            == crate::session::plan::normalize_existing(path)
     })
 }
 

@@ -1,4 +1,4 @@
-use crate::session::plan::normalize_full;
+use crate::session::plan::normalize_existing;
 use crate::utils::code::{Coded, REGISTRY_READ_FAILED};
 use anyhow::{Context, Result};
 
@@ -153,7 +153,7 @@ pub fn remove_record(hive: RegHive, reg_name: &str) -> Result<()> {
 }
 
 fn install_paths_match(a: &str, b: &str) -> bool {
-    normalize_full(a) == normalize_full(b)
+    normalize_existing(a) == normalize_existing(b)
 }
 
 fn record_matches(location: &str, install_path: &str, exe_name: &str, reg_name: &str) -> bool {

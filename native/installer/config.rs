@@ -139,7 +139,7 @@ impl InstallerConfig {
         install_path_exists: bool,
         install_path_source: &'static str,
     ) -> InstallerConfig {
-        self.install_path = install_path.to_string_lossy().to_string();
+        self.install_path = crate::utils::path::long_path(&install_path.to_string_lossy());
         self.install_path_exists = install_path_exists;
         self.install_path_source = install_path_source;
         self

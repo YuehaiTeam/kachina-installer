@@ -1,5 +1,5 @@
 import { spawn, spawnSync } from 'child_process';
-import { dev, getTestDir, cleanupTestDir } from './utils.mjs';
+import { dev, getTestDir, cleanupTestDir, normalizeInstallPath } from './utils.mjs';
 import 'zx/globals';
 import { usePowerShell, usePwsh } from 'zx';
 // pwsh 以 Microsoft Store 别名安装时 node 侧可能探测不到，回退 Windows PowerShell
@@ -181,9 +181,9 @@ async function test() {
   const link = await $`(New-Object -ComObject WScript.Shell).CreateShortcut(${path.join(runDir, 'Sfx Test App.lnk')}) | Select-Object TargetPath, Arguments, WorkingDirectory | ConvertTo-Json -Compress`;
   const { TargetPath, Arguments, WorkingDirectory } = JSON.parse(link.stdout);
   if (
-    TargetPath.toLowerCase() !== portablePath.toLowerCase() ||
+    normalizeInstallPath(TargetPath) !== normalizeInstallPath(portablePath) ||
     Arguments !== '' ||
-    WorkingDirectory.toLowerCase() !== testDir.toLowerCase()
+    normalizeInstallPath(WorkingDirectory) !== normalizeInstallPath(testDir)
   ) {
     throw new Error('source link: ' + link.stdout);
   }

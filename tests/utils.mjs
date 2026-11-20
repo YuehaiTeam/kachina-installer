@@ -102,16 +102,28 @@ export async function verifyUserShortcuts(appName, installDir, exeName) {
       await $`(New-Object -ComObject WScript.Shell).CreateShortcut(${lnk}) | Select-Object TargetPath, WorkingDirectory | ConvertTo-Json -Compress`.quiet();
     const { TargetPath, WorkingDirectory } = JSON.parse(read.stdout);
     if (
-      TargetPath.toLowerCase() !== expectedTarget ||
-      WorkingDirectory.toLowerCase() !== installDir.toLowerCase()
+      normalizeInstallPath(TargetPath) !== normalizeInstallPath(expectedTarget) ||
+      normalizeInstallPath(WorkingDirectory) !== normalizeInstallPath(installDir)
     ) {
       failed.push(`Shortcut ${lnk}: target=${TargetPath} start-in=${WorkingDirectory}`);
+    }
+    // The shortcut's fields must be written in the canonical long form; the
+    // normalized compare above would also pass for a short (8.3) spelling.
+    if (WorkingDirectory !== fs.realpathSync.native(installDir)) {
+      failed.push(`Shortcut ${lnk}: start-in not canonical: ${WorkingDirectory}`);
     }
   }
   return failed;
 }
 
+/** Canonical form for comparing paths the installer hands back (registry
+ * records, .lnk fields, log lines): realpath expands 8.3 short-name
+ * components (e.g. `RUNNER~1`) so either form compares equal; non-existent
+ * paths keep their textual form. */
 export function normalizeInstallPath(p) {
+  if (fs.existsSync(p)) {
+    p = fs.realpathSync.native(p);
+  }
   return p
     .replaceAll('/', '\\')
     .replace(/[\\]+$/, '')

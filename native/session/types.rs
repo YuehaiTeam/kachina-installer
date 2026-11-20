@@ -200,10 +200,13 @@ pub async fn settings_from_cli(
     config: &InstallerConfig,
     project: &ProjectConfig,
 ) -> anyhow::Result<Settings> {
+    // Normalize to the long (non-8.3) form so everything derived from it —
+    // registry records, shortcut working dirs, path comparisons — uses one
+    // consistent spelling regardless of the form `-D` was given in.
     let install_path = args
         .target
         .as_ref()
-        .map(|p| p.to_string_lossy().to_string())
+        .map(|p| crate::utils::path::long_path(&p.to_string_lossy()))
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| config.install_path.clone());
     let source_uri = project.source_uri(args.source.as_deref())?;
