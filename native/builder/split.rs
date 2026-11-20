@@ -122,44 +122,59 @@ pub async fn split_cli(args: SplitArgs) -> Result<(), String> {
     }
     extents.sort_by_key(|e| e.offset);
 
-    // dfs2 形态的 index：hash/patch key -> {name, offset, raw_offset, size}
+    // dfs2 形态的 index：hash/patch key -> {name, offset, raw_offset, size}。
+    // name 是内嵌块的物理名（pack 按 md5 优先命名），不是展示文件名。
     let mut index = BTreeMap::<String, IndexEntry>::new();
-    let put = |index: &mut BTreeMap<String, IndexEntry>, key: String, name: String| {
-        if let Some(e) = entries.iter().find(|e| e.name == key) {
-            index.insert(
-                key,
-                IndexEntry {
-                    name,
-                    offset: e.offset as u64,
-                    raw_offset: e.raw_offset as u64,
-                    size: e.size as u64,
-                },
-            );
-        }
+    let mut put = |index: &mut BTreeMap<String, IndexEntry>,
+                   key: String,
+                   e: &crate::pack_format::Embedded| {
+        index.insert(
+            key,
+            IndexEntry {
+                name: e.name.clone(),
+                offset: e.offset as u64,
+                raw_offset: e.raw_offset as u64,
+                size: e.size as u64,
+            },
+        );
+    };
+    let hashes_of = |v: &serde_json::Value| -> Vec<String> {
+        ["md5", "xxh"]
+            .into_iter()
+            .filter_map(|k| v.get(k).and_then(|h| h.as_str()).map(str::to_string))
+            .collect()
     };
     for item in metadata.get("hashed").and_then(|v| v.as_array()).into_iter().flatten() {
-        let name = item.get("file_name").and_then(|v| v.as_str()).unwrap_or_default();
-        for key in ["xxh", "md5"].into_iter().filter_map(|k| item.get(k)) {
-            if let Some(hash) = key.as_str() {
-                put(&mut index, hash.to_string(), name.to_string());
+        let hashes = hashes_of(item);
+        // 物理块名按 md5 优先取，客户端则可能用任一 hash 查 index。
+        if let Some(e) = hashes
+            .iter()
+            .find_map(|h| entries.iter().find(|e| e.name == *h))
+        {
+            for h in hashes {
+                put(&mut index, h, e);
             }
         }
     }
     for patch in metadata.get("patches").and_then(|v| v.as_array()).into_iter().flatten() {
-        let from = patch
-            .get("from")
-            .and_then(|f| f.get("xxh").or_else(|| f.get("md5")))
-            .and_then(|v| v.as_str());
-        let to = patch
-            .get("to")
-            .and_then(|f| f.get("xxh").or_else(|| f.get("md5")))
-            .and_then(|v| v.as_str());
-        let name = patch
-            .get("file_name")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default();
-        if let (Some(from), Some(to)) = (from, to) {
-            put(&mut index, format!("{from}_{to}"), name.to_string());
+        let (Some(froms), Some(tos)) = (
+            patch.get("from").map(&hashes_of),
+            patch.get("to").map(&hashes_of),
+        ) else {
+            continue;
+        };
+        // 物理名两侧各自 md5 优先；查找键是 `{from的任一hash}_{to的物理名}`，
+        // 覆盖客户端的两种 hash_key 构造。
+        let pref_to = tos.first();
+        let entry = froms.iter().flat_map(|f| tos.iter().map(move |t| (f, t))).find_map(|(f, t)| {
+            entries
+                .iter()
+                .find(|e| e.name == format!("{f}_{t}"))
+        });
+        if let (Some(e), Some(pref_to)) = (entry, pref_to) {
+            for f in froms {
+                put(&mut index, format!("{f}_{pref_to}"), e);
+            }
         }
     }
     index.insert(

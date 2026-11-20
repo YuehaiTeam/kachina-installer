@@ -342,6 +342,9 @@ async fn fetch_hashed_metadata(url: &str, ctx: &mut SourceCtx) -> anyhow::Result
             crate::dfs::HttpStatus::new(status, body),
         )));
     }
+    // extent paths are relative to the document that was actually served;
+    // a redirect must not leave them anchored to the original URL.
+    let final_url = res.url().to_string();
     let body = res.text().await.map_err(|e| attach_metadata(e.into()))?;
     let doc: serde_json::Value =
         serde_json::from_str(&body).map_err(|e| attach_metadata(e.into()))?;
@@ -349,17 +352,71 @@ async fn fetch_hashed_metadata(url: &str, ctx: &mut SourceCtx) -> anyhow::Result
     // `index`/`metadata`/`installer_end` populate the context, `size`/`extents`
     // give the logical -> physical map the download side derives URLs from.
     // A bare RepoMetadata document is the hashed layout.
-    if doc.get("index").is_some() && doc.get("metadata").is_some() && doc.get("extents").is_some() {
-        return apply_extent_doc(&doc, url, ctx);
+    if doc.get("extents").is_some() {
+        return apply_extent_doc(&doc, &final_url, ctx).await;
     }
     serde_json::from_value(doc).map_err(|e| attach_metadata(e.into()))
 }
 
-fn apply_extent_doc(
+/// `{base}/{path}#range=phys-phys` for a logical range covered by one extent,
+/// `#range=0-` when it is the whole extent.
+fn extent_url(extents: &[Extent], base: &str, start: u64, size: u64) -> anyhow::Result<String> {
+    let end = start + size;
+    let extent = extents
+        .iter()
+        .find(|e| e.offset <= start && end <= e.offset + e.len)
+        .ok_or_else(|| {
+            anyhow!("no extent covers range {start}-{end}")
+                .attach(crate::utils::code::METADATA_INVALID)
+        })?;
+    let phys = extent.phys_offset + start - extent.offset;
+    let fragment = if phys == 0 && size == extent.len {
+        "#range=0-".to_string()
+    } else {
+        format!("#range={phys}-{}", phys + size - 1)
+    };
+    Ok(format!("{base}/{}{fragment}", extent.path))
+}
+
+async fn apply_extent_doc(
     doc: &serde_json::Value,
     url: &str,
     ctx: &mut SourceCtx,
 ) -> anyhow::Result<RepoMetadata> {
+    let mut extents: Vec<Extent> = serde_json::from_value(doc["extents"].clone())
+        .map_err(|e| attach_metadata(e.into()))?;
+    extents.sort_by_key(|e| e.offset);
+    ctx.extents = Some(extents);
+    ctx.extent_base = url
+        .rsplit_once('/')
+        .map(|(dir, _)| dir.to_string())
+        .unwrap_or_default();
+    // 仅 extents 的文档是一个虚拟整包：头部与索引区都落在 extent 0，
+    // 用 extent 映射虚拉回这些字节，走整包索引路径补齐 index/metadata。
+    if !(doc.get("index").is_some() && doc.get("metadata").is_some()) {
+        let (extents, base) = (
+            ctx.extents.clone().unwrap_or_default(),
+            ctx.extent_base.clone(),
+        );
+        let fetch = |off: u64, len: u64| -> anyhow::Result<_> {
+            let url = extent_url(&extents, &base, off, len)?;
+            Ok(get_http_with_range(url, off, len))
+        };
+        let (_status, pre) = fetch(0, 256)?.await.into_anyhow()?;
+        let layout = parse_pack_layout(&pre).ok_or_else(|| {
+            anyhow!("invalid remote index header").attach(crate::utils::code::METADATA_INVALID)
+        })?;
+        let index_start = layout.base_end as u64;
+        let data_end = index_start
+            + layout.config_len as u64
+            + layout.theme_len as u64
+            + layout.index_len as u64
+            + layout.manifest_len as u64;
+        let (_status, index_data) = fetch(index_start, data_end - index_start)?
+            .await
+            .into_anyhow()?;
+        return apply_packed_index(&index_data, index_start, &layout, ctx);
+    }
     let index = doc["index"].as_object().ok_or_else(|| {
         anyhow!("extent document has no index object").attach(crate::utils::code::METADATA_INVALID)
     })?;
@@ -383,11 +440,6 @@ fn apply_extent_doc(
         );
     }
     ctx.installer_end = doc["installer_end"].as_u64().unwrap_or_default() as usize;
-    let mut extents: Vec<Extent> = serde_json::from_value(doc["extents"].clone())
-        .map_err(|e| attach_metadata(e.into()))?;
-    extents.sort_by_key(|e| e.offset);
-    ctx.extents = Some(extents);
-    ctx.extent_base = url.rsplit_once('/').map(|(dir, _)| dir.to_string()).unwrap_or_default();
     let metadata: RepoMetadata = serde_json::from_value(doc["metadata"].clone())
         .map_err(|e| attach_metadata(e.into()))?;
     if let (Some(hint), Some(data_end)) = (metadata.data_split_hint.clone(), data_end) {
@@ -459,14 +511,33 @@ async fn refresh_packed_index(apiurl: &str, ctx: &mut SourceCtx) -> anyhow::Resu
         anyhow!("invalid remote index header").attach(crate::utils::code::METADATA_INVALID)
     })?;
     let index_start = layout.base_end as u64;
-    let config_sz = layout.config_len as u64;
-    let theme_sz = layout.theme_len as u64;
-    let data_end =
-        index_start + layout.index_len as u64 + config_sz + theme_sz + layout.manifest_len as u64;
+    let data_end = index_start
+        + layout.config_len as u64
+        + layout.theme_len as u64
+        + layout.index_len as u64
+        + layout.manifest_len as u64;
     let (_status, index_data) =
         get_http_with_range(apiurl.to_string(), index_start, data_end - index_start)
             .await
             .into_anyhow()?;
+    apply_packed_index(&index_data, index_start, &layout, ctx)
+}
+
+/// Parse the `\\0CONFIG\\0IMAGE\\0INDEX\\0META` block fetched from `index_start`
+/// and populate `ctx` with index, installer_end and merge windows.
+fn apply_packed_index(
+    index_data: &[u8],
+    index_start: u64,
+    layout: &crate::pack_format::PackLayout,
+    ctx: &mut SourceCtx,
+) -> anyhow::Result<RepoMetadata> {
+    let config_sz = layout.config_len as u64;
+    let theme_sz = layout.theme_len as u64;
+    let data_end = index_start
+        + layout.index_len as u64
+        + config_sz
+        + theme_sz
+        + layout.manifest_len as u64;
     // 取回的是 \0CONFIG、\0IMAGE、\0INDEX、\0META 首尾相接的一段
     let mut metadata = None;
     let mut pos = 0;
@@ -688,6 +759,11 @@ async fn resolve_range_url(
     start: usize,
     size: usize,
 ) -> anyhow::Result<String> {
+    // 无调度器的静态映射优先于源形态：逻辑区间落到单个 extent 内才有 URL，
+    // 跨 extent 或落入间隙由规划保证不发生，这里兜底报错。
+    if let Some(extents) = ctx.extents.as_ref() {
+        return extent_url(extents, &ctx.extent_base, start as u64, size as u64);
+    }
     let Some(parsed) = ctx.parsed.as_ref() else {
         return Err(anyhow!("source not loaded").attach(crate::utils::code::SOURCE_INVALID));
     };
@@ -701,28 +777,7 @@ async fn resolve_range_url(
         }
         ParsedSource::GitHub { raw, .. } => resolve_github_file_url(raw).await,
         ParsedSource::Http { remote, url, .. } => match remote {
-            RemoteKind::Direct => {
-                if let Some(extents) = ctx.extents.as_ref() {
-                    // 无调度器的静态映射：逻辑区间落到单个 extent 内时才有 URL；
-                    // 跨 extent 或落入间隙由规划保证不发生，这里兜底报错。
-                    let end = start as u64 + size as u64;
-                    let extent = extents
-                        .iter()
-                        .find(|e| e.offset <= start as u64 && end <= e.offset + e.len)
-                        .ok_or_else(|| {
-                            anyhow!("no extent covers range {start}-{end}")
-                                .attach(crate::utils::code::METADATA_INVALID)
-                        })?;
-                    let phys = extent.phys_offset + start as u64 - extent.offset;
-                    let fragment = if phys == 0 && size as u64 == extent.len {
-                        "#range=0-".to_string()
-                    } else {
-                        format!("#range={phys}-{}", phys + size as u64 - 1)
-                    };
-                    return Ok(format!("{}/{}{fragment}", ctx.extent_base, extent.path));
-                }
-                Ok(url.clone())
-            }
+            RemoteKind::Direct => Ok(url.clone()),
             RemoteKind::Dfs2 => Err(anyhow!("DFS2 session not found").attach(NO_DOWNLOAD_NODE)),
         },
     }

@@ -230,13 +230,21 @@ async function testSplitHint() {
         `${label}: ranges crossing a data_split_hint boundary: ${crossing.join(', ')}`,
       );
     }
-    const inside = declared.some((range) => {
+    // 证明真的发生了跨块合并：存在某条声明 range 覆盖 ≥2 个 index 项的
+    // payload 区间（单文件 fallback 的 range 只含一项）。
+    const entries = Object.values(resource.data.index)
+      .filter((entry) => entry.name !== '\\0META')
+      .map((entry) => [entry.offset, entry.offset + entry.size]);
+    const merged = declared.some((range) => {
       const [start, end] = range.split('-').map(Number);
-      return windows.some(([w0, w1]) => w0 < start && end < w1);
+      return (
+        windows.some(([w0, w1]) => w0 <= start && end + 1 <= w1) &&
+        entries.filter(([e0, e1]) => start <= e0 && e1 <= end + 1).length >= 2
+      );
     });
-    if (!inside) {
+    if (!merged) {
       throw new Error(
-        `${label}: no declared range sits strictly inside a hint window`,
+        `${label}: no declared range covers multiple index entries inside a hint window`,
       );
     }
   } finally {
