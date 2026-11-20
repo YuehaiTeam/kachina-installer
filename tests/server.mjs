@@ -94,10 +94,22 @@ function loadResource(version) {
       addIndexEntry(index, entries, `${from}_${to}`, patch.file_name);
     }
   }
+  // the \0INDEX's \0META item lets the client restore data_end, the origin
+  // every data_split_hint window is relative to
+  const metaEntry = entries.get('\0META');
+  if (metaEntry) {
+    index['\0META'] = {
+      name: '\0META',
+      offset: metaEntry.offset,
+      raw_offset: metaEntry.rawOffset,
+      size: metaEntry.size,
+    };
+  }
 
   return {
     bytes,
     metadata,
+    dataEnd: metaEntry ? metaEntry.offset + metaEntry.size : 0,
     data: {
       index,
       metadata,
@@ -174,6 +186,8 @@ function signedUrl(req, version, sid, range) {
 }
 
 // options.partBytes: send it as all three DFS2 part size hints.
+// options.splitHint(resource): inject its return value as the resource's
+// RepoMetadata.data_split_hint in the DFS2 metadata answer.
 // options.abortSigned(range, resource): the first signed download it matches
 // gets half its bytes, then the connection closes.
 function createServer(options = {}) {
@@ -202,10 +216,19 @@ function createServer(options = {}) {
         res.set('Dfs-Preferred-Part-Upper-Bytes', String(options.partBytes));
         res.set('Dfs-Preferred-Part-Lower-Bytes', String(options.partBytes));
       }
+      const data = options.splitHint
+        ? {
+            ...loaded.data,
+            metadata: {
+              ...loaded.data.metadata,
+              data_split_hint: options.splitHint(loaded),
+            },
+          }
+        : loaded.data;
       return res.json({
         resource_version: version,
         name: resource,
-        data: loaded.data,
+        data,
       });
     } catch (error) {
       return res.status(500).json({ error: error.message });

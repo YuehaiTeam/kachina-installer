@@ -2867,10 +2867,14 @@ async fn resolve_install_source(
             start: entry.offset as u64,
             len: entry.size as u64,
         };
+        // `split_bounded` keeps the policy's slicing; `cut_at_windows` keeps
+        // the range whole unless a hint window's boundary falls inside it —
+        // such a straddling range cannot be signed as one request either.
         let parts = if slice {
-            ctx.policy.split(range)
+            ctx.policy
+                .split_bounded(range, ctx.merge_windows.as_deref())
         } else {
-            vec![range]
+            super::download_plan::cut_at_windows(range, ctx.merge_windows.as_deref())
         };
         return Ok(InstallFileSource::Sliced {
             parts: parts.into_iter().map(|p| (p.start, p.len)).collect(),

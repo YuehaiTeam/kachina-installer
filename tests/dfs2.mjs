@@ -180,9 +180,79 @@ async function testSlicedInstall() {
   }
 }
 
+// The server answers the resource's metadata with a data_split_hint whose
+// boundary falls inside app.exe: no declared or requested range may cross a
+// window boundary, and the boundary must actually cut app.exe's download.
+async function testSplitHint() {
+  const label = 'DFS2 split-hint installation';
+  let boundary;
+  const server = await startServer({
+    splitHint: (resource) => {
+      const app = appRange(resource);
+      boundary = app.start + MIB;
+      return [
+        [0, boundary - resource.dataEnd],
+        [boundary - resource.dataEnd, 1 << 30],
+      ];
+    },
+  });
+  const testDir = getTestDir('dfs2-split-hint');
+  try {
+    const result = await runInstaller(
+      './fixtures/test-app-v1/updater.exe',
+      [FLAGS, '-O', '-D', testDir, '--source', 'dfs2-v2'],
+      label,
+    );
+    assertExitOk(result, label);
+    const verification = await verifyFiles(testDir, [
+      { path: 'app.exe', contains: 'APP_V2' },
+      { path: 'feature.dll', size: 30720 },
+      { path: 'updater.exe' },
+    ]);
+    if (verification.failed.length) {
+      throw new Error(verification.failed.join('; '));
+    }
+    assertDfs2BatchCoverage(server.dfs2State, label);
+    const declared = Array.from(server.dfs2State.sessions.values()).flatMap(
+      (session) => session.declared ?? [],
+    );
+    const requested = server.dfs2State.batchRequests.flatMap(
+      (request) => request.ranges,
+    );
+    const boundaries = [boundary, server.dfs2State.getResource('v2').dataEnd];
+    const crossing = [...declared, ...requested].filter((range) => {
+      const [start, end] = range.split('-').map(Number);
+      return boundaries.some((b) => start < b && b <= end);
+    });
+    if (crossing.length) {
+      throw new Error(
+        `${label}: ranges crossing a data_split_hint boundary: ${crossing.join(', ')}`,
+      );
+    }
+    if (
+      !(
+        declared.some((r) => r.endsWith(`-${boundary - 1}`)) &&
+        declared.some((r) => r.startsWith(`${boundary}-`))
+      )
+    ) {
+      throw new Error(
+        `${label}: the boundary inside app.exe did not cut its download at ${boundary}`,
+      );
+    }
+  } finally {
+    await cleanupTestDir(testDir);
+    await new Promise((resolve) => server.close(resolve));
+  }
+}
+
 async function main() {
   if (scenario === 'online-install-dfs2-sliced') {
     await testSlicedInstall();
+    console.log(`✓ ${scenario}`);
+    return;
+  }
+  if (scenario === 'online-install-dfs2-split-hint') {
+    await testSplitHint();
     console.log(`✓ ${scenario}`);
     return;
   }

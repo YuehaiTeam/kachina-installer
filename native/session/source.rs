@@ -109,6 +109,9 @@ pub struct SourceCtx {
     pub installer_end: usize,
     pub resource_version: Option<String>,
     pub policy: super::download_plan::Policy,
+    /// `data_split_hint` shifted into absolute package coordinates by
+    /// `data_end`; `None` lets the planner merge freely.
+    pub merge_windows: Option<Vec<(u64, u64)>>,
     /// The session installs the package's own metadata: see
     /// [`restore_local_package`](Self::restore_local_package).
     local_package: bool,
@@ -139,6 +142,7 @@ impl SourceCtx {
             installer_end: 0,
             resource_version: None,
             policy: super::download_plan::Policy::default(),
+            merge_windows: None,
             local_package: false,
             dfs2: None,
             plugin_session: false,
@@ -334,7 +338,11 @@ async fn fetch_dfs2_metadata(api_url: &str, ctx: &mut SourceCtx) -> anyhow::Resu
         anyhow!("dfs2 metadata is null").attach(crate::utils::code::METADATA_INVALID)
     })?;
     ctx.index.clear();
+    let mut data_end = None;
     for (name, info) in data.index {
+        if info.name == "\0META" {
+            data_end = Some(info.offset + info.size);
+        }
         ctx.index.insert(
             name,
             Embedded {
@@ -347,6 +355,23 @@ async fn fetch_dfs2_metadata(api_url: &str, ctx: &mut SourceCtx) -> anyhow::Resu
     }
     ctx.installer_end = data.installer_end as usize;
     ctx.resource_version = Some(dfs2.resource_version);
+    // `data_end` is the end of the `\0META` index entry; the hint's windows
+    // are relative to it. A hint without a recoverable `data_end` is dropped:
+    // an unsignable merge then falls back to whole files instead.
+    if let Some(hint) = data.metadata.data_split_hint.clone() {
+        if let Some(data_end) = data_end {
+            ctx.merge_windows = Some(crate::session::download_plan::windows(
+                &hint,
+                u64::from(data_end),
+            ));
+        }
+    }
+    tracing::info!(
+        "dfs2 hint={:?} data_end={:?} windows={:?}",
+        data.metadata.data_split_hint,
+        data_end,
+        ctx.merge_windows
+    );
     Ok(data.metadata)
 }
 
@@ -394,9 +419,14 @@ async fn refresh_packed_index(apiurl: &str, ctx: &mut SourceCtx) -> anyhow::Resu
         }
     }
     ctx.installer_end = (index_start + config_sz + theme_sz) as usize;
-    metadata.ok_or_else(|| {
+    let metadata = metadata.ok_or_else(|| {
         anyhow!("packed index has no metadata").attach(crate::utils::code::METADATA_INVALID)
-    })
+    })?;
+    ctx.merge_windows = metadata
+        .data_split_hint
+        .clone()
+        .map(|hint| crate::session::download_plan::windows(&hint, data_end));
+    Ok(metadata)
 }
 
 pub async fn fetch_metadata(source: &str, ctx: &mut SourceCtx) -> anyhow::Result<RepoMetadata> {
@@ -1150,7 +1180,7 @@ mod tests {
             base_url: format!("http://{host}"),
             res_id: "r".into(),
         });
-        let urls = resolve_range_urls(&ctx, None, &[(0, 100), (100, 100)]).await;
+        let urls = resolve_range_urls(&ctx, &[(0, 100), (100, 100)]).await;
         server.abort();
         assert_eq!(
             urls[0].as_ref().unwrap(),
@@ -1160,5 +1190,40 @@ mod tests {
         assert!(err.contains(crate::dfs::RANGE_NOT_SATISFIABLE));
         // the merged executor meets the refusal as a plain message
         assert!(crate::dfs::is_range_not_satisfiable(&anyhow::Error::msg(err)));
+    }
+
+    #[tokio::test]
+    async fn dfs2_metadata_populates_merge_windows() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let host = listener.local_addr().unwrap();
+        let body = "{\"resource_version\":\"v9\",\"name\":\"r\",\"data\":{\"index\":{\"\\u0000META\":{\"name\":\"\\u0000META\",\"offset\":1000,\"raw_offset\":0,\"size\":100}},\"metadata\":{\"tag_name\":\"v9\",\"hashed\":[],\"data_split_hint\":[[0,500],[500,2000]]},\"installer_end\":500}}".to_string();
+        let server = tokio::spawn(async move {
+            loop {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let body = body.clone();
+                tokio::spawn(async move {
+                    let mut head = Vec::new();
+                    while !head.ends_with(b"\r\n\r\n") {
+                        head.push(socket.read_u8().await.unwrap());
+                    }
+                    let res = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = socket.write_all(res.as_bytes()).await;
+                    let _ = socket.shutdown().await;
+                });
+            }
+        });
+        let mut ctx = SourceCtx::default();
+        let meta = fetch_dfs2_metadata(&format!("http://{host}/meta"), &mut ctx)
+            .await
+            .unwrap();
+        server.abort();
+        assert_eq!(meta.tag_name, "v9");
+        // data_end = 1000 + 100 = 1100
+        assert_eq!(ctx.merge_windows, Some(vec![(1100, 1600), (1600, 3100)]));
     }
 }

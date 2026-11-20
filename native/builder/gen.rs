@@ -95,6 +95,7 @@ pub async fn gen_cli(args: GenArgs) {
         installer,
         deletes: Vec::new(),
         packing_info: Vec::new(),
+        data_split_hint: None,
     };
     let metadata_str = serde_json::to_string(&repometa).expect("failed to serialize metadata");
     tokio::fs::write(&args.output_metadata, metadata_str)

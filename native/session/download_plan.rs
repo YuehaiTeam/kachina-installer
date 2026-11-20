@@ -86,6 +86,75 @@ impl Policy {
             })
             .collect()
     }
+
+    /// `split` with every cut also landing on a `windows` boundary: a single
+    /// range that straddles two windows cannot be signed as one request, so
+    /// each side is split on its own.
+    pub fn split_bounded(self, range: Range, windows: Option<&[(u64, u64)]>) -> Vec<Range> {
+        cut_at_windows(range, windows)
+            .into_iter()
+            .flat_map(|segment| self.split(segment))
+            .collect()
+    }
+}
+
+/// `range` cut at every `windows` boundary it straddles, and nothing else:
+/// a straddling range cannot be signed as one request even when it asks for
+/// a single file whole.
+pub fn cut_at_windows(range: Range, windows: Option<&[(u64, u64)]>) -> Vec<Range> {
+    let Some(windows) = windows else {
+        return vec![range];
+    };
+    let mut parts = Vec::new();
+    let mut start = range.start;
+    for boundary in windows.iter().flat_map(|w| [w.0, w.1]) {
+        // adjacent windows share one boundary: cutting at it once suffices,
+        // a second cut would emit a zero-length piece
+        if boundary <= start || boundary >= range.end() {
+            continue;
+        }
+        parts.push(Range {
+            start,
+            len: boundary - start,
+        });
+        start = boundary;
+    }
+    parts.push(Range {
+        start,
+        len: range.end() - start,
+    });
+    parts
+}
+
+/// `hint` is the `data_split_hint` list: `[start, end)` windows relative to
+/// `data_end`. Returns them shifted into absolute package coordinates,
+/// sorted and with overlapping windows merged. Adjacent windows stay
+/// separate: the gap between two windows is a no-merge line.
+pub fn windows(hint: &[(u64, u64)], data_end: u64) -> Vec<(u64, u64)> {
+    let mut windows: Vec<(u64, u64)> = hint
+        .iter()
+        .filter(|(start, end)| start < end)
+        .map(|(start, end)| (start + data_end, end + data_end))
+        .collect();
+    windows.sort_unstable();
+    windows
+        .into_iter()
+        .fold(Vec::new(), |mut out: Vec<(u64, u64)>, (start, end)| {
+            match out.last_mut() {
+                Some(last) if start < last.1 => last.1 = last.1.max(end),
+                _ => out.push((start, end)),
+            }
+            out
+        })
+}
+
+/// The end of the window containing `start`, or `start` itself when no
+/// window does — a group starting outside every window cannot grow.
+fn window_end(windows: &[(u64, u64)], start: u64) -> u64 {
+    match windows.iter().find(|w| w.1 > start) {
+        Some(w) if w.0 <= start => w.1,
+        _ => start,
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -133,7 +202,12 @@ fn allowed(length: u64, useful: u64) -> bool {
     u128::from(length - useful) * 5 <= u128::from(length)
 }
 
-fn groups(mut items: Vec<Selection>, policy: Policy, balanced: bool) -> Vec<Vec<Selection>> {
+fn groups(
+    mut items: Vec<Selection>,
+    policy: Policy,
+    balanced: bool,
+    windows: Option<&[(u64, u64)]>,
+) -> Vec<Vec<Selection>> {
     items.sort_by_key(|i| i.range.start);
     let mut out = Vec::new();
     let mut current: Vec<Selection> = Vec::new();
@@ -144,10 +218,14 @@ fn groups(mut items: Vec<Selection>, policy: Policy, balanced: bool) -> Vec<Vec<
             let overlaps = item.range.start < last.range.end();
             let past_target = length > policy.lower
                 && extent(&current).abs_diff(policy.lower) < length.abs_diff(policy.lower);
+            let crosses_window = windows.is_some_and(|w| {
+                item.range.end() > window_end(w, current[0].range.start)
+            });
             if overlaps
                 || length > policy.upper
                 || !allowed(length, useful + item.range.len)
                 || past_target
+                || crosses_window
             {
                 out.push(std::mem::take(&mut current));
                 useful = 0;
@@ -164,13 +242,17 @@ fn groups(mut items: Vec<Selection>, policy: Policy, balanced: bool) -> Vec<Vec<
         out.push(current);
     }
     if balanced {
-        balance(out, policy)
+        balance(out, policy, windows)
     } else {
         out
     }
 }
 
-fn balance(groups: Vec<Vec<Selection>>, policy: Policy) -> Vec<Vec<Selection>> {
+fn balance(
+    groups: Vec<Vec<Selection>>,
+    policy: Policy,
+    windows: Option<&[(u64, u64)]>,
+) -> Vec<Vec<Selection>> {
     if groups.len() < 2 {
         return groups;
     }
@@ -190,7 +272,11 @@ fn balance(groups: Vec<Vec<Selection>>, policy: Policy) -> Vec<Vec<Selection>> {
     }
     let size = |a: usize, b: usize| items[b - 1].range.end() - items[a].range.start;
     let valid = |a: usize, b: usize| {
-        size(a, b) <= policy.upper && allowed(size(a, b), useful[b] - useful[a])
+        size(a, b) <= policy.upper
+            && allowed(size(a, b), useful[b] - useful[a])
+            && windows.map_or(true, |w| {
+                items[b - 1].range.end() <= window_end(w, items[a].range.start)
+            })
     };
     for i in 0..bounds.len() - 1 {
         let (begin, middle) = bounds[i];
@@ -247,7 +333,9 @@ fn balance(groups: Vec<Vec<Selection>>, policy: Policy) -> Vec<Vec<Selection>> {
 
 /// 输入为同一远端包内可按范围读取的文件；本地、混合基文件和未知范围由调用者保留单流。
 /// 相同 payload 的多个目标分别保留，不对目标文件去重。
-pub fn plan(inputs: &[Input], policy: Policy) -> Vec<Transfer> {
+/// `windows` 是 `data_split_hint` 归一化后的绝对可合并区间：合并组必须落在
+/// 单个区间内，跨边界的单块在边界上切开；`None` 不作约束。
+pub fn plan(inputs: &[Input], policy: Policy, windows: Option<&[(u64, u64)]>) -> Vec<Transfer> {
     let by_id: std::collections::HashMap<_, _> =
         inputs.iter().map(|input| (input.id, input)).collect();
     let small = inputs
@@ -256,7 +344,7 @@ pub fn plan(inputs: &[Input], policy: Policy) -> Vec<Transfer> {
         .map(full)
         .collect();
     let mut selected = Vec::new();
-    for group in groups(small, policy, true) {
+    for group in groups(small, policy, true, windows) {
         if group.len() == 1 {
             selected.push(vec![preferred(by_id[&group[0].id])]);
         } else if group.iter().any(|i| by_id[&i.id].patch.is_some()) {
@@ -264,6 +352,7 @@ pub fn plan(inputs: &[Input], policy: Policy) -> Vec<Transfer> {
                 group.iter().map(|i| preferred(by_id[&i.id])).collect(),
                 policy,
                 true,
+                windows,
             );
             let cost = (
                 alternatives.len(),
@@ -293,7 +382,7 @@ pub fn plan(inputs: &[Input], policy: Policy) -> Vec<Transfer> {
             true
         }
     });
-    selected.extend(groups(patches, policy, false));
+    selected.extend(groups(patches, policy, false, windows));
     selected
         .into_iter()
         .map(|files| {
@@ -302,7 +391,7 @@ pub fn plan(inputs: &[Input], policy: Policy) -> Vec<Transfer> {
                 len: extent(&files),
             };
             let parts = if files.len() == 1 {
-                policy.split(range)
+                policy.split_bounded(range, windows)
             } else {
                 vec![range]
             };
@@ -381,14 +470,14 @@ mod tests {
         let mut files = vec![input(0, 1000, 100), input(1, 1110, 100)];
         files[0].patch = Some(Range { start: 0, len: 5 });
         files[1].patch = Some(Range { start: 6, len: 5 });
-        let selected = plan(&files, Policy::default());
+        let selected = plan(&files, Policy::default(), None);
         assert_eq!(selected.len(), 1);
         assert!(selected[0].files.iter().all(|f| f.patch));
         files[1].patch = Some(Range {
             start: 10000,
             len: 5,
         });
-        assert!(plan(&files, Policy::default())[0]
+        assert!(plan(&files, Policy::default(), None)[0]
             .files
             .iter()
             .all(|f| !f.patch));
@@ -403,7 +492,7 @@ mod tests {
             ..Policy::default()
         };
         let files: Vec<_> = (0..26).map(|id| input(id, id as u64 * 100, 100)).collect();
-        let out = plan(&files, p);
+        let out = plan(&files, p, None);
         assert_eq!(
             out.iter().map(|t| t.files.len()).collect::<Vec<_>>(),
             vec![13, 13]
@@ -412,14 +501,14 @@ mod tests {
         for i in &mut files[15..] {
             i.full.start += 300;
         }
-        let out = plan(&files, p);
+        let out = plan(&files, p, None);
         assert_eq!(
             out.iter().map(|t| t.files.len()).collect::<Vec<_>>(),
             vec![15, 11]
         );
         let alias = vec![input(0, 10, 100), input(1, 10, 100), input(2, 120, 100)];
         assert_eq!(
-            plan(&alias, p).iter().map(|t| t.files.len()).sum::<usize>(),
+            plan(&alias, p, None).iter().map(|t| t.files.len()).sum::<usize>(),
             3
         );
     }
@@ -440,8 +529,8 @@ mod tests {
                 files.push(input(id, start, len));
                 start += len;
             }
-            let result = plan(&files, Policy::default());
-            assert_eq!(result, plan(&files, Policy::default()));
+            let result = plan(&files, Policy::default(), None);
+            assert_eq!(result, plan(&files, Policy::default(), None));
             let mut ids: Vec<_> = result
                 .iter()
                 .flat_map(|t| t.files.iter().map(|f| f.id))
@@ -458,5 +547,70 @@ mod tests {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod hint_tests {
+    use super::*;
+
+    fn input(id: usize, start: u64, len: u64) -> Input {
+        Input {
+            id,
+            raw_size: len,
+            full: Range { start, len },
+            patch: None,
+        }
+    }
+
+    /// A merged group must not cross a window boundary; a lone file's range
+    /// that does is cut on the boundary instead.
+    #[test]
+    fn windows_stop_merges_and_cut_singles() {
+        let p = Policy {
+            lower: 1000,
+            upper: 1000,
+            maximum: 10000,
+            ..Policy::default()
+        };
+        let files = vec![
+            input(0, 0, 50),
+            input(1, 50, 50),
+            input(2, 100, 50),
+            input(3, 150, 50),
+        ];
+        // two windows [0,100) [100,200): the four files would merge into one
+        // group of extent 200 without a hint; the boundary splits them in two.
+        let w = windows(&[(0, 100), (100, 200)], 0);
+        let out = plan(&files, p, Some(&w));
+        assert_eq!(
+            out.iter().map(|t| t.files.len()).collect::<Vec<_>>(),
+            vec![2, 2]
+        );
+        // with no hint they merge
+        assert_eq!(plan(&files, p, None).len(), 1);
+        // an empty hint forbids every merge
+        let empty = windows(&[], 0);
+        let out = plan(&files, p, Some(&empty));
+        assert!(out.iter().all(|t| t.files.len() == 1));
+
+        // a single large file crossing the boundary splits there
+        let big = vec![input(0, 50, 100)];
+        let out = plan(&big, p, Some(&w));
+        assert_eq!(
+            out[0].parts,
+            vec![Range { start: 50, len: 50 }, Range { start: 100, len: 50 }]
+        );
+    }
+
+    #[test]
+    fn windows_normalization() {
+        // shift by data_end, sort, merge overlap, keep adjacency
+        assert_eq!(
+            windows(&[(100, 200), (10, 30), (20, 50)], 1000),
+            vec![(1010, 1050), (1100, 1200)]
+        );
+        // start >= end is dropped
+        assert_eq!(windows(&[(5, 5), (9, 4)], 0), Vec::<(u64, u64)>::new());
     }
 }
