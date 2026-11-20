@@ -708,13 +708,17 @@ async fn open_http_stream(
 ) -> TAResult<HttpStream> {
     let request_start_time = Instant::now();
     // A URL the server signed for a slice pins that window in its fragment
-    // (`#range=start-end`); it wins over the caller's logical offset/size.
-    let fragment_range = crate::utils::url::fragment_range(url);
-    let wire_range = fragment_range.or_else(|| {
-        (size > 0).then_some((offset as u64, size as u64))
-    });
+    // (`#range=start-end`, or `#range=0-` for a whole-file signature); it wins
+    // over the caller's logical offset/size.
+    use crate::utils::url::PinnedRange;
+    let pinned = crate::utils::url::fragment_range(url);
+    let wire_range = match pinned {
+        Some(PinnedRange::Window(start, len)) => Some((start, len)),
+        Some(PinnedRange::Whole) => None,
+        None => (size > 0).then_some((offset as u64, size as u64)),
+    };
     let has_range = wire_range.is_some();
-    let insight_range = if let Some((start, len)) = fragment_range {
+    let insight_range = if let Some(PinnedRange::Window(start, len)) = pinned {
         vec![(start as u32, (start + len - 1) as u32)]
     } else {
         insight_range_vec(request_range, offset, size)
@@ -777,6 +781,9 @@ async fn open_http_stream(
     }
     let expected = if let Some((_, len)) = wire_range {
         Some(len)
+    } else if matches!(pinned, Some(PinnedRange::Whole)) && size > 0 {
+        // a whole-file signature is expected to answer exactly what was asked
+        Some(size as u64)
     } else {
         declared
     };

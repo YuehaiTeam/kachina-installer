@@ -178,6 +178,7 @@ pub fn is_remote_insight_url(url: &str) -> bool {
         || lower.starts_with("http3://")
         || lower.starts_with("h3://")
         || lower.starts_with("h3wt://")
+        || lower.starts_with("ssh+http://")
         || lower.starts_with("sftp://")
 }
 
@@ -398,8 +399,13 @@ pub async fn solve_dfs2_challenge(challenge_type: String, data: String) -> Resul
 }
 
 pub async fn get_http_with_range(url: String, offset: u64, size: u64) -> TAResult<(u16, Vec<u8>)> {
-    // A `#range=` fragment in a server-issued URL pins the physical window.
-    let (offset, size) = crate::utils::url::fragment_range(&url).unwrap_or((offset, size));
+    // A `#range=` fragment in a server-issued URL pins the physical window;
+    // `range=0-` signs the whole file, which is fetched without a Range header.
+    let (offset, size) = match crate::utils::url::fragment_range(&url) {
+        Some(crate::utils::url::PinnedRange::Window(start, len)) => (start, len),
+        Some(crate::utils::url::PinnedRange::Whole) => (0, 0),
+        None => (offset, size),
+    };
     let mut res = API_CLIENT.get(&url);
     if offset != 0 || size != 0 {
         res = res.header("Range", format!("bytes={}-{}", offset, offset + size - 1));
@@ -517,6 +523,7 @@ mod tests {
         assert!(is_remote_insight_url("https://cdn.example.com/file"));
         assert!(is_remote_insight_url("http://127.0.0.1/a"));
         assert!(is_remote_insight_url("h3wt://node.example/path"));
+        assert!(is_remote_insight_url("ssh+http://node.example/path"));
         assert!(!is_remote_insight_url(""));
         assert!(!is_remote_insight_url("unknown"));
         assert!(!is_remote_insight_url("file:///C:/pack.bin"));
