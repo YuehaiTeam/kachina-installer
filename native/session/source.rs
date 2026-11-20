@@ -1107,4 +1107,58 @@ mod tests {
             ]
         );
     }
+
+    /// A window the server cannot sign in one URL surfaces its refusal code
+    /// to the caller, so the merged task falls back instead of retrying the
+    /// same range.
+    #[tokio::test]
+    async fn unsatisfiable_range_surfaces_its_code() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let host = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            loop {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                tokio::spawn(async move {
+                    let mut head = Vec::new();
+                    while !head.ends_with(b"\r\n\r\n") {
+                        head.push(socket.read_u8().await.unwrap());
+                    }
+                    let body = format!(
+                        "{{\"urls\":{{\"0-99\":{{\"url\":\"http://{host}/blob\"}},\"100-199\":{{\"error\":\"{}\"}}}}}}",
+                        crate::dfs::RANGE_NOT_SATISFIABLE
+                    );
+                    let res = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = socket.write_all(res.as_bytes()).await;
+                    let _ = socket.shutdown().await;
+                });
+            }
+        });
+        let mut ctx = SourceCtx::default();
+        ctx.parsed = Some(ParsedSource::Http {
+            remote: RemoteKind::Dfs2,
+            storage: StorageKind::Hashed,
+            url: format!("http://{host}/meta"),
+        });
+        ctx.dfs2 = Some(Dfs2Session {
+            api_url: format!("http://{host}/meta"),
+            session_id: "s".into(),
+            base_url: format!("http://{host}"),
+            res_id: "r".into(),
+        });
+        let urls = resolve_range_urls(&ctx, None, &[(0, 100), (100, 100)]).await;
+        server.abort();
+        assert_eq!(
+            urls[0].as_ref().unwrap(),
+            &format!("http://{host}/blob")
+        );
+        let err = urls[1].as_ref().unwrap_err().clone();
+        assert!(err.contains(crate::dfs::RANGE_NOT_SATISFIABLE));
+        // the merged executor meets the refusal as a plain message
+        assert!(crate::dfs::is_range_not_satisfiable(&anyhow::Error::msg(err)));
+    }
 }

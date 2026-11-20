@@ -131,6 +131,21 @@ impl std::fmt::Display for HttpStatus {
 
 impl std::error::Error for HttpStatus {}
 
+/// The dfs2 server's refusal for a range it cannot sign into one URL: under
+/// dynamic slicing a merged window may span shards no single node serves.
+/// Seeing it means the merged request is unsatisfiable — the answer does
+/// not change on retry, so the caller should fall back to whole files.
+pub const RANGE_NOT_SATISFIABLE: &str = "ERR_RANGE_NOT_SATISFIABLE";
+
+/// Whether the error chain carries the dfs2 refusal for an unsatisfiable
+/// range. The code reaches callers as text (a `Reply.url` error string, or
+/// the `{:#}` chain an `IpcError` carries across the pipe), so matching is
+/// by content, not by type.
+pub fn is_range_not_satisfiable(err: &anyhow::Error) -> bool {
+    err.chain()
+        .any(|cause| cause.to_string().contains(RANGE_NOT_SATISFIABLE))
+}
+
 async fn status_error(res: reqwest::Response) -> anyhow::Error {
     let status = res.status().as_u16();
     let body = res.text().await.unwrap_or_default();
@@ -506,6 +521,19 @@ mod tests {
         assert!(!is_remote_insight_url("unknown"));
         assert!(!is_remote_insight_url("file:///C:/pack.bin"));
         assert!(!is_remote_insight_url("C:\\pack.bin"));
+    }
+
+    #[test]
+    fn range_not_satisfiable_is_recognized_in_the_chain() {
+        let err = anyhow::anyhow!("resolve failed")
+            .context(format!("http status: {RANGE_NOT_SATISFIABLE}"));
+        assert!(is_range_not_satisfiable(&err));
+        assert!(is_range_not_satisfiable(&anyhow::Error::msg(
+            RANGE_NOT_SATISFIABLE.to_string()
+        )));
+        assert!(!is_range_not_satisfiable(&anyhow::anyhow!(
+            "ERR_RANGE_INVALID"
+        )));
     }
 
     #[test]

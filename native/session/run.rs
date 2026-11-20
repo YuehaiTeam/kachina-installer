@@ -2411,6 +2411,19 @@ async fn install_files(
                         }
                         // 取消时既不重试合并请求，也不退回逐个下载
                         Err(err) if is_cancelled(&err) => Err(err),
+                        // the server cannot sign this window into one URL;
+                        // retrying the same merged range signs the same
+                        // refusal, so members fall back to whole files at
+                        // once instead of after another failing resolve
+                        Err(err) if crate::dfs::is_range_not_satisfiable(&err) => {
+                            tracing::warn!("merged range not satisfiable, fallback: {err:#}");
+                            let all: Vec<usize> = (0..files.len()).collect();
+                            fallback_merged_files(
+                                settings, hash_key, files, &all, source_ctx, staging, mgr,
+                                &handle, &has_error,
+                            )
+                            .await
+                        }
                         Err(err) => {
                             tracing::warn!("merged download failed, retry: {err:#}");
                             match install_merged(
