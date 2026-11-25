@@ -85,7 +85,13 @@ jobs:
           path: |
             target/x86_64-win7-windows-msvc/release/*.exe
             target/x86_64-win7-windows-msvc/release/*.pdb
-            kachina-builder-linux
+      # linux 产物独立 artifact：与 windows 混传会把公共祖先顶到 workspace 根，
+      # 下游 test/release 按扁平布局取 windows exe 就会落空。
+      - name: Artifact linux builder
+        uses: actions/upload-artifact@v4.6.0
+        with:
+          name: kachina-builder-linux
+          path: kachina-builder-linux
   unit-test:
     runs-on: windows-2022
     steps:
