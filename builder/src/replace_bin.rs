@@ -85,7 +85,7 @@ async fn apply_app_resources(
             .iter()
             .filter_map(|(key, value)| value.as_ref().map(|value| (*key, value.as_str())))
             .collect();
-        crate::pe_res::update_pe_resources(&tmp, &pairs, icon)
+        crate::pe_res::update_pe_resources(&tmp, &pairs, icon, true)
     })();
     let result = match updated {
         Ok(()) => tokio::fs::read(&tmp)

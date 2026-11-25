@@ -57,12 +57,30 @@ jobs:
           }
           Copy-Item $bundle $builder -Force
           Copy-Item $bundle "kachina-builder.exe" -Force
+      - name: Cache zig
+        uses: actions/cache@v4
+        with:
+          path: C:\zig
+          key: zig-0.17.1-windows-x86_64
+      - name: Setup zig + cargo-zigbuild
+        run: |
+          if (-not (Test-Path C:\zig\zig.exe)) {
+            Invoke-WebRequest https://ziglang.org/download/0.17.1/zig-x86_64-windows-0.17.1.zip -OutFile zig.zip
+            Expand-Archive zig.zip -DestinationPath .
+            Move-Item zig-x86_64-windows-0.17.1 C:\zig
+          }
+          echo "C:\zig" >> $env:GITHUB_PATH
+          pip install cargo-zigbuild
+          rustup target add x86_64-unknown-linux-gnu
+      - name: Cross-build linux builder
+        run: cargo zigbuild -p kachina-builder --release --target x86_64-unknown-linux-gnu.2.17
       - name: Artifact
         uses: actions/upload-artifact@v4.6.0
         with:
           path: |
             target/x86_64-win7-windows-msvc/release/*.exe
             target/x86_64-win7-windows-msvc/release/*.pdb
+            target/x86_64-unknown-linux-gnu/release/kachina-builder
   unit-test:
     runs-on: windows-2022
     steps:

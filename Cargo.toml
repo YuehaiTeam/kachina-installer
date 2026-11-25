@@ -15,6 +15,9 @@ webview-devtools = []
 members = ["builder"]
 default-members = [".", "builder"]
 
+[workspace.package]
+version = "0.1.0"
+
 [dependencies]
 webview2-com = "0.39"
 serde = { version = "1", features = ["derive"] }

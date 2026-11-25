@@ -168,9 +168,16 @@ pub async fn pack_cli(args: PackArgs) -> Result<(), String> {
         icon_path: args.icon,
     };
     validate_pack_names(&config).map_err(|err| err.to_string())?;
-    let output = tokio::fs::File::create(&args.output)
+    // 先写到输出旁的临时文件，全部成功后 rename 覆盖目标：
+    // 打包中途失败（如 --base 不是合法 PE）不得破坏已存在的 installer。
+    let tmp_output = args.output.with_extension(format!(
+        "kachina-tmp-{}-{}",
+        std::process::id(),
+        uuid::Uuid::new_v4()
+    ));
+    let output = tokio::fs::File::create(&tmp_output)
         .await
-        .map_err(|err| format!("Failed to create output {:?}: {err}", args.output))?;
+        .map_err(|err| format!("Failed to create output {:?}: {err}", tmp_output))?;
     println!(
         "Packing: metadata: {:?}, image: {:?}, files: {}",
         config.metadata.is_some(),
@@ -180,9 +187,18 @@ pub async fn pack_cli(args: PackArgs) -> Result<(), String> {
     let result = pack(reader, output, config).await;
     if result.is_err() {
         // a half-written installer must not be mistaken for a build output
-        let _ = tokio::fs::remove_file(&args.output).await;
+        let _ = tokio::fs::remove_file(&tmp_output).await;
+        return result;
     }
-    result
+    tokio::fs::rename(&tmp_output, &args.output)
+        .await
+        .map_err(|err| {
+            format!(
+                "Failed to move {:?} to {:?}: {err}",
+                tmp_output, args.output
+            )
+        })?;
+    Ok(())
 }
 
 pub async fn pack(
@@ -227,12 +243,14 @@ pub async fn pack(
         &tmppath,
         &[("FileDescription", title), ("ProductName", product)],
         icon,
+        false,
     ) {
-        panic!(
+        let _ = tokio::fs::remove_file(&tmppath).await;
+        return Err(format!(
             "editpe update {} ({} bytes): {e}",
             tmppath.display(),
             tmp_len
-        );
+        ));
     }
     println!("Reading base...");
     let mut base_data = vec![];
