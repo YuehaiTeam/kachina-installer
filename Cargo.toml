@@ -42,7 +42,6 @@ reqwest = { version = "0.12", default-features = false, features = [
 native-tls = "0.2"
 futures = "0.3"
 tokio-util = { version = "0.7", features = ["io-util"] }
-async-walkdir = "2.0"
 windows = { version = "0.62", features = [
     "Win32_System_Console",
     "Win32_System_Com",
@@ -72,18 +71,11 @@ windows = { version = "0.62", features = [
 nt_version = "0.1"
 lazy_static = "1.5"
 twox-hash = "2.1.0"
-pin-project = "1.1.7"
 fmmap = { version = "0.4", features = ["tokio"] }
-clap = { version = "4.5", features = ["derive"] }
 chrono = "0.4.39"
 uuid = { version = "1.16", features = ["v4"] }
 hpatch-sys = { path = "libs/hpatch-sys" }
-hdiff-sys = { path = "libs/hdiff-sys" }
-ignore = "0.4.23"
 num_cpus = "1.16.0"
-indicatif = { version = "0.17.9", features = ["tokio"] }
-console = "0.15.10"
-rcedit = { version = "0.1.0", git = "https://github.com/Devolutions/rcedit-rs.git" }
 windows-registry = "0.5"
 zip = { git = "https://github.com/xytoki/zip2.git", default-features = false, features = [
     "deflate",

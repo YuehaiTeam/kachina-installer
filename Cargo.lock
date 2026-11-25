@@ -1572,6 +1572,7 @@ dependencies = [
  "clap",
  "console",
  "editpe",
+ "embed-resource",
  "fmmap",
  "futures",
  "hdiff-sys",
@@ -1584,7 +1585,6 @@ dependencies = [
  "tokio",
  "twox-hash",
  "uuid",
- "zstd",
 ]
 
 [[package]]
@@ -1595,35 +1595,27 @@ dependencies = [
  "async-compression",
  "async-stream",
  "async-trait",
- "async-walkdir",
  "bytes",
  "cc",
  "chksum-md5",
  "chrono",
- "clap",
- "console",
  "embed-resource",
  "fmmap",
  "futures",
  "h3",
  "h3-msquic-async",
- "hdiff-sys",
  "hex",
  "hpatch-sys",
  "http",
  "http-body-util",
  "hyper",
  "hyper-util",
- "ignore",
- "indicatif",
  "lazy_static",
  "log",
  "native-tls",
  "nt_version",
  "num_cpus",
- "pin-project",
  "postcard",
- "rcedit",
  "regex-lite",
  "reqwest",
  "reqwest-middleware",
@@ -2187,24 +2179,6 @@ name = "rangemap"
 version = "1.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "973443cf09a9c8656b574a866ab68dfa19f0867d0340648c7d2f6a71b8a8ea68"
-
-[[package]]
-name = "rcedit"
-version = "0.1.0"
-source = "git+https://github.com/Devolutions/rcedit-rs.git#1bfa3ee6da2092b9b0c93148ce1455c5d45c538c"
-dependencies = [
- "rcedit-sys",
- "thiserror 1.0.69",
- "widestring",
-]
-
-[[package]]
-name = "rcedit-sys"
-version = "0.1.0"
-source = "git+https://github.com/Devolutions/rcedit-rs.git#1bfa3ee6da2092b9b0c93148ce1455c5d45c538c"
-dependencies = [
- "cc",
-]
 
 [[package]]
 name = "redox_syscall"
@@ -3324,12 +3298,6 @@ dependencies = [
  "wasite",
  "web-sys",
 ]
-
-[[package]]
-name = "widestring"
-version = "0.4.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c168940144dd21fd8046987c16a46a33d5fc84eec29ef9dcddc2ac9e31526b7c"
 
 [[package]]
 name = "win32-version-info"

@@ -172,7 +172,7 @@ fn embed_app_resources(crate_dir: &Path) {
     .expect("write app_version.h");
     embed_resource::compile_for(
         rc,
-        ["kachina-installer", "kachina-builder", "kachina-sfx"],
+        ["kachina-installer", "kachina-sfx"],
         embed_resource::NONE,
     )
     .manifest_optional()
