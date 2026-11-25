@@ -36,6 +36,3 @@ tokio = { version = "1", features = [
 twox-hash = "2.1.0"
 uuid = { version = "1.16", features = ["v4"] }
 editpe = { git = "https://github.com/xytoki/editpe.git" }
-
-[build-dependencies]
-zstd = "0.13"
