@@ -1,4 +1,4 @@
-#[path = "../../cli/arg.rs"]
+#[path = "../../../native/cli/arg.rs"]
 pub mod arg;
 
 use std::path::PathBuf;
@@ -19,6 +19,9 @@ pub struct PackArgs {
     pub data_dir: Option<PathBuf>,
     #[clap(long)]
     pub icon: Option<PathBuf>,
+    /// 裸安装器 exe 路径；缺省从 bundle 自身提取（linux 下必须显式指定）
+    #[clap(long, short = 'b')]
+    pub base: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, clap::Args)]

@@ -81,25 +81,11 @@ async fn apply_app_resources(
         .await
         .map_err(|e| format!("Failed to write {}: {e}", tmp.display()))?;
     let updated = (|| {
-        let mut updater = rcedit::ResourceUpdater::new();
-        updater
-            .load(&tmp)
-            .map_err(|e| format!("rcedit failed to load new base: {e:?}"))?;
-        for (key, value) in &strings {
-            if let Some(value) = value {
-                updater
-                    .set_version_string(key, value)
-                    .map_err(|e| format!("rcedit failed to set {key}: {e:?}"))?;
-            }
-        }
-        if let Some(icon) = icon {
-            updater
-                .set_icon(icon)
-                .map_err(|e| format!("rcedit failed to set icon {}: {e:?}", icon.display()))?;
-        }
-        updater
-            .commit()
-            .map_err(|e| format!("rcedit failed to write new base: {e:?}"))
+        let pairs: Vec<(&str, &str)> = strings
+            .iter()
+            .filter_map(|(key, value)| value.as_ref().map(|value| (*key, value.as_str())))
+            .collect();
+        crate::pe_res::update_pe_resources(&tmp, &pairs, icon)
     })();
     let result = match updated {
         Ok(()) => tokio::fs::read(&tmp)

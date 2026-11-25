@@ -1,0 +1,41 @@
+[package]
+name = "kachina-builder"
+version = "0.1.0"
+description = "Kachina package builder"
+authors = ["YuehaiTeam"]
+edition = "2021"
+
+[[bin]]
+name = "kachina-builder"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1.0"
+async-compression = { version = "0.4", features = ["tokio", "zstd", "zstdmt"] }
+async-walkdir = "2.0"
+chksum-md5 = { version = "0.1", features = ["async-runtime-tokio"] }
+clap = { version = "4.5", features = ["derive"] }
+console = "0.15.10"
+fmmap = { version = "0.4", features = ["tokio"] }
+futures = "0.3"
+hdiff-sys = { path = "../libs/hdiff-sys" }
+ignore = "0.4.23"
+indicatif = { version = "0.17.9", features = ["tokio"] }
+num_cpus = "1.16.0"
+pin-project = "1.1.7"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1" }
+tokio = { version = "1", features = [
+    "rt",
+    "rt-multi-thread",
+    "sync",
+    "fs",
+    "io-util",
+    "macros",
+] }
+twox-hash = "2.1.0"
+uuid = { version = "1.16", features = ["v4"] }
+editpe = { git = "https://github.com/xytoki/editpe.git" }
+
+[build-dependencies]
+zstd = "0.13"

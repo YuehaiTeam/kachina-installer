@@ -29,7 +29,7 @@
 #ifndef HDiff_qsort_parallel_h
 #define HDiff_qsort_parallel_h
 #include <algorithm>
-#include "../../../libParallel/parallel_import.h"
+#include "../../libParallel/parallel_import.h"
 #if (_IS_USED_MULTITHREAD)
 #include <thread>   //if used vc++, need >= vc2012
 #endif

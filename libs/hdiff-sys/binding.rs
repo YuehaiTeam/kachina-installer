@@ -237,6 +237,7 @@ pub struct _Mbstatet {
     pub _Byte: ::std::os::raw::c_ushort,
     pub _State: ::std::os::raw::c_ushort,
 }
+#[cfg(windows)]
 #[allow(clippy::unnecessary_operation, clippy::identity_op)]
 const _: () = {
     ["Size of _Mbstatet"][::std::mem::size_of::<_Mbstatet>() - 8usize];

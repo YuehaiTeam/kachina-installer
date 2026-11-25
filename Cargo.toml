@@ -11,6 +11,9 @@ default-run = "kachina-installer"
 # release 默认不开 DevTools。需要在安装器里按 F12 / Ctrl+Shift+I 打开时再开。
 webview-devtools = []
 
+[workspace]
+members = ["builder"]
+
 [dependencies]
 webview2-com = "0.39"
 serde = { version = "1", features = ["derive"] }
@@ -120,10 +123,6 @@ zstd = "0.13"
 [[bin]]
 name = "kachina-installer"
 path = "native/main.rs"
-
-[[bin]]
-name = "kachina-builder"
-path = "native/builder/main.rs"
 
 [[bin]]
 name = "kachina-sfx"

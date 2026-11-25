@@ -20,11 +20,19 @@ pub struct PackConfig {
 }
 
 pub async fn pack_cli(args: PackArgs) -> Result<(), String> {
-    let reader = get_reader_for_bundle().await;
-    if reader.is_err() {
-        return Err(format!("Failed to get reader: {:?}", reader.err()));
-    }
-    let reader = reader.unwrap();
+    let base_bytes;
+    let reader: Box<dyn tokio::io::AsyncRead + Unpin + Send> = if let Some(base) = &args.base {
+        base_bytes = tokio::fs::read(base)
+            .await
+            .map_err(|e| format!("Failed to read base {:?}: {e}", base))?;
+        Box::new(base_bytes.as_slice())
+    } else {
+        let reader = get_reader_for_bundle().await;
+        if reader.is_err() {
+            return Err(format!("Failed to get reader: {:?}", reader.err()));
+        }
+        Box::new(reader.unwrap())
+    };
     let config = tokio::fs::read(&args.config).await;
     if config.is_err() {
         return Err(format!(
@@ -197,14 +205,6 @@ pub async fn pack(
     tmpfile.shutdown().await.unwrap();
     drop(tmpfile);
     let tmp_len = tokio::fs::metadata(&tmppath).await.unwrap().len();
-    let mut updater = rcedit::ResourceUpdater::new();
-    if let Err(e) = updater.load(&tmppath) {
-        panic!(
-            "rcedit load {} ({} bytes): {e:?}",
-            tmppath.display(),
-            tmp_len
-        );
-    }
     let unwrapped_config = config.config.as_object().unwrap();
     let title = unwrapped_config
         .get("windowTitle")
@@ -212,26 +212,28 @@ pub async fn pack(
         .as_str()
         .unwrap();
     let product = unwrapped_config.get("appName").unwrap().as_str().unwrap();
-    updater
-        .set_version_string("FileDescription", title)
-        .unwrap();
-    updater.set_version_string("ProductName", product).unwrap();
 
     // Set icon if provided
+    let mut missing_icon = false;
     if let Some(icon_path) = &config.icon_path {
-        if icon_path.exists() {
-            if let Err(e) = updater.set_icon(icon_path) {
-                eprintln!("Warning: Failed to set icon: {:?}", e);
-            } else {
-                println!("Icon set successfully: {:?}", icon_path);
-            }
-        } else {
+        if !icon_path.exists() {
+            missing_icon = true;
             eprintln!("Warning: Icon file not found: {:?}", icon_path);
         }
     }
-
-    updater.commit().unwrap();
-    drop(updater);
+    let icon = config.icon_path.as_deref().filter(|p| p.exists());
+    let _ = missing_icon;
+    if let Err(e) = crate::pe_res::update_pe_resources(
+        &tmppath,
+        &[("FileDescription", title), ("ProductName", product)],
+        icon,
+    ) {
+        panic!(
+            "editpe update {} ({} bytes): {e}",
+            tmppath.display(),
+            tmp_len
+        );
+    }
     println!("Reading base...");
     let mut base_data = vec![];
     // read tmp file
