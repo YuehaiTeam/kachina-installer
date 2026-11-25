@@ -175,7 +175,8 @@ pub fn plan_tasks(
             patch: patch_range,
         });
     }
-    for transfer in download_plan::plan(&inputs, ctx.policy) {
+    let windows = ctx.merge_windows.as_deref();
+    for transfer in download_plan::plan(&inputs, ctx.policy, windows) {
         if transfer.files.len() == 1 {
             let file = transfer.files[0];
             let source = match matching.get(&file.id) {
@@ -278,20 +279,35 @@ fn add_whole_ranges(
     }
 }
 
-/// The entry's whole range, and with `slices` its parts under the policy.
+/// The entry's range, and with `slices` its parts under the policy. A range
+/// straddling a hint window's boundary is declared cut on the boundary:
+/// signed as one piece it would be refused.
 fn add_index_range(ranges: &mut Vec<String>, ctx: &SourceCtx, name: &str, slices: bool) {
     if let Some(file) = ctx.find(name) {
-        let end = file.offset + file.size.saturating_sub(1);
-        ranges.push(format!("{}-{}", file.offset, end));
+        let windows = ctx.merge_windows.as_deref();
+        ranges.extend(
+            download_plan::cut_at_windows(
+                Range {
+                    start: file.offset as u64,
+                    len: file.size as u64,
+                },
+                windows,
+            )
+            .into_iter()
+            .map(Range::key),
+        );
         if !slices {
             return;
         }
         ranges.extend(
             ctx.policy
-                .split(Range {
-                    start: file.offset as u64,
-                    len: file.size as u64,
-                })
+                .split_bounded(
+                    Range {
+                        start: file.offset as u64,
+                        len: file.size as u64,
+                    },
+                    windows,
+                )
                 .into_iter()
                 .map(Range::key),
         );

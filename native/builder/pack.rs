@@ -250,6 +250,24 @@ pub async fn pack(
         .map(|m| m.packing_info.clone())
         .filter(|p| !p.is_empty());
 
+    let mut files = config.files;
+    // 使用打包优化信息进行智能排序：桶序 [1,2,3,0,4]，
+    // 未变小文件 → 变化小文件 → 小补丁 → 大文件 → 大补丁。
+    files.sort_by_key(|file| get_file_pack_priority(&file.name, packing_info_clone.as_ref()));
+    if let Some(ref packing_info) = packing_info_clone {
+        println!("Packing order optimization enabled:");
+        println!("  Large files: {}", packing_info[0].len());
+        println!("  Unchanged small files: {}", packing_info[1].len());
+        println!("  Changed small files: {}", packing_info[2].len());
+        println!("  Small patches: {}", packing_info[3].len());
+        println!("  Large patches: {}", packing_info[4].len());
+        if let Some(metadata) = config.metadata.as_mut() {
+            let hint = split_hint(&files, packing_info);
+            println!("  Merge windows: {}", hint.len());
+            metadata.data_split_hint = Some(hint);
+        }
+    }
+
     let metadata_bytes = if let Some(metadata) = config.metadata {
         println!("Writing metadata...");
         Some(embed_metadata_bytes(metadata))
@@ -259,7 +277,6 @@ pub async fn pack(
     println!("Generating index...");
     config.config.sort_all_objects();
     let config_bytes = serde_json::to_string(&config.config).unwrap();
-    let mut files = config.files;
     // name size offset
     let mut index: Vec<(String, u32, u32)> = vec![];
     // insert config to index
@@ -286,17 +303,7 @@ pub async fn pack(
         ));
         current_offset = offset + metadata_bytes.len();
     }
-    // 使用打包优化信息进行智能排序
-    if let Some(ref packing_info) = packing_info_clone {
-        println!("Packing order optimization enabled:");
-        println!("  Large files: {}", packing_info[0].len());
-        println!("  Unchanged small files: {}", packing_info[1].len());
-        println!("  Changed small files: {}", packing_info[2].len());
-        println!("  Small patches: {}", packing_info[3].len());
-        println!("  Large patches: {}", packing_info[4].len());
-    }
 
-    files.sort_by_key(|file| get_file_pack_priority(&file.name, packing_info_clone.as_ref()));
     for file in files.iter_mut() {
         let name = file.name.clone();
         let size = file.size;
@@ -510,28 +517,148 @@ fn embed_metadata_bytes(mut metadata: RepoMetadata) -> Vec<u8> {
     serde_json::to_string(&metadata).unwrap().into_bytes()
 }
 
+/// 分桶落盘顺序：[1,2,3,0,4]，即
+/// 未变小文件 → 变化小文件 → 小补丁 → 大文件 → 大补丁。
+const BUCKET_ORDER: [usize; 5] = [1, 2, 3, 0, 4];
+
+/// 单段连续保留区的上限：超过 512 MiB 会顶到节点缓存上限，留余量切到 480 MiB。
+const SPLIT_HINT_SEGMENT_MAX: u64 = 480 * 1024 * 1024;
+
 fn get_file_pack_priority(
     file_name: &str,
     packing_info: Option<&Vec<Vec<String>>>,
 ) -> (u8, String) {
     if let Some(info) = packing_info {
         // 检查每个分类
-        for (priority, category) in info.iter().enumerate() {
+        for (bucket, category) in info.iter().enumerate() {
             if category.contains(&file_name.to_string()) {
-                return (priority as u8, file_name.to_string());
+                let rank = BUCKET_ORDER
+                    .iter()
+                    .position(|b| *b == bucket)
+                    .unwrap_or(BUCKET_ORDER.len()) as u8;
+                return (rank, file_name.to_string());
             }
         }
     }
 
     // 未分类的文件放在最后，使用原有的字母排序
-    (5, file_name.to_string())
+    (BUCKET_ORDER.len() as u8, file_name.to_string())
+}
+
+/// 由落盘顺序算出 `data_split_hint`：小文件与小补丁桶（1、2、3）在包内物理
+/// 连续，允许跨块合并；大文件与大补丁各自独立，不能跨块。每个窗口从段首块
+/// 的 TLV 头起点量到段末块 payload 末尾，坐标以 data_end（\0META 结束位置、
+/// 即数据区起点）为 0，单段不超 `SPLIT_HINT_SEGMENT_MAX`。
+fn split_hint(files: &[PackFile], packing_info: &Vec<Vec<String>>) -> Vec<(u64, u64)> {
+    let mut windows = Vec::new();
+    // 相对 data_end 的偏移：数据区第一块的 TLV 头起点为 0
+    let mut pos = 0u64;
+    let mut open: Option<u64> = None;
+    let mut seg_len = 0u64;
+    for file in files {
+        let span = get_header_size(&file.name) as u64 + file.size as u64;
+        let bucket = packing_info
+            .iter()
+            .position(|category| category.contains(&file.name));
+        let mergeable = matches!(bucket, Some(1) | Some(2) | Some(3));
+        if !mergeable {
+            if let Some(start) = open.take() {
+                windows.push((start, pos));
+            }
+            seg_len = 0;
+        } else {
+            if open.is_none() || seg_len + span > SPLIT_HINT_SEGMENT_MAX {
+                if let Some(start) = open.take() {
+                    windows.push((start, pos));
+                }
+                open = Some(pos);
+                seg_len = 0;
+            }
+            seg_len += span;
+        }
+        pos += span;
+    }
+    if let Some(start) = open.take() {
+        windows.push((start, pos));
+    }
+    windows
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{index_to_bin, write_header};
-    use crate::pack_format::{embedded_name::INDEX_NAME_MAX, scan_embedded};
+    use super::{
+        get_file_pack_priority, index_to_bin, split_hint, write_header, PackFile,
+        SPLIT_HINT_SEGMENT_MAX,
+    };
+    use crate::pack_format::{embedded_name::INDEX_NAME_MAX, get_header_size, scan_embedded};
     use tokio::io::AsyncWriteExt;
+
+    fn file(name: &str, size: usize) -> PackFile {
+        PackFile {
+            name: name.to_string(),
+            size,
+            data: Box::new(tokio::io::empty()),
+        }
+    }
+
+    fn packing() -> Vec<Vec<String>> {
+        vec![
+            vec!["big.bin".to_string()],
+            vec!["a.txt".to_string()],
+            vec!["b.txt".to_string()],
+            vec!["patch.kpatch".to_string()],
+            vec!["bigpatch.kpatch".to_string()],
+        ]
+    }
+
+    #[test]
+    fn pack_order_is_small_then_large() {
+        let packing = packing();
+        let names = |n: &str| get_file_pack_priority(n, Some(&packing)).0;
+        // 桶序 [1,2,3,0,4]：小文件/小补丁在前，大文件与大补丁在后。
+        assert!(names("a.txt") < names("b.txt"));
+        assert!(names("b.txt") < names("patch.kpatch"));
+        assert!(names("patch.kpatch") < names("big.bin"));
+        assert!(names("big.bin") < names("bigpatch.kpatch"));
+        assert_eq!(names("bigpatch.kpatch"), 4);
+    }
+
+    #[test]
+    fn split_hint_covers_only_mergeable_runs() {
+        // 落盘序：a.txt(未变小) b.txt(变化小) patch(小补丁) big.bin(大) bigpatch(大补丁)
+        let files = vec![
+            file("a.txt", 10),
+            file("b.txt", 20),
+            file("patch.kpatch", 30),
+            file("big.bin", 40),
+            file("bigpatch.kpatch", 50),
+        ];
+        let windows = split_hint(&files, &packing());
+        let small_span: u64 = ["a.txt", "b.txt", "patch.kpatch"]
+            .iter()
+            .map(|n| get_header_size(n) as u64 + files.iter().find(|f| &f.name == n).unwrap().size as u64)
+            .sum();
+        assert_eq!(windows, vec![(0, small_span)]);
+    }
+
+    #[test]
+    fn split_hint_cuts_runs_at_the_segment_cap() {
+        let packing = vec![
+            vec![],
+            vec!["a.txt".to_string()],
+            vec!["b.txt".to_string()],
+            vec![],
+            vec![],
+        ];
+        let each = (SPLIT_HINT_SEGMENT_MAX / 2) as usize;
+        let files = vec![file("a.txt", each), file("b.txt", each)];
+        let windows = split_hint(&files, &packing);
+        // 每段封顶 480 MiB：两个半段相邻但边界仍是切割点。
+        assert_eq!(windows.len(), 2);
+        assert_eq!(windows[0].1, windows[1].0);
+        assert!(windows[0].1 - windows[0].0 <= SPLIT_HINT_SEGMENT_MAX);
+        assert!(windows[1].1 - windows[1].0 <= SPLIT_HINT_SEGMENT_MAX);
+    }
 
     #[test]
     fn index_rejects_names_over_255_bytes() {

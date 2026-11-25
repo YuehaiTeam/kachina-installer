@@ -90,6 +90,19 @@ pub struct ReplaceBinArgs {
     pub icon: Option<PathBuf>,
 }
 
+#[derive(Debug, Clone, clap::Args)]
+pub struct SplitArgs {
+    /// 输入的最终成品安装包（签名后执行拆包，保证头部字节与完整包源一致）
+    #[clap(long, short = 'i')]
+    pub input: PathBuf,
+    /// 输出目录：写入 cas/{xxh} 块与 <name>.json
+    #[clap(long, short = 'o')]
+    pub output: PathBuf,
+    /// {ver}.json 的文件名（不带扩展名）；缺省取输入文件名
+    #[clap(long, short = 'n')]
+    pub name: Option<String>,
+}
+
 #[derive(Subcommand, Clone, Debug)]
 pub enum Command {
     Pack(PackArgs),
@@ -97,6 +110,7 @@ pub enum Command {
     Extract(ExtractArgs),
     Gen(GenArgs),
     ReplaceBin(ReplaceBinArgs),
+    Split(SplitArgs),
 }
 
 #[derive(Parser)]

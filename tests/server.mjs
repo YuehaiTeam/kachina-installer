@@ -73,11 +73,17 @@ function addIndexEntry(index, entries, hash, name) {
 
 function loadResource(version) {
   const packagePath = path.resolve(FIXTURES_DIR, `test-app-${version}.exe`);
-  const metadataPath = path.resolve(FIXTURES_DIR, `${version}-metadata.json`);
   const bytes = fs.readFileSync(packagePath);
-  const metadata = JSON.parse(fs.readFileSync(metadataPath, 'utf8'));
   const entries = readPackedEntries(bytes);
   const index = {};
+  // the server passes the package's \0INDEX and \0META through verbatim
+  const metaEntry = entries.get('\0META');
+  if (!metaEntry) {
+    throw new Error(`Packed resource ${version} has no \\0META`);
+  }
+  const metadata = JSON.parse(
+    bytes.subarray(metaEntry.offset, metaEntry.offset + metaEntry.size).toString('utf8'),
+  );
 
   for (const item of metadata.hashed ?? []) {
     if (item.xxh) {
@@ -94,10 +100,19 @@ function loadResource(version) {
       addIndexEntry(index, entries, `${from}_${to}`, patch.file_name);
     }
   }
+  // the \0INDEX's \0META item lets the client restore data_end, the origin
+  // every data_split_hint window is relative to
+  index['\0META'] = {
+    name: '\0META',
+    offset: metaEntry.offset,
+    raw_offset: metaEntry.rawOffset,
+    size: metaEntry.size,
+  };
 
   return {
     bytes,
     metadata,
+    dataEnd: metaEntry.offset + metaEntry.size,
     data: {
       index,
       metadata,
@@ -134,6 +149,7 @@ function challengeData() {
 function createState() {
   return {
     resources: new Map(),
+    requests: [],
     sessions: new Map(),
     batchRequests: [],
     singleRequests: [],
@@ -183,6 +199,7 @@ function createServer(options = {}) {
   app.use(express.json());
   app.use((req, _res, next) => {
     console.log(`${req.method} ${req.originalUrl}`);
+    state.requests.push(`${req.method} ${req.originalUrl}`);
     next();
   });
 
