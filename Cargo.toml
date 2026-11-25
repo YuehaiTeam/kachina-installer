@@ -72,6 +72,8 @@ nt_version = "0.1"
 lazy_static = "1.5"
 twox-hash = "2.1.0"
 fmmap = { version = "0.4", features = ["tokio"] }
+clap = { version = "4.5", features = ["derive"] }
+hdiff-sys = { path = "libs/hdiff-sys" }
 chrono = "0.4.39"
 uuid = { version = "1.16", features = ["v4"] }
 hpatch-sys = { path = "libs/hpatch-sys" }
