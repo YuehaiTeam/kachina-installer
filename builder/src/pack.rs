@@ -190,14 +190,15 @@ pub async fn pack_cli(args: PackArgs) -> Result<(), String> {
         let _ = tokio::fs::remove_file(&tmp_output).await;
         return result;
     }
-    tokio::fs::rename(&tmp_output, &args.output)
-        .await
-        .map_err(|err| {
-            format!(
-                "Failed to move {:?} to {:?}: {err}",
-                tmp_output, args.output
-            )
-        })?;
+    if let Err(err) = tokio::fs::rename(&tmp_output, &args.output).await {
+        // rename 失败（如目标被运行中的进程占用）时清掉已写完的临时安装包，
+        // 否则每次重试都遗留一份完整副本。
+        let _ = tokio::fs::remove_file(&tmp_output).await;
+        return Err(format!(
+            "Failed to move {:?} to {:?}: {err}",
+            tmp_output, args.output
+        ));
+    }
     Ok(())
 }
 

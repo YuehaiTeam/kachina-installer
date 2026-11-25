@@ -19,7 +19,7 @@ pub struct PackArgs {
     pub data_dir: Option<PathBuf>,
     #[clap(long)]
     pub icon: Option<PathBuf>,
-    /// 裸安装器 exe 路径；缺省从 bundle 自身提取（linux 下必须显式指定）
+    /// 裸安装器 exe 路径；缺省从自身拼接的 bundle 提取，只有未拼接的裸 builder 才需要显式指定
     #[clap(long, short = 'b')]
     pub base: Option<PathBuf>,
 }
