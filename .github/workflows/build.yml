@@ -70,15 +70,21 @@ jobs:
             Move-Item zig-x86_64-windows-0.17.1 C:\zig
           }
           echo "C:\zig" >> $env:GITHUB_PATH
-          pip install cargo-zigbuild
+          pip install cargo-zigbuild==0.24.1
           rustup target add x86_64-unknown-linux-gnu
       - name: Cross-build linux builder
         run: cargo zigbuild -p kachina-builder --release --target x86_64-unknown-linux-gnu.2.17
       - name: Bundle linux builder with installer
         # 与 windows bundle 同构：builder 字节在前 installer 字节在后，
         # 运行时扫描自身最后一个非零偏移的 PE 头定位。ELF 对尾部追加免疫。
-        shell: cmd
-        run: copy /b target\x86_64-unknown-linux-gnu\release\kachina-builder+target\x86_64-win7-windows-msvc\release\kachina-installer.exe target\x86_64-win7-windows-msvc\release\kachina-builder-linux
+        run: |
+          $rel = "target\x86_64-win7-windows-msvc\release"
+          cmd /c "copy /b target\x86_64-unknown-linux-gnu\release\kachina-builder+$rel\kachina-installer.exe $rel\kachina-builder-linux"
+          $bundle = Get-Item "$rel\kachina-builder-linux"
+          $bare = Get-Item "target\x86_64-unknown-linux-gnu\release\kachina-builder"
+          if ($bundle.Length -le $bare.Length) {
+            throw "linux bundle $($bundle.Length) is not larger than bare builder $($bare.Length)"
+          }
       # linux bundle 与 windows 产物同目录树上传，artifact 保持扁平布局，
       # 外部直接下载 CI artifact 做 dev 测试的消费者能一并拿到。
       - name: Artifact
@@ -88,6 +94,31 @@ jobs:
             target/x86_64-win7-windows-msvc/release/*.exe
             target/x86_64-win7-windows-msvc/release/*.pdb
             target/x86_64-win7-windows-msvc/release/kachina-builder-linux
+  linux-test:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Override rust-toolchain for CI
+        run: sed -i 's/channel = "nightly"/channel = "${{ env.RUST_NIGHTLY_VERSION }}"/' rust-toolchain.toml
+      - run: |
+          rustup toolchain install ${{ env.RUST_NIGHTLY_VERSION }} --profile minimal
+          rustup component add rust-src --toolchain ${{ env.RUST_NIGHTLY_VERSION }}
+          rustup default ${{ env.RUST_NIGHTLY_VERSION }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-targets: false
+      - name: Rust unit tests
+        run: cargo test -p kachina-builder
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      # 验真实发布产物：gen --diff-vers 跑起交叉编译的 hdiff-sys/libstdc++，
+      # pack/replace-bin 不带 --base 走 ELF 自提取 + editpe 资源重写。
+      - name: Smoke test linux builder artifact
+        run: bash tests/linux-smoke.sh
+
   unit-test:
     runs-on: windows-2022
     steps:
@@ -108,7 +139,7 @@ jobs:
         run: cargo test
 
   release:
-    needs: [build, test, unit-test]
+    needs: [build, test, unit-test, linux-test]
     runs-on: windows-2022
     if: startsWith(github.ref, 'refs/tags/')
     steps:
