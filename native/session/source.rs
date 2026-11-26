@@ -409,6 +409,13 @@ async fn apply_extent_doc(
     ctx.reset_remote_layout();
     let mut extents: Vec<Extent> = serde_json::from_value(doc["extents"].clone())
         .map_err(|e| attach_metadata(e.into()))?;
+    // 逻辑结束位置溢出的 extent 会在窗口派生与 URL 拼接里 panic，入库前先拒绝
+    for e in &extents {
+        if e.offset.checked_add(e.len).is_none() {
+            return Err(anyhow!("extent at {} with len {} overflows", e.offset, e.len)
+                .attach(crate::utils::code::METADATA_INVALID));
+        }
+    }
     extents.sort_by_key(|e| e.offset);
     ctx.extents = Some(extents);
     let url_path = url.split(['?', '#']).next().unwrap_or(url);
@@ -664,9 +671,10 @@ pub async fn resolve_file_location(
     let Some(parsed) = ctx.parsed.as_ref() else {
         return Err(anyhow!("source not loaded").attach(crate::utils::code::SOURCE_INVALID));
     };
-    // extent 布局下文件只能经 Sliced 从虚拟包切出；走到这里说明不在索引里，
-    // 不能像 hashed 布局一样拼 `{dir}/hashed/{hash}` 凑出并不存在的地址。
-    if ctx.extents.is_some() && !installer {
+    // extent 布局下文件只能经 Sliced 从虚拟包切出；走到这里说明不在索引里
+    // （installer 首段非零时已在 resolve_install_source 走 Sliced），不能像
+    // hashed 布局一样拼 `{dir}/hashed/{hash}` 凑出并不存在的地址。
+    if ctx.extents.is_some() {
         return Err(anyhow!("no file in remote binary").attach(REMOTE_FILE_MISSING));
     }
     match parsed {
@@ -1505,4 +1513,18 @@ mod tests {
         // data_end = 200 + 50 = 250，hint 平移到 [250, 350)
         assert_eq!(ctx.merge_windows, Some(vec![(250, 350)]));
     }
+    /// 逻辑结束位置溢出的 extent 必须在入库前被拒绝，而不是在窗口派生时 panic。
+    #[tokio::test]
+    async fn extent_doc_rejects_overflowing_end() {
+        let mut ctx = SourceCtx::default();
+        let doc = serde_json::json!({
+            "extents": [{"offset": u64::MAX, "len": 2, "phys_offset": 0, "path": "cas/x"}],
+            "index": {},
+            "metadata": {"tag_name": "v1"}
+        });
+        assert!(apply_extent_doc(&doc, "https://example.com/v2.json", &mut ctx)
+            .await
+            .is_err());
+    }
 }
+

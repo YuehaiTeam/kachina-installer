@@ -79,10 +79,16 @@ pub async fn split_cli(args: SplitArgs) -> Result<(), String> {
         Some(v) => serde_json::from_value(v.clone())
             .map_err(|e| format!("Bad data_split_hint: {e}"))?,
     };
-    let windows: Vec<(u64, u64)> = hint
-        .iter()
-        .map(|(s, e)| (data_end + s, data_end + e))
-        .collect();
+    let mut windows: Vec<(u64, u64)> = Vec::new();
+    for (s, e) in &hint {
+        let (Some(w0), Some(w1)) = (data_end.checked_add(*s), data_end.checked_add(*e)) else {
+            return Err(format!(
+                "{:?} has overflowing data_split_hint window [{s}, {e})",
+                args.input
+            ));
+        };
+        windows.push((w0, w1));
+    }
     for (w0, w1) in &windows {
         if w0 >= w1 || *w1 > bytes.len() as u64 {
             return Err(format!(
@@ -103,6 +109,35 @@ pub async fn split_cli(args: SplitArgs) -> Result<(), String> {
             .iter()
             .any(|(w0, w1)| e.raw_offset as u64 >= *w0 && (e.offset + e.size) as u64 <= *w1)
     };
+
+    // dfs2 形态的 index：物理块名 -> {name, offset, raw_offset, size}，
+    // 与包内 \0INDEX 1:1（同 dfs2 服务端与 apply_packed_index 的读法）。
+    // 提前解析并校验边界：数据区中后段截断时 scan_embedded 丢块，
+    // 若照写索引就会静默产出引用不存在数据块的残缺拆包产物。
+    let index_entry = entries
+        .iter()
+        .find(|e| e.name == "\0INDEX")
+        .ok_or_else(|| "package has no \\0INDEX".to_string())?;
+    let parsed = parse_index(
+        &bytes[index_entry.offset..index_entry.offset + index_entry.size],
+        index_start as usize,
+    )
+    .ok_or_else(|| "malformed \\0INDEX".to_string())?;
+    for entry in &parsed {
+        let bounded = entry
+            .offset
+            .checked_add(entry.size)
+            .is_some_and(|end| end <= bytes.len());
+        if !bounded {
+            return Err(format!(
+                "{:?} is truncated: index entry {:?} ends at {:?}, file is {} bytes",
+                args.input,
+                entry.name,
+                entry.offset.checked_add(entry.size),
+                bytes.len()
+            ));
+        }
+    }
 
     let out_dir = &args.output;
     let cas_dir = out_dir.join("cas");
@@ -144,17 +179,6 @@ pub async fn split_cli(args: SplitArgs) -> Result<(), String> {
     }
     extents.sort_by_key(|e| e.offset);
 
-    // dfs2 形态的 index：物理块名 -> {name, offset, raw_offset, size}，
-    // 与包内 \0INDEX 1:1（同 dfs2 服务端与 apply_packed_index 的读法）。
-    let index_entry = entries
-        .iter()
-        .find(|e| e.name == "\0INDEX")
-        .ok_or_else(|| "package has no \\0INDEX".to_string())?;
-    let parsed = parse_index(
-        &bytes[index_entry.offset..index_entry.offset + index_entry.size],
-        index_start as usize,
-    )
-    .ok_or_else(|| "malformed \\0INDEX".to_string())?;
     let index: BTreeMap<String, IndexEntry> = parsed
         .into_iter()
         .map(|e| {
@@ -282,4 +306,44 @@ mod tests {
         assert!(err.contains("invalid data_split_hint"), "{err}");
         let _ = std::fs::remove_dir_all(&dir);
     }
+    /// 索引声明的数据块超出文件末尾：数据区截断必须报错而非照写索引。
+    #[tokio::test]
+    async fn index_entry_beyond_file_end_errors() {
+        let dir = std::env::temp_dir().join(format!("kachina-split-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let config = tlv(b" CONFIG", br#"{"appName":"Demo"}"#);
+        let mut index_body = Vec::new();
+        let name = b"abcdef";
+        index_body.push(name.len() as u8);
+        index_body.extend(name);
+        index_body.extend(100u32.to_be_bytes()); // size
+        index_body.extend(999999u32.to_be_bytes()); // rel，远超文件长度
+        let index = tlv(b" INDEX", &index_body);
+        let meta = tlv(b" META", br#"{"tag_name":"v1","hashed":[]}"#);
+        let base_end = 200u32;
+        let mut bytes = vec![0u8; base_end as usize];
+        let mut header = crate::pack_format::LAYOUT_MARKER.to_vec();
+        for v in [
+            base_end,
+            config.len() as u32,
+            0,
+            index.len() as u32,
+            meta.len() as u32,
+        ] {
+            header.extend(v.to_be_bytes());
+        }
+        bytes[..header.len()].copy_from_slice(&header);
+        bytes.extend(config);
+        bytes.extend(index);
+        bytes.extend(meta);
+        let input = dir.join("pack.exe");
+        let output = dir.join("out");
+        std::fs::write(&input, &bytes).unwrap();
+        let err = split_cli(SplitArgs { input, output, name: None })
+            .await
+            .unwrap_err();
+        assert!(err.contains("truncated"), "{err}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
+
