@@ -47,6 +47,14 @@ pub async fn split_cli(args: SplitArgs) -> Result<(), String> {
         + layout.index_len as u64
         + layout.manifest_len as u64;
     let installer_end = index_start + layout.config_len as u64 + layout.theme_len as u64;
+    // 截断或损坏的包：布局头声明的长度越界时响亮报错，不 panic
+    if data_end as usize > bytes.len() || index_start > data_end {
+        return Err(format!(
+            "{:?} is truncated: layout declares data end {data_end}, file is {} bytes",
+            args.input,
+            bytes.len()
+        ));
+    }
 
     let entries = scan_embedded(&bytes);
     let meta = entries
@@ -58,10 +66,15 @@ pub async fn split_cli(args: SplitArgs) -> Result<(), String> {
     )
     .map_err(|e| format!("Failed to parse \\0META: {e}"))?;
 
-    // data_split_hint：None = 全数据区可合并（单窗口）；Some([]) = 全独立
+    // data_split_hint：None = 全数据区可合并（单窗口）；Some([]) = 全独立。
+    // 数据区为空（无文件只有头）时不产窗口，否则切出 0 字节 cas 块。
     let hint: Vec<(u64, u64)> = match metadata.get("data_split_hint") {
         None | Some(serde_json::Value::Null) => {
-            vec![(0, bytes.len() as u64 - data_end)]
+            if bytes.len() as u64 == data_end {
+                vec![]
+            } else {
+                vec![(0, bytes.len() as u64 - data_end)]
+            }
         }
         Some(v) => serde_json::from_value(v.clone())
             .map_err(|e| format!("Bad data_split_hint: {e}"))?,
@@ -70,6 +83,15 @@ pub async fn split_cli(args: SplitArgs) -> Result<(), String> {
         .iter()
         .map(|(s, e)| (data_end + s, data_end + e))
         .collect();
+    for (w0, w1) in &windows {
+        if w0 >= w1 || *w1 > bytes.len() as u64 {
+            return Err(format!(
+                "{:?} has invalid data_split_hint window [{w0}, {w1}) for a {}-byte file",
+                args.input,
+                bytes.len()
+            ));
+        }
+    }
 
     // 数据区内不被任何窗口覆盖的文件单独成块（payload only）
     let files: Vec<&crate::pack_format::Embedded> = entries
@@ -172,4 +194,92 @@ pub async fn split_cli(args: SplitArgs) -> Result<(), String> {
         out_path
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cli::SplitArgs;
+
+    fn tlv(name: &[u8], body: &[u8]) -> Vec<u8> {
+        let mut out = b"!IN\0".to_vec();
+        out.extend((name.len() as u16).to_be_bytes());
+        out.extend(name);
+        out.extend((body.len() as u32).to_be_bytes());
+        out.extend(body);
+        out
+    }
+
+    /// 最小合法包：布局头 + \0CONFIG + \0INDEX(空) + \0META，数据区为空。
+    /// `manifest_len_lie` 往布局头声明的 manifest 长度里注水模拟截断/损坏。
+    fn build_pack(meta_body: &[u8], manifest_len_lie: u32) -> Vec<u8> {
+        let config = tlv(b"\0CONFIG", br#"{"appName":"Demo"}"#);
+        let index = tlv(b"\0INDEX", &[]);
+        let meta = tlv(b"\0META", meta_body);
+        let base_end = 200u32;
+        let mut bytes = vec![0u8; base_end as usize];
+        let mut header = crate::pack_format::LAYOUT_MARKER.to_vec();
+        for v in [
+            base_end,
+            config.len() as u32,
+            0,
+            index.len() as u32,
+            meta.len() as u32 + manifest_len_lie,
+        ] {
+            header.extend(v.to_be_bytes());
+        }
+        bytes[..header.len()].copy_from_slice(&header);
+        bytes.extend(config);
+        bytes.extend(index);
+        bytes.extend(meta);
+        bytes
+    }
+
+    async fn run_split(bytes: &[u8], dir: &std::path::Path) -> Result<(), String> {
+        let input = dir.join("pack.exe");
+        let output = dir.join("out");
+        std::fs::write(&input, bytes).unwrap();
+        split_cli(SplitArgs {
+            input,
+            output,
+            name: None,
+        })
+        .await
+    }
+
+    #[tokio::test]
+    async fn empty_data_region_yields_no_zero_length_cas_block() {
+        let dir = std::env::temp_dir().join(format!("kachina-split-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let pack = build_pack(br#"{"tag_name":"v1","hashed":[]}"#, 0);
+        run_split(&pack, &dir).await.unwrap();
+        let cas = dir.join("out").join("cas");
+        let blocks: Vec<_> = std::fs::read_dir(&cas).unwrap().collect();
+        // 空数据区只有头区一个块，没有 0 字节块
+        assert_eq!(blocks.len(), 1);
+        for entry in blocks {
+            assert!(entry.unwrap().metadata().unwrap().len() > 0);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn truncated_pack_errors_instead_of_panicking() {
+        let dir = std::env::temp_dir().join(format!("kachina-split-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let pack = build_pack(br#"{"tag_name":"v1","hashed":[]}"#, 100000);
+        let err = run_split(&pack, &dir).await.unwrap_err();
+        assert!(err.contains("truncated"), "{err}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn out_of_bounds_hint_window_errors_instead_of_panicking() {
+        let dir = std::env::temp_dir().join(format!("kachina-split-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let pack = build_pack(br#"{"tag_name":"v1","hashed":[],"data_split_hint":[[0,99999999]]}"#, 0);
+        let err = run_split(&pack, &dir).await.unwrap_err();
+        assert!(err.contains("invalid data_split_hint"), "{err}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
