@@ -246,18 +246,28 @@ async fn resolve_direct_url(original_url: &str, cache_time: Option<u64>) -> anyh
         .send()
         .await
         .map_err(|e| attach_metadata(e.into()))?;
+    let status = response.status();
     let location = response
         .headers()
         .get("location")
         .and_then(|v| v.to_str().ok())
         .filter(|s| !s.is_empty())
         .map(str::to_string);
-    let redirect = match location {
-        Some(loc) => match url::Url::parse(original_url).and_then(|base| base.join(&loc)) {
-            Ok(joined) => joined.to_string(),
-            Err(_) => return Ok(original_url.to_string()),
-        },
-        None => original_url.to_string(),
+    // error responses (and redirects with a missing/unusable Location) must
+    // not be cached: the mirror may recover and redirect elsewhere
+    let redirect = if status.is_redirection() {
+        match location.and_then(|loc| {
+            url::Url::parse(original_url)
+                .and_then(|base| base.join(&loc))
+                .ok()
+        }) {
+            Some(joined) => joined.to_string(),
+            None => return Ok(original_url.to_string()),
+        }
+    } else if status.is_success() {
+        original_url.to_string()
+    } else {
+        return Ok(original_url.to_string());
     };
     let expiry_ms = if let Some(secs) = cache_time {
         now + (secs as u128) * 1000
@@ -437,6 +447,32 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(path_rel, format!("http://127.0.0.1:{port}/x/dl2/app.exe"));
+    }
+
+    #[tokio::test]
+    async fn error_status_is_not_cached() {
+        let served = Arc::new(std::sync::Mutex::new(0u32));
+        let (port, count) = mock_server({
+            let served = served.clone();
+            move |_path| {
+                let mut n = served.lock().unwrap();
+                *n += 1;
+                if *n == 1 {
+                    "HTTP/1.1 503 Service Unavailable\r\ncontent-length: 0\r\nconnection: close\r\n\r\n".to_string()
+                } else {
+                    "HTTP/1.1 302 Found\r\nlocation: /cdn/app.exe\r\ncontent-length: 0\r\nconnection: close\r\n\r\n".to_string()
+                }
+            }
+        })
+        .await;
+        let url = format!("http://127.0.0.1:{port}/pkg.exe");
+        let first = resolve_direct_url(&url, Some(60)).await.unwrap();
+        assert_eq!(first, url);
+        // the 503 left nothing in the cache, so the second probe hits the
+        // server again and follows the redirect it now serves
+        let second = resolve_direct_url(&url, Some(60)).await.unwrap();
+        assert_eq!(second, format!("http://127.0.0.1:{port}/cdn/app.exe"));
+        assert_eq!(*count.lock().unwrap(), 2);
     }
 
     #[test]
