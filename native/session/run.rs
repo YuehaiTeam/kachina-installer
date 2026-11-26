@@ -1503,7 +1503,6 @@ async fn dfs_staged(
             .map(|files| files.iter().map(|f| f.name.clone()).collect())
             .unwrap_or_default(),
         ignore_nonempty: ignore_nonempty.clone(),
-        app_name: project.app_name.clone(),
     });
 
     session_dump!(

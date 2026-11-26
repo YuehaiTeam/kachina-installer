@@ -64,7 +64,6 @@ pub struct PlanInput {
     pub local: DiskFiles,
     pub embedded_names: Vec<String>,
     pub ignore_nonempty: Vec<String>,
-    pub app_name: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -330,7 +329,6 @@ mod tests {
             local: DiskFiles::new(vec![]),
             embedded_names: vec![],
             ignore_nonempty: vec![],
-            app_name: "Test".to_string(),
         }
     }
 
