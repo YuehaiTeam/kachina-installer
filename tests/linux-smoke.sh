@@ -52,9 +52,10 @@ echo "== replace-bin（自提取）=="
 echo "== replace-bin --base kachina-sfx.exe（便携包路径）=="
 "$BUILDER" replace-bin packed.exe --base "$SFX" --icon "$ICON" -o portable.exe
 [ -s portable.exe ] || { echo "portable.exe empty"; exit 1; }
-# extract --list 在载荷全丢时也返回成功（只打印表头），必须断言内嵌文件在列表中
-"$BUILDER" extract -i portable.exe --list | tee portable-list.txt
-grep -q "big.bin" portable-list.txt || { echo "portable.exe lost embedded payload"; exit 1; }
+# extract --list 在载荷全丢时也返回成功（只打印表头），且 PATCH 行不能顶替
+# 完整文件块——便携包运行需要的是 FILE 块。直接 extract --all 逐字节校验最稳。
+"$BUILDER" extract -i portable.exe --all portable-out
+cmp portable-out/big.bin v2/big.bin || { echo "portable.exe payload big.bin mismatch or missing"; exit 1; }
 
 echo "== split =="
 "$BUILDER" split -i packed.exe -o splitout
