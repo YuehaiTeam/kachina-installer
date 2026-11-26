@@ -63,16 +63,13 @@ pub struct PlanInput {
     pub deletes: Vec<String>,
     pub local: DiskFiles,
     pub embedded_names: Vec<String>,
-    pub user_data_path: Vec<String>,
     pub ignore_nonempty: Vec<String>,
-    pub app_name: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(debug_assertions, derive(Serialize), serde(rename_all = "snake_case"))]
 pub enum SkipReason {
     Unchanged,
-    UserData,
     IgnoreFolder,
 }
 
@@ -175,11 +172,6 @@ pub fn side_hash(side: &PatchSide, key: HashKey) -> Option<&str> {
 }
 
 pub fn build_plan(input: &PlanInput) -> InstallPlan {
-    let user_data_dirs: Vec<String> = input
-        .user_data_path
-        .iter()
-        .map(|tpl| expand_template(tpl, &input.install_path, &input.app_name))
-        .collect();
     let ignore_dirs: Vec<String> = input
         .ignore_nonempty
         .iter()
@@ -204,22 +196,6 @@ pub fn build_plan(input: &PlanInput) -> InstallPlan {
     for item in &input.hashed {
         let local = input.local.find(&item.file_name);
         let full = join_install(&input.install_path, &item.file_name);
-
-        if let Some(local) = local {
-            let local_full = join_install(&input.install_path, &local.file_name);
-            if user_data_dirs.iter().any(|dir| is_under(&local_full, dir)) {
-                files.push(PlanFile {
-                    file_name: item.file_name.clone(),
-                    action: PlanAction::Skip,
-                    skip_reason: Some(SkipReason::UserData),
-                    old_hash: Some(local.hash.clone()),
-                    unwritable: local.unwritable,
-                    has_patch: false,
-                    has_lpatch: false,
-                });
-                continue;
-            }
-        }
 
         if input.is_update && ignore_dirs.iter().any(|dir| is_under(&full, dir)) {
             files.push(PlanFile {
@@ -286,21 +262,14 @@ pub fn build_plan(input: &PlanInput) -> InstallPlan {
 pub fn collect_skip_hash(
     hashed: &[FileMeta],
     install_path: &str,
-    app_name: &str,
-    user_data_path: &[String],
     ignore_nonempty: &[String],
 ) -> Vec<String> {
-    let user_data_dirs: Vec<String> = user_data_path
-        .iter()
-        .map(|tpl| expand_template(tpl, install_path, app_name))
-        .collect();
     let ignore_dirs: Vec<String> = ignore_nonempty.iter().map(|p| normalize_full(p)).collect();
     hashed
         .iter()
         .filter(|item| {
             let full = join_install(install_path, &item.file_name);
-            user_data_dirs.iter().any(|dir| is_under(&full, dir))
-                || ignore_dirs.iter().any(|dir| is_under(&full, dir))
+            ignore_dirs.iter().any(|dir| is_under(&full, dir))
         })
         .map(|item| item.file_name.clone())
         .collect()
@@ -359,9 +328,7 @@ mod tests {
             deletes: vec![],
             local: DiskFiles::new(vec![]),
             embedded_names: vec![],
-            user_data_path: vec!["${INSTALL_PATH}/User".to_string()],
             ignore_nonempty: vec![],
-            app_name: "Test".to_string(),
         }
     }
 
@@ -401,7 +368,7 @@ mod tests {
     }
 
     #[test]
-    fn user_data_uses_expanded_install_path() {
+    fn managed_files_update_regardless_of_user_data_dirs() {
         let mut input = base_input();
         input.hashed = vec![
             hash_info("app.exe", "bbb"),
@@ -412,19 +379,9 @@ mod tests {
             local(r"\User\settings.json", "user-modified"),
         ]);
         let plan = build_plan(&input);
-        let user = plan
-            .files
-            .iter()
-            .find(|f| f.file_name == "User/settings.json")
-            .unwrap();
-        assert_eq!(user.action, PlanAction::Skip);
-        assert_eq!(user.skip_reason, Some(SkipReason::UserData));
-        let app = plan
-            .files
-            .iter()
-            .find(|f| f.file_name == "app.exe")
-            .unwrap();
-        assert_eq!(app.action, PlanAction::Install);
+        for f in &plan.files {
+            assert_eq!(f.action, PlanAction::Install, "{}", f.file_name);
+        }
     }
 
     #[test]
@@ -492,7 +449,7 @@ mod tests {
     }
 
     #[test]
-    fn skip_hash_covers_user_data_and_ignore_folder() {
+    fn skip_hash_covers_ignore_folder_only() {
         let skip = collect_skip_hash(
             &[
                 hash_info("app.exe", "aaa"),
@@ -500,11 +457,9 @@ mod tests {
                 hash_info("cache/keep.dat", "v2"),
             ],
             r"C:\app",
-            "Test",
-            &["${INSTALL_PATH}/User".to_string()],
             &[r"C:\app\cache".to_string()],
         );
-        assert_eq!(skip, vec!["User/settings.json", "cache/keep.dat"]);
+        assert_eq!(skip, vec!["cache/keep.dat"]);
     }
 
     #[test]

@@ -1040,22 +1040,16 @@ fn log_plan_summary(plan: &InstallPlan, local: &[LocalFile]) {
         .iter()
         .filter(|f| f.skip_reason == Some(SkipReason::Unchanged))
         .count();
-    let skip_userdata = plan
-        .files
-        .iter()
-        .filter(|f| f.skip_reason == Some(SkipReason::UserData))
-        .count();
     let skip_ignore = plan
         .files
         .iter()
         .filter(|f| f.skip_reason == Some(SkipReason::IgnoreFolder))
         .count();
     tracing::info!(
-        "plan files={} install={} skip_unchanged={} skip_userdata={} skip_ignore={} deletes={} local_scanned={}",
+        "plan files={} install={} skip_unchanged={} skip_ignore={} deletes={} local_scanned={}",
         plan.files.len(),
         install,
         skip_unchanged,
-        skip_userdata,
         skip_ignore,
         plan.deletes.len(),
         local.len(),
@@ -1479,7 +1473,6 @@ async fn dfs_staged(
             "hash-scan",
             scan_local(
                 settings,
-                project,
                 latest,
                 hash_key,
                 &ignore_nonempty,
@@ -1509,9 +1502,7 @@ async fn dfs_staged(
             .as_ref()
             .map(|files| files.iter().map(|f| f.name.clone()).collect())
             .unwrap_or_default(),
-        user_data_path: project.user_data_path.clone(),
         ignore_nonempty: ignore_nonempty.clone(),
-        app_name: project.app_name.clone(),
     });
 
     session_dump!(
@@ -1919,7 +1910,6 @@ async fn prepare_process(
 
 async fn scan_local(
     settings: &Settings,
-    project: &ProjectConfig,
     latest: &RepoMetadata,
     hash_key: HashKey,
     ignore_nonempty: &[String],
@@ -1936,8 +1926,6 @@ async fn scan_local(
     let skip_hash = collect_skip_hash(
         &latest.hashed,
         &settings.install_path,
-        &project.app_name,
-        &project.user_data_path,
         ignore_nonempty,
     );
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Progress>();

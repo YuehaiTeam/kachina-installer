@@ -48,7 +48,7 @@
   "description": "快速多功能的安装器",
   // 窗口标题
   "windowTitle": "Kachina Installer 安装程序",
-  // 卸载时需要删除的用户数据目录或文件
+  // 用户数据目录或文件，仅用于卸载时保留或删除；不影响更新
   "userDataPath": ["${INSTALL_PATH}/User"],
   // 更新时如果文件夹已存在且非空则跳过的目录
   "ignoreFolderPath": ["${INSTALL_PATH}/cache"],

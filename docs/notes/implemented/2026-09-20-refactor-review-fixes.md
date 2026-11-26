@@ -35,7 +35,7 @@ Status: implemented
 
 ### 保留的设计
 
-更新时保留已有 `userDataPath` 文件、补齐缺失的默认文件；非空 `ignoreFolderPath` 跳过更新；运行库安装失败提示用户后允许应用文件安装结束。这些行为有明确用途，不因代码审阅而统一改成失败或覆盖。[计划生成](../../../native/session/plan.rs)与[运行库安装](../../../native/session/run.rs)是对应实现。绿色版不创建注册记录见[按安装记录登记](./2026-09-20-install-identity-registry.md)。
+`userDataPath` 仅在卸载时保留或删除用户数据，不影响更新；非空 `ignoreFolderPath` 跳过更新；运行库安装失败提示用户后允许应用文件安装结束。这些行为有明确用途，不因代码审阅而统一改成失败或覆盖。[计划生成](../../../native/session/plan.rs)与[运行库安装](../../../native/session/run.rs)是对应实现。绿色版不创建注册记录见[按安装记录登记](./2026-09-20-install-identity-registry.md)。
 
 修复遵守[文件提交协议](./2026-09-02-atomic-file-commit.md)：提交阶段不可取消，暂存写入停止后才清理，中断恢复与自更新处理由该协议定义。本 note 只处理进入提交前的取消判定和等待反馈。
 

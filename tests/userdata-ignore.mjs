@@ -18,7 +18,7 @@ async function test() {
   const installerV2 = './fixtures/test-app-v2.exe';
 
   console.log(
-    chalk.blue('=== userDataPath / ignoreFolderPath Update Test ==='),
+    chalk.blue('=== ignoreFolderPath Update Test ==='),
   );
   console.log(`Test directory: ${testDir}`);
 
@@ -54,45 +54,25 @@ async function test() {
     const kept = await verifyFiles(testDir, [
       { path: 'app.exe', contains: 'APP_V2' },
       { path: 'config.json', contains: '"version": "2.0.0"' },
-      { path: 'User/settings.json', contains: 'USER_MODIFIED' },
+      // userDataPath does not affect updates: managed files update normally
+      { path: 'User/settings.json', contains: '"from":"v2"' },
+      // ignoreFolderPath skips existing files under it on update
       { path: 'cache/keep.dat', contains: 'CACHE_MODIFIED' },
       { path: 'cache/local-only.dat', contains: 'LOCAL_ONLY' },
     ]);
 
     const skippedNew = await verifyFilesRemoved(testDir, ['cache/new.dat']);
 
-    const extraFailed = [];
-    const settings = await fs.readFile(
-      path.join(testDir, 'User/settings.json'),
-      'utf-8',
-    );
-    if (settings.includes('"from":"v2"')) {
-      extraFailed.push(
-        'User/settings.json was overwritten by v2 (userDataPath should skip existing user files)',
-      );
-    }
-    const cacheKeep = await fs.readFile(
-      path.join(testDir, 'cache/keep.dat'),
-      'utf-8',
-    );
-    if (cacheKeep.includes('CACHE_V2')) {
-      extraFailed.push(
-        'cache/keep.dat was overwritten by v2 (ignoreFolderPath should skip non-empty cache)',
-      );
-    }
-
     const allPassed =
-      kept.failed.length === 0 &&
-      skippedNew.failed.length === 0 &&
-      extraFailed.length === 0;
+      kept.failed.length === 0 && skippedNew.failed.length === 0;
 
     if (allPassed) {
       console.log(
-        chalk.green('✓ userDataPath and ignoreFolderPath honored on update'),
+        chalk.green('✓ ignoreFolderPath honored on update, userDataPath files updated'),
       );
     } else {
-      console.error(chalk.red('✗ userData/ignore verification failed:'));
-      [...kept.failed, ...skippedNew.failed, ...extraFailed].forEach((msg) =>
+      console.error(chalk.red('✗ ignore verification failed:'));
+      [...kept.failed, ...skippedNew.failed].forEach((msg) =>
         console.error(chalk.red(`  - ${msg}`)),
       );
       process.exit(1);
