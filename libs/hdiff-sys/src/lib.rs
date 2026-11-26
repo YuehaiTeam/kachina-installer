@@ -1,13 +1,51 @@
-#![allow(non_upper_case_globals)]
-#![allow(non_camel_case_types)]
+//! 最小跨平台 FFI：只用 `create_single_compressed_diff` 一个符号，不再依赖
+//! bindgen 生成的全量 Windows 绑定。`hpatch_TStreamOutput` 布局须与
+//! `HPatch/patch_types.h` 逐字节一致（字段顺序 streamImport/streamSize/read_writed/write）。
 #![allow(non_snake_case)]
-// binding.rs 由 bindgen 生成，memcmp/memcpy 等 CRT 符号声明用 c_ulonglong；
-// x86_64 Windows 上与 stdlib 期望的 usize ABI 一致。
-#![allow(suspicious_runtime_symbol_definitions)]
+#![allow(non_camel_case_types)]
 
-use std::ffi::c_void;
+use std::ffi::{c_int, c_uchar, c_void};
 
-include!("../binding.rs");
+pub type hpatch_StreamPos_t = u64;
+pub type hpatch_BOOL = c_int;
+
+#[repr(C)]
+pub struct hpatch_TStreamOutput {
+    pub streamImport: *mut c_void,
+    pub streamSize: hpatch_StreamPos_t,
+    pub read_writed: Option<
+        unsafe extern "C" fn(
+            stream: *const hpatch_TStreamOutput,
+            readFromPos: hpatch_StreamPos_t,
+            out_data: *mut c_uchar,
+            out_data_end: *mut c_uchar,
+        ) -> hpatch_BOOL,
+    >,
+    pub write: Option<
+        unsafe extern "C" fn(
+            stream: *const hpatch_TStreamOutput,
+            writeToPos: hpatch_StreamPos_t,
+            data: *const c_uchar,
+            data_end: *const c_uchar,
+        ) -> hpatch_BOOL,
+    >,
+}
+
+extern "C" {
+    fn create_single_compressed_diff(
+        newData: *const c_uchar,
+        newData_end: *const c_uchar,
+        oldData: *const c_uchar,
+        oldData_end: *const c_uchar,
+        out_diff: *const hpatch_TStreamOutput,
+        compressPlugin: *const c_void,
+        kMinSingleMatchScore: c_int,
+        patchStepMemSize: usize,
+        isUseBigCacheMatch: bool,
+        listener: *mut c_void,
+        threadNum: usize,
+    );
+}
 
 trait WriteSeek: std::io::Write + std::io::Seek {}
 
