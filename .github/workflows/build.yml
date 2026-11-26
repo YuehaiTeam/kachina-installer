@@ -78,20 +78,16 @@ jobs:
         # 与 windows bundle 同构：builder 字节在前 installer 字节在后，
         # 运行时扫描自身最后一个非零偏移的 PE 头定位。ELF 对尾部追加免疫。
         shell: cmd
-        run: copy /b target\x86_64-unknown-linux-gnu\release\kachina-builder+target\x86_64-win7-windows-msvc\release\kachina-installer.exe kachina-builder-linux
+        run: copy /b target\x86_64-unknown-linux-gnu\release\kachina-builder+target\x86_64-win7-windows-msvc\release\kachina-installer.exe target\x86_64-win7-windows-msvc\release\kachina-builder-linux
+      # linux bundle 与 windows 产物同目录树上传，artifact 保持扁平布局，
+      # 外部直接下载 CI artifact 做 dev 测试的消费者能一并拿到。
       - name: Artifact
         uses: actions/upload-artifact@v4.6.0
         with:
           path: |
             target/x86_64-win7-windows-msvc/release/*.exe
             target/x86_64-win7-windows-msvc/release/*.pdb
-      # linux 产物独立 artifact：与 windows 混传会把公共祖先顶到 workspace 根，
-      # 下游 test/release 按扁平布局取 windows exe 就会落空。
-      - name: Artifact linux builder
-        uses: actions/upload-artifact@v4.6.0
-        with:
-          name: kachina-builder-linux
-          path: kachina-builder-linux
+            target/x86_64-win7-windows-msvc/release/kachina-builder-linux
   unit-test:
     runs-on: windows-2022
     steps:
@@ -131,7 +127,7 @@ jobs:
       - name: Copy Binary
         run: |
           Copy-Item "artifacts/artifact/kachina-builder.exe" "kachina-builder.exe" -Force
-          Copy-Item "artifacts/kachina-builder-linux/kachina-builder-linux" "kachina-builder-linux" -Force
+          Copy-Item "artifacts/artifact/kachina-builder-linux" "kachina-builder-linux" -Force
       - name: Sentry upload
         continue-on-error: true
         env:
