@@ -1,5 +1,7 @@
 use anyhow::{Context, Result};
-use std::{io::Read, os::windows::fs::OpenOptionsExt, path::Path};
+use std::{io::Read, path::Path};
+#[cfg(windows)]
+use std::os::windows::fs::OpenOptionsExt;
 
 pub const HASH_BUFFER_SIZE: usize = 1024 * 1024;
 const FILE_FLAG_SEQUENTIAL_SCAN: u32 = 0x0800_0000;
@@ -17,12 +19,11 @@ pub fn hash_file_with(
     buffer: &mut [u8],
     stopped: &dyn Fn() -> bool,
 ) -> Result<String> {
-    let mut file = std::fs::OpenOptions::new()
-        .read(true)
-        .write(false)
-        .custom_flags(FILE_FLAG_SEQUENTIAL_SCAN)
-        .open(Path::new(path))
-        .context("OPEN_TARGET_ERR")?;
+    let mut open_options = std::fs::OpenOptions::new();
+    open_options.read(true).write(false);
+    #[cfg(windows)]
+    open_options.custom_flags(FILE_FLAG_SEQUENTIAL_SCAN);
+    let mut file = open_options.open(Path::new(path)).context("OPEN_TARGET_ERR")?;
 
     if hash_algorithm == "md5" {
         let mut hasher = chksum_md5::MD5::new();

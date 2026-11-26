@@ -69,11 +69,14 @@ pub async fn get_reader_for_bundle() -> Result<AsyncMmapFileReader<'static>, Str
     let file = mmap().await;
     let bytes = file.slice(0, file.len());
     let headers = pe_image_starts(bytes);
-    if headers.len() < 2 {
+    // Windows 下 builder 自身是 PE（命中偏移 0），linux ELF 自身不是。
+    // 追加的 installer 总是最后一个非零偏移的 PE 命中；
+    // 只剩偏移 0（windows 裸 builder）或完全没有命中（linux 裸 builder）都是未拼接。
+    let exe_offset = headers.iter().copied().filter(|&o| o > 0).last();
+    let Some(exe_offset) = exe_offset else {
         println!("Found PE images: {headers:?}");
         return Err("Failed to find packed exe: ".to_string());
-    }
-    let exe_offset = headers[headers.len() - 1];
+    };
     let reader = file.reader(exe_offset).map_err(|e| e.to_string())?;
     Ok(reader)
 }

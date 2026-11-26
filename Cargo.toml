@@ -1,7 +1,7 @@
 cargo-features = ["profile-rustflags", "trim-paths"]
 [package]
 name = "kachina-installer"
-version = "0.1.0"
+version.workspace = true
 description = "Unified installer and upgrader"
 authors = ["YuehaiTeam"]
 edition = "2021"
@@ -10,6 +10,13 @@ default-run = "kachina-installer"
 [features]
 # release 默认不开 DevTools。需要在安装器里按 F12 / Ctrl+Shift+I 打开时再开。
 webview-devtools = []
+
+[workspace]
+members = ["builder"]
+default-members = [".", "builder"]
+
+[workspace.package]
+version = "0.1.0"
 
 [dependencies]
 webview2-com = "0.39"
@@ -39,7 +46,6 @@ reqwest = { version = "0.12", default-features = false, features = [
 native-tls = "0.2"
 futures = "0.3"
 tokio-util = { version = "0.7", features = ["io-util"] }
-async-walkdir = "2.0"
 windows = { version = "0.62", features = [
     "Win32_System_Console",
     "Win32_System_Com",
@@ -69,18 +75,11 @@ windows = { version = "0.62", features = [
 nt_version = "0.1"
 lazy_static = "1.5"
 twox-hash = "2.1.0"
-pin-project = "1.1.7"
 fmmap = { version = "0.4", features = ["tokio"] }
-clap = { version = "4.5", features = ["derive"] }
 chrono = "0.4.39"
 uuid = { version = "1.16", features = ["v4"] }
 hpatch-sys = { path = "libs/hpatch-sys" }
-hdiff-sys = { path = "libs/hdiff-sys" }
-ignore = "0.4.23"
 num_cpus = "1.16.0"
-indicatif = { version = "0.17.9", features = ["tokio"] }
-console = "0.15.10"
-rcedit = { version = "0.1.0", git = "https://github.com/Devolutions/rcedit-rs.git" }
 windows-registry = "0.5"
 zip = { git = "https://github.com/xytoki/zip2.git", default-features = false, features = [
     "deflate",
@@ -122,10 +121,6 @@ name = "kachina-installer"
 path = "native/main.rs"
 
 [[bin]]
-name = "kachina-builder"
-path = "native/builder/main.rs"
-
-[[bin]]
 name = "kachina-sfx"
 path = "native/sfx/main.rs"
 
@@ -158,3 +153,8 @@ msquic-async = { git = "https://github.com/xytoki/msquic-async-rs.git", branch =
 h3-msquic-async = { git = "https://github.com/xytoki/msquic-async-rs.git", branch = "main" }
 ctor = { git = "https://github.com/xytoki/rust-ctor.git", branch = "master" }
 seera-msquic = { git = "https://github.com/xytoki/seera-msquic.git", branch = "seera-main" }
+
+[dev-dependencies]
+# 仅测试代码使用：cli/mod.rs 的 clap 对拍 oracle、ipc/install_file.rs 的 hdiff round-trip。
+clap = { version = "4.5", features = ["derive"] }
+hdiff-sys = { path = "libs/hdiff-sys" }

@@ -20,11 +20,19 @@ pub struct PackConfig {
 }
 
 pub async fn pack_cli(args: PackArgs) -> Result<(), String> {
-    let reader = get_reader_for_bundle().await;
-    if reader.is_err() {
-        return Err(format!("Failed to get reader: {:?}", reader.err()));
-    }
-    let reader = reader.unwrap();
+    let base_bytes;
+    let reader: Box<dyn tokio::io::AsyncRead + Unpin + Send> = if let Some(base) = &args.base {
+        base_bytes = tokio::fs::read(base)
+            .await
+            .map_err(|e| format!("Failed to read base {:?}: {e}", base))?;
+        Box::new(base_bytes.as_slice())
+    } else {
+        let reader = get_reader_for_bundle().await;
+        if reader.is_err() {
+            return Err(format!("Failed to get reader: {:?}", reader.err()));
+        }
+        Box::new(reader.unwrap())
+    };
     let config = tokio::fs::read(&args.config).await;
     if config.is_err() {
         return Err(format!(
@@ -160,9 +168,16 @@ pub async fn pack_cli(args: PackArgs) -> Result<(), String> {
         icon_path: args.icon,
     };
     validate_pack_names(&config).map_err(|err| err.to_string())?;
-    let output = tokio::fs::File::create(&args.output)
+    // 先写到输出旁的临时文件，全部成功后 rename 覆盖目标：
+    // 打包中途失败（如 --base 不是合法 PE）不得破坏已存在的 installer。
+    let tmp_output = args.output.with_extension(format!(
+        "kachina-tmp-{}-{}",
+        std::process::id(),
+        uuid::Uuid::new_v4()
+    ));
+    let output = tokio::fs::File::create(&tmp_output)
         .await
-        .map_err(|err| format!("Failed to create output {:?}: {err}", args.output))?;
+        .map_err(|err| format!("Failed to create output {:?}: {err}", tmp_output))?;
     println!(
         "Packing: metadata: {:?}, image: {:?}, files: {}",
         config.metadata.is_some(),
@@ -172,9 +187,19 @@ pub async fn pack_cli(args: PackArgs) -> Result<(), String> {
     let result = pack(reader, output, config).await;
     if result.is_err() {
         // a half-written installer must not be mistaken for a build output
-        let _ = tokio::fs::remove_file(&args.output).await;
+        let _ = tokio::fs::remove_file(&tmp_output).await;
+        return result;
     }
-    result
+    if let Err(err) = tokio::fs::rename(&tmp_output, &args.output).await {
+        // rename 失败（如目标被运行中的进程占用）时清掉已写完的临时安装包，
+        // 否则每次重试都遗留一份完整副本。
+        let _ = tokio::fs::remove_file(&tmp_output).await;
+        return Err(format!(
+            "Failed to move {:?} to {:?}: {err}",
+            tmp_output, args.output
+        ));
+    }
+    Ok(())
 }
 
 pub async fn pack(
@@ -197,14 +222,6 @@ pub async fn pack(
     tmpfile.shutdown().await.unwrap();
     drop(tmpfile);
     let tmp_len = tokio::fs::metadata(&tmppath).await.unwrap().len();
-    let mut updater = rcedit::ResourceUpdater::new();
-    if let Err(e) = updater.load(&tmppath) {
-        panic!(
-            "rcedit load {} ({} bytes): {e:?}",
-            tmppath.display(),
-            tmp_len
-        );
-    }
     let unwrapped_config = config.config.as_object().unwrap();
     let title = unwrapped_config
         .get("windowTitle")
@@ -212,26 +229,28 @@ pub async fn pack(
         .as_str()
         .unwrap();
     let product = unwrapped_config.get("appName").unwrap().as_str().unwrap();
-    updater
-        .set_version_string("FileDescription", title)
-        .unwrap();
-    updater.set_version_string("ProductName", product).unwrap();
 
-    // Set icon if provided
-    if let Some(icon_path) = &config.icon_path {
-        if icon_path.exists() {
-            if let Err(e) = updater.set_icon(icon_path) {
-                eprintln!("Warning: Failed to set icon: {:?}", e);
-            } else {
-                println!("Icon set successfully: {:?}", icon_path);
-            }
-        } else {
-            eprintln!("Warning: Icon file not found: {:?}", icon_path);
+    // 图标路径不存在时警告并沿用 base 原图标，不中止打包
+    let icon = config.icon_path.as_deref().filter(|p| {
+        let exists = p.exists();
+        if !exists {
+            eprintln!("Warning: Icon file not found: {:?}", p);
         }
+        exists
+    });
+    if let Err(e) = crate::pe_res::update_pe_resources(
+        &tmppath,
+        &[("FileDescription", title), ("ProductName", product)],
+        icon,
+        false,
+    ) {
+        let _ = tokio::fs::remove_file(&tmppath).await;
+        return Err(format!(
+            "editpe update {} ({} bytes): {e}",
+            tmppath.display(),
+            tmp_len
+        ));
     }
-
-    updater.commit().unwrap();
-    drop(updater);
     println!("Reading base...");
     let mut base_data = vec![];
     // read tmp file

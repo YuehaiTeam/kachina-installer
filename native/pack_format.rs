@@ -8,7 +8,7 @@
 //! 离线包在 DOS stub 里写布局头，`base_end` 指向首个 TLV；在线包与卸载器/更新器的布局头
 //! 为全零。分发侧做 Authenticode 签名时，签名表追加在文件末尾。
 
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -376,21 +376,24 @@ pub fn read_json<T: serde::de::DeserializeOwned>(
     serde_json::from_str(&text).map(Some)
 }
 
-/// 归档 metadata 里的相对路径拼到 `root` 下。只允许 Normal 组件（子目录合法）；`..`、绝对
-/// 路径、盘符、UNC 与空路径返回 `None`，防止包内路径把文件写到 `root` 之外。
+/// 归档 metadata 里的相对路径拼到 `root` 下。`..`、绝对路径、盘符、UNC 与空路径返回
+/// `None`，防止包内路径把文件写到 `root` 之外。
+/// 写包时归档名统一为 `/`（见 metadata.rs），这里手工按 `/` 和 `\` 两种分隔符切分，
+/// 不依赖平台 `Path` 语义——linux 的 `Path` 不认 `\`，会把 `..\evil` 当成普通文件名放行。
 pub fn relative_under_root(root: &Path, relative: &str) -> Option<PathBuf> {
-    let mut path = root.to_path_buf();
-    let mut normal_count = 0;
-    for component in Path::new(relative).components() {
-        match component {
-            Component::Normal(part) => {
-                path.push(part);
-                normal_count += 1;
-            }
-            _ => return None,
-        }
+    if relative.starts_with(['/', '\\']) {
+        return None;
     }
-    (normal_count > 0).then_some(path)
+    let mut path = root.to_path_buf();
+    for segment in relative.split(['/', '\\']) {
+        // 任何段含 `:` 都拒绝：首段是盘符逃逸，嵌套段（sub/C:evil）在 Windows 上
+        // 落盘也会命中盘符语义或 NTFS ADS（写成宿主文件的隐藏流而非预期文件）。
+        if segment.is_empty() || segment == "." || segment == ".." || segment.contains(':') {
+            return None;
+        }
+        path.push(segment);
+    }
+    Some(path)
 }
 
 fn be_u16(bytes: &[u8], at: usize) -> Option<u16> {
@@ -740,20 +743,23 @@ mod tests {
 
     #[test]
     fn relative_path_guard() {
-        let root = Path::new(r"C:\temp\sfx");
-        assert_eq!(
-            relative_under_root(root, "a/b.txt"),
-            Some(PathBuf::from(r"C:\temp\sfx\a\b.txt"))
-        );
-        assert!(relative_under_root(root, "a\\b.txt").is_some());
+        let root = Path::new("root");
+        let expected = root.join("a").join("b.txt");
+        assert_eq!(relative_under_root(root, "a/b.txt"), Some(expected.clone()));
+        assert_eq!(relative_under_root(root, "a\\b.txt"), Some(expected));
         for bad in [
             "../evil",
             "..\\evil",
             "a/../../evil",
             "/abs",
+            "\\abs",
             "C:/abs",
             r"C:\Windows\evil.exe",
             r"\\server\share\evil.exe",
+            "a//b.txt",
+            "a/./b.txt",
+            "sub/C:evil.exe",
+            "a/foo:bar",
             "",
         ] {
             assert!(relative_under_root(root, bad).is_none(), "{bad:?}");
