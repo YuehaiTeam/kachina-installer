@@ -77,7 +77,7 @@ pub fn fragment_range(url: &str) -> Option<PinnedRange> {
         let start = start.parse::<u64>().ok()?;
         let end = end.parse::<u64>().ok()?;
         if start <= end {
-            Some(PinnedRange::Window(start, end - start + 1))
+            Some(PinnedRange::Window(start, (end - start).checked_add(1)?))
         } else {
             None
         }
@@ -315,6 +315,15 @@ mod tests {
         assert_eq!(
             fragment_range("https://cdn.example.com/pack#range=200-100"),
             None
+        );
+        // end - start + 1 overflow (start == 0, end == u64::MAX) is malformed, not a panic
+        assert_eq!(
+            fragment_range("https://cdn.example.com/pack#range=0-18446744073709551615"),
+            None
+        );
+        assert_eq!(
+            fragment_range("https://cdn.example.com/pack#range=0-18446744073709551614"),
+            Some(PinnedRange::Window(0, u64::MAX))
         );
     }
 
