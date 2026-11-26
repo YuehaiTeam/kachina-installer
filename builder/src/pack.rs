@@ -230,16 +230,14 @@ pub async fn pack(
         .unwrap();
     let product = unwrapped_config.get("appName").unwrap().as_str().unwrap();
 
-    // Set icon if provided
-    let mut missing_icon = false;
-    if let Some(icon_path) = &config.icon_path {
-        if !icon_path.exists() {
-            missing_icon = true;
-            eprintln!("Warning: Icon file not found: {:?}", icon_path);
+    // 图标路径不存在时警告并沿用 base 原图标，不中止打包
+    let icon = config.icon_path.as_deref().filter(|p| {
+        let exists = p.exists();
+        if !exists {
+            eprintln!("Warning: Icon file not found: {:?}", p);
         }
-    }
-    let icon = config.icon_path.as_deref().filter(|p| p.exists());
-    let _ = missing_icon;
+        exists
+    });
     if let Err(e) = crate::pe_res::update_pe_resources(
         &tmppath,
         &[("FileDescription", title), ("ProductName", product)],
