@@ -102,6 +102,11 @@ impl Policy {
 /// a straddling range cannot be signed as one request even when it asks for
 /// a single file whole.
 pub fn cut_at_windows(range: Range, windows: Option<&[(u64, u64)]>) -> Vec<Range> {
+    // 零长区间没有可签名的字节：保留会经 Range::key 的 end()-1 产出倒置声明
+    // （start 为 0 时甚至下溢），与 Policy::split 一样返回空。
+    if range.len == 0 {
+        return Vec::new();
+    }
     let Some(windows) = windows else {
         return vec![range];
     };
@@ -612,5 +617,16 @@ mod hint_tests {
         );
         // start >= end is dropped
         assert_eq!(windows(&[(5, 5), (9, 4)], 0), Vec::<(u64, u64)>::new());
+    }
+
+    #[test]
+    fn cut_at_windows_drops_empty_ranges() {
+        // 零长区间保留会经 Range::key 的 end()-1 产出倒置声明
+        assert!(cut_at_windows(Range { start: 0, len: 0 }, None).is_empty());
+        assert!(cut_at_windows(Range { start: 5, len: 0 }, Some(&[(0, 10)])).is_empty());
+        assert_eq!(
+            cut_at_windows(Range { start: 0, len: 5 }, None),
+            vec![Range { start: 0, len: 5 }]
+        );
     }
 }

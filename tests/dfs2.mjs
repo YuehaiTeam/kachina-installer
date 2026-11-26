@@ -233,7 +233,7 @@ async function testSplitHint() {
     // 证明真的发生了跨块合并：存在某条声明 range 覆盖 ≥2 个 index 项的
     // payload 区间（单文件 fallback 的 range 只含一项）。
     const entries = Object.values(resource.data.index)
-      .filter((entry) => entry.name !== '\\0META')
+      .filter((entry) => entry.name !== '\0META')
       .map((entry) => [entry.offset, entry.offset + entry.size]);
     const merged = declared.some((range) => {
       const [start, end] = range.split('-').map(Number);
@@ -259,7 +259,7 @@ async function testSplitHint() {
 async function testExtentInstall() {
   const label = 'DFS2 extent-source installation';
   const testDir = getTestDir('dfs2-extent');
-  cleanupTestDir(testDir);
+  await cleanupTestDir(testDir);
   await fs.ensureDir(testDir);
   const server = await startServer();
   try {
@@ -287,6 +287,7 @@ async function testExtentInstall() {
       throw new Error(`${label}: scheduler was touched without dfs2`);
     }
   } finally {
+    await cleanupTestDir(testDir);
     await new Promise((resolve) => server.close(resolve));
   }
 }
