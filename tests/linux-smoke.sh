@@ -59,6 +59,12 @@ echo "== replace-bin --base kachina-sfx.exe（便携包路径）=="
 "$BUILDER" extract -i portable.exe --all portable-out >/dev/null
 diff -r before-out portable-out || { echo "portable.exe payload differs from packed.exe"; exit 1; }
 [ -n "$(ls portable-out)" ] || { echo "portable.exe lost embedded payload"; exit 1; }
+# extract --all 不转储 CONFIG/INDEX/META 内部块，便携包运行时依赖它们，
+# 用 --list 输出断言这些结构性块在换头后仍然存在。
+"$BUILDER" extract -i portable.exe --list > portable-list.txt
+for blk in CONFIG INDEX META; do
+  grep -q "^$blk" portable-list.txt || { echo "portable.exe missing $blk block"; exit 1; }
+done
 
 echo "== split =="
 "$BUILDER" split -i packed.exe -o splitout
