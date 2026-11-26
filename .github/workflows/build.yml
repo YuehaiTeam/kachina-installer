@@ -129,7 +129,9 @@ jobs:
         with:
           path: artifacts
       - name: Copy Binary
-        run: Copy-Item "artifacts/artifact/kachina-builder.exe" "kachina-builder.exe" -Force
+        run: |
+          Copy-Item "artifacts/artifact/kachina-builder.exe" "kachina-builder.exe" -Force
+          Copy-Item "artifacts/kachina-builder-linux/kachina-builder-linux" "kachina-builder-linux" -Force
       - name: Sentry upload
         continue-on-error: true
         env:
@@ -151,7 +153,9 @@ jobs:
       - name: Release
         uses: softprops/action-gh-release@v2
         with:
-          files: kachina-builder.exe
+          files: |
+            kachina-builder.exe
+            kachina-builder-linux
           make_latest: true
           body: "${{ needs.build.outputs.version }}"
 
@@ -205,3 +209,14 @@ jobs:
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           }
         timeout-minutes: 10
+      # flake 排查依赖安装器日志（如 webview 初始化超时），失败时落盘
+      - name: Collect installer log on failure
+        if: failure()
+        run: Copy-Item "$env:TEMP\KachinaInstaller.log" "installer-log.txt" -ErrorAction SilentlyContinue
+      - name: Upload installer log
+        if: failure()
+        uses: actions/upload-artifact@v4.6.0
+        with:
+          name: installer-log-${{ matrix.test }}
+          path: installer-log.txt
+          if-no-files-found: ignore
