@@ -385,11 +385,10 @@ pub fn relative_under_root(root: &Path, relative: &str) -> Option<PathBuf> {
         return None;
     }
     let mut path = root.to_path_buf();
-    for (index, segment) in relative.split(['/', '\\']).enumerate() {
-        if segment.is_empty() || segment == "." || segment == ".." {
-            return None;
-        }
-        if index == 0 && segment.contains(':') {
+    for segment in relative.split(['/', '\\']) {
+        // 任何段含 `:` 都拒绝：首段是盘符逃逸，嵌套段（sub/C:evil）在 Windows 上
+        // 落盘也会命中盘符语义或 NTFS ADS（写成宿主文件的隐藏流而非预期文件）。
+        if segment.is_empty() || segment == "." || segment == ".." || segment.contains(':') {
             return None;
         }
         path.push(segment);
@@ -759,6 +758,8 @@ mod tests {
             r"\\server\share\evil.exe",
             "a//b.txt",
             "a/./b.txt",
+            "sub/C:evil.exe",
+            "a/foo:bar",
             "",
         ] {
             assert!(relative_under_root(root, bad).is_none(), "{bad:?}");
