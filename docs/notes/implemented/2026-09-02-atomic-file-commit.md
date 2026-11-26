@@ -68,7 +68,7 @@ Status: implemented
 `fs.rs::check_local_files` 在 `spawn_blocking` 里对含受管文件的目录 `read_dir` 一趟（`ScanWalk::walk`），受管文件的大小从条目取，同一趟得到每个目录的干净标记。返回 `LocalScan { files, dirty_dirs, reparse_dirs }`，`dirty_dirs` 是相对路径小写 `/` 形式、`""` 为根：
 
 - 文件条目：受管则记 stat；不受管即标本目录脏。
-- 子目录条目：是 reparse point（`is_symlink()` 或 `FILE_ATTRIBUTE_REPARSE_POINT`）→ 标父目录脏、记入 `reparse_dirs`、不进入，其下受管文件逐个 `metadata()`；metadata 中没有任何受管文件（含空目录）→ 标父目录脏、不进入；其下受管文件全部在 `skip_hash` 内（`userDataPath` / `ignoreFolderPath`）→ 标父目录脏、不进入、其下文件逐个 stat；否则进入，子目录脏则父目录脏。
+- 子目录条目：是 reparse point（`is_symlink()` 或 `FILE_ATTRIBUTE_REPARSE_POINT`）→ 标父目录脏、记入 `reparse_dirs`、不进入，其下受管文件逐个 `metadata()`；metadata 中没有任何受管文件（含空目录）→ 标父目录脏、不进入；其下受管文件全部在 `skip_hash` 内（`ignoreFolderPath`）→ 标父目录脏、不进入、其下文件逐个 stat；否则进入，子目录脏则父目录脏。
 - 父目录脏不代表子目录脏：`node_modules\` 根下一个用户文件不妨碍 `node_modules\foo\` 干净。安装目录不存在时返回空 `LocalScan`，即根目录干净。
 
 候选目录在会话侧由计划算出（`session/run.rs::build_units`）：对 metadata 里出现的每个目录（含根），其下全部受管文件都是 `PlanAction::Install`、且不在 `dirty_dirs`、且没有 reparse 子树下的文件 → 候选；取最靠上的候选为目录单元。全新安装（目标目录不存在）时根目录是唯一候选；普通更新（散落几十个文件变更）候选集为空。哈希阶段不变，仍是读盘瓶颈。

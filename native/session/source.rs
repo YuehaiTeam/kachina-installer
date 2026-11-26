@@ -273,6 +273,7 @@ pub fn parse_source(source: &str) -> anyhow::Result<ParsedSource> {
         });
     }
 
+    let forced_github = forced_plugin_name(source).as_deref() == Some("github");
     if let Some(name) = forced_plugin_name(source) {
         if name != "github" && !is_github_source(source) {
             return Ok(ParsedSource::Plugin {
@@ -321,7 +322,7 @@ pub fn parse_source(source: &str) -> anyhow::Result<ParsedSource> {
             return Err(anyhow!("Invalid dfs source: {source}").attach(SOURCE_INVALID));
         }
     };
-    if is_github_source(source) || is_github_source(&rest) {
+    if forced_github || is_github_source(source) || is_github_source(&rest) {
         return Ok(ParsedSource::GitHub {
             raw: source.to_string(),
             storage,
@@ -1289,6 +1290,17 @@ mod tests {
         assert!(!needs_js_plugin(
             "dfs2+hashed+https://example.com/meta.json"
         ));
+    }
+
+    #[test]
+    fn forced_github_plugin_on_non_github_host() {
+        let url = r#"plugin-github+https://cnb.cool/bettergi/better-genshin-impact/-/releases/download/v${version}/BetterGI.Install.${version}.exe#versionRegex=v([0-9]%2B\.[0-9]%2B\.[0-9]%2B)&cacheTime=5"#;
+        assert!(!needs_js_plugin(url));
+        let parsed = parse_source(url).unwrap();
+        assert!(
+            matches!(parsed, ParsedSource::GitHub { .. }),
+            "expected GitHub variant, got {parsed:?}"
+        );
     }
 
     /// The packed index loads in two plain range GETs on the package URL:
