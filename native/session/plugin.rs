@@ -132,18 +132,19 @@ fn parse_github_url(url: &str) -> anyhow::Result<GitHubUrl> {
     })?;
     let releases_prefix = format!("{}{}", &base_url[..releases_index], "/releases");
     let releases_latest_url = format!("{releases_prefix}/latest");
-    let (owner, repo) = owner_repo_from_releases_url(&base_url).ok_or_else(|| {
+    owner_repo_from_releases_url(&base_url).ok_or_else(|| {
         anyhow::anyhow!("Invalid releases URL format").attach(crate::utils::code::SOURCE_INVALID)
     })?;
     let host_ok = url::Url::parse(&base_url)
         .ok()
         .and_then(|u| u.host_str().map(|h| h == "github.com"))
         .unwrap_or(false);
+    let cache_key = format!("{}#{}", base_url, version_regex.as_deref().unwrap_or(""));
     Ok(GitHubUrl {
         base_url,
         version_regex,
         releases_latest_url,
-        cache_key: format!("{owner}/{repo}"),
+        cache_key,
         should_cache: host_ok || cache_time.is_some(),
         cache_time,
     })
@@ -233,28 +234,31 @@ async fn resolve_direct_url(original_url: &str, cache_time: Option<u64>) -> anyh
             return Ok(hit.resolved_url.clone());
         }
     }
-    let response = http_get_request(original_url.to_string(), Some(true), None, None)
+    // probe with redirects off; the response is dropped without consuming the
+    // body so a direct 200 on the package itself does not download it whole
+    let client = reqwest::ClientBuilder::new()
+        .user_agent(crate::capabilities::ua_string())
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|e| attach_metadata(e.into()))?;
+    let response = client
+        .get(original_url)
+        .send()
         .await
-        .map_err(attach_metadata)?;
-    let mut redirect = response
-        .headers
+        .map_err(|e| attach_metadata(e.into()))?;
+    let location = response
+        .headers()
         .get("location")
-        .cloned()
+        .and_then(|v| v.to_str().ok())
         .filter(|s| !s.is_empty())
-        .unwrap_or(response.final_url);
-    if redirect.is_empty() || redirect == original_url {
-        return Ok(original_url.to_string());
-    }
-    if redirect.starts_with('/') {
-        if let Ok(base) = url::Url::parse(original_url) {
-            redirect = format!(
-                "{}://{}{}",
-                base.scheme(),
-                base.host_str().unwrap_or(""),
-                redirect
-            );
-        }
-    }
+        .map(str::to_string);
+    let redirect = match location {
+        Some(loc) => match url::Url::parse(original_url).and_then(|base| base.join(&loc)) {
+            Ok(joined) => joined.to_string(),
+            Err(_) => return Ok(original_url.to_string()),
+        },
+        None => original_url.to_string(),
+    };
     let expiry_ms = if let Some(secs) = cache_time {
         now + (secs as u128) * 1000
     } else {
@@ -355,5 +359,101 @@ mod tests {
         assert!(capture_version(r"v([0-9.+", "https://x/releases/tag/v1").is_err());
         assert!(capture_version(r"/zzz/(\d+)", "https://x/releases/tag/v1").is_err());
         assert!(capture_version(r"(x*)", "https://x/releases/tag/v1").is_err());
+    }
+
+    use std::sync::Arc;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    /// One-shot HTTP server: serves `respond` for each accepted connection,
+    /// counting requests. Returns the port and the counter.
+    async fn mock_server(
+        respond: impl Fn(&str) -> String + Send + Sync + 'static,
+    ) -> (u16, Arc<std::sync::Mutex<u32>>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let count = Arc::new(std::sync::Mutex::new(0u32));
+        let respond = Arc::new(respond);
+        tokio::spawn({
+            let count = count.clone();
+            async move {
+                while let Ok((mut socket, _)) = listener.accept().await {
+                    *count.lock().unwrap() += 1;
+                    let respond = respond.clone();
+                    tokio::spawn(async move {
+                        let mut buf = vec![0u8; 8192];
+                        let n = socket.read(&mut buf).await.unwrap_or(0);
+                        let req = String::from_utf8_lossy(&buf[..n]).to_string();
+                        let path = req
+                            .split_whitespace()
+                            .nth(1)
+                            .unwrap_or("/")
+                            .to_string();
+                        let out = respond(&path);
+                        let _ = socket.write_all(out.as_bytes()).await;
+                    });
+                }
+            }
+        });
+        (port, count)
+    }
+
+    #[tokio::test]
+    async fn direct_url_caches_200_without_reading_body() {
+        let big = "x".repeat(8 * 1024 * 1024);
+        let (port, count) = mock_server(move |_path| {
+            format!(
+                "HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                big.len() + 1,
+                big
+            )
+        })
+        .await;
+        let url = format!("http://127.0.0.1:{port}/pkg.exe");
+        // the probe returns fast although the body is 8MB: it is never read
+        let resolved = resolve_direct_url(&url, Some(60)).await.unwrap();
+        assert_eq!(resolved, url);
+        assert_eq!(*count.lock().unwrap(), 1);
+        // second call is served from URL_CACHE without any further request
+        let again = resolve_direct_url(&url, Some(60)).await.unwrap();
+        assert_eq!(again, url);
+        assert_eq!(*count.lock().unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn direct_url_joins_relative_redirects_keeping_port() {
+        let (port, _count) = mock_server(|path| {
+            if path == "/a/pkg.exe" {
+                "HTTP/1.1 302 Found\r\nlocation: /dl/app.exe\r\ncontent-length: 0\r\nconnection: close\r\n\r\n".to_string()
+            } else {
+                "HTTP/1.1 302 Found\r\nlocation: ../dl2/app.exe\r\ncontent-length: 0\r\nconnection: close\r\n\r\n".to_string()
+            }
+        })
+        .await;
+        let root_rel = resolve_direct_url(&format!("http://127.0.0.1:{port}/a/pkg.exe"), Some(60))
+            .await
+            .unwrap();
+        assert_eq!(root_rel, format!("http://127.0.0.1:{port}/dl/app.exe"));
+        let path_rel = resolve_direct_url(&format!("http://127.0.0.1:{port}/x/y/pkg.exe"), Some(60))
+            .await
+            .unwrap();
+        assert_eq!(path_rel, format!("http://127.0.0.1:{port}/x/dl2/app.exe"));
+    }
+
+    #[test]
+    fn mirror_cache_keys_do_not_collide_across_hosts() {
+        let a = parse_github_url(
+            "http://mirror-a.local:1000/o/r/releases/download/v${version}/app.exe",
+        )
+        .unwrap();
+        let b = parse_github_url(
+            "http://mirror-b.local:2000/o/r/releases/download/v${version}/app.exe",
+        )
+        .unwrap();
+        let c = parse_github_url(
+            "http://mirror-a.local:1000/o/r/releases/download/v${version}/app.exe#versionRegex=v(.+)",
+        )
+        .unwrap();
+        assert_ne!(a.cache_key, b.cache_key);
+        assert_ne!(a.cache_key, c.cache_key);
     }
 }
