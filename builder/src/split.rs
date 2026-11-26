@@ -311,15 +311,15 @@ mod tests {
     async fn index_entry_beyond_file_end_errors() {
         let dir = std::env::temp_dir().join(format!("kachina-split-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
-        let config = tlv(b" CONFIG", br#"{"appName":"Demo"}"#);
+        let config = tlv(b"\0CONFIG", br#"{"appName":"Demo"}"#);
         let mut index_body = Vec::new();
         let name = b"abcdef";
         index_body.push(name.len() as u8);
         index_body.extend(name);
         index_body.extend(100u32.to_be_bytes()); // size
         index_body.extend(999999u32.to_be_bytes()); // rel，远超文件长度
-        let index = tlv(b" INDEX", &index_body);
-        let meta = tlv(b" META", br#"{"tag_name":"v1","hashed":[]}"#);
+        let index = tlv(b"\0INDEX", &index_body);
+        let meta = tlv(b"\0META", br#"{"tag_name":"v1","hashed":[]}"#);
         let base_end = 200u32;
         let mut bytes = vec![0u8; base_end as usize];
         let mut header = crate::pack_format::LAYOUT_MARKER.to_vec();
