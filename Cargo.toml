@@ -1,7 +1,7 @@
 cargo-features = ["profile-rustflags", "trim-paths"]
 [package]
 name = "kachina-installer"
-version = "0.1.0"
+version.workspace = true
 description = "Unified installer and upgrader"
 authors = ["YuehaiTeam"]
 edition = "2021"
