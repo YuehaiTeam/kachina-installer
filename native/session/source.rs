@@ -196,6 +196,14 @@ impl SourceCtx {
             .unwrap_or_default()
     }
 
+    /// 切源或回退本地安装前清掉远端布局状态：extents/merge_windows 属于
+    /// 上一个元数据来源，残留会让 resolve_install_source 误判走 Sliced。
+    fn reset_remote_layout(&mut self) {
+        self.extents = None;
+        self.extent_base.clear();
+        self.merge_windows = None;
+    }
+
     /// The session installs the package's own metadata: the index is the
     /// package's, and its files are read from the package only.
     pub fn restore_local_package(
@@ -204,6 +212,7 @@ impl SourceCtx {
         resource_version: Option<String>,
     ) {
         self.local_package = true;
+        self.reset_remote_layout();
         self.index.clear();
         if let Some(index) = embedded_index {
             for file in index {
@@ -361,7 +370,13 @@ async fn fetch_hashed_metadata(url: &str, ctx: &mut SourceCtx) -> anyhow::Result
 /// `{base}/{path}#range=phys-phys` for a logical range covered by one extent,
 /// `#range=0-` when it is the whole extent.
 fn extent_url(extents: &[Extent], base: &str, start: u64, size: u64) -> anyhow::Result<String> {
-    let end = start + size;
+    // size 为 0 时 phys+size-1 下溢，且零长请求本来就没有可拉的字节
+    if size == 0 {
+        return Err(anyhow!("empty range at {start}").attach(crate::utils::code::METADATA_INVALID));
+    }
+    let end = start
+        .checked_add(size)
+        .ok_or_else(|| anyhow!("range {start}+{size} overflows").attach(crate::utils::code::METADATA_INVALID))?;
     let extent = extents
         .iter()
         .find(|e| e.offset <= start && end <= e.offset + e.len)
@@ -391,6 +406,7 @@ async fn apply_extent_doc(
     url: &str,
     ctx: &mut SourceCtx,
 ) -> anyhow::Result<RepoMetadata> {
+    ctx.reset_remote_layout();
     let mut extents: Vec<Extent> = serde_json::from_value(doc["extents"].clone())
         .map_err(|e| attach_metadata(e.into()))?;
     extents.sort_by_key(|e| e.offset);
@@ -424,7 +440,9 @@ async fn apply_extent_doc(
         let (_status, index_data) = fetch(index_start, data_end - index_start)?
             .await
             .into_anyhow()?;
-        return apply_packed_index(&index_data, index_start, &layout, ctx);
+        let metadata = apply_packed_index(&index_data, index_start, &layout, ctx)?;
+        derive_windows_from_extents(ctx);
+        return Ok(metadata);
     }
     let index = doc["index"].as_object().ok_or_else(|| {
         anyhow!("extent document has no index object").attach(crate::utils::code::METADATA_INVALID)
@@ -457,6 +475,7 @@ async fn apply_extent_doc(
             data_end as u64,
         ));
     }
+    derive_windows_from_extents(ctx);
     tracing::info!(
         "extents={:?} data_end={:?} windows={:?}",
         ctx.extents.as_ref().map(|e| e.len()),
@@ -466,7 +485,25 @@ async fn apply_extent_doc(
     Ok(metadata)
 }
 
+/// 无 `data_split_hint` 的多 extent 文档：按 extent 逻辑区间派生合并窗口，
+/// 防止规划器跨 extent 合并出一个任何单 extent 都覆盖不了的区间。
+/// extent 已是绝对逻辑坐标，`windows(..., 0)` 只做排序与重叠合并，
+/// 相邻 extent 边界保留为不可合并线。
+fn derive_windows_from_extents(ctx: &mut SourceCtx) {
+    if ctx.merge_windows.is_some() {
+        return;
+    }
+    if let Some(extents) = ctx.extents.as_ref() {
+        let hint: Vec<(u64, u64)> = extents
+            .iter()
+            .map(|e| (e.offset, e.offset + e.len))
+            .collect();
+        ctx.merge_windows = Some(crate::session::download_plan::windows(&hint, 0));
+    }
+}
+
 async fn fetch_dfs2_metadata(api_url: &str, ctx: &mut SourceCtx) -> anyhow::Result<RepoMetadata> {
+    ctx.reset_remote_layout();
     let (dfs2, policy) = get_dfs2_metadata(api_url.to_string())
         .await
         .map_err(attach_metadata)?;
@@ -513,6 +550,9 @@ async fn fetch_dfs2_metadata(api_url: &str, ctx: &mut SourceCtx) -> anyhow::Resu
 }
 
 async fn refresh_packed_index(apiurl: &str, ctx: &mut SourceCtx) -> anyhow::Result<RepoMetadata> {
+    // reset 在这里而非 apply_packed_index：apply_extent_doc 会先填好 extents
+    // 再调 apply_packed_index，在那里清会把刚填的抹掉。
+    ctx.reset_remote_layout();
     let (_status, pre) = get_http_with_range(apiurl.to_string(), 0, 256)
         .await
         .into_anyhow()?;
@@ -624,6 +664,11 @@ pub async fn resolve_file_location(
     let Some(parsed) = ctx.parsed.as_ref() else {
         return Err(anyhow!("source not loaded").attach(crate::utils::code::SOURCE_INVALID));
     };
+    // extent 布局下文件只能经 Sliced 从虚拟包切出；走到这里说明不在索引里，
+    // 不能像 hashed 布局一样拼 `{dir}/hashed/{hash}` 凑出并不存在的地址。
+    if ctx.extents.is_some() && !installer {
+        return Err(anyhow!("no file in remote binary").attach(REMOTE_FILE_MISSING));
+    }
     match parsed {
         ParsedSource::Plugin { name, raw } => {
             resolve_plugin_location(ctx, name, raw, hash, installer).await
@@ -1027,9 +1072,14 @@ async fn fetch_plugin_metadata(
 }
 
 fn apply_plugin_metadata(ctx: &mut SourceCtx, data: String) -> anyhow::Result<RepoMetadata> {
+    ctx.reset_remote_layout();
     let data: Dfs2Data = serde_json::from_str(&data).map_err(|e| attach_metadata(e.into()))?;
     ctx.index.clear();
+    let mut data_end = None;
     for (name, info) in data.index {
+        if info.name == "\0META" {
+            data_end = Some(info.offset + info.size);
+        }
         ctx.index.insert(
             name,
             Embedded {
@@ -1041,6 +1091,12 @@ fn apply_plugin_metadata(ctx: &mut SourceCtx, data: String) -> anyhow::Result<Re
         );
     }
     ctx.installer_end = data.installer_end as usize;
+    if let (Some(hint), Some(data_end)) = (data.metadata.data_split_hint.clone(), data_end) {
+        ctx.merge_windows = Some(crate::session::download_plan::windows(
+            &hint,
+            u64::from(data_end),
+        ));
+    }
     Ok(data.metadata)
 }
 
@@ -1386,5 +1442,67 @@ mod tests {
         assert_eq!(meta.tag_name, "v9");
         // data_end = 1000 + 100 = 1100
         assert_eq!(ctx.merge_windows, Some(vec![(1100, 1600), (1600, 3100)]));
+    }
+
+    fn extent(offset: u64, len: u64, path: &str) -> Extent {
+        Extent {
+            offset,
+            len,
+            phys_offset: 0,
+            path: path.to_string(),
+        }
+    }
+
+    #[test]
+    fn restore_local_package_clears_remote_layout() {
+        let mut ctx = SourceCtx::default();
+        ctx.extents = Some(vec![extent(0, 10, "cas/a")]);
+        ctx.extent_base = "http://x".to_string();
+        ctx.merge_windows = Some(vec![(0, 10)]);
+        ctx.restore_local_package(None, None);
+        assert!(ctx.extents.is_none());
+        assert!(ctx.extent_base.is_empty());
+        assert!(ctx.merge_windows.is_none());
+    }
+
+    #[test]
+    fn extent_url_rejects_empty_and_overflowing_ranges() {
+        let extents = vec![extent(0, 100, "cas/a")];
+        assert!(extent_url(&extents, "http://x", 0, 0).is_err());
+        assert!(extent_url(&extents, "http://x", 50, 0).is_err());
+        assert!(extent_url(&extents, "http://x", u64::MAX, 2).is_err());
+        assert!(extent_url(&extents, "http://x", 0, 10).is_ok());
+    }
+
+    #[test]
+    fn windows_fallback_derives_from_extents_and_keeps_hint() {
+        let mut ctx = SourceCtx::default();
+        ctx.extents = Some(vec![extent(0, 100, "cas/a"), extent(100, 50, "cas/b")]);
+        derive_windows_from_extents(&mut ctx);
+        // 相邻 extent 边界保留为不可合并线
+        assert_eq!(ctx.merge_windows, Some(vec![(0, 100), (100, 150)]));
+        ctx.merge_windows = Some(vec![(0, 1)]);
+        derive_windows_from_extents(&mut ctx);
+        assert_eq!(ctx.merge_windows, Some(vec![(0, 1)]));
+    }
+
+    #[tokio::test]
+    async fn extents_missing_file_does_not_fall_back_to_hashed_url() {
+        let mut ctx = SourceCtx::default();
+        ctx.parsed = Some(parse_source("https://example.com/v2.json").unwrap());
+        ctx.extents = Some(vec![extent(0, 100, "cas/a")]);
+        let err = resolve_file_location(&ctx, "deadbeef", false)
+            .await
+            .unwrap_err();
+        assert!(format!("{err:?}").contains("no file"));
+    }
+
+    #[test]
+    fn plugin_metadata_sets_merge_windows() {
+        let data = "{\"index\":{\"k\":{\"name\":\"\\u0000META\",\"offset\":200,\"raw_offset\":190,\"size\":50}},\"metadata\":{\"tag_name\":\"v1\",\"hashed\":[],\"data_split_hint\":[[0,100]]},\"installer_end\":100}".to_string();
+        let mut ctx = SourceCtx::default();
+        apply_plugin_metadata(&mut ctx, data).unwrap();
+        // data_end = 200 + 50 = 250，hint 平移到 [250, 350)
+        assert_eq!(ctx.merge_windows, Some(vec![(250, 350)]));
     }
 }
