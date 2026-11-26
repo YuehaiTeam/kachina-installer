@@ -7,6 +7,8 @@ set -euo pipefail
 BUILDER="$(pwd)/artifacts/artifact/kachina-builder-linux"
 [ -f "$BUILDER" ] || { echo "missing $BUILDER"; exit 1; }
 chmod +x "$BUILDER"
+SFX="$(pwd)/artifacts/artifact/kachina-sfx.exe"
+[ -f "$SFX" ] || { echo "missing $SFX"; exit 1; }
 ICON="$(pwd)/resources/icons/icon.ico"
 
 WORK="$(mktemp -d)"
@@ -46,6 +48,11 @@ echo "== extract --list / --all =="
 echo "== replace-bin（自提取）=="
 "$BUILDER" replace-bin packed.exe -o replaced.exe
 [ -s replaced.exe ] || { echo "replaced.exe empty"; exit 1; }
+
+echo "== replace-bin --base kachina-sfx.exe（便携包路径）=="
+"$BUILDER" replace-bin packed.exe --base "$SFX" --icon "$ICON" -o portable.exe
+[ -s portable.exe ] || { echo "portable.exe empty"; exit 1; }
+"$BUILDER" extract -i portable.exe --list
 
 echo "== split =="
 "$BUILDER" split -i packed.exe -o splitout

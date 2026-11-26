@@ -159,6 +159,7 @@ jobs:
         run: |
           Copy-Item "artifacts/artifact/kachina-builder.exe" "kachina-builder.exe" -Force
           Copy-Item "artifacts/artifact/kachina-builder-linux" "kachina-builder-linux" -Force
+          Copy-Item "artifacts/artifact/kachina-sfx.exe" "kachina-sfx.exe" -Force
       - name: Sentry upload
         continue-on-error: true
         env:
@@ -183,6 +184,7 @@ jobs:
           files: |
             kachina-builder.exe
             kachina-builder-linux
+            kachina-sfx.exe
           make_latest: true
           body: "${{ needs.build.outputs.version }}"
 
