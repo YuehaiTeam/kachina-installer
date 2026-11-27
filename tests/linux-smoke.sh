@@ -7,6 +7,8 @@ set -euo pipefail
 BUILDER="$(pwd)/artifacts/artifact/kachina-builder-linux"
 [ -f "$BUILDER" ] || { echo "missing $BUILDER"; exit 1; }
 chmod +x "$BUILDER"
+SFX="$(pwd)/artifacts/artifact/kachina-sfx.exe"
+[ -f "$SFX" ] || { echo "missing $SFX"; exit 1; }
 ICON="$(pwd)/resources/icons/icon.ico"
 
 WORK="$(mktemp -d)"
@@ -46,6 +48,28 @@ echo "== extract --list / --all =="
 echo "== replace-bin（自提取）=="
 "$BUILDER" replace-bin packed.exe -o replaced.exe
 [ -s replaced.exe ] || { echo "replaced.exe empty"; exit 1; }
+
+echo "== replace-bin --base kachina-sfx.exe（便携包路径）=="
+"$BUILDER" replace-bin packed.exe --base "$SFX" --icon "$ICON" -o portable.exe
+[ -s portable.exe ] || { echo "portable.exe empty"; exit 1; }
+# 校验 replace-bin 后载荷完整：extract --list 空载荷也返回成功（只打印表头），
+# 且 extract --all 转储的是 zstd 压缩原始块（不解压），无法对照明文源文件。
+# 正确口径是逐字节对比 replace 前后两包提取出的全部嵌入块——replace-bin 必须原样保留。
+"$BUILDER" extract -i packed.exe --all before-out >/dev/null
+"$BUILDER" extract -i portable.exe --all portable-out >/dev/null
+diff -r before-out portable-out || { echo "portable.exe payload differs from packed.exe"; exit 1; }
+[ -n "$(ls portable-out)" ] || { echo "portable.exe lost embedded payload"; exit 1; }
+# extract --all 不转储 CONFIG/INDEX/META 内部块，便携包运行时依赖它们，
+# 用 --list 输出断言这些结构性块在换头后仍然存在。
+"$BUILDER" extract -i portable.exe --list > portable-list.txt
+for blk in CONFIG INDEX META; do
+  grep -q "^$blk" portable-list.txt || { echo "portable.exe missing $blk block"; exit 1; }
+done
+# --list 只证明内部块存在；CONFIG 内容须逐字节保留（便携运行时直接消费），
+# INDEX/META 的正确性已被按元数据名成功提取全程 transitive 覆盖。
+"$BUILDER" extract -i packed.exe -n '\0CONFIG' -f cfg-before.bin >/dev/null
+"$BUILDER" extract -i portable.exe -n '\0CONFIG' -f cfg-after.bin >/dev/null
+cmp cfg-before.bin cfg-after.bin || { echo "portable.exe CONFIG block corrupted"; exit 1; }
 
 echo "== split =="
 "$BUILDER" split -i packed.exe -o splitout
